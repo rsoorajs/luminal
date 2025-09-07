@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::usize;
@@ -32,7 +31,7 @@ use std::sync::Arc;
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
-const MAX_SEARCHED_GRAPHS: usize = 100_000;
+const MAX_SEARCHED_GRAPHS: usize = 10_000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
@@ -337,45 +336,9 @@ pub fn search(
         .enumerate()
     {
         // Build termdag
-        let mut graph = extraction_to_graph(&egraph, &trajectory, &loop_level_map);
-        // crate::debug::display_graph2(&graph, &[]);
+        let graph = extraction_to_graph(&egraph, &trajectory, &loop_level_map);
         prev_graphs.push(graph.clone());
         prev_traj.push(trajectory.clone());
-
-        // Dedup GMEMs (don't think we need this?)
-        let mut canon: FxHashMap<String, NodeIndex> = FxHashMap::default();
-
-        for n in graph.node_indices().collect::<Vec<_>>() {
-            if let GraphTerm::GMEM { label } = &graph[n] {
-                match canon.entry(label.clone()) {
-                    Entry::Vacant(e) => {
-                        e.insert(n);
-                    }
-                    Entry::Occupied(e) => {
-                        let c = *e.get();
-                        for src in graph
-                            .neighbors_directed(n, Direction::Incoming)
-                            .collect::<Vec<_>>()
-                        {
-                            graph.update_edge(src, c, ());
-                        }
-                        for dst in graph
-                            .neighbors_directed(n, Direction::Outgoing)
-                            .collect::<Vec<_>>()
-                        {
-                            graph.update_edge(c, dst, ());
-                        }
-                        graph.remove_node(n);
-                    }
-                }
-            }
-        }
-
-        // Build input mapping
-        let node_index_to_init_data: Vec<(NodeIndex, InitData)> = inputs
-            .iter()
-            .filter_map(|(label, data)| canon.get(label).map(|&n| (n, data.clone())))
-            .collect();
 
         let Some((kernels, gmem_mapping)) =
             crate::codegen::codegen(graph.clone(), arch.clone(), dyn_vars)
@@ -383,7 +346,7 @@ pub fn search(
             continue;
         };
         possibles += 1;
-        // let inputs = inputs.into_iter().filter_map(|(l, d)| graph.node_indices().find(|n| matches!(graph.node_weight(*n).unwrap(), GraphTerm::GMEM { label } if label == l)).map(|i| (i, d.clone()))).collect_vec();
+        let inputs = inputs.into_iter().filter_map(|(l, d)| graph.node_indices().find(|n| matches!(graph.node_weight(*n).unwrap(), GraphTerm::GMEM { label } if label == l)).map(|i| (i, d.clone()))).collect_vec();
         match &arch {
             GPUArch::CUDA => {
                 let k = print_kernels(&kernels);
@@ -392,13 +355,7 @@ pub fn search(
                 } else {
                     seen.insert(k);
                 }
-                if let Some((us, outs)) = cost(
-                    &graph,
-                    &kernels,
-                    &node_index_to_init_data,
-                    &gmem_mapping,
-                    dyn_vars,
-                ) {
+                if let Some((us, outs)) = cost(&graph, &kernels, &inputs, &gmem_mapping, dyn_vars) {
                     valid_graphs += 1;
                     if let Some((progress, logs, title, _)) = &ui_functions {
                         progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
@@ -465,13 +422,7 @@ pub fn search(
                 } else {
                     seen.insert(k);
                 }
-                if let Some((us, outs)) = cost(
-                    &graph,
-                    &kernels,
-                    &node_index_to_init_data,
-                    &gmem_mapping,
-                    dyn_vars,
-                ) {
+                if let Some((us, outs)) = cost(&graph, &kernels, &inputs, &gmem_mapping, dyn_vars) {
                     valid_graphs += 1;
                     if let Some((progress, logs, title, _)) = &ui_functions {
                         progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
