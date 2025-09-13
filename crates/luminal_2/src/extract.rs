@@ -5,33 +5,35 @@ use std::usize;
 
 use crate::Kernel;
 use crate::debug::display_graph;
+use crate::egraph_debugger::display_egraph;
 use crate::run::{assign_buffers, compile_kernels, run_graph};
 use crate::translate::InitData;
 use crate::utils::{build_search_space, generate_proof, print_kernels};
-#[cfg(feature = "metal")]
-use crate::{Buffer, Device};
 use crate::{GPUArch, GraphTerm};
-#[cfg(feature = "cuda")]
-use anyhow::Result;
 use colored::Colorize;
-#[cfg(feature = "cuda")]
-use cudarc::driver::{CudaContext, CudaSlice, DriverError};
 use egraph_serialize::{ClassId, EGraph, NodeId};
 use itertools::Itertools;
 use luminal::prelude::NodeIndex;
 use luminal::prelude::petgraph::prelude::StableGraph;
 use luminal::prelude::petgraph::{Directed, Direction};
 use luminal::shape::{Expression, Term};
-#[cfg(feature = "metal")]
-use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
 use rand::{Rng, rng};
 use rustc_hash::{FxHashMap, FxHashSet};
+#[cfg(feature = "metal")]
+use {
+    crate::{Buffer, Device},
+    objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions},
+};
 #[cfg(feature = "cuda")]
-use std::sync::Arc;
+use {
+    anyhow::Result,
+    cudarc::driver::{CudaContext, CudaSlice, DriverError},
+    std::sync::Arc,
+};
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
-const MAX_SEARCHED_GRAPHS: usize = 10000;
+const MAX_SEARCHED_GRAPHS: usize = 1_000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
@@ -43,6 +45,7 @@ const INVALID_IR: &[&str] = &[
     "TiledMatmulInputB",
     "TiledMatmulAcc",
     "loop_level",
+    "vec-of",
 ];
 
 #[cfg(feature = "metal")]
@@ -237,7 +240,9 @@ fn extract_trajectories<'a>(
             if enode_trajectories.is_empty() {
                 // First child
                 for mut child_trajectory in trajectory_cache[child].clone() {
-                    child_trajectory.insert(0, enode);
+                    if egraph.nodes[enode].op != "Fused" {
+                        child_trajectory.insert(0, enode);
+                    }
                     enode_trajectories.push(child_trajectory);
                 }
             } else if !trajectory_cache[child].is_empty() {
@@ -250,8 +255,17 @@ fn extract_trajectories<'a>(
                             .iter()
                             .take(MAX_SEARCHED_GRAPHS / n_enode_traj),
                     )
-                    .map(|(p, n)| [p, n.clone()].concat())
+                    .map(|(p, n)| {
+                        if egraph.nodes[enode].op != "Fused" {
+                            [p, n.clone()].concat()
+                        } else {
+                            n.clone()
+                        }
+                    })
                     .collect();
+            }
+            if egraph.nodes[enode].op == "Fused" {
+                break;
             }
         }
         *seen.get_mut(&enode).unwrap() -= 1;
@@ -279,6 +293,7 @@ pub fn search(
 ) -> Option<StableGraph<GraphTerm, ()>> {
     let og = graph.clone();
     let egraph = build_search_space(graph, steps);
+    // display_egraph(&egraph);
     let trajectories = extract_trajectories(
         &egraph,
         &egraph.root_eclasses[0],
@@ -379,10 +394,12 @@ pub fn search(
                     if let Some((progress, logs, title, _)) = &ui_functions {
                         progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
                         logs(print_kernels(&kernels));
-                        title(format!("Graph {valid_graphs} {us}µs"));
+                        title(format!(
+                            "Graph {valid_graphs} Best {best_time}µs Current {us}µs"
+                        ));
                     } else if option_env!("DEBUG").is_some() {
                         println!("{}", print_kernels(&kernels));
-                        println!("Graph {valid_graphs} {us}µs");
+                        println!("Graph {valid_graphs} Best {best_time}µs Current {us}µs");
                         if ref_outputs.is_empty() {
                             ref_outputs = outs;
                         } else {
@@ -439,17 +456,27 @@ pub fn search(
                 if seen.contains(&k) {
                     continue;
                 } else {
-                    seen.insert(k);
+                    seen.insert(k.clone());
                 }
+                // if kernels.node_count() as u128 >= best_time {
+                //     if let Some((progress, logs, title, _)) = &ui_functions {
+                //         progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
+                //         logs(k);
+                //         title(format!("Graph {n} best {}", best_time - 2));
+                //     }
+                //     continue;
+                // }
                 if let Some((us, outs)) = cost(&graph, &kernels, &inputs, &gmem_mapping, dyn_vars) {
                     valid_graphs += 1;
                     if let Some((progress, logs, title, _)) = &ui_functions {
                         progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
-                        logs(print_kernels(&kernels));
-                        title(format!("Graph {valid_graphs} {us}µs"));
+                        logs(k);
+                        title(format!(
+                            "Graph {valid_graphs} Best {best_time}µs Current {us}µs"
+                        ));
                     } else if option_env!("DEBUG").is_some() {
-                        println!("{}", print_kernels(&kernels));
-                        println!("Graph {valid_graphs} {us}µs");
+                        println!("{k}");
+                        println!("Graph {valid_graphs} Best {best_time}µs Current {us}µs");
                         if ref_outputs.is_empty() {
                             ref_outputs = outs;
                             println!("{}", "Initial".bold().on_bright_green());
@@ -493,6 +520,7 @@ pub fn search(
                     if og_kernels.is_empty() {
                         og_kernels = kernel_string.clone();
                     }
+                    // let us = kernels.node_count() as u128;
                     if us < best_time {
                         best_time = us;
                         best_graph = Some(graph);
@@ -502,8 +530,8 @@ pub fn search(
             }
         }
     }
-    if let Some((_, _, _, e)) = &ui_functions {
-        e();
+    if let Some((_, _, _, exit)) = &ui_functions {
+        exit();
     }
     println!("FASTEST ({}ms): {fastest}", best_time / 1000);
     println!("Valids: {:?} / {:?}", possibles, total_trajectories);
@@ -563,7 +591,7 @@ pub fn extraction_to_graph(
             }
 
             // wrappers around a literal/var child
-            "MNum" | "MVar" | "Fused" => {
+            "MNum" | "MVar" => {
                 *current += 1;
                 build_expression(egraph, trajectory, current)
             }
@@ -624,20 +652,6 @@ pub fn extraction_to_graph(
                         g.add_node(GraphTerm::GMEM { label })
                     })
                 }
-            }
-
-            // Pass-through (can wrap IR)
-            "Fused" => {
-                *current += 1;
-                build_ir(
-                    egraph,
-                    trajectory,
-                    current,
-                    g,
-                    loop_level_map,
-                    prev_placed,
-                    no_place,
-                )?
             }
 
             // LoopIn/LoopOut = (Loop* <expr> <Math> <Math>)
