@@ -207,17 +207,6 @@ fn extract_trajectories<'a>(
                     )
                     .map(|i| vec![i])
                     .unwrap_or_default()
-                } else if egraph.nodes[child_first_enode].op == "Loop" {
-                    // Pull just the range out for the loop
-                    extract_shortest(
-                        egraph,
-                        egraph.nid_to_cid(&egraph.nodes[child_first_enode].children[1]),
-                        seen,
-                        junk_cache,
-                        &mut FxHashMap::default(),
-                    )
-                    .map(|i| vec![i])
-                    .unwrap_or_default()
                 } else {
                     extract_trajectories(
                         egraph,
@@ -302,6 +291,7 @@ pub fn search(
         &mut FxHashMap::default(),
         1,
     );
+    println!("traj: {}", trajectories.len());
     // build loop level -> enode mapping
     let mut loop_level_values = FxHashMap::default();
     for (id, _) in &egraph.class_data {
@@ -335,7 +325,11 @@ pub fn search(
         // make sure all IR nodes loop levels
         for (id, node) in &egraph.nodes {
             if node.eclass.to_string().starts_with("IR-") {
-                assert!(loop_level_map.contains_key(id));
+                assert!(
+                    loop_level_map.contains_key(id),
+                    "Loop level not found for {}",
+                    node.op
+                );
             }
         }
     }
@@ -364,6 +358,7 @@ pub fn search(
         // crate::egraph_debugger::display_egraph_with_path(&egraph, &trajectory);
         // Build termdag
         let Some(graph) = extraction_to_graph(&egraph, &trajectory, &loop_level_map) else {
+            println!("skip");
             continue;
         };
         prev_graphs.push(graph.clone());
@@ -844,7 +839,12 @@ pub fn extraction_to_graph(
                     r
                 }
             }
-            _ => return None, // other => panic!("unsupported IR op '{other}'"),
+            op => {
+                if option_env!("PRINT_REJECT").is_some() {
+                    println!("unsupported IR op: {op}");
+                }
+                return None;
+            }
         })
     }
 
