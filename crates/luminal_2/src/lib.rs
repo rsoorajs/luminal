@@ -77,12 +77,10 @@ pub enum GraphTerm {
     LoopIn {
         range: Expression,
         stride: Expression,
-        marker: String,
     },
     LoopOut {
         range: Expression,
         stride: Expression,
-        marker: String,
     },
     Add,
     Mul,
