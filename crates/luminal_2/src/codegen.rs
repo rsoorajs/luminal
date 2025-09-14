@@ -20,7 +20,7 @@ use std::{
 
 use crate::{
     GMEMBuffer, GPUArch, GraphTerm, Kernel,
-    debug::{display_graph, display_graph2},
+    debug::{display_graph, display_graph2, display_multiple_graphs},
     translate::{MetaGraph, SubGraph},
     utils::validate_graph,
 };
@@ -984,7 +984,7 @@ fn toposort_subset<N, E>(
 }
 
 /// add kernel dimensions so that all loop-to-loop dependencies are between seperate kernels or on the threadblock / thread levels
-fn split_kernels(
+pub fn split_kernels(
     graph: StableGraph<GraphTerm, (), Directed>,
 ) -> (
     Vec<(
@@ -1119,6 +1119,8 @@ fn split_kernels(
         *ks = ks.drain().map(|k| remap[&k]).collect();
     }
 
+    let before = marked_graph.clone();
+
     // Add kernel barriers
     for edge in marked_graph.edge_indices().collect_vec() {
         let (mut src, mut dest) = marked_graph.edge_endpoints(edge).unwrap();
@@ -1126,26 +1128,18 @@ fn split_kernels(
         let (_, _, src_kernel) = marked_graph[src].clone();
         if dest_level.len() > 0 && dest_kernel.iter().any(|i| !src_kernel.contains(i)) {
             // Put a barrier here
-            // Get buffer size before this loop
-            let mut curr = src;
-            let mut total_size = Expression::from(0);
-            loop {
-                let GraphTerm::LoopOut { range, stride, .. } = marked_graph[curr].0 else {
-                    break;
-                };
-                total_size = total_size.max(stride.substitute('z', range));
-                curr = marked_graph
-                    .neighbors_directed(curr, Direction::Incoming)
-                    .next()
-                    .unwrap();
-            }
-
             marked_graph.remove_edge(edge);
             for i in (0..dest_level.len()).rev() {
+                let stride = dest_level
+                    .iter()
+                    .skip(i - 1)
+                    .copied()
+                    .product::<Expression>()
+                    * 'z';
                 let new_src = marked_graph.add_node((
                     GraphTerm::LoopOut {
-                        range: dest_level[i].clone(),
-                        stride: total_size * 'z',
+                        range: dest_level[i],
+                        stride,
                         marker: "".to_string(),
                     },
                     dest_level[..i].to_vec(),
@@ -1155,8 +1149,8 @@ fn split_kernels(
                 src = new_src;
                 let new_dest = marked_graph.add_node((
                     GraphTerm::LoopIn {
-                        range: dest_level[i].clone(),
-                        stride: total_size * 'z',
+                        range: dest_level[i],
+                        stride,
                         marker: "".to_string(),
                     },
                     dest_level[..i].to_vec(),
