@@ -1,5 +1,6 @@
 pub mod codegen;
 pub mod debug;
+pub mod egraph_debugger;
 pub mod extract;
 pub mod run;
 pub mod translate;
@@ -76,12 +77,10 @@ pub enum GraphTerm {
     LoopIn {
         range: Expression,
         stride: Expression,
-        marker: String,
     },
     LoopOut {
         range: Expression,
         stride: Expression,
-        marker: String,
     },
     Add,
     Mul,

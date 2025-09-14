@@ -47,7 +47,6 @@ pub fn loop_in(
     node: NodeIndex,
     range: impl Into<Expression>,
     stride: impl Into<Expression>,
-    marker: impl ToString,
     graph: &mut StableGraph<GraphTerm, (), Directed>,
 ) -> NodeIndex {
     unary(
@@ -55,7 +54,6 @@ pub fn loop_in(
         GraphTerm::LoopIn {
             range: range.into(),
             stride: stride.into(),
-            marker: marker.to_string(),
         },
         graph,
     )
@@ -65,7 +63,6 @@ pub fn loop_out(
     node: NodeIndex,
     range: impl Into<Expression>,
     stride: impl Into<Expression>,
-    marker: impl ToString,
     graph: &mut StableGraph<GraphTerm, (), Directed>,
 ) -> NodeIndex {
     unary(
@@ -73,7 +70,6 @@ pub fn loop_out(
         GraphTerm::LoopOut {
             range: range.into(),
             stride: stride.into(),
-            marker: marker.to_string(),
         },
         graph,
     )
@@ -85,7 +81,7 @@ pub fn pad_in(
     levels: usize,
 ) -> NodeIndex {
     for i in 0..levels {
-        node = loop_in(node, 1, 0, "pad".to_string(), graph);
+        node = loop_in(node, 1, 0, graph);
     }
     node
 }
@@ -96,7 +92,7 @@ pub fn pad_out(
     levels: usize,
 ) -> NodeIndex {
     for i in (0..levels).rev() {
-        node = loop_out(node, 1, 0, "pad".to_string(), graph);
+        node = loop_out(node, 1, 0, graph);
     }
     node
 }
@@ -143,17 +139,17 @@ pub fn validate_graph(graph: &StableGraph<(GraphTerm, usize), (), Directed>) {
                 }
             }
 
-            // if graph
-            //     .neighbors_directed(node, Direction::Incoming)
-            //     .next()
-            //     .is_none()
-            //     && !matches!(graph.node_weight(node).unwrap().0, GraphTerm::SMEM)
-            // {
-            //     if *curr_level != 0 {
-            //         display_graph(graph);
-            //         panic!("Inputs must have level 0, found {curr_level}");
-            //     }
-            // }
+            if graph
+                .neighbors_directed(node, Direction::Incoming)
+                .next()
+                .is_none()
+                && !matches!(graph.node_weight(node).unwrap().0, GraphTerm::SMEM)
+            {
+                if *curr_level != 0 {
+                    display_graph(graph);
+                    panic!("Inputs must have level 0, found {curr_level}");
+                }
+            }
         }
     }
 }
@@ -165,7 +161,6 @@ pub fn build_search_space(
     let (rendered, root) = render_egglog(graph, "t");
     if option_env!("PRINT_EGGLOG").is_some() {
         println!("{rendered}");
-        // println!("{}", render_egglog(graph, "a").0);
     }
     let code = include_str!("code.lisp");
 
@@ -239,30 +234,22 @@ pub fn render_egglog(
             }
             GraphTerm::SMEM => "(SMEM)".into(),
 
-            GraphTerm::LoopIn {
-                range,
-                stride,
-                marker,
-            } => {
+            GraphTerm::LoopIn { range, stride } => {
                 let [ref src] = operand(n, &names, &graph)[..] else {
                     panic!("LoopIn expects 1 child");
                 };
                 format!(
-                    "(LoopIn {src} (Loop \"{marker}\" {}) {})",
+                    "(LoopIn {src} {} {})",
                     range.to_egglog(),
                     stride.to_egglog()
                 )
             }
-            GraphTerm::LoopOut {
-                range,
-                stride,
-                marker,
-            } => {
+            GraphTerm::LoopOut { range, stride } => {
                 let [ref body] = operand(n, &names, &graph)[..] else {
                     panic!("LoopOut expects 1 child");
                 };
                 format!(
-                    "(LoopOut {body} (Loop \"{marker}\" {}) {})",
+                    "(LoopOut {body} {} {})",
                     range.to_egglog(),
                     stride.to_egglog()
                 )
@@ -371,36 +358,18 @@ pub fn render_egglog_inline(
         let expr = match &graph[n] {
             GraphTerm::GMEM { label } => format!("(GMEM \"{label}\")"),
             GraphTerm::SMEM => "(SMEM)".into(),
-            GraphTerm::LoopIn {
-                range,
-                stride,
-                marker,
-            } => {
+            GraphTerm::LoopIn { range, stride } => {
                 let src = &children[0];
                 format!(
-                    "(LoopIn {src} (Loop \"{}\" {}) {})",
-                    if no_loop_markers {
-                        "".to_string()
-                    } else {
-                        marker.to_string()
-                    },
+                    "(LoopIn {src} {} {})",
                     range.to_egglog(),
                     stride.to_egglog()
                 )
             }
-            GraphTerm::LoopOut {
-                range,
-                stride,
-                marker,
-            } => {
+            GraphTerm::LoopOut { range, stride } => {
                 let body = &children[0];
                 format!(
-                    "(LoopOut {body} (Loop \"{}\" {}) {})",
-                    if no_loop_markers {
-                        "".to_string()
-                    } else {
-                        marker.to_string()
-                    },
+                    "(LoopOut {body} {} {})",
                     range.to_egglog(),
                     stride.to_egglog()
                 )
@@ -770,10 +739,6 @@ pub fn generate_proof(
 		(run ir-generic)
 	)
 )
-
-(ruleset loop-blank)
-(rewrite (Loop ?s ?r) (Loop \"\" ?r) :ruleset loop-blank)
-(run-schedule (run loop-blank))
     ",
         )
         .unwrap();

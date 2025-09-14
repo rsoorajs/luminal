@@ -16,15 +16,6 @@ pub enum InitData {
     Data(Vec<f32>),
 }
 
-impl InitData {
-    pub fn to_vec(self, dyn_map: &FxHashMap<char, usize>) -> Vec<f32> {
-        match self {
-            InitData::Data(d) => d,
-            InitData::Expr(e) => vec![e.exec(dyn_map).unwrap() as f32],
-        }
-    }
-}
-
 pub type CrossSubGraphTensorIndexes = (NodeIndex, NodeIndex);
 pub type MetaGraphNodeIndex = NodeIndex;
 pub type SubGraphNodeIndex = NodeIndex;
@@ -246,14 +237,14 @@ pub fn translate_graph(
                 let mut rm_strides = ranges
                     .iter()
                     .rev()
-                    .scan(Expression::from(1), |i, (s, _)| {
+                    .scan(Expression::from(1), |i, s| {
                         let r = *i;
                         *i *= s;
                         Some(r)
                     })
                     .collect::<Vec<_>>();
                 rm_strides.reverse();
-                for (i, ((range, name), acc_stride)) in ranges.iter().zip(rm_strides).enumerate() {
+                for (i, (range, acc_stride)) in ranges.iter().zip(rm_strides).enumerate() {
                     let stride = if i == reduce_dim {
                         Expression::from(Term::Acc('a'))
                     } else if i > GRID_DIMS + THREADBLOCK_DIMS {
@@ -264,7 +255,6 @@ pub fn translate_graph(
                     let new_acc = g.add_node(GraphTerm::LoopIn {
                         range: *range,
                         stride,
-                        marker: name.to_string(),
                     });
                     g.add_edge(acc, new_acc, ());
                     acc = new_acc;
@@ -358,7 +348,7 @@ fn scope_in(
     simplify_cache: &mut FxHashMap<Expression, Expression>,
     translation_mapping: &mut FxHashMap<NodeIndex, NodeIndex>,
     n_orig_nodes: usize,
-) -> (NodeIndex, Vec<(Expression, String)>) {
+) -> (NodeIndex, Vec<Expression>) {
     // Loop in through all dimensions, handle padding
     let strides = shape.strides();
     let mut ranges = vec![];
@@ -377,12 +367,11 @@ fn scope_in(
             //     ranges.push((Expression::from(1), format!("pad{z}")));
             //     src = loop_in(src, 1, 0, format!("pad{z}"), graph);
             // }
-            ranges.push((range, i.to_string()));
+            ranges.push(range);
             src = loop_in(
                 src,
                 range.simplify_cache(simplify_cache),
                 stride.simplify_cache(simplify_cache),
-                i,
                 graph,
             ); // Problem: acc stride only is ever 'a', which doesn't work if there is multiple accs!
         } else if left_pad != 0 {
@@ -400,7 +389,6 @@ fn scope_in(
                     mask,
                     shape.dims()[level].simplify_cache(simplify_cache),
                     0,
-                    level,
                     graph,
                 );
             }
@@ -410,7 +398,6 @@ fn scope_in(
                 Expression::from('z')
                     .gte(left_pad)
                     .simplify_cache(simplify_cache),
-                i,
                 graph,
             );
             for level in (i + 1)..shape.len() {
@@ -418,17 +405,15 @@ fn scope_in(
                     mask,
                     shape.dims()[level].simplify_cache(simplify_cache),
                     0,
-                    level,
                     graph,
                 );
             }
             pad_mask = Some(mask);
-            ranges.push((range, i.to_string()));
+            ranges.push(range);
             src = loop_in(
                 src,
                 range.simplify_cache(simplify_cache),
                 stride.simplify_cache(simplify_cache),
-                i,
                 graph,
             );
         } else if right_pad != 0 {
@@ -447,7 +432,6 @@ fn scope_in(
                     mask,
                     shape.dims()[level].simplify_cache(simplify_cache),
                     0,
-                    level,
                     graph,
                 );
             }
@@ -455,7 +439,6 @@ fn scope_in(
                 mask,
                 range.simplify_cache(simplify_cache),
                 Expression::from('z').lt(right_pad),
-                i,
                 graph,
             );
             for level in (i + 1)..shape.len() {
@@ -463,38 +446,34 @@ fn scope_in(
                     mask,
                     shape.dims()[level].simplify_cache(simplify_cache),
                     0,
-                    level,
                     graph,
                 );
             }
             pad_mask = Some(mask);
-            ranges.push((range, i.to_string()));
+            ranges.push(range);
             src = loop_in(
                 src,
                 range.simplify_cache(simplify_cache),
                 stride.simplify_cache(simplify_cache),
-                i,
                 graph,
             );
         } else if left_slice != 0 || right_slice != i32::MAX {
             range = (right_slice.min(shape.dims[shape.indexes[i]]) - left_slice).max(0);
             stride = stride.substitute('z', Expression::from('z') + left_slice);
-            ranges.push((range, i.to_string()));
+            ranges.push(range);
             src = loop_in(
                 src,
                 range.simplify_cache(simplify_cache),
                 stride.simplify_cache(simplify_cache),
-                i,
                 graph,
             );
         } else {
             // No pads or reduces
-            ranges.push((range, i.to_string()));
+            ranges.push(range);
             src = loop_in(
                 src,
                 range.simplify_cache(simplify_cache),
                 stride.simplify_cache(simplify_cache),
-                i,
                 graph,
             );
         }
@@ -509,23 +488,26 @@ fn scope_in(
 
 fn scope_out(
     mut src: NodeIndex,
-    ranges: Vec<(Expression, String)>,
+    ranges: Vec<Expression>,
     reduce: Option<usize>,
     graph: &mut StableGraph<GraphTerm, (), Directed>,
 ) -> NodeIndex {
-    for (stride, range, loop_name) in ranges.into_iter().enumerate().rev().scan(
-        Expression::from('z'),
-        |i, (ind, (range, loop_name))| {
-            if reduce == Some(ind) {
-                Some((Expression::from(Term::Acc('a')), range, loop_name)) // THIS IS WRONG, IT SHOULD MIRROR THE INCOMING ACC AND BE RANDOMLY GENERATED
-            } else {
-                let r = *i;
-                *i *= range;
-                Some((r, range, loop_name))
-            }
-        },
-    ) {
-        src = loop_out(src, range, stride, loop_name, graph);
+    for (stride, range) in
+        ranges
+            .into_iter()
+            .enumerate()
+            .rev()
+            .scan(Expression::from('z'), |i, (ind, range)| {
+                if reduce == Some(ind) {
+                    Some((Expression::from(Term::Acc('a')), range)) // THIS IS WRONG, IT SHOULD MIRROR THE INCOMING ACC AND BE RANDOMLY GENERATED
+                } else {
+                    let r = *i;
+                    *i *= range;
+                    Some((r, range))
+                }
+            })
+    {
+        src = loop_out(src, range, stride, graph);
     }
     src
 }

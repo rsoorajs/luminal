@@ -68,7 +68,7 @@ pub fn codegen(
     });
     let mut gmem_mapping: HashMap<NodeIndex, usize> = HashMap::new();
     let mut gmem_names = FxHashMap::default();
-    for (n_kernel, (_, inputs, _, _)) in kernels.iter().enumerate() {
+    for (n_kernel, (_, inputs, _)) in kernels.iter().enumerate() {
         for (n_input, (input_kernel, _)) in inputs.into_iter().enumerate() {
             match input_kernel {
                 GMEMBuffer::PrevKernel { kernel, output } => kernel_meta_graph.add_edge(
@@ -103,7 +103,6 @@ pub fn codegen(
             (output_index, i),
         );
     }
-    // display_graph2(&kernel_meta_graph, &[]);
     let Ok(t) = toposort(&kernel_meta_graph, None) else {
         // TODO: for some reason sometimes there are cycles in the kernel graph
         return None;
@@ -112,7 +111,7 @@ pub fn codegen(
         if kernels.len() <= node.index() {
             continue; // Either input node or output node
         }
-        let (kernel_graph, inputs, outputs, smem_buffers) = kernels[node.index()].clone();
+        let (kernel_graph, inputs, outputs) = kernels[node.index()].clone();
         // Handle custom kernels
         if kernel_graph
             .node_weights()
@@ -146,21 +145,18 @@ pub fn codegen(
             continue;
         }
 
-        validate_graph(&kernel_graph);
-        // display_graph(&kernel_graph, &[]);
+        if std::env::var("DEBUG").is_ok() {
+            validate_graph(&kernel_graph);
+        }
         let mut node_to_var = inputs
             .iter()
             .map(|(_, n)| *n)
             .chain(outputs.iter().map(|(_, i)| *i))
-            .chain(smem_buffers.iter().map(|(_, i, _)| *i))
             .enumerate()
             .map(|(v, n)| (n, (v, true)))
             .collect::<HashMap<_, _>>();
         for (_, (n, _)) in &node_to_var {
             arch.add_metal_buffer_type(*n, "device ");
-        }
-        for (n, _, _) in &smem_buffers {
-            arch.add_metal_buffer_type(*n, "threadgroup ");
         }
         let mut loop_levels = vec![];
         let kernel = make_kernel(
@@ -170,10 +166,6 @@ pub fn codegen(
             &mut (inputs.len() + outputs.len()),
             &mut loop_levels,
             &mut HashMap::new(),
-            &smem_buffers
-                .iter()
-                .map(|(ind, node, _)| (*node, *ind))
-                .collect(),
             0,
             0,
             &mut arch,
@@ -192,15 +184,11 @@ pub fn codegen(
             .chain(repeat(1.into()))
             .take(3) // Hardware always expects 3 dims
             .collect_vec();
-        // Make sure there are no dynamic dimensions in the threadblock
-        if threadblock
-            .iter()
-            .copied()
-            .product::<Expression>()
-            .to_usize()
-            .is_none()
-        {
-            println!("dyn in tb");
+        // Make sure there are no dynamic dimensions in the threadblock TODO: why is this not allowed?
+        if threadblock.iter().any(|i| i.to_usize().is_none()) {
+            if option_env!("PRINT_REJECT").is_some() {
+                println!("dyn in threadblock");
+            }
             return None;
         }
         let kernel_lines = kernel.into_iter().map(|s| format!("\t{s}")).join("\n");
@@ -218,25 +206,9 @@ pub fn codegen(
                             .map(|(c, _)| format!("const size_t const_{c}")),
                     )
                     .join(", ");
-                let smem_setup = if smem_buffers.is_empty() {
-                    "".to_string()
-                } else {
-                    format!(
-                        "\textern __shared__ float sm[];\n{}",
-                        smem_buffers
-                            .iter()
-                            .scan("".to_string(), |prev_buffers, (n, _, size)| {
-                                let r =
-                                    format!("\tfloat* {} = sm{prev_buffers};\n", var_to_char(*n));
-                                prev_buffers.push_str(&format!(" + {size}"));
-                                Some(r)
-                            })
-                            .join("")
-                    )
-                };
                 format!(
                     "extern \"C\" __global__ void kernel_name({inputs}) {{
-{smem_setup}{kernel_lines}
+{kernel_lines}
 }}"
                 )
             }
@@ -253,7 +225,7 @@ pub fn codegen(
                             if let GMEMBuffer::Input { node } = buf {
                                 format!(" // GMEM({})", gmem_names[&node])
                             } else {
-                                "".to_string()
+                                " // From previous kernel".to_string()
                             }
                         )
                     })
@@ -272,33 +244,15 @@ pub fn codegen(
                     }))
                     .collect_vec();
                 *input_string.last_mut().unwrap() = input_string.last().unwrap().replace(",", " ");
-                let (smem_setup, smem_input) = if smem_buffers.is_empty() {
-                    ("".to_string(), "".to_string())
-                } else {
-                    (
-                        smem_buffers
-                            .iter()
-                            .scan("".to_string(), |prev_buffers, (n, _, size)| {
-                                let r = format!(
-                                    "\tthreadgroup float* {} = sm{prev_buffers};\n",
-                                    var_to_char(*n)
-                                );
-                                prev_buffers.push_str(&format!(" + {size}"));
-                                Some(r)
-                            })
-                            .join(""),
-                        ", threadgroup float* sm [[threadgroup(0)]]".to_string(),
-                    )
-                };
                 format!(
                     "#include <metal_stdlib>
 using namespace metal;
 kernel void kernel_name(
 	uint3 blockIdx [[threadgroup_position_in_grid]],
 	uint3 threadIdx [[thread_position_in_threadgroup]],
-	{}{smem_input}
+	{}
 ) {{
-{smem_setup}{kernel_lines}
+{kernel_lines}
 }}",
                     input_string.join("\n\t")
                 )
@@ -310,24 +264,34 @@ kernel void kernel_name(
             .unwrap()
             > MAX_THREADBLOCK_SIZE
         {
-            // println!("Tb too big: {:?}", threadblock);
-            // println!("{kernel}");
+            if option_env!("PRINT_REJECT").is_some() {
+                println!("threadblock too large: {threadblock:?}");
+            }
             return None;
         }
         if grid[0].exec(dyn_vars).unwrap() > MAX_GRID_X {
+            if option_env!("PRINT_REJECT").is_some() {
+                println!("grid x too large: {}", grid[0]);
+            }
             return None;
         }
         if grid[1].exec(dyn_vars).unwrap() > MAX_GRID_YZ {
+            if option_env!("PRINT_REJECT").is_some() {
+                println!("grid y too large: {}", grid[1]);
+            }
             return None;
         }
         if grid[2].exec(dyn_vars).unwrap() > MAX_GRID_YZ {
+            if option_env!("PRINT_REJECT").is_some() {
+                println!("grid z too large: {}", grid[2]);
+            }
             return None;
         }
         *kernel_meta_graph.node_weight_mut(node).unwrap() = Kernel {
             code: kernel,
             grid: (grid[0], grid[1], grid[2]),
             threadblock: (threadblock[0], threadblock[1], threadblock[2]),
-            smem: smem_buffers.into_iter().map(|(_, _, a)| a).sum(),
+            smem: 0.into(),
             outputs: outputs.into_iter().map(|(o, _)| o.simplify()).collect(),
         };
     }
@@ -349,7 +313,6 @@ fn make_kernel(
     prev_max_var: &mut usize, // contains the char last used
     tracked_loop_levels: &mut Vec<Expression>,
     loop_indexes: &mut HashMap<NodeIndex, usize>,
-    smem_buffers: &HashMap<NodeIndex, usize>,
     mut current_loop_level: usize,
     unpadded_loop_level: usize,
     arch: &mut GPUArch,
@@ -536,7 +499,9 @@ fn make_kernel(
                         // Handle the case where the dest is not the real loop output
                         let size = stride.substitute('z', range).max(1);
                         if current_loop_level < THREADBLOCK_DIMS + GRID_DIMS {
-                            println!("too low?");
+                            if option_env!("PRINT_REJECT").is_some() {
+                                println!("acc too low");
+                            }
                             return None;
                         }
                         // We don't have a place to save this output to. Need to allocate a register buffer
@@ -680,7 +645,6 @@ fn make_kernel(
                     prev_max_var,
                     tracked_loop_levels,
                     loop_indexes,
-                    smem_buffers,
                     current_loop_level + 1,
                     unpadded_loop_level + 1,
                     arch,
@@ -789,6 +753,9 @@ fn make_kernel(
                 }
             }
             GraphTerm::LoopOut { .. } => {
+                if option_env!("PRINT_REJECT").is_some() {
+                    println!("seen loopout");
+                }
                 return None; // TODO: why do we ever see this? should be able to panic here.
                 // panic!("found loopout range: {range} stride: {stride}")
             }
@@ -1017,14 +984,13 @@ fn toposort_subset<N, E>(
 }
 
 /// add kernel dimensions so that all loop-to-loop dependencies are between seperate kernels or on the threadblock / thread levels
-fn split_kernels(
+pub fn split_kernels(
     graph: StableGraph<GraphTerm, (), Directed>,
 ) -> (
     Vec<(
-        StableGraph<(GraphTerm, usize), (), Directed>,
-        Vec<(GMEMBuffer, NodeIndex)>, // (src buffer, current graph node)
-        Vec<(Expression, NodeIndex)>, // output node
-        Vec<(usize, NodeIndex, Expression)>, // (shared memory buffer name, node, buffer size)
+        StableGraph<(GraphTerm, usize), (), Directed>, // graph of (term, loop leve)
+        Vec<(GMEMBuffer, NodeIndex)>,                  // (src buffer, current graph node)
+        Vec<(Expression, NodeIndex)>,                  // output node
     )>,
     Vec<(usize, usize)>, // Output kernels
 ) {
@@ -1160,27 +1126,18 @@ fn split_kernels(
         let (_, _, src_kernel) = marked_graph[src].clone();
         if dest_level.len() > 0 && dest_kernel.iter().any(|i| !src_kernel.contains(i)) {
             // Put a barrier here
-            // Get buffer size before this loop
-            let mut curr = src;
-            let mut total_size = Expression::from(0);
-            loop {
-                let GraphTerm::LoopOut { range, stride, .. } = marked_graph[curr].0 else {
-                    break;
-                };
-                total_size = total_size.max(stride.substitute('z', range));
-                curr = marked_graph
-                    .neighbors_directed(curr, Direction::Incoming)
-                    .next()
-                    .unwrap();
-            }
-
             marked_graph.remove_edge(edge);
             for i in (0..dest_level.len()).rev() {
+                let stride = dest_level
+                    .iter()
+                    .skip(i - 1)
+                    .copied()
+                    .product::<Expression>()
+                    * 'z';
                 let new_src = marked_graph.add_node((
                     GraphTerm::LoopOut {
-                        range: dest_level[i].clone(),
-                        stride: total_size * 'z',
-                        marker: "".to_string(),
+                        range: dest_level[i],
+                        stride,
                     },
                     dest_level[..i].to_vec(),
                     src_kernel.clone(),
@@ -1189,9 +1146,8 @@ fn split_kernels(
                 src = new_src;
                 let new_dest = marked_graph.add_node((
                     GraphTerm::LoopIn {
-                        range: dest_level[i].clone(),
-                        stride: total_size * 'z',
-                        marker: "".to_string(),
+                        range: dest_level[i],
+                        stride,
                     },
                     dest_level[..i].to_vec(),
                     dest_kernel.clone(),
@@ -1210,14 +1166,14 @@ fn split_kernels(
         .max()
         .expect("No kernels found!?");
     let mut kernel_graphs = (0..n_kernels)
-        .map(|_| (StableGraph::new(), vec![], vec![], vec![]))
+        .map(|_| (StableGraph::new(), vec![], vec![]))
         .collect_vec();
     let mut node_maps = (0..n_kernels).map(|_| HashMap::new()).collect_vec();
     let mut final_outputs = HashMap::new();
     for node in marked_graph.node_indices() {
         let (term, loop_level, kernels) = &marked_graph[node];
         for kernel in kernels {
-            let (kernel_graph, _, curr_outputs, _) = &mut kernel_graphs[*kernel];
+            let (kernel_graph, _, curr_outputs) = &mut kernel_graphs[*kernel];
             node_maps[*kernel].insert(
                 node,
                 kernel_graph.add_node((term.clone(), loop_level.len())),
@@ -1283,40 +1239,7 @@ fn split_kernels(
     }
 
     // Go through SMEM buffers
-    for (kernel_graph, inputs, outputs, smem_buffers) in &mut kernel_graphs {
-        for node in kernel_graph.node_indices() {
-            if let (GraphTerm::SMEM, _) = kernel_graph[node] {
-                // Walk forward until load to find the size
-                for mut curr in kernel_graph.neighbors_directed(node, Direction::Outgoing) {
-                    let mut size = Expression::from(1);
-                    let mut load = false;
-                    loop {
-                        match kernel_graph[curr].0 {
-                            GraphTerm::LoopIn { range, stride, .. } => {
-                                if stride != 0 {
-                                    size *= range;
-                                }
-                                curr = kernel_graph
-                                    .neighbors_directed(curr, Direction::Outgoing)
-                                    .next()
-                                    .unwrap();
-                            }
-                            GraphTerm::SMEMLoad => {
-                                load = true;
-                                break;
-                            }
-                            _ => break,
-                        }
-                    }
-                    if load {
-                        let buf_index = inputs.len() + outputs.len() + smem_buffers.len();
-                        smem_buffers.push((buf_index, node, size));
-                        break;
-                    }
-                }
-            }
-        }
-
+    for (kernel_graph, inputs, outputs) in &mut kernel_graphs {
         // Ensure GMEM is placed on the graph
         for (_, input) in inputs {
             if !matches!(kernel_graph[*input].0, GraphTerm::GMEM { .. }) {
@@ -1397,7 +1320,7 @@ fn reassign_disjoint_kernels(
         }
     }
     // Build i -> nodes and find current max index
-    let next_kernel_idx = *g.node_weights().flat_map(|(_, _, k)| k).max().unwrap_or(&0);
+    let mut next_kernel_idx = *g.node_weights().flat_map(|(_, _, k)| k).max().unwrap_or(&0);
     let idx_to_nodes = g
         .node_indices()
         .flat_map(|n| g[n].2.iter().copied().map(move |i| (i, n)))
@@ -1435,6 +1358,7 @@ fn reassign_disjoint_kernels(
             .skip(1)
             .enumerate()
         {
+            next_kernel_idx += 1;
             for n in comp {
                 let ws = &mut g.node_weight_mut(n).unwrap().2;
                 if ws.remove(&i) {
@@ -1444,7 +1368,7 @@ fn reassign_disjoint_kernels(
         }
     }
 
-    // re-add kernel ids
+    // re-add gmem kernel ids
     for i in g.node_indices().collect_vec() {
         if matches!(g[i].0, GraphTerm::GMEM { .. }) {
             g.node_weight_mut(i).unwrap().2 = g

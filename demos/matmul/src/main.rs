@@ -47,6 +47,7 @@ fn main() {
         let b = cx.named_tensor("B", (K, N));
         let c = cx.named_tensor("C", (K, N));
         let d = cx.named_tensor("D", (N, J));
+        // let _out = a.matmul(b).swish();
         let _out = (a.matmul(b).swish() * a.matmul(c)).matmul(d);
 
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);
