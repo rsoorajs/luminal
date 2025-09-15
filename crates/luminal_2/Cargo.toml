@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["metal"]
+default = []
 cuda = ["dep:cudarc", "dep:luminal_cuda"]
 metal = ["dep:objc2", "dep:objc2-metal", "dep:objc2-foundation"]
 
