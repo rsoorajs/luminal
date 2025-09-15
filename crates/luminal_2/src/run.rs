@@ -1,12 +1,9 @@
-#[cfg(feature = "metal")]
-use crate::{Buffer, Device, Function, GraphTerm};
-#[cfg(feature = "cuda")]
-use cudarc::{driver::*, nvrtc::CompileOptions};
 use itertools::Itertools;
 #[cfg(feature = "cuda")]
-use std::fs::OpenOptions;
-#[cfg(feature = "cuda")]
-use std::io::Write;
+use {
+    cudarc::{driver::*, nvrtc::CompileOptions},
+    std::{fs::OpenOptions, io::Write},
+};
 
 use luminal::{
     prelude::{
@@ -20,11 +17,14 @@ use luminal::{
     },
     shape::Expression,
 };
-#[cfg(feature = "metal")]
-use objc2_metal::{MTLBuffer, MTLDevice};
 use rustc_hash::FxHashMap;
-use std::{ffi::c_void, ptr::NonNull};
 use std::{fs::File, io::Read};
+#[cfg(feature = "metal")]
+use {
+    crate::{Buffer, Device, Function, GraphTerm},
+    objc2_metal::{MTLBuffer, MTLDevice},
+    std::{ffi::c_void, ptr::NonNull},
+};
 
 use crate::Kernel;
 
@@ -241,8 +241,6 @@ pub fn run_graph(
             stream.memcpy_htod(&data, dest_buffer).unwrap();
         } else {
             let mut builder = stream.launch_builder(&compiled_kernels[&kernel.code]);
-            println!("Code to run: {}", kernel.code);
-
             // set inputs
             for (input, input_index) in kernels
                 .edges_directed(node, Direction::Incoming)
@@ -300,7 +298,6 @@ pub fn run_graph(
 
 #[cfg(feature = "metal")]
 pub fn run_graph(
-    graph: &StableGraph<GraphTerm, ()>,
     inputs: &mut FxHashMap<usize, (Buffer, bool)>,
     kernels: &StableGraph<Kernel, (usize, usize)>,
     dyn_vars: &FxHashMap<char, usize>,
@@ -420,9 +417,7 @@ pub fn run_graph(
                 let Ok(c) = device
                     .newComputePipelineStateWithFunction_error(&compiled_kernels[&kernel.code])
                 else {
-                    println!("failed to compile {}", kernel.code);
-                    crate::debug::display_graph(graph);
-                    panic!();
+                    panic!("failed to compile {}", kernel.code);
                 };
                 encoder.setComputePipelineState(&c);
 

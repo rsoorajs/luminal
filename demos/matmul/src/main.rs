@@ -204,7 +204,6 @@ fn main() {
             #[cfg(feature = "metal")]
             {
                 run_graph(
-                    &graph,
                     &mut inputs,
                     &kernels,
                     &FxHashMap::default(),

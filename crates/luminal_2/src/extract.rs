@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::ffi::c_void;
-use std::ptr::NonNull;
 use std::usize;
 
 use crate::Kernel;
@@ -22,11 +20,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use {
     crate::{Buffer, Device},
     objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions},
+    std::{ffi::c_void, ptr::NonNull},
 };
 #[cfg(feature = "cuda")]
 use {
-    anyhow::Result,
-    cudarc::driver::{CudaContext, CudaSlice, DriverError},
+    cudarc::driver::{CudaContext, CudaSlice},
     std::sync::Arc,
 };
 
@@ -379,7 +377,7 @@ pub fn search(
                 } else {
                     seen.insert(k);
                 }
-                if let Some((us, outs)) = cost(&graph, &kernels, &inputs, &gmem_mapping, dyn_vars) {
+                if let Some((us, outs)) = cost(&kernels, &inputs, &gmem_mapping, dyn_vars) {
                     valid_graphs += 1;
                     if let Some((progress, logs, title, _)) = &ui_functions {
                         progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
@@ -448,7 +446,7 @@ pub fn search(
                 } else {
                     seen.insert(k.clone());
                 }
-                if let Some((us, outs)) = cost(&graph, &kernels, &inputs, &gmem_mapping, dyn_vars) {
+                if let Some((us, outs)) = cost(&kernels, &inputs, &gmem_mapping, dyn_vars) {
                     valid_graphs += 1;
                     if let Some((progress, logs, title, _)) = &ui_functions {
                         progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
@@ -836,7 +834,6 @@ pub fn extraction_to_graph(
 }
 
 fn cost<'a>(
-    graph: &StableGraph<GraphTerm, ()>,
     kernels: &StableGraph<Kernel, (usize, usize), Directed>,
     inputs: &[(NodeIndex, &InitData)],
     gmem_mapping: &HashMap<NodeIndex, usize>,
@@ -867,7 +864,7 @@ fn cost<'a>(
                         },
                         #[cfg(feature = "cuda")]
                         match b {
-                            InitData::Data(d) => copy_cuda_buffer(d, &device),
+                            InitData::Data(d) => copy_cuda_buffer(d, ctx.clone()),
                             InitData::Expr(e) => copy_cuda_buffer(
                                 &vec![e.exec(dyn_vars).unwrap() as f32],
                                 ctx.clone(),
@@ -882,7 +879,6 @@ fn cost<'a>(
         for _ in 0..WARMUP_TRIALS {
             #[cfg(feature = "metal")]
             run_graph(
-                &graph,
                 &mut inputs,
                 &kernels,
                 dyn_vars,
@@ -909,7 +905,6 @@ fn cost<'a>(
                 #[cfg(feature = "metal")]
                 {
                     run_graph(
-                        &graph,
                         &mut inputs,
                         &kernels,
                         dyn_vars,

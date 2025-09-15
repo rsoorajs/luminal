@@ -1,0 +1,75 @@
+Compiling kernel:
+extern "C" __global__ void kernel_name(float* a, float* b, float* c, float* d) {
+	int loop_f = blockIdx.x;
+	float* g = d + (512*loop_f);
+	int loop_h = blockIdx.y;
+	float* i = a + loop_h;
+	float* j = g + loop_h;
+	float k[1] = {0.0};
+	for (int load = 0; load < 1; ++load) {
+		k[0] = *(b + 0);
+	}
+	for (int loop_l = 0; loop_l < 512; ++loop_l) {
+		float* m = c + loop_l;
+		float* n = i + (512*loop_l);
+		float o = *m * *n;
+		float p = *k + o;
+		*k = p;
+	}
+	*j = *k;
+}
+
+Compiling kernel:
+extern "C" __global__ void kernel_name(float* a, float* b, float* c, float* d, float* e, float* f, float* g, float* h, float* i) {
+	int loop_k = blockIdx.x;
+	float* l = b + (512*loop_k);
+	int loop_m = blockIdx.y;
+	float* n = h + (512*loop_m);
+	float* o = a + loop_m;
+	float* p = i + loop_m;
+	float q[1] = {0.0};
+	for (int load = 0; load < 1; ++load) {
+		q[0] = *(c + 0);
+	}
+	for (int loop_r = 0; loop_r < 512; ++loop_r) {
+		float* s = o + (512*loop_r);
+		float* t = l + loop_r;
+		float u = *t * *s;
+		float v = *q + u;
+		*q = v;
+	}
+	float w[1] = {0.0};
+	for (int load = 0; load < 1; ++load) {
+		w[0] = *(g + 0);
+	}
+	for (int loop_x = 0; loop_x < 512; ++loop_x) {
+		float* y = n + loop_x;
+		float z = *w + *y;
+		*w = z;
+	}
+	float ba = *w * *f;
+	float bb = ba * *e;
+	float bc = exp2(bb);
+	float bd = bc + *d;
+	float be = 1.0 / bd;
+	float bf = be * *d;
+	float bg = *w * bf;
+	float bh = bg * *q;
+	*p = bh;
+}
+
+Compiling kernel:
+extern "C" __global__ void kernel_name(float* a, float* b, float* c) {
+	int loop_e = blockIdx.x;
+	float* f = a + (512*loop_e);
+	int loop_g = blockIdx.y;
+	float* h = b + loop_g;
+	float* i = c + (512*loop_g);
+	int loop_j = threadIdx.x;
+	float* k = h + (512*loop_j);
+	float* l = f + loop_j;
+	float* m = i + loop_j;
+	float n = *l * *k;
+	*m = n;
+}
+
