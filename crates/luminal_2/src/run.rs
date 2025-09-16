@@ -1,4 +1,5 @@
 use itertools::Itertools;
+
 #[cfg(feature = "cuda")]
 use {
     cudarc::{driver::*, nvrtc::CompileOptions},
@@ -21,7 +22,7 @@ use rustc_hash::FxHashMap;
 use std::{fs::File, io::Read};
 #[cfg(feature = "metal")]
 use {
-    crate::{Buffer, Device, Function, GraphTerm},
+    crate::{Buffer, Device, Function},
     objc2_metal::{MTLBuffer, MTLDevice},
     std::{ffi::c_void, ptr::NonNull},
 };
@@ -220,10 +221,10 @@ pub fn run_graph(
             assert_eq!(file_buffer.len() % std::mem::size_of::<f32>(), 0);
 
             let num_floats = file_buffer.len() / std::mem::size_of::<f32>();
-            let floats: Vec<f32> = unsafe {
-                let ptr = file_buffer.as_ptr() as *const f32;
-                Vec::from_raw_parts(ptr as *mut f32, num_floats, num_floats)
-            };
+            let floats: Vec<f32> = file_buffer
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
             let mut matched = true;
             println!("Diff {} | {}", data.len(), floats.len());
             for (ind, (i, j)) in data.iter().zip(floats).enumerate() {
@@ -233,7 +234,7 @@ pub fn run_graph(
                     break;
                 }
             }
-            std::mem::forget(file_buffer);
+
             if matched {
                 println!("DIFF {diff_name} MATCHED");
             }
@@ -333,7 +334,6 @@ pub fn run_graph(
             .unwrap();
         for node in toposort(kernels, None).unwrap() {
             let kernel = &kernels[node];
-            // println!("Our wonderful kernel: {:?}", kernel);
             if kernel.code == "Inputs" {
                 // Inputs should already be in the buffer map
             } else if kernel.code == "Outputs" {
@@ -373,8 +373,8 @@ pub fn run_graph(
                 let mut data = vec![0_f32; buffer.length() as usize / size_of::<f32>()];
                 unsafe {
                     std::ptr::copy_nonoverlapping(
-                        buffer.contents().as_ptr() as *const _,
-                        &mut data,
+                        buffer.contents().as_ptr() as *const f32,
+                        data.as_mut_ptr(),
                         data.len(),
                     );
                 }
@@ -383,11 +383,11 @@ pub fn run_graph(
                 file.read_to_end(&mut file_buffer).unwrap();
                 assert_eq!(file_buffer.len() % std::mem::size_of::<f32>(), 0);
 
-                let num_floats = file_buffer.len() / std::mem::size_of::<f32>();
-                let floats: Vec<f32> = unsafe {
-                    let ptr = file_buffer.as_ptr() as *const f32;
-                    Vec::from_raw_parts(ptr as *mut f32, num_floats, num_floats)
-                };
+                let _num_floats = file_buffer.len() / std::mem::size_of::<f32>();
+                let floats: Vec<f32> = file_buffer
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
                 let mut matched = true;
                 println!("Diff {} | {}", data.len(), floats.len());
                 for (ind, (i, j)) in data.iter().zip(floats).enumerate() {
@@ -397,15 +397,15 @@ pub fn run_graph(
                         break;
                     }
                 }
-                std::mem::forget(file_buffer);
+
                 if matched {
                     println!("DIFF {diff_name} MATCHED");
                 }
                 let dest_buffer = &mut buffers[intermediate_buffer_map[&node][0]];
                 unsafe {
                     std::ptr::copy_nonoverlapping(
-                        &data,
-                        dest_buffer.contents().as_ptr() as *mut _,
+                        data.as_ptr(),
+                        dest_buffer.contents().as_ptr() as *mut f32,
                         data.len(),
                     );
                 }
@@ -513,6 +513,229 @@ pub fn run_graph(
             }
         }
         panic!("No output kernel detected in graph!");
+    })
+}
+
+pub fn run_graph_per_cb(
+    inputs: &mut FxHashMap<usize, (Buffer, bool)>,
+    kernels: &StableGraph<Kernel, (usize, usize)>,
+    dyn_vars: &FxHashMap<char, usize>,
+    compiled_kernels: &FxHashMap<String, Function>,
+    intermediate_buffers: &Vec<Expression>,
+    intermediate_buffer_map: &FxHashMap<NodeIndex, Vec<usize>>,
+) -> (Vec<Buffer>, u128, Vec<(NodeIndex, u128)>) {
+    objc2::rc::autoreleasepool(|_| {
+        use itertools::Itertools;
+        use objc2_metal::*;
+
+        let device = MTLCreateSystemDefaultDevice().unwrap();
+        let queue = device.newCommandQueue().expect("No command queue");
+        let wall_start = std::time::Instant::now();
+
+        // Allocate intermediates once
+        let mut buffers = intermediate_buffers
+            .iter()
+            .map(|e| {
+                device
+                    .newBufferWithLength_options(
+                        e.exec(dyn_vars).unwrap() * core::mem::size_of::<f32>(),
+                        MTLResourceOptions::StorageModeShared,
+                    )
+                    .unwrap()
+            })
+            .collect_vec();
+
+        let input_node = kernels
+            .node_indices()
+            .find(|n| kernels[*n].code == "Inputs")
+            .unwrap();
+
+        let topo = toposort(kernels, None).unwrap();
+        let mut per_kernel_ms: Vec<(NodeIndex, u128)> = Vec::new();
+
+        for node in topo {
+            let kernel = &kernels[node];
+
+            if kernel.code == "Inputs" {
+                continue;
+            } else if kernel.code == "Outputs" {
+                // Collect final outputs and finish
+                let outputs = kernels
+                    .edges_directed(node, Direction::Incoming)
+                    .map(|e| {
+                        (
+                            e.weight().1,
+                            intermediate_buffer_map[&e.source()][e.weight().0],
+                        )
+                    })
+                    .sorted_by_key(|(_, b)| *b)
+                    .rev()
+                    .map(|(a, b)| (a, buffers.remove(b)))
+                    .sorted_by_key(|(a, _)| *a)
+                    .map(|(_, a)| a)
+                    .collect_vec();
+
+                return (outputs, wall_start.elapsed().as_micros(), per_kernel_ms);
+            } else if kernel.code.starts_with("Diff") {
+                // CPU-side diff passthrough (same logic as your original)
+                use objc2_metal::MTLBuffer;
+                use std::fs::File;
+                use std::io::Read;
+
+                let diff_name = kernel.code.replace("Diff", "");
+                let (input, input_index) = kernels
+                    .edges_directed(node, Direction::Incoming)
+                    .sorted_by_key(|n| n.weight().1)
+                    .map(|n| (n.source(), n.weight().0))
+                    .next()
+                    .unwrap();
+                let buffer = &buffers[intermediate_buffer_map[&input][input_index]];
+                let mut data = vec![0_f32; buffer.length() as usize / core::mem::size_of::<f32>()];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        buffer.contents().as_ptr() as *const _,
+                        &mut data,
+                        data.len(),
+                    );
+                }
+                let mut file = File::open(format!("{diff_name}.bin")).unwrap();
+                let mut file_buffer = Vec::new();
+                file.read_to_end(&mut file_buffer).unwrap();
+                assert_eq!(file_buffer.len() % core::mem::size_of::<f32>(), 0);
+
+                let num_floats = file_buffer.len() / core::mem::size_of::<f32>();
+                let floats: Vec<f32> = unsafe {
+                    let ptr = file_buffer.as_ptr() as *const f32;
+                    Vec::from_raw_parts(ptr as *mut f32, num_floats, num_floats)
+                };
+                let mut matched = true;
+                println!("Diff {} | {}", data.len(), floats.len());
+                for (ind, (i, j)) in data.iter().zip(floats).enumerate() {
+                    if (i - j).abs() > 1e-5 {
+                        matched = false;
+                        println!("Diff {diff_name} failed: curr: {i} != file: {j}, index {ind}");
+                        break;
+                    }
+                }
+                core::mem::forget(file_buffer);
+                if matched {
+                    println!("DIFF {diff_name} MATCHED");
+                }
+                let dest_buffer = &mut buffers[intermediate_buffer_map[&node][0]];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        &data,
+                        dest_buffer.contents().as_ptr() as *mut _,
+                        data.len(),
+                    );
+                }
+                continue;
+            }
+
+            // --- One command buffer per compute kernel ---
+            let cb = queue.commandBuffer().unwrap();
+            let enc = cb.computeCommandEncoder().unwrap();
+
+            // Pipeline
+            let pso = device
+                .newComputePipelineStateWithFunction_error(&compiled_kernels[&kernel.code])
+                .expect("failed to compile pipeline");
+            enc.setComputePipelineState(&pso);
+
+            // Bind inputs (sorted by edge idx)
+            let mut arg_i = 0usize;
+            for (src, in_idx) in kernels
+                .edges_directed(node, Direction::Incoming)
+                .sorted_by_key(|n| n.weight().1)
+                .map(|n| (n.source(), n.weight().0))
+            {
+                unsafe {
+                    if src == input_node {
+                        enc.setBuffer_offset_atIndex(Some(&inputs[&in_idx].0), 0, arg_i);
+                    } else {
+                        enc.setBuffer_offset_atIndex(
+                            Some(&buffers[intermediate_buffer_map[&src][in_idx]]),
+                            0,
+                            arg_i,
+                        );
+                    }
+                }
+                arg_i += 1;
+            }
+
+            // Bind outputs
+            for o in 0..kernel.outputs.len() {
+                unsafe {
+                    enc.setBuffer_offset_atIndex(
+                        Some(&buffers[intermediate_buffer_map[&node][o]]),
+                        0,
+                        arg_i,
+                    );
+                }
+                arg_i += 1;
+            }
+
+            // Dynamic dims (u64)
+            for (_, v) in dyn_vars.iter().sorted_by_key(|(k, _)| **k) {
+                let val: u64 = *v as u64;
+                let buf = unsafe {
+                    use std::{ffi::c_void, ptr::NonNull};
+                    device
+                        .newBufferWithBytes_length_options(
+                            NonNull::new(&val as *const _ as *mut c_void).unwrap(),
+                            core::mem::size_of::<u64>(),
+                            MTLResourceOptions::StorageModeShared,
+                        )
+                        .unwrap()
+                };
+                unsafe { enc.setBuffer_offset_atIndex(Some(&buf), 0, arg_i) };
+                arg_i += 1;
+            }
+
+            // Dispatch
+            let grid = (
+                kernel.grid.0.exec(dyn_vars).unwrap(),
+                kernel.grid.1.exec(dyn_vars).unwrap(),
+                kernel.grid.2.exec(dyn_vars).unwrap(),
+            );
+            let tb = (
+                kernel.threadblock.0.exec(dyn_vars).unwrap(),
+                kernel.threadblock.1.exec(dyn_vars).unwrap(),
+                kernel.threadblock.2.exec(dyn_vars).unwrap(),
+            );
+            assert!(tb.0 * tb.1 * tb.2 <= 1024, "threadblock too big: {tb:?}");
+            assert!(grid.1 <= 65535 && grid.2 <= 65535);
+            assert!(grid.0 <= 2_147_483_647);
+
+            enc.dispatchThreadgroups_threadsPerThreadgroup(
+                MTLSize {
+                    width: grid.0,
+                    height: grid.1,
+                    depth: grid.2,
+                },
+                MTLSize {
+                    width: tb.0,
+                    height: tb.1,
+                    depth: tb.2,
+                },
+            );
+            enc.endEncoding();
+
+            cb.commit();
+            unsafe { cb.waitUntilCompleted() };
+
+            // Per-kernel GPU time (ms)
+            let t0 = unsafe { cb.GPUStartTime() };
+            let t1 = unsafe { cb.GPUEndTime() };
+            let micros = if t0 > 0.0 && t1 > 0.0 {
+                ((t1 - t0) * 1e6) as u128
+            } else {
+                0
+            };
+            per_kernel_ms.push((node, micros));
+        }
+
+        unreachable!("No output kernel detected in graph!");
     })
 }
 

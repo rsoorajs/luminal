@@ -25,7 +25,7 @@ use crate::{
     utils::validate_graph,
 };
 
-pub const GRID_DIMS: usize = 2;
+pub const GRID_DIMS: usize = 3;
 pub const THREADBLOCK_DIMS: usize = 2;
 pub const MAX_THREADBLOCK_SIZE: usize = 1024; // this is max on mac
 pub const MAX_GRID_X: usize = 2147483647;
@@ -491,10 +491,12 @@ fn make_kernel(
                 // Make thread-level buffers
                 let mut created_buffers = FxHashMap::default();
                 for (output, stride) in &loop_outputs {
-                    let dest = kernel_graph
+                    let Some(dest) = kernel_graph
                         .neighbors_directed(*output, Direction::Outgoing)
                         .next()
-                        .unwrap();
+                    else {
+                        return None; // TODO: this should never fail, remove this return None.
+                    };
                     if !stride.is_acc() && !node_to_var.contains_key(&dest) {
                         // Handle the case where the dest is not the real loop output
                         let size = stride.substitute('z', range).max(1);

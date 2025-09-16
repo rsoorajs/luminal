@@ -41,14 +41,16 @@ fn main() {
         let arch = GPUArch::CUDA;
 
         #[allow(non_snake_case)]
-        let (M, K, N, J) = (512, 512, 512, 512);
+        // let (hidden, intermediate) = (512, 2048);
+        let (hidden, intermediate) = (4096, 14336);
+        // let (M, K, N, J) = (4096, 512, 512, 512);
         let mut cx = Graph::new();
-        let a = cx.named_tensor("A", (M, K));
-        let b = cx.named_tensor("B", (K, N));
-        let c = cx.named_tensor("C", (K, N));
-        let d = cx.named_tensor("D", (N, J));
+        let a = cx.named_tensor("A", (8, hidden));
+        let gate = cx.named_tensor("B", (hidden, intermediate));
+        let up = cx.named_tensor("C", (hidden, intermediate));
+        let down = cx.named_tensor("D", (intermediate, hidden));
         // let _out = a.matmul(b).swish();
-        let _out = (a.matmul(b).swish() * a.matmul(c)).matmul(d);
+        let _out = (a.matmul(gate).swish() * a.matmul(up)).matmul(down);
 
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);
         // Search each subgraph
@@ -137,7 +139,7 @@ fn main() {
             gmem_mapping[&unified_map[&a.id]],
             (
                 copy_buffer(
-                    &(0..M * K)
+                    &(0..1 * hidden)
                         .map(|_| rng.random_range(-1e-2..1e-2))
                         .collect_vec(),
                     device,
@@ -146,10 +148,10 @@ fn main() {
             ),
         );
         inputs.insert(
-            gmem_mapping[&unified_map[&b.id]],
+            gmem_mapping[&unified_map[&gate.id]],
             (
                 copy_buffer(
-                    &(0..K * N)
+                    &(0..hidden * intermediate)
                         .map(|_| rng.random_range(-1e-2..1e-2))
                         .collect_vec(),
                     device,
@@ -158,10 +160,10 @@ fn main() {
             ),
         );
         inputs.insert(
-            gmem_mapping[&unified_map[&c.id]],
+            gmem_mapping[&unified_map[&up.id]],
             (
                 copy_buffer(
-                    &(0..K * N)
+                    &(0..hidden * intermediate)
                         .map(|_| rng.random_range(-1e-2..1e-2))
                         .collect_vec(),
                     device,
@@ -170,10 +172,10 @@ fn main() {
             ),
         );
         inputs.insert(
-            gmem_mapping[&unified_map[&d.id]],
+            gmem_mapping[&unified_map[&down.id]],
             (
                 copy_buffer(
-                    &(0..N * J)
+                    &(0..intermediate * hidden)
                         .map(|_| rng.random_range(-1e-2..1e-2))
                         .collect_vec(),
                     device,

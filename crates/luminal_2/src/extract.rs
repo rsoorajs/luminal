@@ -14,6 +14,7 @@ use luminal::prelude::NodeIndex;
 use luminal::prelude::petgraph::prelude::StableGraph;
 use luminal::prelude::petgraph::{Directed, Direction};
 use luminal::shape::{Expression, Term};
+use rand::seq::SliceRandom;
 use rand::{Rng, rng};
 use rustc_hash::{FxHashMap, FxHashSet};
 #[cfg(feature = "metal")]
@@ -30,7 +31,7 @@ use {
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
-const MAX_SEARCHED_GRAPHS: usize = 1_000;
+const MAX_SEARCHED_GRAPHS: usize = 10000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
@@ -177,7 +178,9 @@ fn extract_trajectories<'a>(
     waiting: usize,
 ) -> Vec<Vec<&'a NodeId>> {
     let mut trajectories = vec![];
-    'enode_loop: for enode in egraph.classes()[current_class].nodes.iter().rev() {
+    let mut enodes = egraph.classes()[current_class].nodes.iter().collect_vec();
+    enodes.shuffle(&mut rng());
+    'enode_loop: for enode in enodes {
         if INVALID_IR.contains(&egraph.nodes[enode].op.as_str()) {
             junk_cache.insert(enode);
             continue;
@@ -270,6 +273,96 @@ fn extract_trajectories<'a>(
     trajectories
 }
 
+fn count_trajectories<'a>(
+    egraph: &'a EGraph,
+    current_class: &'a ClassId,
+    seen: &mut FxHashMap<&'a NodeId, usize>,
+    junk_cache: &mut FxHashSet<&'a NodeId>,
+    trajectory_cache: &mut FxHashMap<&'a NodeId, usize>,
+) -> usize {
+    let mut trajectories = 0;
+    'enode_loop: for enode in egraph.classes()[current_class].nodes.iter().rev() {
+        if INVALID_IR.contains(&egraph.nodes[enode].op.as_str()) {
+            junk_cache.insert(enode);
+            continue;
+        } else if junk_cache.contains(&enode)
+            || seen.get(&enode).copied().unwrap_or_default() >= MAX_CYCLES
+        {
+            continue;
+        }
+        let mut enode_trajectories = 0;
+        *seen.entry(enode).or_insert(0) += 1;
+        for child in &egraph.nodes[enode].children {
+            let child_first_enode = child;
+            // let child = egraph.nid_to_cid(child);
+            // Ask what's the child's trajectories
+            if !trajectory_cache.contains_key(child) {
+                let child_trajectories = if is_expression_enode(&egraph.nodes[child_first_enode].op)
+                {
+                    1
+                } else {
+                    count_trajectories(
+                        egraph,
+                        egraph.nid_to_cid(child),
+                        seen,
+                        junk_cache,
+                        trajectory_cache,
+                    )
+                };
+                if child_trajectories == 0 {
+                    // bad enode
+                    junk_cache.insert(enode);
+                    *seen.get_mut(&enode).unwrap() -= 1;
+                    continue 'enode_loop;
+                }
+                trajectory_cache.insert(child, child_trajectories.clone());
+            }
+
+            if enode_trajectories == 0 {
+                // First child
+                enode_trajectories = trajectory_cache[child];
+            } else if trajectory_cache[child] != 0 {
+                // Cartisian product the current trajectories with the new trajectories
+                enode_trajectories = enode_trajectories.max(1) * trajectory_cache[child].max(1);
+            }
+            if egraph.nodes[enode].op == "Fused" {
+                break;
+            }
+        }
+        *seen.get_mut(&enode).unwrap() -= 1;
+
+        if egraph.nodes[enode].children.is_empty() {
+            // Leaf node → single-element trajectory
+            trajectories += 1;
+        } else {
+            // Add combined trajectories
+            trajectories += enode_trajectories;
+        }
+    }
+    trajectories
+}
+
+pub fn human_readable(n: usize) -> String {
+    const THOUSAND: f64 = 1_000.0;
+    const MILLION: f64 = 1_000_000.0;
+    const BILLION: f64 = 1_000_000_000.0;
+    const TRILLION: f64 = 1_000_000_000_000.0;
+
+    let n_f = n as f64;
+
+    if n_f >= TRILLION {
+        format!("{:.1} trillion", n_f / TRILLION)
+    } else if n_f >= BILLION {
+        format!("{:.1} billion", n_f / BILLION)
+    } else if n_f >= MILLION {
+        format!("{:.1} million", n_f / MILLION)
+    } else if n_f >= THOUSAND {
+        format!("{:.1} thousand", n_f / THOUSAND)
+    } else {
+        n.to_string()
+    }
+}
+
 pub fn search(
     graph: &StableGraph<GraphTerm, ()>,
     steps: usize,
@@ -279,8 +372,21 @@ pub fn search(
 ) -> Option<StableGraph<GraphTerm, ()>> {
     let og = graph.clone();
     let egraph = build_search_space(graph, steps);
+    if option_env!("PRINT_EGGLOG").is_some() {
+        println!(
+            "Total Trajectories in E-Graph: {}",
+            human_readable(count_trajectories(
+                &egraph,
+                &egraph.root_eclasses[0],
+                &mut FxHashMap::default(),
+                &mut FxHashSet::default(),
+                &mut FxHashMap::default(),
+            ))
+            .bold()
+        );
+    }
     // display_egraph(&egraph);
-    let trajectories = extract_trajectories(
+    let mut trajectories = extract_trajectories(
         &egraph,
         &egraph.root_eclasses[0],
         &mut FxHashMap::default(),
@@ -288,6 +394,7 @@ pub fn search(
         &mut FxHashMap::default(),
         1,
     );
+    trajectories.shuffle(&mut rng());
     // build loop level -> enode mapping
     let mut loop_level_values = FxHashMap::default();
     for (id, _) in &egraph.class_data {
@@ -317,18 +424,18 @@ pub fn search(
         }
     }
 
-    if std::env::var("DEBUG").is_ok() {
-        // make sure all IR nodes loop levels
-        for (id, node) in &egraph.nodes {
-            if node.eclass.to_string().starts_with("IR-") {
-                assert!(
-                    loop_level_map.contains_key(id),
-                    "Loop level not found for {}",
-                    node.op
-                );
-            }
-        }
-    }
+    // if std::env::var("DEBUG").is_ok() {
+    //     // make sure all IR nodes loop levels
+    //     for (id, node) in &egraph.nodes {
+    //         if node.eclass.to_string().starts_with("IR-") {
+    //             assert!(
+    //                 loop_level_map.contains_key(id),
+    //                 "Loop level not found for {}",
+    //                 node.op
+    //             );
+    //         }
+    //     }
+    // }
 
     // Now we have DFS trajectories
     let mut ref_outputs: Vec<Vec<f32>> = vec![];
@@ -337,14 +444,14 @@ pub fn search(
     let mut best_graph = None;
     let mut valid_graphs = 0;
     let total_trajectories = trajectories.len().min(MAX_SEARCHED_GRAPHS);
-    let mut prev_graphs = vec![];
-    let mut prev_traj = vec![];
     let mut og_kernels = "".to_string();
+    let mut og_graph = StableGraph::default();
     let mut ui_functions = None;
     if option_env!("DEBUG").is_none() {
         ui_functions = Some(crate::utils::search_ui());
     };
     let mut seen = FxHashSet::default();
+    let mut kernel_timings = FxHashMap::default();
     let mut possibles = 0;
     'trajectory_loop: for (n, trajectory) in trajectories
         .into_iter()
@@ -354,8 +461,6 @@ pub fn search(
         // crate::egraph_debugger::display_egraph_with_path(&egraph, &trajectory);
         // Build termdag
         let graph = extraction_to_graph(&egraph, &trajectory, &loop_level_map);
-        prev_graphs.push(graph.clone());
-        prev_traj.push(trajectory.clone());
 
         let Some((kernels, gmem_mapping)) =
             crate::codegen::codegen(graph.clone(), arch.clone(), dyn_vars)
@@ -377,7 +482,22 @@ pub fn search(
                 } else {
                     seen.insert(k);
                 }
-                if let Some((us, outs)) = cost(&kernels, &inputs, &gmem_mapping, dyn_vars) {
+                if kernels.node_weights().any(|k| {
+                    kernel_timings
+                        .get(&k.code)
+                        .map(|i| *i > best_time)
+                        .unwrap_or_default()
+                }) {
+                    // At least one kernel is slower than the fastest graph time
+                    continue;
+                }
+                if let Some((us, outs)) = cost(
+                    &kernels,
+                    &inputs,
+                    &gmem_mapping,
+                    dyn_vars,
+                    &mut kernel_timings,
+                ) {
                     valid_graphs += 1;
                     if let Some((progress, logs, title, _)) = &ui_functions {
                         progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
@@ -446,7 +566,22 @@ pub fn search(
                 } else {
                     seen.insert(k.clone());
                 }
-                if let Some((us, outs)) = cost(&kernels, &inputs, &gmem_mapping, dyn_vars) {
+                if kernels.node_weights().any(|k| {
+                    kernel_timings
+                        .get(&k.code)
+                        .map(|i| *i > best_time)
+                        .unwrap_or_default()
+                }) {
+                    // At least one kernel is slower than the fastest graph time
+                    continue;
+                }
+                if let Some((us, outs)) = cost(
+                    &kernels,
+                    &inputs,
+                    &gmem_mapping,
+                    dyn_vars,
+                    &mut kernel_timings,
+                ) {
                     valid_graphs += 1;
                     if let Some((progress, logs, title, _)) = &ui_functions {
                         progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
@@ -499,6 +634,9 @@ pub fn search(
                     let kernel_string = print_kernels(&kernels);
                     if og_kernels.is_empty() {
                         og_kernels = kernel_string.clone();
+                        og_graph = graph.clone();
+                    } else {
+                        // display_multiple_graphs(&[&og_graph, &graph]);
                     }
                     // let us = kernels.node_count() as u128;
                     if us < best_time {
@@ -838,6 +976,7 @@ fn cost<'a>(
     inputs: &[(NodeIndex, &InitData)],
     gmem_mapping: &HashMap<NodeIndex, usize>,
     dyn_vars: &FxHashMap<char, usize>,
+    kernel_timings: &mut FxHashMap<String, u128>,
 ) -> Option<(Cost, Vec<Vec<f32>>)> {
     with_autoreleasepool(|| {
         // Get buffer info
@@ -901,10 +1040,10 @@ fn cost<'a>(
         let mut outputs = vec![];
 
         for _ in 0..TRIALS {
-            let (o, m_val) = {
+            let (o, m_val, timings) = {
                 #[cfg(feature = "metal")]
                 {
-                    run_graph(
+                    crate::run::run_graph_per_cb(
                         &mut inputs,
                         &kernels,
                         dyn_vars,
@@ -926,6 +1065,20 @@ fn cost<'a>(
                     )
                 }
             };
+            for node in kernels.node_indices() {
+                let kernel = &kernels[node];
+                if kernel.code != "Inputs" && kernel.code != "Outputs" {
+                    kernel_timings.insert(
+                        kernel.code.clone(),
+                        timings
+                            .iter()
+                            .find(|(n, _)| *n == node)
+                            .map(|(_, i)| *i)
+                            .unwrap(),
+                    );
+                }
+            }
+            println!("timings: {timings:?}");
             outputs = o;
             micros.push(m_val);
         }

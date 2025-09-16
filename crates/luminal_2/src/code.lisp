@@ -30,7 +30,7 @@
 ; Constant folding
 (rewrite (MAdd (MNum a) (MNum b)) (MNum (+ a b)) :ruleset expr)
 (rewrite (MSub (MNum a) (MNum b)) (MNum (- a b)) :ruleset expr)
-(rewrite (MMul (MNum ?a) (MNum ?b)) (MNum (* ?a ?b)) :when ((< ?a 10000) (< ?b 10000)) :ruleset expr)
+(rewrite (MMul (MNum ?a) (MNum ?b)) (MNum (* ?a ?b)) :ruleset expr) ; can this overflow?
 (rewrite (MDiv (MNum a) (MNum b)) (MNum (/ a b)) :when ((!= 0 b) (= 0 (% a b))) :ruleset expr)
 (rewrite (MMax (MNum a) (MNum b)) (MNum (max a b)) :ruleset expr)
 (rewrite (MMin (MNum a) (MNum b)) (MNum (min a b)) :ruleset expr)
@@ -89,8 +89,7 @@
    	; propogation patterns
    	(SwapLoops IR String String) ; Swap two loops, identified by their strings
    	(TileLoop IR String) ; Tile a loop, identified by it's string
-    (UnpadLoop IR String) ; Remove a padding loop, identified by it's string
-    (MergeLoops IR String String) ; Merge loops, identified by their strings
+    (MergeLoops IR i64) ; Merge loops, identified by the inner loop level
     (Fused IR EVec) ; Says that we have previously fused loopout -> loopins here
 
    	; tensor core stuff
@@ -255,11 +254,85 @@
 )
 
 ; Tiling
-; TODO add back in the prop rules
 
+; Merging
+(rule
+	(
+		(= ?inner
+			(LoopOut ?x
+				(MNum ?rangeI) ?stI
+			)
+		)
+		(= ?e
+			(LoopOut
+				?inner
+				(MNum ?rangeO) ?stO
+			)
+		)
+		(= ?ll (loop_level ?inner))
+		(set-not-contains (MAccumSet) ?stI)
+		(set-not-contains (MAccumSet) ?stO)
+	)
+	(
+		(union ?e
+			(LoopOut
+				(MergeLoops ?x ?ll)
+				(MNum (* ?rangeO ?rangeI))
+				(MAdd (MReplace ?stO (MVar "z") (MDiv (MVar "z") (MNum ?rangeI))) (MReplace ?stI (MVar "z") (MMod (MVar "z") (MNum ?rangeI))))
+			)
+		)
+	)
+	;:ruleset ir
+)
+(rule
+	(
+		(= ?inner (LoopIn (LoopIn ?x ?rangeO ?stO) ?rangeI ?stI))
+		(= ?ll (loop_level ?inner))
+		(= ?e (MergeLoops ?inner ?ll))
+	)
+	(
+		(union
+			?e
+			(LoopIn
+				?x
+				(MMul ?rangeO ?rangeI)
+				(MAdd (MReplace ?stO (MVar "z") (MDiv (MVar "z") ?rangeI)) (MReplace ?stI (MVar "z") (MMod (MVar "z") ?rangeI)))
+			)
+		)
+	)
+	:ruleset ir-prop
+)
+; propogation
+(rule
+	(
+		(= ?x (LoopIn ?body ?range ?stride))
+		(= ?e (MergeLoops ?x ?ll))
+		(> (loop_level ?x) ?ll)
+	)
+	(
+		(union ?e (LoopIn (MergeLoops ?body ?ll) ?range ?stride))
+	)
+	:ruleset ir-prop
+)
+(rewrite
+	(MergeLoops (LoopOut ?body ?range ?stride) ?ll)
+	(LoopOut (MergeLoops ?body ?ll) ?range ?stride)
+	:ruleset ir-prop
+)
+(rewrite
+	(MergeLoops (Unary ?un ?body) ?ll)
+	(Unary ?un (MergeLoops ?body ?ll))
+	:ruleset ir-prop
+)
+(rewrite
+	(MergeLoops (Binary ?bin ?bodyA ?bodyB) ?ll)
+	(Binary ?bin (MergeLoops ?bodyA ?ll) (MergeLoops ?bodyB ?ll))
+	:ruleset ir-prop
+)
 
-; Loop merging
-; TODO add back in the prop rules
+; Swapping
+
+; Fission
 
 ; TensorCore
 (ruleset tc)
@@ -401,8 +474,14 @@
 	:ruleset tc
 )
 
-; Swap loops
-; TODO add back in the prop rules
+(ruleset end)
+(rewrite
+	(MMul (MNum a) (MDiv b (MNum c)))
+	(MMul b (MNum (/ a c)))
+	:when ((= (% a c) 0))
+	:ruleset end
+)
+
 
 {code}
 
@@ -419,6 +498,7 @@
 	(saturate ir-prop)
 	(saturate tc)
 	(saturate ir-prop)
+	(saturate end)
 )
 
 ;(print-size)
