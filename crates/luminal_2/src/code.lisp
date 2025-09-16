@@ -282,7 +282,7 @@
 			)
 		)
 	)
-	;:ruleset ir
+	:ruleset ir
 )
 (rule
 	(

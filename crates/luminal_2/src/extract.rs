@@ -31,7 +31,7 @@ use {
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
-const MAX_SEARCHED_GRAPHS: usize = 10000;
+const MAX_SEARCHED_GRAPHS: usize = 100;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
@@ -445,7 +445,6 @@ pub fn search(
     let mut valid_graphs = 0;
     let total_trajectories = trajectories.len().min(MAX_SEARCHED_GRAPHS);
     let mut og_kernels = "".to_string();
-    let mut og_graph = StableGraph::default();
     let mut ui_functions = None;
     if option_env!("DEBUG").is_none() {
         ui_functions = Some(crate::utils::search_ui());
@@ -453,11 +452,7 @@ pub fn search(
     let mut seen = FxHashSet::default();
     let mut kernel_timings = FxHashMap::default();
     let mut possibles = 0;
-    'trajectory_loop: for (n, trajectory) in trajectories
-        .into_iter()
-        .take(MAX_SEARCHED_GRAPHS)
-        .enumerate()
-    {
+    'trajectory_loop: for (n, trajectory) in trajectories.into_iter().enumerate() {
         // crate::egraph_debugger::display_egraph_with_path(&egraph, &trajectory);
         // Build termdag
         let graph = extraction_to_graph(&egraph, &trajectory, &loop_level_map);
@@ -634,9 +629,6 @@ pub fn search(
                     let kernel_string = print_kernels(&kernels);
                     if og_kernels.is_empty() {
                         og_kernels = kernel_string.clone();
-                        og_graph = graph.clone();
-                    } else {
-                        // display_multiple_graphs(&[&og_graph, &graph]);
                     }
                     // let us = kernels.node_count() as u128;
                     if us < best_time {
@@ -1040,10 +1032,10 @@ fn cost<'a>(
         let mut outputs = vec![];
 
         for _ in 0..TRIALS {
-            let (o, m_val, timings) = {
+            let (o, m_val) = {
                 #[cfg(feature = "metal")]
                 {
-                    crate::run::run_graph_per_cb(
+                    crate::run::run_graph(
                         &mut inputs,
                         &kernels,
                         dyn_vars,
@@ -1065,20 +1057,20 @@ fn cost<'a>(
                     )
                 }
             };
-            for node in kernels.node_indices() {
-                let kernel = &kernels[node];
-                if kernel.code != "Inputs" && kernel.code != "Outputs" {
-                    kernel_timings.insert(
-                        kernel.code.clone(),
-                        timings
-                            .iter()
-                            .find(|(n, _)| *n == node)
-                            .map(|(_, i)| *i)
-                            .unwrap(),
-                    );
-                }
-            }
-            println!("timings: {timings:?}");
+            // for node in kernels.node_indices() {
+            //     let kernel = &kernels[node];
+            //     if kernel.code != "Inputs" && kernel.code != "Outputs" {
+            //         kernel_timings.insert(
+            //             kernel.code.clone(),
+            //             timings
+            //                 .iter()
+            //                 .find(|(n, _)| *n == node)
+            //                 .map(|(_, i)| *i)
+            //                 .unwrap(),
+            //         );
+            //     }
+            // }
+            // println!("timings: {timings:?}");
             outputs = o;
             micros.push(m_val);
         }
