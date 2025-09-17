@@ -399,7 +399,6 @@
 
 ; Swapping
 
-; Fission
 
 ; TensorCore
 (ruleset tc)

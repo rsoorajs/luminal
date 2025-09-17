@@ -469,6 +469,9 @@ fn make_kernel(
                             .next()
                             .unwrap();
                         // Use a single loop with correct striding from the input
+                        if loads.to_usize().map(|i| i <= 16).unwrap_or_default() {
+                            kernel_lines.push(format!("{spacing}#pragma unroll")); // Loop unroll short loops
+                        }
                         kernel_lines.push(format!(
                             "{spacing}for (int load = 0; load < {}; ++load) {{",
                             loads.to_kernel()
@@ -546,6 +549,9 @@ fn make_kernel(
                     // for
                     *prev_max_var += 1;
                     let loop_var = var_to_char(*prev_max_var);
+                    if range.to_usize().map(|i| i <= 16).unwrap_or_default() {
+                        kernel_lines.push(format!("{spacing}#pragma unroll")); // Loop unroll short loops
+                    }
                     kernel_lines.push(format!("{spacing}for (int loop_{loop_var} = 0; loop_{loop_var} < {}; ++loop_{loop_var}) {{", range.to_kernel()));
                 };
                 let loop_var = var_to_char(*prev_max_var);
@@ -736,6 +742,9 @@ fn make_kernel(
                                 (Expression::from('z') / current_elem_size) % range,
                             );
                             current_elem_size *= range;
+                        }
+                        if size.to_usize().map(|i| i <= 16).unwrap_or_default() {
+                            kernel_lines.push(format!("{spacing}#pragma unroll")); // Loop unroll short loops
                         }
                         kernel_lines.push(format!(
                             "{spacing}for (int save = 0; save < {}; ++save) {{",
