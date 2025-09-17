@@ -87,7 +87,7 @@
    	(Binary BinOp IR IR)
 
    	; propogation patterns
-   	(SwapLoops IR String String) ; Swap two loops, identified by their strings
+   	(SwapLoops IR i64) ; Swap two loops, identified by the inner loop level
    	(TileLoop IR i64) ; Tile a loop, identified by it's loop level
     (MergeLoops IR i64) ; Merge loops, identified by the inner loop level
     (Fused IR EVec) ; Says that we have previously fused loopout -> loopins here
@@ -398,7 +398,99 @@
 )
 
 ; Swapping
-
+(rule
+	(
+		(= ?inner
+			(LoopOut
+				?x
+				?innerRange
+				?innerStride
+			)
+		)
+		(= ?e
+			(LoopOut
+				?inner
+				?outerRange
+				?outerStride
+			)
+		)
+		(= ?ll  (loop_level ?inner))
+		(set-not-contains (MAccumSet) ?innerStride)
+		(!= ?innerRange ?outerRange)
+	)
+	(
+		(union
+			?e
+			(LoopOut
+				(LoopOut
+					(SwapLoops ?x ?ll)
+					?outerRange
+					?outerStride
+				)
+				?innerRange
+				?innerStride
+			)
+		)
+	)
+	:ruleset ir
+)
+(rule
+	(
+		(= ?inner
+			(LoopIn
+				(LoopIn
+					?x
+					?outerRange
+					?outerStride
+				)
+				?innerRange
+				?innerStride
+			)
+		)
+		(= ?ll (loop_level ?inner))
+		(= ?e (SwapLoops ?inner ?ll))
+	)
+	(
+		(union ?e
+			(LoopIn
+				(LoopIn
+					?x
+					?innerRange
+					?innerStride
+				)
+				?outerRange
+				?outerStride
+			)
+		)
+	)
+	:ruleset ir-prop
+)
+(rule
+	(
+		(= ?x (LoopIn ?body ?range ?stride))
+		(= ?e (SwapLoops ?x ?ll))
+		(> (loop_level ?x) ?ll)
+	)
+	(
+		(union ?e (LoopIn (SwapLoops ?body ?ll) ?range ?stride))
+	)
+	:ruleset ir-prop
+)
+(rewrite
+	(SwapLoops (LoopOut ?body ?range ?stride) ?ll)
+	(LoopOut (SwapLoops ?body ?ll) ?range ?stride)
+	:ruleset ir-prop
+)
+(rewrite
+	(SwapLoops (Unary ?un ?body) ?ll)
+	(Unary ?un (SwapLoops ?body ?ll))
+	:ruleset ir-prop
+)
+(rewrite
+	(SwapLoops (Binary ?bin ?bodyA ?bodyB) ?ll)
+	(Binary ?bin (SwapLoops ?bodyA ?ll) (SwapLoops ?bodyB ?ll))
+	:ruleset ir-prop
+)
 
 ; TensorCore
 (ruleset tc)
