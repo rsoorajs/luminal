@@ -41,15 +41,12 @@ fn main() {
         let arch = GPUArch::CUDA;
 
         #[allow(non_snake_case)]
-        // let (hidden, intermediate) = (512, 2048);
-        let (hidden, intermediate) = (4096, 14336);
-        // let (M, K, N, J) = (4096, 512, 512, 512);
+        let (hidden, intermediate) = (512, 1792); // llama numbers divided by 8
         let mut cx = Graph::new();
-        let a = cx.named_tensor("A", (8, hidden));
-        let gate = cx.named_tensor("B", (hidden, intermediate));
-        let up = cx.named_tensor("C", (hidden, intermediate));
-        let down = cx.named_tensor("D", (intermediate, hidden));
-        // let _out = a.matmul(b).swish();
+        let a = cx.named_tensor("Input", (8, hidden));
+        let gate = cx.named_tensor("Gate", (hidden, intermediate));
+        let up = cx.named_tensor("Up", (hidden, intermediate));
+        let down = cx.named_tensor("Down", (intermediate, hidden));
         let _out = (a.matmul(gate).swish() * a.matmul(up)).matmul(down);
 
         let (mut new_graph, mut mapping, accs) = translate_graph(&cx);

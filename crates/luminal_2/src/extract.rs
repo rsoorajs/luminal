@@ -29,9 +29,9 @@ use {
     std::sync::Arc,
 };
 
-const WARMUP_TRIALS: usize = 0;
-const TRIALS: usize = 1;
-const MAX_SEARCHED_GRAPHS: usize = 100;
+const WARMUP_TRIALS: usize = 2;
+const TRIALS: usize = 3;
+const MAX_SEARCHED_GRAPHS: usize = 10000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
