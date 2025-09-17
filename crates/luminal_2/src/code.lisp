@@ -88,7 +88,7 @@
 
    	; propogation patterns
    	(SwapLoops IR String String) ; Swap two loops, identified by their strings
-   	(TileLoop IR String) ; Tile a loop, identified by it's string
+   	(TileLoop IR i64) ; Tile a loop, identified by it's loop level
     (MergeLoops IR i64) ; Merge loops, identified by the inner loop level
     (Fused IR EVec) ; Says that we have previously fused loopout -> loopins here
 
@@ -254,6 +254,74 @@
 )
 
 ; Tiling
+(rule
+	(
+		(= ?e (LoopOut ?body (MNum ?range) ?stride))
+		(= ?ll (loop_level ?e))
+		(> ?range 8) ; range must be larger than 8
+		(= (% ?range 8) 0) ; range must be divisible by 8
+	)
+	(
+		(union ?e
+			(LoopOut
+				(LoopOut
+					(TileLoop ?body ?ll)
+					(MNum 8)
+					?stride
+				)
+				(MNum (/ ?range 8))
+				(MReplace ?stride (MVar "z") (MMul (MVar "z") (MNum 8)))
+			)
+		)
+	)
+	:ruleset ir
+)
+(rule
+	(
+		(= ?loop (LoopIn ?body (MNum ?range) ?stride))
+		(= ?e (TileLoop ?loop ?ll))
+		(= ?ll (loop_level ?loop))
+	)
+	(
+		(union ?e
+			(LoopIn
+				(LoopIn ?body
+					(MNum (/ ?range 8))
+					(MReplace ?stride (MVar "z") (MMul (MVar "z") (MNum 8)))
+				)
+				(MNum 8)
+				?stride
+			)
+		)
+	)
+	:ruleset ir-prop
+)
+(rule
+	(
+		(= ?x (LoopIn ?body ?range ?stride))
+		(= ?e (TileLoop ?x ?ll))
+		(> (loop_level ?x) ?ll)
+	)
+	(
+		(union ?e (LoopIn (TileLoop ?body ?ll) ?range ?stride))
+	)
+	:ruleset ir-prop
+)
+(rewrite
+	(TileLoop (LoopOut ?body ?range ?stride) ?ll)
+	(LoopOut (TileLoop ?body ?ll) ?range ?stride)
+	:ruleset ir-prop
+)
+(rewrite
+	(TileLoop (Unary ?un ?body) ?ll)
+	(Unary ?un (TileLoop ?body ?ll))
+	:ruleset ir-prop
+)
+(rewrite
+	(TileLoop (Binary ?bin ?bodyA ?bodyB) ?ll)
+	(Binary ?bin (TileLoop ?bodyA ?ll) (TileLoop ?bodyB ?ll))
+	:ruleset ir-prop
+)
 
 ; Merging
 (rule
@@ -302,7 +370,6 @@
 	)
 	:ruleset ir-prop
 )
-; propogation
 (rule
 	(
 		(= ?x (LoopIn ?body ?range ?stride))
