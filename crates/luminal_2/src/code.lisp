@@ -245,6 +245,7 @@
 (rewrite
 	(LoopIn (LoopOut ?a ?range ?st) ?range ?st)
 	(Fused ?a (vec-of ?range))
+	:when ((set-not-contains (MAccumSet) ?st))
 	:ruleset fusion
 )
 (rewrite
