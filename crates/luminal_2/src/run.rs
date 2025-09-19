@@ -319,7 +319,6 @@ pub fn run_graph(
             .iter()
             .map(|e| {
                 use objc2_metal::MTLResourceOptions;
-
                 device
                     .newBufferWithLength_options(
                         e.exec(dyn_vars).unwrap() * size_of::<f32>(),

@@ -78,7 +78,7 @@
 	(Mul)
 	(Max)
 )
-(sort EVec (Vec Expression))
+(sort ESet (Set Expression))
 (datatype IR
    	(GMEM String)
    	(LoopIn IR Expression Expression)
@@ -90,7 +90,7 @@
    	(SwapLoops IR i64) ; Swap two loops, identified by the inner loop level
    	(TileLoop IR i64) ; Tile a loop, identified by it's loop level
     (MergeLoops IR i64) ; Merge loops, identified by the inner loop level
-    (Fused IR EVec) ; Says that we have previously fused loopout -> loopins here
+    (Fused IR ESet) ; Says that we have previously fused loopout -> loopins here
 
    	; tensor core stuff
    	(TCMatmul IR IR Expression Expression Expression Expression Expression Expression) ; input A, input B, A k stride, B k stride, A inner stride, B inner stride, C inner stride, number of K tile loops
@@ -244,13 +244,13 @@
 (ruleset fusion)
 (rewrite
 	(LoopIn (LoopOut ?a ?range ?st) ?range ?st)
-	(Fused ?a (vec-of ?range))
+	(Fused ?a (set-of ?range))
 	:when ((set-not-contains (MAccumSet) ?st))
 	:ruleset fusion
 )
 (rewrite
 	(LoopIn (Fused (LoopOut ?a ?range ?st) ?prev_fused) ?range ?st)
-	(Fused ?a (vec-push ?prev_fused ?range))
+	(Fused ?a (set-insert ?prev_fused ?range))
 	:ruleset fusion
 )
 

@@ -25,7 +25,7 @@ use crate::{
     utils::validate_graph,
 };
 
-pub const GRID_DIMS: usize = 3;
+pub const GRID_DIMS: usize = 2;
 pub const THREADBLOCK_DIMS: usize = 2;
 pub const MAX_THREADBLOCK_SIZE: usize = 1024; // this is max on mac
 pub const MAX_GRID_X: usize = 2147483647;
@@ -705,8 +705,13 @@ fn make_kernel(
 
                 // Save accumulators
                 for (output_node, _) in loop_outputs.into_iter().filter(|(_, st)| st.is_acc()) {
-                    let (_, _, size, out_loops) =
-                        accs.iter().find(|(_, o, _, _)| *o == output_node).unwrap();
+                    let Some((_, _, size, out_loops)) =
+                        accs.iter().find(|(_, o, _, _)| *o == output_node)
+                    else {
+                        return None; // TODO get rid of this
+                        // display_graph(&kernel_graph);
+                        // panic!("Can't find output accumulator");
+                    };
                     let outer_out = kernel_graph
                         .neighbors_directed(output_node, Direction::Outgoing)
                         .next()

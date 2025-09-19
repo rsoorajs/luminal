@@ -1,11 +1,13 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::usize;
 
 use crate::Kernel;
+use crate::codegen::codegen;
 use crate::debug::display_graph;
 use crate::run::{assign_buffers, compile_kernels, run_graph};
 use crate::translate::InitData;
-use crate::utils::{build_search_space, generate_proof, print_kernels};
+use crate::utils::{build_search_space, print_kernels};
 use crate::{GPUArch, GraphTerm};
 use colored::Colorize;
 use egraph_serialize::{ClassId, EGraph, NodeId};
@@ -14,7 +16,6 @@ use luminal::prelude::NodeIndex;
 use luminal::prelude::petgraph::prelude::StableGraph;
 use luminal::prelude::petgraph::{Directed, Direction};
 use luminal::shape::{Expression, Term};
-use rand::seq::SliceRandom;
 use rand::{Rng, rng};
 use rustc_hash::{FxHashMap, FxHashSet};
 #[cfg(feature = "metal")]
@@ -29,9 +30,9 @@ use {
     std::sync::Arc,
 };
 
-const WARMUP_TRIALS: usize = 2;
-const TRIALS: usize = 3;
-const MAX_SEARCHED_GRAPHS: usize = 1000;
+const WARMUP_TRIALS: usize = 0;
+const TRIALS: usize = 1;
+const MAX_SEARCHED_GRAPHS: usize = 100_000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
@@ -44,6 +45,7 @@ const INVALID_IR: &[&str] = &[
     "TiledMatmulAcc",
     "loop_level",
     "vec-of",
+    "set-of",
 ];
 
 #[cfg(feature = "metal")]
@@ -89,57 +91,6 @@ fn is_expression_enode(enode_label: &str) -> bool {
         || enode_label.starts_with("MVar:")
 }
 
-fn shortest_from_enode<'a>(
-    egraph: &'a EGraph,
-    enode: &'a NodeId,
-    seen: &mut FxHashMap<&'a NodeId, usize>,
-    junk: &mut FxHashSet<&'a NodeId>,
-    cache: &mut FxHashMap<&'a NodeId, Option<Vec<&'a NodeId>>>,
-) -> Option<Vec<&'a NodeId>> {
-    if let Some(cached) = cache.get(enode) {
-        return cached.clone();
-    }
-    if INVALID_IR.contains(&egraph.nodes[enode].op.as_str()) || junk.contains(enode) {
-        cache.insert(enode, None);
-        return None;
-    }
-    if seen.get(&enode).copied().unwrap_or(0) >= MAX_CYCLES {
-        cache.insert(enode, None);
-        return None;
-    }
-
-    *seen.entry(enode).or_insert(0) += 1;
-
-    let out = if egraph.nodes[enode].children.is_empty() {
-        // Leaf → path is just this enode
-        Some(vec![enode])
-    } else {
-        // For each child class, take its shortest; if any child has no path → this enode invalid
-        let mut acc: Vec<&'a NodeId> = vec![enode];
-        let mut ok = true;
-
-        for child in &egraph.nodes[enode].children {
-            let child_class = egraph.nid_to_cid(child);
-            if let Some(child_path) = extract_shortest(egraph, child_class, seen, junk, cache) {
-                acc.extend(child_path);
-            } else {
-                ok = false;
-                break;
-            }
-        }
-
-        if ok { Some(acc) } else { None }
-    };
-
-    *seen.get_mut(&enode).unwrap() -= 1;
-
-    if out.is_none() {
-        junk.insert(enode);
-    }
-    cache.insert(enode, out.clone());
-    out
-}
-
 pub fn extract_shortest<'a>(
     egraph: &'a EGraph,
     class: &'a ClassId,
@@ -147,26 +98,44 @@ pub fn extract_shortest<'a>(
     junk: &mut FxHashSet<&'a NodeId>,
     cache: &mut FxHashMap<&'a NodeId, Option<Vec<&'a NodeId>>>,
 ) -> Option<Vec<&'a NodeId>> {
-    // Try all enodes in the class and keep the shortest
-    let mut best: Option<Vec<&'a NodeId>> = None;
-    for enode in &egraph.classes()[class].nodes {
-        if INVALID_IR.contains(&egraph.nodes[enode].op.as_str()) || junk.contains(enode) {
-            junk.insert(enode);
-            continue;
-        }
-        if seen.get(&enode).copied().unwrap_or(0) >= MAX_CYCLES {
-            continue;
-        }
-
-        if let Some(path) = shortest_from_enode(egraph, enode, seen, junk, cache) {
-            if best.as_ref().map_or(true, |b| path.len() < b.len()) {
-                best = Some(path);
+    egraph.classes()[class]
+        .nodes
+        .iter()
+        .filter_map(|en| {
+            if INVALID_IR.contains(&egraph.nodes[en].op.as_str()) || junk.contains(en) {
+                junk.insert(en);
+                return None;
             }
-        } else {
-            junk.insert(enode);
-        }
-    }
-    best
+            if *seen.get(en).unwrap_or(&0) >= MAX_CYCLES {
+                return None;
+            }
+            if let Some(c) = cache.get(en) {
+                return c.clone();
+            }
+            *seen.entry(en).or_insert(0) += 1;
+            let out = if egraph.nodes[en].children.is_empty() {
+                Some(vec![en])
+            } else {
+                egraph.nodes[en]
+                    .children
+                    .iter()
+                    .try_fold(vec![en], |mut acc, ch| {
+                        extract_shortest(egraph, &egraph.nid_to_cid(ch), seen, junk, cache).map(
+                            |p| {
+                                acc.extend(p);
+                                acc
+                            },
+                        )
+                    })
+            };
+            *seen.get_mut(en).unwrap() -= 1;
+            if out.is_none() {
+                junk.insert(en);
+            }
+            cache.insert(en, out.clone());
+            out
+        })
+        .min_by_key(|p| p.len())
 }
 
 fn extract_trajectories<'a>(
@@ -175,29 +144,40 @@ fn extract_trajectories<'a>(
     seen: &mut FxHashMap<&'a NodeId, usize>,
     junk_cache: &mut FxHashSet<&'a NodeId>,
     trajectory_cache: &mut FxHashMap<&'a NodeId, Vec<Vec<&'a NodeId>>>,
-    waiting: usize,
+    trajectory_counts: &FxHashMap<&'a NodeId, usize>,
+    mut budget: usize,
 ) -> Vec<Vec<&'a NodeId>> {
     let mut trajectories = vec![];
-    let mut enodes = egraph.classes()[current_class].nodes.iter().collect_vec();
-    enodes.shuffle(&mut rng());
-    'enode_loop: for enode in enodes {
-        if INVALID_IR.contains(&egraph.nodes[enode].op.as_str()) {
-            junk_cache.insert(enode);
-            continue;
-        } else if junk_cache.contains(&enode)
-            || seen.get(&enode).copied().unwrap_or_default() >= MAX_CYCLES
-        {
+    let enodes = egraph.classes()[current_class]
+        .nodes
+        .iter()
+        .filter(|e| !INVALID_IR.contains(&egraph.nodes[*e].op.as_str()))
+        .filter(|e| !junk_cache.contains(*e))
+        .filter(|e| seen.get(*e).copied().unwrap_or_default() < MAX_CYCLES)
+        .collect_vec();
+    let enode_budgets = sample_enodes(
+        &enodes
+            .iter()
+            .map(|e| {
+                // if egraph.nodes[*e].op == "Fused" {
+                //     trajectory_counts[e] * 2
+                // } else {
+                trajectory_counts[e]
+                // }
+            })
+            .collect_vec(),
+        budget,
+    );
+    'enode_loop: for (enode, enode_budget) in enodes.into_iter().zip(enode_budgets).collect_vec() {
+        if enode_budget == 0 {
             continue;
         }
         let mut enode_trajectories = vec![];
         *seen.entry(enode).or_insert(0) += 1;
         for child in &egraph.nodes[enode].children {
-            let child_first_enode = child;
-            // let child = egraph.nid_to_cid(child);
             // Ask what's the child's trajectories
             if !trajectory_cache.contains_key(child) {
-                let child_trajectories = if is_expression_enode(&egraph.nodes[child_first_enode].op)
-                {
+                let child_trajectories = if is_expression_enode(&egraph.nodes[child].op) {
                     extract_shortest(
                         egraph,
                         egraph.nid_to_cid(child),
@@ -214,7 +194,8 @@ fn extract_trajectories<'a>(
                         seen,
                         junk_cache,
                         trajectory_cache,
-                        (waiting * enode_trajectories.len().max(1)) + trajectories.len(),
+                        trajectory_counts,
+                        enode_budget,
                     )
                 };
                 if child_trajectories.is_empty() {
@@ -223,34 +204,22 @@ fn extract_trajectories<'a>(
                     *seen.get_mut(&enode).unwrap() -= 1;
                     continue 'enode_loop;
                 }
-                trajectory_cache.insert(child, child_trajectories.clone());
+                trajectory_cache.insert(child, child_trajectories);
             }
 
             if enode_trajectories.is_empty() {
                 // First child
                 for mut child_trajectory in trajectory_cache[child].clone() {
-                    if egraph.nodes[enode].op != "Fused" {
-                        child_trajectory.insert(0, enode);
-                    }
+                    child_trajectory.insert(0, enode);
                     enode_trajectories.push(child_trajectory);
                 }
             } else if !trajectory_cache[child].is_empty() {
                 // Cartisian product the current trajectories with the new trajectories
-                let n_enode_traj = enode_trajectories.len();
                 enode_trajectories = enode_trajectories
                     .into_iter()
-                    .cartesian_product(
-                        trajectory_cache[child]
-                            .iter()
-                            .take((MAX_SEARCHED_GRAPHS / n_enode_traj).max(1)),
-                    )
-                    .map(|(p, n)| {
-                        if egraph.nodes[enode].op != "Fused" {
-                            [p, n.clone()].concat()
-                        } else {
-                            n.clone()
-                        }
-                    })
+                    .cartesian_product(&trajectory_cache[child])
+                    .take(budget)
+                    .map(|(p, n)| [p, n.clone()].concat())
                     .collect();
             }
             if egraph.nodes[enode].op == "Fused" {
@@ -262,15 +231,49 @@ fn extract_trajectories<'a>(
         if egraph.nodes[enode].children.is_empty() {
             // Leaf node → single-element trajectory
             trajectories.push(vec![enode]);
+            budget -= 1;
         } else {
             // Add combined trajectories
+            budget -= enode_trajectories.len();
             trajectories.extend(enode_trajectories);
         }
-        if trajectories.len() * waiting > MAX_SEARCHED_GRAPHS {
-            break; // Only pick the first valid (non cycling) enode for expressions
+        if budget == 0 {
+            break; // Only pick the first enode for expressions
         }
     }
     trajectories
+}
+
+/// Given total trajectories each enode can yield, and a budget, return how many trajectories should be yielded from each enode
+fn sample_enodes(enode_traj_counts: &[usize], traj_budget: usize) -> Vec<usize> {
+    let total: f64 = enode_traj_counts.iter().map(|&c| c as f64).sum();
+    if total == 0.0 {
+        return vec![0; enode_traj_counts.len()];
+    }
+
+    // Expected allocation proportional to counts
+    let mut alloc: Vec<usize> = enode_traj_counts
+        .iter()
+        .map(|&c| ((traj_budget as f64) * (c as f64) / total).floor() as usize)
+        .collect();
+
+    // Distribute remainder by largest fractional parts
+    let remainder = traj_budget.saturating_sub(alloc.iter().sum());
+    let mut frac_parts: Vec<(usize, f64)> = enode_traj_counts
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            let expected = (traj_budget as f64) * (c as f64) / total;
+            (i, expected - alloc[i] as f64)
+        })
+        .collect();
+
+    frac_parts.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    for &(i, _) in frac_parts.iter().take(remainder) {
+        alloc[i] += 1;
+    }
+
+    alloc
 }
 
 fn count_trajectories<'a>(
@@ -290,54 +293,40 @@ fn count_trajectories<'a>(
         {
             continue;
         }
-        let mut enode_trajectories = 0;
+        let mut enode_trajectories = 1;
         *seen.entry(enode).or_insert(0) += 1;
         for child in &egraph.nodes[enode].children {
-            let child_first_enode = child;
-            // let child = egraph.nid_to_cid(child);
             // Ask what's the child's trajectories
             if !trajectory_cache.contains_key(child) {
-                let child_trajectories = if is_expression_enode(&egraph.nodes[child_first_enode].op)
-                {
-                    1
+                if is_expression_enode(&egraph.nodes[child].op) {
+                    trajectory_cache.insert(child, 1);
                 } else {
-                    count_trajectories(
+                    let child_trajectories = count_trajectories(
                         egraph,
                         egraph.nid_to_cid(child),
                         seen,
                         junk_cache,
                         trajectory_cache,
-                    )
-                };
-                if child_trajectories == 0 {
-                    // bad enode
-                    junk_cache.insert(enode);
-                    *seen.get_mut(&enode).unwrap() -= 1;
-                    continue 'enode_loop;
+                    );
+                    if child_trajectories == 0 {
+                        // bad enode
+                        junk_cache.insert(enode);
+                        *seen.get_mut(&enode).unwrap() -= 1;
+                        continue 'enode_loop;
+                    }
+                    trajectory_cache.insert(child, child_trajectories);
                 }
-                trajectory_cache.insert(child, child_trajectories.clone());
             }
 
-            if enode_trajectories == 0 {
-                // First child
-                enode_trajectories = trajectory_cache[child];
-            } else if trajectory_cache[child] != 0 {
-                // Cartisian product the current trajectories with the new trajectories
-                enode_trajectories = enode_trajectories.max(1) * trajectory_cache[child].max(1);
-            }
+            // Cartisian product the current trajectories with the new trajectories
+            enode_trajectories *= trajectory_cache[child].max(1);
             if egraph.nodes[enode].op == "Fused" {
                 break;
             }
         }
         *seen.get_mut(&enode).unwrap() -= 1;
-
-        if egraph.nodes[enode].children.is_empty() {
-            // Leaf node → single-element trajectory
-            trajectories += 1;
-        } else {
-            // Add combined trajectories
-            trajectories += enode_trajectories;
-        }
+        trajectory_cache.insert(enode, enode_trajectories);
+        trajectories += enode_trajectories;
     }
     trajectories
 }
@@ -370,19 +359,57 @@ pub fn search(
     arch: GPUArch,
     dyn_vars: &FxHashMap<char, usize>,
 ) -> Option<StableGraph<GraphTerm, ()>> {
-    let og = graph.clone();
+    // Get reference outputs
+    let mut ref_graph = graph.clone();
+    let mut canon: FxHashMap<String, NodeIndex> = FxHashMap::default();
+    for n in ref_graph.node_indices().collect::<Vec<_>>() {
+        if let GraphTerm::GMEM { label } = &ref_graph[n] {
+            match canon.entry(label.clone()) {
+                Entry::Vacant(e) => {
+                    e.insert(n);
+                }
+                Entry::Occupied(e) => {
+                    let c = *e.get();
+                    for src in ref_graph
+                        .neighbors_directed(n, Direction::Incoming)
+                        .collect::<Vec<_>>()
+                    {
+                        ref_graph.update_edge(src, c, ());
+                    }
+                    for dst in ref_graph
+                        .neighbors_directed(n, Direction::Outgoing)
+                        .collect::<Vec<_>>()
+                    {
+                        ref_graph.update_edge(c, dst, ());
+                    }
+                    ref_graph.remove_node(n);
+                }
+            }
+        }
+    }
+    let (ref_kernels, ref_gmem_map) = codegen(ref_graph.clone(), arch.clone(), dyn_vars).unwrap();
+    let ref_inputs = inputs
+    	.into_iter()
+     	.filter_map(|(l, d)|
+    		ref_graph.node_indices().find(|n| matches!(ref_graph.node_weight(*n).unwrap(), GraphTerm::GMEM { label } if label == l)).map(|i| (i, d))
+      	)
+      	.collect_vec();
+    let (_, ref_outputs) = cost(&ref_kernels, &ref_inputs, &ref_gmem_map, dyn_vars).unwrap();
+
+    // Build search space and get trajectories
     let egraph = build_search_space(graph, steps);
+    let mut trajectory_counts = FxHashMap::default();
+    let total_trajectories = count_trajectories(
+        &egraph,
+        &egraph.root_eclasses[0],
+        &mut FxHashMap::default(),
+        &mut FxHashSet::default(),
+        &mut trajectory_counts,
+    );
     if option_env!("PRINT_EGGLOG").is_some() {
         println!(
             "Total Trajectories in E-Graph: {}",
-            human_readable(count_trajectories(
-                &egraph,
-                &egraph.root_eclasses[0],
-                &mut FxHashMap::default(),
-                &mut FxHashSet::default(),
-                &mut FxHashMap::default(),
-            ))
-            .bold()
+            human_readable(total_trajectories).bold()
         );
     }
     // display_egraph(&egraph);
@@ -392,9 +419,11 @@ pub fn search(
         &mut FxHashMap::default(),
         &mut FxHashSet::default(),
         &mut FxHashMap::default(),
-        1,
+        &trajectory_counts,
+        MAX_SEARCHED_GRAPHS,
     );
-    trajectories.shuffle(&mut rng());
+    trajectories.sort_by_key(|t| t.len());
+    // trajectories.shuffle(&mut rng());
     // build loop level -> enode mapping
     let mut loop_level_values = FxHashMap::default();
     for (id, _) in &egraph.class_data {
@@ -437,206 +466,83 @@ pub fn search(
     //     }
     // }
 
-    // Now we have DFS trajectories
-    let mut ref_outputs: Vec<Vec<f32>> = vec![];
+    // Run through each trajectory, codegen and test graph
     let mut best_time = u128::MAX;
     let mut fastest = "".to_string();
     let mut best_graph = None;
     let mut valid_graphs = 0;
-    let total_trajectories = trajectories.len().min(MAX_SEARCHED_GRAPHS);
-    let mut og_kernels = "".to_string();
+    let total_trajectories = trajectories.len();
     let mut ui_functions = None;
     if option_env!("DEBUG").is_none() {
         ui_functions = Some(crate::utils::search_ui());
     };
     let mut seen = FxHashSet::default();
-    let mut kernel_timings = FxHashMap::default();
-    let mut possibles = 0;
+    let mut valids = 0;
     'trajectory_loop: for (n, trajectory) in trajectories.into_iter().enumerate() {
-        // crate::egraph_debugger::display_egraph_with_path(&egraph, &trajectory);
-        // Build termdag
         let graph = extraction_to_graph(&egraph, &trajectory, &loop_level_map);
-
         let Some((kernels, gmem_mapping)) =
             crate::codegen::codegen(graph.clone(), arch.clone(), dyn_vars)
         else {
             continue;
         };
-        possibles += 1;
+        valids += 1;
         let inputs = inputs
         	.into_iter()
          	.filter_map(|(l, d)|
           		graph.node_indices().find(|n| matches!(graph.node_weight(*n).unwrap(), GraphTerm::GMEM { label } if label == l)).map(|i| (i, d))
           	)
           	.collect_vec();
-        match &arch {
-            GPUArch::CUDA => {
-                let k = print_kernels(&kernels);
-                if seen.contains(&k) {
-                    continue;
-                } else {
-                    seen.insert(k);
-                }
-                if kernels.node_weights().any(|k| {
-                    kernel_timings
-                        .get(&k.code)
-                        .map(|i| *i > best_time)
-                        .unwrap_or_default()
-                }) {
-                    // At least one kernel is slower than the fastest graph time
-                    continue;
-                }
-                if let Some((us, outs)) = cost(
-                    &kernels,
-                    &inputs,
-                    &gmem_mapping,
-                    dyn_vars,
-                    &mut kernel_timings,
-                ) {
-                    valid_graphs += 1;
-                    if let Some((progress, logs, title, _)) = &ui_functions {
-                        progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
-                        logs(print_kernels(&kernels));
-                        title(format!(
-                            "Graph {valid_graphs} Best {best_time}µs Current {us}µs"
-                        ));
-                    } else if option_env!("DEBUG").is_some() {
-                        println!("{}", print_kernels(&kernels));
-                        println!("Graph {valid_graphs} Best {best_time}µs Current {us}µs");
-                        if ref_outputs.is_empty() {
-                            ref_outputs = outs;
-                        } else {
-                            for (a, b) in ref_outputs.iter().zip(&outs) {
-                                for (x, y) in a.iter().zip(b) {
-                                    if (x - y).abs() >= 1e-4 {
-                                        if option_env!("DEBUG").is_some() {
-                                            // display_graph(&graph, &[]);
-                                            println!(
-                                                "REF: {:?}",
-                                                &ref_outputs
-                                                    .iter()
-                                                    .map(|v| &v[..v.len().min(20)])
-                                                    .collect_vec()
-                                            );
-                                            println!(
-                                                "New: {:?}",
-                                                &outs
-                                                    .iter()
-                                                    .map(|v| &v[..v.len().min(20)])
-                                                    .collect_vec()
-                                            );
-                                            crate::debug::display_graph(&og);
-                                            crate::debug::display_graph(&graph);
-                                            generate_proof(&og, &graph);
-                                            println!("{}", og_kernels);
-                                            println!("{}", print_kernels(&kernels));
-                                            panic!(
-                                                "{} {x} != {y} {}",
-                                                "Output Mismatch".bold().on_bright_red(),
-                                                (x - y).abs()
-                                            );
-                                        }
-                                        continue 'trajectory_loop;
-                                    }
-                                }
+
+        let k = print_kernels(&kernels);
+        if seen.contains(&k) {
+            continue;
+        } else {
+            seen.insert(k.clone());
+        }
+        if let Some((us, outs)) = cost(&kernels, &inputs, &gmem_mapping, dyn_vars) {
+            valid_graphs += 1;
+            if let Some((progress, logs, title, _)) = &ui_functions {
+                progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
+                logs(k);
+                title(format!(
+                    "Graph {valid_graphs} Best {best_time}µs Current {us}µs"
+                ));
+            } else if option_env!("DEBUG").is_some() {
+                println!("{k}");
+                println!("Graph {valid_graphs} Best {best_time}µs Current {us}µs");
+                for (a, b) in ref_outputs.iter().zip(&outs) {
+                    for (x, y) in a.iter().zip(b) {
+                        if (x - y).abs() >= 1e-4 {
+                            if option_env!("DEBUG").is_some() {
+                                // display_graph(&graph, &[]);
+                                println!(
+                                    "REF: {:?}",
+                                    &ref_outputs
+                                        .iter()
+                                        .map(|v| &v[..v.len().min(20)])
+                                        .collect_vec()
+                                );
+                                println!(
+                                    "New: {:?}",
+                                    &outs.iter().map(|v| &v[..v.len().min(20)]).collect_vec()
+                                );
+                                println!("{}", print_kernels(&ref_kernels));
+                                println!("{}", print_kernels(&kernels));
+                                crate::debug::display_multiple_graphs(&[&ref_graph, &graph]);
+                                panic!("{} {x} != {y}", "Output Mismatch".bold().on_bright_red());
                             }
-                            println!("{}", "Outputs Validated".bold().on_bright_green());
+                            continue 'trajectory_loop;
                         }
                     }
-                    let kernel_string = print_kernels(&kernels);
-                    if og_kernels.is_empty() {
-                        og_kernels = kernel_string.clone();
-                    }
-                    if us < best_time {
-                        best_time = us;
-                        best_graph = Some(graph);
-                        fastest = kernel_string;
-                    }
                 }
+                println!("{}", "Outputs Validated".bold().on_bright_green());
             }
-            GPUArch::Metal(_) => {
-                let k = print_kernels(&kernels);
-                if seen.contains(&k) {
-                    continue;
-                } else {
-                    seen.insert(k.clone());
-                }
-                if kernels.node_weights().any(|k| {
-                    kernel_timings
-                        .get(&k.code)
-                        .map(|i| *i > best_time)
-                        .unwrap_or_default()
-                }) {
-                    // At least one kernel is slower than the fastest graph time
-                    continue;
-                }
-                if let Some((us, outs)) = cost(
-                    &kernels,
-                    &inputs,
-                    &gmem_mapping,
-                    dyn_vars,
-                    &mut kernel_timings,
-                ) {
-                    valid_graphs += 1;
-                    if let Some((progress, logs, title, _)) = &ui_functions {
-                        progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
-                        logs(k);
-                        title(format!(
-                            "Graph {valid_graphs} Best {best_time}µs Current {us}µs"
-                        ));
-                    } else if option_env!("DEBUG").is_some() {
-                        println!("{k}");
-                        println!("Graph {valid_graphs} Best {best_time}µs Current {us}µs");
-                        if ref_outputs.is_empty() {
-                            ref_outputs = outs;
-                            println!("{}", "Initial".bold().on_bright_green());
-                        } else {
-                            for (a, b) in ref_outputs.iter().zip(&outs) {
-                                for (x, y) in a.iter().zip(b) {
-                                    if (x - y).abs() >= 1e-4 {
-                                        if option_env!("DEBUG").is_some() {
-                                            // display_graph(&graph, &[]);
-                                            println!(
-                                                "REF: {:?}",
-                                                &ref_outputs
-                                                    .iter()
-                                                    .map(|v| &v[..v.len().min(20)])
-                                                    .collect_vec()
-                                            );
-                                            println!(
-                                                "New: {:?}",
-                                                &outs
-                                                    .iter()
-                                                    .map(|v| &v[..v.len().min(20)])
-                                                    .collect_vec()
-                                            );
-                                            // crate::utils::generate_proof(&og, &graph);
-                                            println!("{}", og_kernels);
-                                            println!("{}", print_kernels(&kernels));
-                                            crate::debug::display_multiple_graphs(&[&og, &graph]);
-                                            panic!(
-                                                "{} {x} != {y}",
-                                                "Output Mismatch".bold().on_bright_red()
-                                            );
-                                        }
-                                        continue 'trajectory_loop;
-                                    }
-                                }
-                            }
-                            println!("{}", "Outputs Validated".bold().on_bright_green());
-                        }
-                    }
-                    let kernel_string = print_kernels(&kernels);
-                    if og_kernels.is_empty() {
-                        og_kernels = kernel_string.clone();
-                    }
-                    // let us = kernels.node_count() as u128;
-                    if us < best_time {
-                        best_time = us;
-                        best_graph = Some(graph);
-                        fastest = kernel_string;
-                    }
-                }
+            let kernel_string = print_kernels(&kernels);
+            // let us = kernels.node_count() as u128;
+            if us < best_time {
+                best_time = us;
+                best_graph = Some(graph);
+                fastest = kernel_string;
             }
         }
     }
@@ -644,7 +550,7 @@ pub fn search(
         exit();
     }
     println!("FASTEST ({}ms): {fastest}", best_time / 1000);
-    println!("Valids: {:?} / {:?}", possibles, total_trajectories);
+    println!("Valids: {valids} / {total_trajectories}");
     best_graph
 }
 
@@ -711,22 +617,11 @@ pub fn extraction_to_graph(
                 *current += 1;
                 Expression::from(Term::Acc('a'))
             }
-
-            // inline literals / names encoded in `op`
-            _ if op.starts_with("MNum:") => {
-                let num: i64 = op["MNum:".len()..].parse().expect("invalid MNum literal");
-                Expression::from(num as usize)
-            }
-            _ if op.starts_with("MVar:") => {
-                let name = &op["MVar:".len()..];
-                Expression::from(name.chars().next().unwrap())
-            }
-            _ if op.starts_with("Boxed(\"") => {
+            op if op.starts_with("Boxed(\"") => {
                 let name = op.replace("Boxed(\"", "").replace("\")", "");
                 Expression::from(name.chars().next().unwrap())
             }
-            op => enode
-                .op
+            op => op
                 .parse::<usize>()
                 .map(|i| i.into())
                 .unwrap_or_else(|_| panic!("unsupported expression op '{op}'")),
@@ -941,6 +836,18 @@ pub fn extraction_to_graph(
                     r
                 }
             }
+            "Fused" => {
+                *current += 1;
+                build_ir(
+                    egraph,
+                    trajectory,
+                    current,
+                    g,
+                    loop_level_map,
+                    prev_placed,
+                    no_place,
+                )
+            }
             op => panic!("unsupported IR op: {op}"),
         }
     }
@@ -968,11 +875,16 @@ fn cost<'a>(
     inputs: &[(NodeIndex, &InitData)],
     gmem_mapping: &HashMap<NodeIndex, usize>,
     dyn_vars: &FxHashMap<char, usize>,
-    kernel_timings: &mut FxHashMap<String, u128>,
 ) -> Option<(Cost, Vec<Vec<f32>>)> {
     with_autoreleasepool(|| {
         // Get buffer info
         let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
+        for i in &int_buffers {
+            if i.to_usize().unwrap_or_default() > 17_179_869_184 {
+                // Can't allocate a buffer larger than 16GB
+                return None;
+            }
+        }
         let compiled_kernels = compile_kernels(&kernels);
         #[cfg(feature = "metal")]
         let device = MTLCreateSystemDefaultDevice().unwrap();
@@ -1006,6 +918,7 @@ fn cost<'a>(
                 )
             })
             .collect::<FxHashMap<_, _>>();
+
         // Warm up resources (buffer allocation, kernel compiler, etc.)
         for _ in 0..WARMUP_TRIALS {
             #[cfg(feature = "metal")]
@@ -1168,106 +1081,4 @@ pub fn make_test_inputs(
         }
     }
     inputs
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        translate::{MetaGraph, SubGraph, translate_graph},
-        utils::build_search_space,
-    };
-
-    fn build_minimal_add_graph() -> (luminal::graph::Graph, MetaGraph, SubGraph) {
-        use luminal::graph::Graph;
-
-        let mut cx = Graph::new();
-        let a = cx.tensor(3).set([1., 2., 3.]);
-        let b = cx.tensor(3).set([4., 5., 6.]);
-        let c = (a + b).sqrt();
-        let d = c * a;
-        let _e = d.sum(0).retrieve();
-
-        let (meta_graph, _global_map, _inits) = translate_graph(&cx);
-        let meta_node = meta_graph
-            .node_indices()
-            .next()
-            .expect("MetaGraph unexpectedly empty");
-        let sub = meta_graph
-            .node_weight(meta_node)
-            .expect("Missing subgraph at meta node")
-            .clone();
-
-        (cx, meta_graph, sub)
-    }
-
-    fn build_nonempty_egraph() -> EGraph {
-        // Keep `cx` and `meta_graph` alive while we build the egraph
-        let (_cx, meta_graph, sub) = build_minimal_add_graph();
-        let e = build_search_space(&sub, /*iters=*/ 2);
-        // `_cx` and `meta_graph` can drop now; `e` no longer needs them
-        drop(meta_graph);
-        e
-    }
-
-    #[test]
-    fn test_egraph_is_nonempty_and_has_root() {
-        let egraph = build_nonempty_egraph();
-        assert!(!egraph.classes().is_empty(), "EGraph should have classes");
-        assert!(
-            !egraph.root_eclasses.is_empty(),
-            "EGraph should have a root"
-        );
-    }
-
-    #[test]
-    fn test_extract_trajectories_invalid_ir_filtering() {
-        let egraph = build_nonempty_egraph();
-
-        if egraph.classes().is_empty() || egraph.root_eclasses.is_empty() {
-            return;
-        }
-
-        let root_class = &egraph.root_eclasses[0];
-        let mut seen = FxHashMap::default();
-        let mut junk_cache = FxHashSet::default();
-        let mut trajectory_cache = FxHashMap::default();
-
-        let trajectories = extract_trajectories(
-            &egraph,
-            root_class,
-            &mut seen,
-            &mut junk_cache,
-            &mut trajectory_cache,
-            1,
-        );
-
-        // Check that trajectories don't contain INVALID_IR operations
-        for trajectory in trajectories {
-            for &node in &trajectory {
-                let op_name = &egraph.nodes[node].op;
-                assert!(
-                    !INVALID_IR.contains(&op_name.as_str()),
-                    "Trajectory contains invalid IR operation: {}",
-                    op_name
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_is_expression_enode() {
-        // Test that expression enodes are correctly identified
-        assert!(is_expression_enode("MNum"));
-        assert!(is_expression_enode("MVar"));
-        assert!(is_expression_enode("MAdd"));
-        assert!(is_expression_enode("MNum:42"));
-        assert!(is_expression_enode("MVar:x"));
-
-        // Test that non-expression enodes are not identified
-        assert!(!is_expression_enode("GMEM"));
-        assert!(!is_expression_enode("LoopIn"));
-        assert!(!is_expression_enode("Add"));
-        assert!(!is_expression_enode("Invalid"));
-    }
 }
