@@ -906,7 +906,7 @@ fn make_kernel(
             } => {
                 if cfg!(feature = "cuda") {
                     // CUDA build: skip / fallback
-                    return None; // or generate a non-TC matmul
+                    return None;
                 }
 
                 let mut srcs = kernel_graph

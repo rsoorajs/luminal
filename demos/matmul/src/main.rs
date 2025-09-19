@@ -10,7 +10,7 @@ use luminal::prelude::{
 use luminal_2::{
     codegen::{codegen, stitch_meta_graph_together},
     extract::{make_test_inputs, search},
-    run::{assign_buffers, compile_kernels, run_graph},
+    run::{assign_buffers, compile_kernels, new_buffer, run_graph},
     translate::{translate_graph, InitData},
     GPUArch, GraphTerm,
 };
@@ -201,40 +201,18 @@ fn main() {
 
         let mut buffers = int_buffers
             .iter()
-            .map(|e| {
-                device
-                    .newBufferWithLength_options(
-                        e.exec(&cx.dyn_map).unwrap() * size_of::<f32>(),
-                        objc2_metal::MTLResourceOptions::StorageModeShared,
-                    )
-                    .unwrap()
-            })
+            .map(|e| new_buffer(e.exec(&cx.dyn_map).unwrap() * size_of::<f32>()))
             .collect_vec();
         let mut inp = inputs.iter().map(|(i, (b, v))| (*i, (b, *v))).collect();
         let (outputs, _) = {
-            #[cfg(feature = "metal")]
-            {
-                run_graph(
-                    &mut inp,
-                    &kernels,
-                    &FxHashMap::default(),
-                    &compiled,
-                    &mut buffers,
-                    &int_buffer_map,
-                )
-            }
-
-            #[cfg(feature = "cuda")]
-            {
-                run_graph(
-                    &mut inputs,
-                    &kernels,
-                    &FxHashMap::default(),
-                    &compiled,
-                    &int_buffers,
-                    &int_buffer_map,
-                )
-            }
+            run_graph(
+                &mut inp,
+                &kernels,
+                &FxHashMap::default(),
+                &compiled,
+                &mut buffers,
+                &int_buffer_map,
+            )
         };
         println!("{:?}", &outputs[0][..10]);
     });

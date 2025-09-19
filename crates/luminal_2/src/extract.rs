@@ -2,14 +2,16 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::usize;
 
-use crate::Kernel;
 use crate::codegen::codegen;
 use crate::debug::display_graph;
-use crate::run::{assign_buffers, compile_kernels, run_graph};
+use crate::run::{assign_buffers, compile_kernels, htod, new_buffer, run_graph};
 use crate::translate::InitData;
 use crate::utils::{build_search_space, print_kernels};
+use crate::{Buffer, Kernel};
 use crate::{GPUArch, GraphTerm};
 use colored::Colorize;
+#[cfg(feature = "cuda")]
+use cudarc::driver::CudaContext;
 use egraph_serialize::{ClassId, EGraph, NodeId};
 use itertools::Itertools;
 use luminal::prelude::NodeIndex;
@@ -23,11 +25,6 @@ use {
     crate::{Buffer, Device},
     objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions},
     std::{ffi::c_void, ptr::NonNull},
-};
-#[cfg(feature = "cuda")]
-use {
-    cudarc::driver::{CudaContext, CudaSlice},
-    std::sync::Arc,
 };
 
 const WARMUP_TRIALS: usize = 0;
@@ -47,24 +44,6 @@ const INVALID_IR: &[&str] = &[
     "vec-of",
     "set-of",
 ];
-
-#[cfg(feature = "metal")]
-#[inline]
-fn with_autoreleasepool<F, R>(f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    objc2::rc::autoreleasepool(|_| f())
-}
-
-#[cfg(feature = "cuda")]
-#[inline]
-fn with_autoreleasepool<F, R>(f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    f()
-}
 
 type Cost = u128; // Execution time in microseconds
 
@@ -508,6 +487,9 @@ pub fn search(
         } else {
             seen.insert(k.clone());
         }
+        if option_env!("DEBUG").is_some() {
+            println!("{k}");
+        }
         if let Some((us, outs)) = cost(
             &kernels,
             &map_inputs_into_kernel_graph(&inputs, &graph),
@@ -522,7 +504,6 @@ pub fn search(
                     "Graph {valid_graphs} Best {best_time}µs Current {us}µs"
                 ));
             } else if option_env!("DEBUG").is_some() {
-                println!("{k}");
                 println!("Graph {valid_graphs} Best {best_time}µs Current {us}µs");
                 for (a, b) in ref_outputs.iter().zip(&outs) {
                     for (x, y) in a.iter().zip(b) {
@@ -911,11 +892,7 @@ fn cost<'a>(
         }
     }
     let compiled_kernels = compile_kernels(&kernels);
-    #[cfg(feature = "metal")]
-    let device = MTLCreateSystemDefaultDevice().unwrap();
-    #[cfg(feature = "cuda")]
-    let ctx = CudaContext::new(0).unwrap();
-    // Set up input buffers over
+    // Set up input buffers
     let mut inputs = inputs
         .into_iter()
         .filter(|(n, _)| gmem_mapping.contains_key(n))
@@ -924,34 +901,17 @@ fn cost<'a>(
     // Allocate intermediate buffers
     let mut buffers = int_buffers
         .iter()
-        .map(|e| {
-            device
-                .newBufferWithLength_options(
-                    e.exec(dyn_vars).unwrap() * size_of::<f32>(),
-                    objc2_metal::MTLResourceOptions::StorageModeShared,
-                )
-                .unwrap()
-        })
+        .map(|e| new_buffer(e.exec(dyn_vars).unwrap() * size_of::<f32>()))
         .collect_vec();
 
     // Warm up resources (buffer allocation, kernel compiler, etc.)
     for _ in 0..WARMUP_TRIALS {
-        #[cfg(feature = "metal")]
         run_graph(
             &mut inputs,
             &kernels,
             dyn_vars,
             &compiled_kernels,
             &mut buffers,
-            &int_buffer_map,
-        );
-        #[cfg(feature = "cuda")]
-        run_graph(
-            &mut inputs,
-            &kernels,
-            dyn_vars,
-            &compiled_kernels,
-            &int_buffers,
             &int_buffer_map,
         );
     }
@@ -961,75 +921,19 @@ fn cost<'a>(
 
     for _ in 0..TRIALS {
         let (o, m_val) = {
-            #[cfg(feature = "metal")]
-            {
-                crate::run::run_graph(
-                    &mut inputs,
-                    &kernels,
-                    dyn_vars,
-                    &compiled_kernels,
-                    &mut buffers,
-                    &int_buffer_map,
-                )
-            }
-
-            #[cfg(feature = "cuda")]
-            {
-                run_graph(
-                    &mut inputs,
-                    &kernels,
-                    dyn_vars,
-                    &compiled_kernels,
-                    &int_buffers,
-                    &int_buffer_map,
-                )
-            }
+            crate::run::run_graph(
+                &mut inputs,
+                &kernels,
+                dyn_vars,
+                &compiled_kernels,
+                &mut buffers,
+                &int_buffer_map,
+            )
         };
         outputs = o;
         micros.push(m_val);
     }
     Some((micros.into_iter().sum::<u128>() / TRIALS as u128, outputs))
-}
-
-#[cfg(feature = "cuda")]
-pub fn htod(v: &[f32], ctx: &Arc<CudaContext>) -> CudaSlice<f32> {
-    assert!(!v.is_empty(), "Can't copy empty slice to device");
-
-    // Then copy host data to the allocated device memory
-    let stream = ctx.default_stream();
-    let mut dst = stream.alloc_zeros::<f32>(v.len()).unwrap();
-    stream.memcpy_htod(v, &mut dst).unwrap();
-    dst
-}
-
-/// Device -> Host (like contents() memcpy back)
-#[cfg(feature = "cuda")]
-pub fn dtoh(buf: &CudaSlice<f32>) -> Vec<f32> {
-    buf.stream().memcpy_dtov(buf).unwrap()
-}
-
-#[cfg(feature = "metal")]
-pub fn htod(v: &Vec<f32>, device: &Device) -> Buffer {
-    assert!(v.len() > 0);
-    unsafe {
-        let ptr = NonNull::new(v.as_ptr() as *mut c_void).unwrap();
-        device
-            .newBufferWithBytes_length_options(
-                ptr,
-                (v.len() * 4) as _,
-                MTLResourceOptions::StorageModeShared,
-            )
-            .unwrap()
-    }
-}
-#[cfg(feature = "metal")]
-pub fn dtoh(v: &Buffer) -> Vec<f32> {
-    let mut data = vec![0f32; v.length() as usize / size_of::<f32>()];
-    let ptr = v.contents().as_ptr() as *mut f32;
-    for (i, d) in data.iter_mut().enumerate() {
-        *d = unsafe { *ptr.add(i) };
-    }
-    data
 }
 
 pub fn make_test_inputs(
