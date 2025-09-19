@@ -362,7 +362,7 @@ pub fn search(
     // Get reference outputs
     let mut ref_graph = graph.clone();
     let mut canon: FxHashMap<String, NodeIndex> = FxHashMap::default();
-    for n in ref_graph.node_indices().collect::<Vec<_>>() {
+    for n in ref_graph.node_indices().collect_vec() {
         if let GraphTerm::GMEM { label } = &ref_graph[n] {
             match canon.entry(label.clone()) {
                 Entry::Vacant(e) => {
@@ -372,13 +372,13 @@ pub fn search(
                     let c = *e.get();
                     for src in ref_graph
                         .neighbors_directed(n, Direction::Incoming)
-                        .collect::<Vec<_>>()
+                        .collect_vec()
                     {
                         ref_graph.update_edge(src, c, ());
                     }
                     for dst in ref_graph
                         .neighbors_directed(n, Direction::Outgoing)
-                        .collect::<Vec<_>>()
+                        .collect_vec()
                     {
                         ref_graph.update_edge(c, dst, ());
                     }
@@ -388,13 +388,29 @@ pub fn search(
         }
     }
     let (ref_kernels, ref_gmem_map) = codegen(ref_graph.clone(), arch.clone(), dyn_vars).unwrap();
-    let ref_inputs = inputs
-    	.into_iter()
-     	.filter_map(|(l, d)|
-    		ref_graph.node_indices().find(|n| matches!(ref_graph.node_weight(*n).unwrap(), GraphTerm::GMEM { label } if label == l)).map(|i| (i, d))
-      	)
-      	.collect_vec();
-    let (_, ref_outputs) = cost(&ref_kernels, &ref_inputs, &ref_gmem_map, dyn_vars).unwrap();
+    #[cfg(feature = "metal")]
+    let device = MTLCreateSystemDefaultDevice().unwrap();
+    #[cfg(feature = "cuda")]
+    let device = CudaContext::new(0).unwrap();
+    let inputs = inputs
+        .into_iter()
+        .map(|(n, init)| {
+            (
+                n.clone(),
+                match init {
+                    InitData::Data(d) => htod(d, &device),
+                    InitData::Expr(e) => htod(&vec![e.exec(dyn_vars).unwrap() as f32], &device),
+                },
+            )
+        })
+        .collect_vec();
+    let (_, ref_outputs) = cost(
+        &ref_kernels,
+        &map_inputs_into_kernel_graph(&inputs, &ref_graph),
+        &ref_gmem_map,
+        dyn_vars,
+    )
+    .unwrap();
 
     // Build search space and get trajectories
     let egraph = build_search_space(graph, steps);
@@ -486,20 +502,18 @@ pub fn search(
             continue;
         };
         valids += 1;
-        let inputs = inputs
-        	.into_iter()
-         	.filter_map(|(l, d)|
-          		graph.node_indices().find(|n| matches!(graph.node_weight(*n).unwrap(), GraphTerm::GMEM { label } if label == l)).map(|i| (i, d))
-          	)
-          	.collect_vec();
-
         let k = print_kernels(&kernels);
         if seen.contains(&k) {
             continue;
         } else {
             seen.insert(k.clone());
         }
-        if let Some((us, outs)) = cost(&kernels, &inputs, &gmem_mapping, dyn_vars) {
+        if let Some((us, outs)) = cost(
+            &kernels,
+            &map_inputs_into_kernel_graph(&inputs, &graph),
+            &gmem_mapping,
+            dyn_vars,
+        ) {
             valid_graphs += 1;
             if let Some((progress, logs, title, _)) = &ui_functions {
                 progress(((n as f32 / total_trajectories as f32) * 100.0) as u16);
@@ -870,135 +884,115 @@ pub fn extraction_to_graph(
     g
 }
 
+fn map_inputs_into_kernel_graph<'a>(
+    inputs: &'a [(String, Buffer)],
+    graph: &StableGraph<GraphTerm, ()>,
+) -> Vec<(NodeIndex, &'a Buffer)> {
+    inputs
+    	.iter()
+     	.filter_map(|(l, d)|
+    		graph.node_indices().find(|n| matches!(graph.node_weight(*n).unwrap(), GraphTerm::GMEM { label } if label == l)).map(|i| (i, d))
+      	)
+      	.collect()
+}
+
 fn cost<'a>(
     kernels: &StableGraph<Kernel, (usize, usize), Directed>,
-    inputs: &[(NodeIndex, &InitData)],
+    inputs: &[(NodeIndex, &Buffer)],
     gmem_mapping: &HashMap<NodeIndex, usize>,
     dyn_vars: &FxHashMap<char, usize>,
 ) -> Option<(Cost, Vec<Vec<f32>>)> {
-    with_autoreleasepool(|| {
-        // Get buffer info
-        let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
-        for i in &int_buffers {
-            if i.to_usize().unwrap_or_default() * size_of::<f32>() > 17_179_869_184 {
-                // Can't allocate a buffer larger than 16GB
-                return None;
-            }
+    // Get buffer info
+    let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
+    for i in &int_buffers {
+        if i.to_usize().unwrap_or_default() * size_of::<f32>() > 17_179_869_184 {
+            // Can't allocate a buffer larger than 16GB
+            return None;
         }
-        let compiled_kernels = compile_kernels(&kernels);
-        #[cfg(feature = "metal")]
-        let device = MTLCreateSystemDefaultDevice().unwrap();
-        #[cfg(feature = "cuda")]
-        let ctx = CudaContext::new(0).unwrap(); // will need to expand beyond single host
-        // Copy input buffers over
-        let mut inputs = inputs
-            .into_iter()
-            .filter(|(n, _)| gmem_mapping.contains_key(n))
-            .map(|(n, b)| {
-                (
-                    gmem_mapping[n],
-                    (
-                        #[cfg(feature = "metal")]
-                        match b {
-                            InitData::Data(d) => copy_metal_buffer(d, &device),
-                            InitData::Expr(e) => {
-                                copy_metal_buffer(&vec![e.exec(dyn_vars).unwrap() as f32], &device)
-                            }
-                        },
-                        #[cfg(feature = "cuda")]
-                        match b {
-                            InitData::Data(d) => copy_cuda_buffer(d, ctx.clone()),
-                            InitData::Expr(e) => copy_cuda_buffer(
-                                &vec![e.exec(dyn_vars).unwrap() as f32],
-                                ctx.clone(),
-                            ),
-                        },
-                        false,
-                    ),
+    }
+    let compiled_kernels = compile_kernels(&kernels);
+    #[cfg(feature = "metal")]
+    let device = MTLCreateSystemDefaultDevice().unwrap();
+    #[cfg(feature = "cuda")]
+    let ctx = CudaContext::new(0).unwrap();
+    // Set up input buffers over
+    let mut inputs = inputs
+        .into_iter()
+        .filter(|(n, _)| gmem_mapping.contains_key(n))
+        .map(|(n, b)| (gmem_mapping[n], (*b, false)))
+        .collect::<FxHashMap<_, _>>();
+    // Allocate intermediate buffers
+    let mut buffers = int_buffers
+        .iter()
+        .map(|e| {
+            device
+                .newBufferWithLength_options(
+                    e.exec(dyn_vars).unwrap() * size_of::<f32>(),
+                    objc2_metal::MTLResourceOptions::StorageModeShared,
                 )
-            })
-            .collect::<FxHashMap<_, _>>();
+                .unwrap()
+        })
+        .collect_vec();
 
-        // Warm up resources (buffer allocation, kernel compiler, etc.)
-        for _ in 0..WARMUP_TRIALS {
+    // Warm up resources (buffer allocation, kernel compiler, etc.)
+    for _ in 0..WARMUP_TRIALS {
+        #[cfg(feature = "metal")]
+        run_graph(
+            &mut inputs,
+            &kernels,
+            dyn_vars,
+            &compiled_kernels,
+            &mut buffers,
+            &int_buffer_map,
+        );
+        #[cfg(feature = "cuda")]
+        run_graph(
+            &mut inputs,
+            &kernels,
+            dyn_vars,
+            &compiled_kernels,
+            &int_buffers,
+            &int_buffer_map,
+        );
+    }
+    // Test runtime
+    let mut micros = vec![];
+    let mut outputs = vec![];
+
+    for _ in 0..TRIALS {
+        let (o, m_val) = {
             #[cfg(feature = "metal")]
-            run_graph(
-                &mut inputs,
-                &kernels,
-                dyn_vars,
-                &compiled_kernels,
-                &int_buffers,
-                &int_buffer_map,
-            );
-            #[cfg(feature = "cuda")]
-            run_graph(
-                &mut inputs,
-                &kernels,
-                dyn_vars,
-                &compiled_kernels,
-                &int_buffers,
-                &int_buffer_map,
-            );
-        }
-        // Test runtime
-        let mut micros = vec![];
-        let mut outputs = vec![];
+            {
+                crate::run::run_graph(
+                    &mut inputs,
+                    &kernels,
+                    dyn_vars,
+                    &compiled_kernels,
+                    &mut buffers,
+                    &int_buffer_map,
+                )
+            }
 
-        for _ in 0..TRIALS {
-            let (o, m_val) = {
-                #[cfg(feature = "metal")]
-                {
-                    crate::run::run_graph(
-                        &mut inputs,
-                        &kernels,
-                        dyn_vars,
-                        &compiled_kernels,
-                        &int_buffers,
-                        &int_buffer_map,
-                    )
-                }
-
-                #[cfg(feature = "cuda")]
-                {
-                    run_graph(
-                        &mut inputs,
-                        &kernels,
-                        dyn_vars,
-                        &compiled_kernels,
-                        &int_buffers,
-                        &int_buffer_map,
-                    )
-                }
-            };
-            // for node in kernels.node_indices() {
-            //     let kernel = &kernels[node];
-            //     if kernel.code != "Inputs" && kernel.code != "Outputs" {
-            //         kernel_timings.insert(
-            //             kernel.code.clone(),
-            //             timings
-            //                 .iter()
-            //                 .find(|(n, _)| *n == node)
-            //                 .map(|(_, i)| *i)
-            //                 .unwrap(),
-            //         );
-            //     }
-            // }
-            // println!("timings: {timings:?}");
-            outputs = o;
-            micros.push(m_val);
-        }
-        Some((
-            micros.into_iter().sum::<u128>() / TRIALS as u128,
-            #[cfg(feature = "metal")]
-            outputs.iter().map(copy_metal_buffer_back).collect_vec(),
             #[cfg(feature = "cuda")]
-            outputs.iter().map(copy_cuda_buffer_back).collect_vec(),
-        ))
-    })
+            {
+                run_graph(
+                    &mut inputs,
+                    &kernels,
+                    dyn_vars,
+                    &compiled_kernels,
+                    &int_buffers,
+                    &int_buffer_map,
+                )
+            }
+        };
+        outputs = o;
+        micros.push(m_val);
+    }
+    Some((micros.into_iter().sum::<u128>() / TRIALS as u128, outputs))
 }
 
 #[cfg(feature = "cuda")]
-pub fn copy_cuda_buffer(v: &[f32], ctx: Arc<CudaContext>) -> CudaSlice<f32> {
+pub fn htod(v: &[f32], ctx: &Arc<CudaContext>) -> CudaSlice<f32> {
     assert!(!v.is_empty(), "Can't copy empty slice to device");
 
     // Then copy host data to the allocated device memory
@@ -1010,12 +1004,12 @@ pub fn copy_cuda_buffer(v: &[f32], ctx: Arc<CudaContext>) -> CudaSlice<f32> {
 
 /// Device -> Host (like contents() memcpy back)
 #[cfg(feature = "cuda")]
-pub fn copy_cuda_buffer_back(buf: &CudaSlice<f32>) -> Vec<f32> {
+pub fn dtoh(buf: &CudaSlice<f32>) -> Vec<f32> {
     buf.stream().memcpy_dtov(buf).unwrap()
 }
 
 #[cfg(feature = "metal")]
-pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
+pub fn htod(v: &Vec<f32>, device: &Device) -> Buffer {
     assert!(v.len() > 0);
     unsafe {
         let ptr = NonNull::new(v.as_ptr() as *mut c_void).unwrap();
@@ -1029,7 +1023,7 @@ pub fn copy_metal_buffer(v: &Vec<f32>, device: &Device) -> Buffer {
     }
 }
 #[cfg(feature = "metal")]
-pub fn copy_metal_buffer_back(v: &Buffer) -> Vec<f32> {
+pub fn dtoh(v: &Buffer) -> Vec<f32> {
     let mut data = vec![0f32; v.length() as usize / size_of::<f32>()];
     let ptr = v.contents().as_ptr() as *mut f32;
     for (i, d) in data.iter_mut().enumerate() {

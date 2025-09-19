@@ -1,4 +1,6 @@
 use itertools::Itertools;
+#[cfg(feature = "metal")]
+use objc2::{rc::Retained, runtime::ProtocolObject};
 
 #[cfg(feature = "cuda")]
 use {
@@ -299,13 +301,13 @@ pub fn run_graph(
 
 #[cfg(feature = "metal")]
 pub fn run_graph(
-    inputs: &mut FxHashMap<usize, (Buffer, bool)>,
+    inputs: &mut FxHashMap<usize, (&Buffer, bool)>,
     kernels: &StableGraph<Kernel, (usize, usize)>,
     dyn_vars: &FxHashMap<char, usize>,
     compiled_kernels: &FxHashMap<String, Function>,
-    intermediate_buffers: &Vec<Expression>,
+    intermediate_buffers: &mut Vec<Retained<ProtocolObject<dyn MTLBuffer>>>,
     intermediate_buffer_map: &FxHashMap<NodeIndex, Vec<usize>>,
-) -> (Vec<Buffer>, u128) {
+) -> (Vec<Vec<f32>>, u128) {
     objc2::rc::autoreleasepool(|_| {
         use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 
@@ -314,18 +316,6 @@ pub fn run_graph(
         let command_buffer = queue.commandBuffer().unwrap();
         let start = std::time::Instant::now();
 
-        // Allocate intermediate buffers
-        let mut buffers = intermediate_buffers
-            .iter()
-            .map(|e| {
-                device
-                    .newBufferWithLength_options(
-                        e.exec(dyn_vars).unwrap() * size_of::<f32>(),
-                        objc2_metal::MTLResourceOptions::StorageModeShared,
-                    )
-                    .unwrap()
-            })
-            .collect_vec();
         let input_node = kernels
             .node_indices()
             .find(|n| kernels[*n].code == "Inputs")
@@ -351,7 +341,7 @@ pub fn run_graph(
                     })
                     .sorted_by_key(|(_, b)| *b)
                     .rev()
-                    .map(|(a, b)| (a, buffers.remove(b)))
+                    .map(|(a, b)| (a, copy_metal_buffer_back(&intermediate_buffers[b])))
                     .sorted_by_key(|(a, _)| *a)
                     .map(|(_, a)| a)
                     .collect_vec();
@@ -367,7 +357,7 @@ pub fn run_graph(
                     .map(|n| (n.source(), n.weight().0))
                     .next()
                     .unwrap();
-                let buffer = &buffers[intermediate_buffer_map[&input][input_index]];
+                let buffer = &intermediate_buffers[intermediate_buffer_map[&input][input_index]];
                 let mut data = vec![0_f32; buffer.length() as usize / size_of::<f32>()];
                 unsafe {
                     std::ptr::copy_nonoverlapping(
@@ -399,7 +389,7 @@ pub fn run_graph(
                 if matched {
                     println!("DIFF {diff_name} MATCHED");
                 }
-                let dest_buffer = &mut buffers[intermediate_buffer_map[&node][0]];
+                let dest_buffer = &mut intermediate_buffers[intermediate_buffer_map[&node][0]];
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         data.as_ptr(),
@@ -438,7 +428,10 @@ pub fn run_graph(
                     } else {
                         unsafe {
                             encoder.setBuffer_offset_atIndex(
-                                Some(&buffers[intermediate_buffer_map[&input][input_index]]),
+                                Some(
+                                    &intermediate_buffers
+                                        [intermediate_buffer_map[&input][input_index]],
+                                ),
                                 0,
                                 buffer_count,
                             );
@@ -450,7 +443,7 @@ pub fn run_graph(
                 for o in 0..kernel.outputs.len() {
                     unsafe {
                         encoder.setBuffer_offset_atIndex(
-                            Some(&buffers[intermediate_buffer_map[&node][o]]),
+                            Some(&intermediate_buffers[intermediate_buffer_map[&node][o]]),
                             0,
                             buffer_count,
                         );

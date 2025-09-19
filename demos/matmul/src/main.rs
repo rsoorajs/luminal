@@ -199,15 +199,27 @@ fn main() {
             }
         }
 
+        let mut buffers = int_buffers
+            .iter()
+            .map(|e| {
+                device
+                    .newBufferWithLength_options(
+                        e.exec(&cx.dyn_map).unwrap() * size_of::<f32>(),
+                        objc2_metal::MTLResourceOptions::StorageModeShared,
+                    )
+                    .unwrap()
+            })
+            .collect_vec();
+        let mut inp = inputs.iter().map(|(i, (b, v))| (*i, (b, *v))).collect();
         let (outputs, _) = {
             #[cfg(feature = "metal")]
             {
                 run_graph(
-                    &mut inputs,
+                    &mut inp,
                     &kernels,
                     &FxHashMap::default(),
                     &compiled,
-                    &int_buffers,
+                    &mut buffers,
                     &int_buffer_map,
                 )
             }
@@ -224,7 +236,7 @@ fn main() {
                 )
             }
         };
-        println!("{:?}", &copy_buffer_back(&outputs[0])[..10]);
+        println!("{:?}", &outputs[0][..10]);
     });
 }
 
