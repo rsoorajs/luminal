@@ -25,7 +25,7 @@ use crate::{
     utils::validate_graph,
 };
 
-pub const GRID_DIMS: usize = 2;
+pub const GRID_DIMS: usize = 3;
 pub const THREADBLOCK_DIMS: usize = 2;
 pub const MAX_THREADBLOCK_SIZE: usize = 1024; // this is max on mac
 pub const MAX_GRID_X: usize = 2147483647;

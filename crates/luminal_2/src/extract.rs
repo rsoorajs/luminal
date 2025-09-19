@@ -32,7 +32,7 @@ use {
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
-const MAX_SEARCHED_GRAPHS: usize = 100_000;
+const MAX_SEARCHED_GRAPHS: usize = 10_000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
@@ -880,7 +880,7 @@ fn cost<'a>(
         // Get buffer info
         let (int_buffers, int_buffer_map) = assign_buffers(&kernels);
         for i in &int_buffers {
-            if i.to_usize().unwrap_or_default() > 17_179_869_184 {
+            if i.to_usize().unwrap_or_default() * size_of::<f32>() > 17_179_869_184 {
                 // Can't allocate a buffer larger than 16GB
                 return None;
             }

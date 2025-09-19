@@ -318,11 +318,10 @@ pub fn run_graph(
         let mut buffers = intermediate_buffers
             .iter()
             .map(|e| {
-                use objc2_metal::MTLResourceOptions;
                 device
                     .newBufferWithLength_options(
                         e.exec(dyn_vars).unwrap() * size_of::<f32>(),
-                        MTLResourceOptions::StorageModeShared,
+                        objc2_metal::MTLResourceOptions::StorageModeShared,
                     )
                     .unwrap()
             })
