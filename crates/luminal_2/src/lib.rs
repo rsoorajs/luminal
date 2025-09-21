@@ -30,6 +30,10 @@ pub type Device = Retained<ProtocolObject<dyn MTLDevice>>;
 pub type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 #[cfg(feature = "metal")]
 pub type Function = Retained<ProtocolObject<dyn MTLFunction>>;
+#[cfg(feature = "cuda")]
+pub type Device = std::sync::Arc<luminal_cuda::CudaContext>;
+#[cfg(feature = "cuda")]
+pub type Buffer = cudarc::driver::CudaSlice<f32>;
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum GPUArch {

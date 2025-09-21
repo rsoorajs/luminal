@@ -51,7 +51,7 @@ pub fn codegen(
             graph.remove_node(node);
         }
     }
-    let (kernels, output_kernels) = split_kernels(graph.clone());
+    let (kernels, output_kernels) = split_kernels(&graph);
     // Create kernel meta graph to toposort
     let mut kernel_meta_graph = StableGraph::new();
     for _ in 0..kernels.len() {
@@ -163,7 +163,7 @@ pub fn codegen(
             &kernel_graph,
             kernel_graph.node_indices().collect(),
             &mut node_to_var,
-            &mut (inputs.len() + outputs.len()),
+            &mut (inputs.len() + outputs.len() - 1),
             &mut loop_levels,
             &mut HashMap::new(),
             0,
@@ -194,22 +194,37 @@ pub fn codegen(
         let kernel_lines = kernel.into_iter().map(|s| format!("\t{s}")).join("\n");
         let kernel = match &arch {
             GPUArch::CUDA => {
-                let inputs = inputs
+                let mut input_string = inputs
                     .into_iter()
-                    .map(|(_, a)| a)
-                    .chain(outputs.iter().map(|(_, i)| *i))
-                    .map(|a| format!("float* {}", var_to_char(node_to_var[&a].0)))
+                    .map(|(buf, a)| {
+                        format!(
+                            "float* {},{}",
+                            var_to_char(node_to_var[&a].0),
+                            if let GMEMBuffer::Input { node } = buf {
+                                format!(" // GMEM({})", gmem_names[&node])
+                            } else {
+                                " // From previous kernel".to_string()
+                            }
+                        )
+                    })
+                    .chain(outputs.iter().map(|(_, n)| {
+                        format!("float* {}, // Output", var_to_char(node_to_var[&n].0),)
+                    }))
                     .chain(
                         dyn_vars
                             .iter()
-                            .sorted_by_key(|(k, _)| **k)
-                            .map(|(c, _)| format!("const size_t const_{c}")),
+                            .sorted()
+                            .map(|(c, _)| format!("const size_t const_{c}",)),
                     )
-                    .join(", ");
+                    .collect_vec();
+                *input_string.last_mut().unwrap() = input_string.last().unwrap().replace(",", " ");
                 format!(
-                    "extern \"C\" __global__ void kernel_name({inputs}) {{
+                    "extern \"C\" __global__ void kernel_name(
+\t{}
+) {{
 {kernel_lines}
-}}"
+}}",
+                    input_string.join("\n\t")
                 )
             }
             GPUArch::Metal { .. } => {
@@ -469,6 +484,9 @@ fn make_kernel(
                             .next()
                             .unwrap();
                         // Use a single loop with correct striding from the input
+                        if loads.to_usize().map(|i| i <= 16).unwrap_or_default() {
+                            kernel_lines.push(format!("{spacing}#pragma unroll")); // Loop unroll short loops
+                        }
                         kernel_lines.push(format!(
                             "{spacing}for (int load = 0; load < {}; ++load) {{",
                             loads.to_kernel()
@@ -546,6 +564,9 @@ fn make_kernel(
                     // for
                     *prev_max_var += 1;
                     let loop_var = var_to_char(*prev_max_var);
+                    if range.to_usize().map(|i| i <= 16).unwrap_or_default() {
+                        kernel_lines.push(format!("{spacing}#pragma unroll")); // Loop unroll short loops
+                    }
                     kernel_lines.push(format!("{spacing}for (int loop_{loop_var} = 0; loop_{loop_var} < {}; ++loop_{loop_var}) {{", range.to_kernel()));
                 };
                 let loop_var = var_to_char(*prev_max_var);
@@ -699,8 +720,13 @@ fn make_kernel(
 
                 // Save accumulators
                 for (output_node, _) in loop_outputs.into_iter().filter(|(_, st)| st.is_acc()) {
-                    let (_, _, size, out_loops) =
-                        accs.iter().find(|(_, o, _, _)| *o == output_node).unwrap();
+                    let Some((_, _, size, out_loops)) =
+                        accs.iter().find(|(_, o, _, _)| *o == output_node)
+                    else {
+                        return None; // TODO get rid of this
+                        // display_graph(&kernel_graph);
+                        // panic!("Can't find output accumulator");
+                    };
                     let outer_out = kernel_graph
                         .neighbors_directed(output_node, Direction::Outgoing)
                         .next()
@@ -736,6 +762,9 @@ fn make_kernel(
                                 (Expression::from('z') / current_elem_size) % range,
                             );
                             current_elem_size *= range;
+                        }
+                        if size.to_usize().map(|i| i <= 16).unwrap_or_default() {
+                            kernel_lines.push(format!("{spacing}#pragma unroll")); // Loop unroll short loops
                         }
                         kernel_lines.push(format!(
                             "{spacing}for (int save = 0; save < {}; ++save) {{",
@@ -892,7 +921,7 @@ fn make_kernel(
             } => {
                 if cfg!(feature = "cuda") {
                     // CUDA build: skip / fallback
-                    return None; // or generate a non-TC matmul
+                    return None;
                 }
 
                 let mut srcs = kernel_graph
@@ -985,17 +1014,9 @@ fn toposort_subset<N, E>(
     order
 }
 
-/// add kernel dimensions so that all loop-to-loop dependencies are between seperate kernels or on the threadblock / thread levels
-pub fn split_kernels(
-    graph: StableGraph<GraphTerm, (), Directed>,
-) -> (
-    Vec<(
-        StableGraph<(GraphTerm, usize), (), Directed>, // graph of (term, loop leve)
-        Vec<(GMEMBuffer, NodeIndex)>,                  // (src buffer, current graph node)
-        Vec<(Expression, NodeIndex)>,                  // output node
-    )>,
-    Vec<(usize, usize)>, // Output kernels
-) {
+pub fn split_kernels_marked_graph(
+    graph: &StableGraph<GraphTerm, (), Directed>,
+) -> StableGraph<(GraphTerm, Vec<Expression>, FxHashSet<usize>), ()> {
     let mut marked_graph = StableGraph::new();
     // Add nodes
     let mut to_remove = vec![];
@@ -1071,6 +1092,7 @@ pub fn split_kernels(
         dfs.extend(marked_graph.neighbors_undirected(n));
     }
     // Assign kernel numbers
+    let mut global_max_kernel = 1;
     for node in toposort(&marked_graph, None).unwrap().into_iter().rev() {
         let (term, curr_level, curr_kernel) = marked_graph[node].clone();
         for source in marked_graph
@@ -1090,18 +1112,13 @@ pub fn split_kernels(
                 let min_src = *src_kernel.iter().min().unwrap_or(&0);
                 let max_curr = *curr_kernel.iter().max().unwrap_or(&0);
                 if min_src <= max_curr {
-                    let max_kernel = curr_kernel
-                        .iter()
-                        .map(|i| *i + 1)
-                        .chain(src_kernel.iter().copied())
-                        .max()
-                        .unwrap_or(0);
                     src_kernel.clear();
-                    src_kernel.insert(max_kernel + 1);
+                    src_kernel.insert(global_max_kernel);
+                    global_max_kernel += 1;
                 }
             } else {
                 src_kernel.extend(curr_kernel.iter().copied());
-            }
+            };
         }
     }
 
@@ -1160,6 +1177,21 @@ pub fn split_kernels(
             marked_graph.add_edge(src, dest, ());
         }
     }
+
+    marked_graph
+}
+
+pub fn split_kernels(
+    graph: &StableGraph<GraphTerm, (), Directed>,
+) -> (
+    Vec<(
+        StableGraph<(GraphTerm, usize), (), Directed>, // graph of (term, loop leve)
+        Vec<(GMEMBuffer, NodeIndex)>,                  // (src buffer, current graph node)
+        Vec<(Expression, NodeIndex)>,                  // output node
+    )>,
+    Vec<(usize, usize)>, // Output kernels
+) {
+    let marked_graph = split_kernels_marked_graph(graph);
 
     // Place nodes in kernel graphs
     let n_kernels = 1 + *marked_graph

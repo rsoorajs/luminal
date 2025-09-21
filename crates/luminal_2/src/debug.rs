@@ -1101,6 +1101,15 @@ pub fn display_graph2(
     graph: &StableGraph<impl TermToString, impl EdgeToString, Directed, u32>,
     mark_nodes: &[(NodeIndex, &str)],
 ) {
+    if let Err(e) = webbrowser::open(&display_graph_text(graph, mark_nodes)) {
+        panic!("Error displaying graph: {:?}", e);
+    }
+}
+
+pub fn display_graph_text(
+    graph: &StableGraph<impl TermToString, impl EdgeToString, Directed, u32>,
+    mark_nodes: &[(NodeIndex, &str)],
+) -> String {
     let mut new_graph = StableGraph::new();
     let mut map = std::collections::HashMap::new();
     for node in graph.node_indices() {
@@ -1131,11 +1140,8 @@ pub fn display_graph2(
         );
     }
 
-    let url = format!(
+    format!(
         "https://dreampuf.github.io/GraphvizOnline/#{}",
         urlencoding::encode(&graph_string)
-    );
-    if let Err(e) = webbrowser::open(&url) {
-        panic!("Error displaying graph: {:?}", e);
-    }
+    )
 }

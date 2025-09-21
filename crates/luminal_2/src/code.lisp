@@ -31,7 +31,7 @@
 (rewrite (MAdd (MNum a) (MNum b)) (MNum (+ a b)) :ruleset expr)
 (rewrite (MSub (MNum a) (MNum b)) (MNum (- a b)) :ruleset expr)
 (rewrite (MMul (MNum ?a) (MNum ?b)) (MNum (* ?a ?b)) :ruleset expr) ; can this overflow?
-(rewrite (MDiv (MNum a) (MNum b)) (MNum (/ a b)) :when ((!= 0 b) (= 0 (% a b))) :ruleset expr)
+;(rewrite (MDiv (MNum a) (MNum b)) (MNum (/ a b)) :when ((!= 0 b) (= 0 (% a b))) :ruleset expr)
 (rewrite (MMax (MNum a) (MNum b)) (MNum (max a b)) :ruleset expr)
 (rewrite (MMin (MNum a) (MNum b)) (MNum (min a b)) :ruleset expr)
 (rewrite (MAnd (MNum a) (MNum b)) (MNum (& a b)) :ruleset expr)
@@ -78,7 +78,7 @@
 	(Mul)
 	(Max)
 )
-(sort EVec (Vec Expression))
+(sort ESet (Set Expression))
 (datatype IR
    	(GMEM String)
    	(LoopIn IR Expression Expression)
@@ -87,10 +87,10 @@
    	(Binary BinOp IR IR)
 
    	; propogation patterns
-   	(SwapLoops IR String String) ; Swap two loops, identified by their strings
-   	(TileLoop IR String) ; Tile a loop, identified by it's string
+   	(SwapLoops IR i64) ; Swap two loops, identified by the inner loop level
+   	(TileLoop IR i64) ; Tile a loop, identified by it's loop level
     (MergeLoops IR i64) ; Merge loops, identified by the inner loop level
-    (Fused IR EVec) ; Says that we have previously fused loopout -> loopins here
+    (Fused IR ESet) ; Says that we have previously fused loopout -> loopins here
 
    	; tensor core stuff
    	(TCMatmul IR IR Expression Expression Expression Expression Expression Expression) ; input A, input B, A k stride, B k stride, A inner stride, B inner stride, C inner stride, number of K tile loops
@@ -244,16 +244,85 @@
 (ruleset fusion)
 (rewrite
 	(LoopIn (LoopOut ?a ?range ?st) ?range ?st)
-	(Fused ?a (vec-of ?range))
+	(Fused ?a (set-of ?range))
+	:when ((set-not-contains (MAccumSet) ?st))
 	:ruleset fusion
 )
 (rewrite
 	(LoopIn (Fused (LoopOut ?a ?range ?st) ?prev_fused) ?range ?st)
-	(Fused ?a (vec-push ?prev_fused ?range))
+	(Fused ?a (set-insert ?prev_fused ?range))
 	:ruleset fusion
 )
 
 ; Tiling
+(rule
+	(
+		(= ?e (LoopOut ?body (MNum ?range) ?stride))
+		(= ?ll (loop_level ?e))
+		(> ?range 8) ; range must be larger than 8
+		(= (% ?range 8) 0) ; range must be divisible by 8
+	)
+	(
+		(union ?e
+			(LoopOut
+				(LoopOut
+					(TileLoop ?body ?ll)
+					(MNum 8)
+					?stride
+				)
+				(MNum (/ ?range 8))
+				(MReplace ?stride (MVar "z") (MMul (MVar "z") (MNum 8)))
+			)
+		)
+	)
+	:ruleset ir
+)
+(rule
+	(
+		(= ?loop (LoopIn ?body (MNum ?range) ?stride))
+		(= ?e (TileLoop ?loop ?ll))
+		(= ?ll (loop_level ?loop))
+	)
+	(
+		(union ?e
+			(LoopIn
+				(LoopIn ?body
+					(MNum (/ ?range 8))
+					(MReplace ?stride (MVar "z") (MMul (MVar "z") (MNum 8)))
+				)
+				(MNum 8)
+				?stride
+			)
+		)
+	)
+	:ruleset ir-prop
+)
+(rule
+	(
+		(= ?x (LoopIn ?body ?range ?stride))
+		(= ?e (TileLoop ?x ?ll))
+		(> (loop_level ?x) ?ll)
+	)
+	(
+		(union ?e (LoopIn (TileLoop ?body ?ll) ?range ?stride))
+	)
+	:ruleset ir-prop
+)
+(rewrite
+	(TileLoop (LoopOut ?body ?range ?stride) ?ll)
+	(LoopOut (TileLoop ?body ?ll) ?range ?stride)
+	:ruleset ir-prop
+)
+(rewrite
+	(TileLoop (Unary ?un ?body) ?ll)
+	(Unary ?un (TileLoop ?body ?ll))
+	:ruleset ir-prop
+)
+(rewrite
+	(TileLoop (Binary ?bin ?bodyA ?bodyB) ?ll)
+	(Binary ?bin (TileLoop ?bodyA ?ll) (TileLoop ?bodyB ?ll))
+	:ruleset ir-prop
+)
 
 ; Merging
 (rule
@@ -302,7 +371,6 @@
 	)
 	:ruleset ir-prop
 )
-; propogation
 (rule
 	(
 		(= ?x (LoopIn ?body ?range ?stride))
@@ -329,10 +397,6 @@
 	(Binary ?bin (MergeLoops ?bodyA ?ll) (MergeLoops ?bodyB ?ll))
 	:ruleset ir-prop
 )
-
-; Swapping
-
-; Fission
 
 ; TensorCore
 (ruleset tc)
@@ -474,15 +538,6 @@
 	:ruleset tc
 )
 
-(ruleset end)
-(rewrite
-	(MMul (MNum a) (MDiv b (MNum c)))
-	(MMul b (MNum (/ a c)))
-	:when ((= (% a c) 0))
-	:ruleset end
-)
-
-
 {code}
 
 (run-schedule
@@ -498,7 +553,6 @@
 	(saturate ir-prop)
 	(saturate tc)
 	(saturate ir-prop)
-	(saturate end)
 )
 
 ;(print-size)

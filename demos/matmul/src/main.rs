@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
 
 #[cfg(feature = "cuda")]
-use cudarc::{driver::*, nvrtc::CompileOptions};
+use cudarc::driver::*;
 use itertools::Itertools;
 use luminal::prelude::{
     petgraph::{visit::EdgeRef, Direction},
@@ -10,7 +10,7 @@ use luminal::prelude::{
 use luminal_2::{
     codegen::{codegen, stitch_meta_graph_together},
     extract::{make_test_inputs, search},
-    run::{assign_buffers, compile_kernels, run_graph},
+    run::{assign_buffers, compile_kernels, new_buffer, run_graph},
     translate::{translate_graph, InitData},
     GPUArch, GraphTerm,
 };
@@ -41,7 +41,7 @@ fn main() {
         let arch = GPUArch::CUDA;
 
         #[allow(non_snake_case)]
-        let (hidden, intermediate) = (512, 1792); // llama numbers divided by 8
+        let (hidden, intermediate) = (4096, 14336); // llama numbers divided by 8
         let mut cx = Graph::new();
         let a = cx.named_tensor("Input", (8, hidden));
         let gate = cx.named_tensor("Gate", (hidden, intermediate));
@@ -199,32 +199,22 @@ fn main() {
             }
         }
 
+        let mut buffers = int_buffers
+            .iter()
+            .map(|e| new_buffer(e.exec(&cx.dyn_map).unwrap() * size_of::<f32>()))
+            .collect_vec();
+        let mut inp = inputs.iter().map(|(i, (b, v))| (*i, (b, *v))).collect();
         let (outputs, _) = {
-            #[cfg(feature = "metal")]
-            {
-                run_graph(
-                    &mut inputs,
-                    &kernels,
-                    &FxHashMap::default(),
-                    &compiled,
-                    &int_buffers,
-                    &int_buffer_map,
-                )
-            }
-
-            #[cfg(feature = "cuda")]
-            {
-                run_graph(
-                    &mut inputs,
-                    &kernels,
-                    &FxHashMap::default(),
-                    &compiled,
-                    &int_buffers,
-                    &int_buffer_map,
-                )
-            }
+            run_graph(
+                &mut inp,
+                &kernels,
+                &FxHashMap::default(),
+                &compiled,
+                &mut buffers,
+                &int_buffer_map,
+            )
         };
-        println!("{:?}", &copy_buffer_back(&outputs[0])[..10]);
+        println!("{:?}", &outputs[0][..10]);
     });
 }
 
