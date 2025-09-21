@@ -206,7 +206,6 @@ fn main() {
         let mut inp = inputs.iter().map(|(i, (b, v))| (*i, (b, *v))).collect();
         let (outputs, _) = {
             run_graph(
-                &graph,
                 &mut inp,
                 &kernels,
                 &FxHashMap::default(),

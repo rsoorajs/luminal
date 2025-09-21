@@ -1,6 +1,4 @@
 use itertools::Itertools;
-#[cfg(feature = "metal")]
-use objc2::{rc::Retained, runtime::ProtocolObject};
 
 #[cfg(feature = "cuda")]
 use cudarc::{driver::*, nvrtc::CompileOptions};
@@ -21,7 +19,7 @@ use rustc_hash::FxHashMap;
 use std::{fs::File, io::Read};
 #[cfg(feature = "metal")]
 use {
-    crate::{Buffer, Device, Function},
+    crate::{Device, Function},
     objc2_metal::{MTLBuffer, MTLDevice},
     std::{ffi::c_void, ptr::NonNull},
 };
@@ -152,7 +150,6 @@ pub fn compile_kernels(
 
 #[cfg(feature = "cuda")]
 pub fn run_graph(
-    graph: &StableGraph<GraphTerm, ()>,
     inputs: &mut FxHashMap<usize, (&CudaSlice<f32>, bool)>,
     kernels: &StableGraph<Kernel, (usize, usize)>,
     dyn_vars: &FxHashMap<char, usize>,
@@ -344,7 +341,7 @@ pub fn run_graph(
                     })
                     .sorted_by_key(|(_, b)| *b)
                     .rev()
-                    .map(|(a, b)| (a, copy_metal_buffer_back(&intermediate_buffers[b])))
+                    .map(|(a, b)| (a, dtoh(&intermediate_buffers[b])))
                     .sorted_by_key(|(a, _)| *a)
                     .map(|(_, a)| a)
                     .collect_vec();
@@ -536,7 +533,7 @@ pub fn htod(v: &Vec<f32>, device: &Device) -> Buffer {
             .newBufferWithBytes_length_options(
                 ptr,
                 (v.len() * 4) as _,
-                MTLResourceOptions::StorageModeShared,
+                objc2_metal::MTLResourceOptions::StorageModeShared,
             )
             .unwrap()
     }
@@ -553,7 +550,7 @@ pub fn dtoh(v: &Buffer) -> Vec<f32> {
 
 #[cfg(feature = "metal")]
 pub fn new_buffer(size: usize) -> Buffer {
-    MTLCreateSystemDefaultDevice()
+    objc2_metal::MTLCreateSystemDefaultDevice()
         .unwrap()
         .newBufferWithLength_options(size, objc2_metal::MTLResourceOptions::StorageModeShared)
         .unwrap()

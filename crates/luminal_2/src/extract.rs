@@ -18,14 +18,10 @@ use luminal::prelude::NodeIndex;
 use luminal::prelude::petgraph::prelude::StableGraph;
 use luminal::prelude::petgraph::{Directed, Direction};
 use luminal::shape::{Expression, Term};
+#[cfg(feature = "metal")]
+use objc2_metal::MTLCreateSystemDefaultDevice;
 use rand::{Rng, rng};
 use rustc_hash::{FxHashMap, FxHashSet};
-#[cfg(feature = "metal")]
-use {
-    crate::{Buffer, Device},
-    objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions},
-    std::{ffi::c_void, ptr::NonNull},
-};
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
@@ -384,7 +380,6 @@ pub fn search(
         })
         .collect_vec();
     let (_, ref_outputs) = cost(
-        &ref_graph,
         &ref_kernels,
         &map_inputs_into_kernel_graph(&inputs, &ref_graph),
         &ref_gmem_map,
@@ -489,7 +484,6 @@ pub fn search(
             seen.insert(k.clone());
         }
         if let Some((us, outs)) = cost(
-            &graph,
             &kernels,
             &map_inputs_into_kernel_graph(&inputs, &graph),
             &gmem_mapping,
@@ -878,7 +872,6 @@ fn map_inputs_into_kernel_graph<'a>(
 }
 
 fn cost<'a>(
-    graph: &StableGraph<GraphTerm, ()>,
     kernels: &StableGraph<Kernel, (usize, usize), Directed>,
     inputs: &[(NodeIndex, &Buffer)],
     gmem_mapping: &HashMap<NodeIndex, usize>,
@@ -908,7 +901,6 @@ fn cost<'a>(
     // Warm up resources (buffer allocation, kernel compiler, etc.)
     for _ in 0..WARMUP_TRIALS {
         run_graph(
-            graph,
             &mut inputs,
             &kernels,
             dyn_vars,
@@ -924,7 +916,6 @@ fn cost<'a>(
     for _ in 0..TRIALS {
         let (o, m_val) = {
             crate::run::run_graph(
-                graph,
                 &mut inputs,
                 &kernels,
                 dyn_vars,
