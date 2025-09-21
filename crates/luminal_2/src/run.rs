@@ -3,10 +3,7 @@ use itertools::Itertools;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 
 #[cfg(feature = "cuda")]
-use {
-    cudarc::{driver::*, nvrtc::CompileOptions},
-    std::{fs::OpenOptions, io::Write},
-};
+use cudarc::{driver::*, nvrtc::CompileOptions};
 
 use luminal::{
     prelude::{
@@ -30,6 +27,8 @@ use {
 };
 
 use crate::Buffer;
+#[cfg(feature = "cuda")]
+use crate::GraphTerm;
 use crate::Kernel;
 
 pub fn assign_buffers(
@@ -153,6 +152,7 @@ pub fn compile_kernels(
 
 #[cfg(feature = "cuda")]
 pub fn run_graph(
+    graph: &StableGraph<GraphTerm, ()>,
     inputs: &mut FxHashMap<usize, (&CudaSlice<f32>, bool)>,
     kernels: &StableGraph<Kernel, (usize, usize)>,
     dyn_vars: &FxHashMap<char, usize>,
@@ -168,7 +168,7 @@ pub fn run_graph(
         .node_indices()
         .find(|n| kernels[*n].code == "Inputs")
         .unwrap();
-    for node in toposort(kernels, None).unwrap() {
+    for (i, node) in toposort(kernels, None).unwrap().into_iter().enumerate() {
         let kernel = &kernels[node];
         if kernel.code == "Inputs" {
             // Inputs should already be in the buffer map
@@ -185,10 +185,9 @@ pub fn run_graph(
                 })
                 .sorted_by_key(|(_, b)| *b)
                 .rev()
-                .map(|(a, b)| (a, intermediate_buffers.remove(b)))
+                .map(|(a, b)| (a, dtoh(&intermediate_buffers[b])))
                 .sorted_by_key(|(a, _)| *a)
                 .map(|(_, a)| a)
-                .map(|a| dtoh(&a))
                 .collect_vec();
             return (outputs, start.elapsed().as_micros());
         } else if kernel.code.starts_with("Diff") {
@@ -227,6 +226,7 @@ pub fn run_graph(
             let dest_buffer = &mut intermediate_buffers[intermediate_buffer_map[&node][0]];
             stream.memcpy_htod(&data, dest_buffer).unwrap();
         } else {
+            // println!("{i}: {}", kernel.code);
             let mut builder = stream.launch_builder(&compiled_kernels[&kernel.code]);
             // set inputs
             for (input, input_index) in kernels
@@ -235,13 +235,21 @@ pub fn run_graph(
                 .map(|n| (n.source(), n.weight().0))
             {
                 if input == input_node {
+                    // println!("INPUT: {}", inputs[&input_index].0.len());
                     builder.arg(inputs[&input_index].0);
                 } else {
+                    // println!(
+                    //     "INPUT: {}",
+                    //     intermediate_buffers[intermediate_buffer_map[&input][input_index]].len()
+                    // );
                     builder
                         .arg(&intermediate_buffers[intermediate_buffer_map[&input][input_index]]);
                 }
             }
             // set output
+            // println!("Grid: {:?}", kernel.grid);
+            // println!("Threadblock: {:?}", kernel.threadblock);
+            // println!("OUTPUTS: {:?}", kernel.outputs);
             let mut output_views = (0..kernel.outputs.len())
                 .map(|o| intermediate_buffers[intermediate_buffer_map[&node][o]].as_view_mut())
                 .collect_vec();
@@ -279,6 +287,16 @@ pub fn run_graph(
                 })
             }
             .unwrap();
+            // if let Err(e) = stream.synchronize() {
+            //     use crate::codegen::split_kernels_marked_graph;
+
+            //     std::fs::write(
+            //         "graph.txt",
+            //         crate::debug::display_graph_text(&split_kernels_marked_graph(graph), &[]),
+            //     )
+            //     .unwrap();
+            //     panic!("{:?}", e);
+            // }
         }
     }
     panic!("No output kernel detected in graph!");

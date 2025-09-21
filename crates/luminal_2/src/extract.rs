@@ -29,7 +29,7 @@ use {
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
-const MAX_SEARCHED_GRAPHS: usize = 10_000;
+const MAX_SEARCHED_GRAPHS: usize = 1_000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
@@ -197,7 +197,7 @@ fn extract_trajectories<'a>(
                 enode_trajectories = enode_trajectories
                     .into_iter()
                     .cartesian_product(&trajectory_cache[child])
-                    .take(budget)
+                    .take(enode_budget)
                     .map(|(p, n)| [p, n.clone()].concat())
                     .collect();
             }
@@ -384,6 +384,7 @@ pub fn search(
         })
         .collect_vec();
     let (_, ref_outputs) = cost(
+        &ref_graph,
         &ref_kernels,
         &map_inputs_into_kernel_graph(&inputs, &ref_graph),
         &ref_gmem_map,
@@ -487,10 +488,8 @@ pub fn search(
         } else {
             seen.insert(k.clone());
         }
-        if option_env!("DEBUG").is_some() {
-            println!("{k}");
-        }
         if let Some((us, outs)) = cost(
+            &graph,
             &kernels,
             &map_inputs_into_kernel_graph(&inputs, &graph),
             &gmem_mapping,
@@ -504,6 +503,7 @@ pub fn search(
                     "Graph {valid_graphs} Best {best_time}µs Current {us}µs"
                 ));
             } else if option_env!("DEBUG").is_some() {
+                println!("{k}");
                 println!("Graph {valid_graphs} Best {best_time}µs Current {us}µs");
                 for (a, b) in ref_outputs.iter().zip(&outs) {
                     for (x, y) in a.iter().zip(b) {
@@ -878,6 +878,7 @@ fn map_inputs_into_kernel_graph<'a>(
 }
 
 fn cost<'a>(
+    graph: &StableGraph<GraphTerm, ()>,
     kernels: &StableGraph<Kernel, (usize, usize), Directed>,
     inputs: &[(NodeIndex, &Buffer)],
     gmem_mapping: &HashMap<NodeIndex, usize>,
@@ -907,6 +908,7 @@ fn cost<'a>(
     // Warm up resources (buffer allocation, kernel compiler, etc.)
     for _ in 0..WARMUP_TRIALS {
         run_graph(
+            graph,
             &mut inputs,
             &kernels,
             dyn_vars,
@@ -922,6 +924,7 @@ fn cost<'a>(
     for _ in 0..TRIALS {
         let (o, m_val) = {
             crate::run::run_graph(
+                graph,
                 &mut inputs,
                 &kernels,
                 dyn_vars,

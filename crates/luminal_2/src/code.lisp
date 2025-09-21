@@ -31,7 +31,7 @@
 (rewrite (MAdd (MNum a) (MNum b)) (MNum (+ a b)) :ruleset expr)
 (rewrite (MSub (MNum a) (MNum b)) (MNum (- a b)) :ruleset expr)
 (rewrite (MMul (MNum ?a) (MNum ?b)) (MNum (* ?a ?b)) :ruleset expr) ; can this overflow?
-(rewrite (MDiv (MNum a) (MNum b)) (MNum (/ a b)) :when ((!= 0 b) (= 0 (% a b))) :ruleset expr)
+;(rewrite (MDiv (MNum a) (MNum b)) (MNum (/ a b)) :when ((!= 0 b) (= 0 (% a b))) :ruleset expr)
 (rewrite (MMax (MNum a) (MNum b)) (MNum (max a b)) :ruleset expr)
 (rewrite (MMin (MNum a) (MNum b)) (MNum (min a b)) :ruleset expr)
 (rewrite (MAnd (MNum a) (MNum b)) (MNum (& a b)) :ruleset expr)
@@ -538,15 +538,6 @@
 	:ruleset tc
 )
 
-(ruleset end)
-(rewrite
-	(MMul (MNum a) (MDiv b (MNum c)))
-	(MMul b (MNum (/ a c)))
-	:when ((= (% a c) 0))
-	:ruleset end
-)
-
-
 {code}
 
 (run-schedule
@@ -562,7 +553,6 @@
 	(saturate ir-prop)
 	(saturate tc)
 	(saturate ir-prop)
-	(saturate end)
 )
 
 ;(print-size)

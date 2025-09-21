@@ -134,7 +134,7 @@ pub fn validate_graph(graph: &StableGraph<(GraphTerm, usize), (), Directed>) {
                 ) {
                     if *new_level != *curr_level {
                         display_graph(graph);
-                        panic!("incorrect levels");
+                        panic!("incorrect levels {curr_term:?} -> {new_term:?}");
                     }
                 }
             }

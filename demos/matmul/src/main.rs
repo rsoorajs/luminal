@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
 
 #[cfg(feature = "cuda")]
-use cudarc::{driver::*, nvrtc::CompileOptions};
+use cudarc::driver::*;
 use itertools::Itertools;
 use luminal::prelude::{
     petgraph::{visit::EdgeRef, Direction},
@@ -206,6 +206,7 @@ fn main() {
         let mut inp = inputs.iter().map(|(i, (b, v))| (*i, (b, *v))).collect();
         let (outputs, _) = {
             run_graph(
+                &graph,
                 &mut inp,
                 &kernels,
                 &FxHashMap::default(),
