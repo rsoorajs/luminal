@@ -98,7 +98,11 @@ struct AdamGradientState {
 
 /// Implements the [Adam](https://arxiv.org/abs/1412.6980) algorithm.
 impl AdamOptimizer {
-    pub fn new(graph: &mut Graph, old_weights: impl ToIds, grads: &[(NodeIndex, ShapeTracker)]) -> Self {
+    pub fn new(
+        graph: &mut Graph,
+        old_weights: impl ToIds,
+        grads: &[(NodeIndex, ShapeTracker)],
+    ) -> Self {
         let mut states: Vec<AdamGradientState> = Vec::new(); // Placeholder for old weights
 
         let lr = graph.named_tensor("Learning Rate", 1).set(1e-3).keep();
@@ -106,12 +110,14 @@ impl AdamOptimizer {
         let beta2 = graph.named_tensor("Beta2", 1).set(0.999).keep();
         let epsilon = graph.named_tensor("Epsilon", 1).set(1e-8).keep();
         let one = graph.constant(1.0);
-        
+
         let time_input = graph.tensor(1).set(0.0);
         let time_output = time_input + graph.constant(1.0).expand(time_input.shape);
         time_output.keep();
 
-        for ((grad_id, grad_shape), old_weight_id) in grads.iter().copied().zip(old_weights.to_ids()) {
+        for ((grad_id, grad_shape), old_weight_id) in
+            grads.iter().copied().zip(old_weights.to_ids())
+        {
             let shape = grad_shape;
             let weight = GraphTensor::from_id(old_weight_id, grad_shape, graph);
             let gradient = GraphTensor::from_id(grad_id, grad_shape, graph);
@@ -121,16 +127,19 @@ impl AdamOptimizer {
             // Define the momentum update: m = beta1 * m_prev + (1 - beta1) * gradient
             let one_minus_beta1 = one.expand(shape) - beta1.expand(shape);
             let momentum_output = beta1.expand(shape) * momentum_input + one_minus_beta1 * gradient;
-            momentum_output.keep(); 
+            momentum_output.keep();
 
             // Define the variance update: v = beta2 * v_prev + (1 - beta2) * gradient^2
             let one_minus_beta2 = one.expand(shape) - beta2.expand(shape);
             let gradient_squared = gradient * gradient;
-            let variance_output = beta2.expand(shape) * variance_input + one_minus_beta2 * gradient_squared;
-            variance_output.keep(); 
+            let variance_output =
+                beta2.expand(shape) * variance_input + one_minus_beta2 * gradient_squared;
+            variance_output.keep();
 
-            let bias_correction1 = one.expand(shape) - beta1.expand(shape).pow(time_output.expand(shape));
-            let bias_correction2 = one.expand(shape) - beta2.expand(shape).pow(time_output.expand(shape));
+            let bias_correction1 =
+                one.expand(shape) - beta1.expand(shape).pow(time_output.expand(shape));
+            let bias_correction2 =
+                one.expand(shape) - beta2.expand(shape).pow(time_output.expand(shape));
 
             let m_hat = momentum_output / bias_correction1;
             let v_hat = variance_output / bias_correction2;
@@ -159,7 +168,7 @@ impl AdamOptimizer {
             beta1: beta1.into(),
             beta2: beta2.into(),
             epsilon: epsilon.into(),
-            states
+            states,
         }
     }
 
@@ -167,7 +176,7 @@ impl AdamOptimizer {
         let time_input = self.time_input.to_tensor(graph);
         let time_output = self.time_output.to_tensor(graph);
 
-        transfer_data_same_graph(time_output,   time_input, graph);
+        transfer_data_same_graph(time_output, time_input, graph);
 
         for state in &mut self.states {
             let momentum_input = state.momentum_input.to_tensor(graph);
@@ -186,7 +195,10 @@ impl AdamOptimizer {
     }
 
     pub fn new_weight_datas(&self, graph: &mut Graph) -> Vec<Vec<f32>> {
-        self.states.iter().map(|s| s.weight.to_tensor(graph).data()).collect()
+        self.states
+            .iter()
+            .map(|s| s.weight.to_tensor(graph).data())
+            .collect()
     }
 
     pub fn time(&self, graph: &mut Graph) -> Vec<f32> {
@@ -228,7 +240,7 @@ mod tests {
         let weights = graph.tensor(1).set(1.0).keep();
         let params = vec![weights.id];
         let gradients = graph.tensor(1).set(0.1).keep();
-        let grads = vec![(gradients.id, gradients.shape)]; 
+        let grads = vec![(gradients.id, gradients.shape)];
 
         // Create Adam optimizer
         let adam = AdamOptimizer::new(&mut graph, params, &grads);
@@ -247,21 +259,23 @@ mod tests {
         // v̂₁ = 0.00001 / (1 - 0.999¹) = 0.00001 / 0.001 = 0.01
         // update = 1e-3 * 0.1 / (√0.01 + 1e-8) = 1e-4 / 0.1 = 1e-3
         // new_weight = 1.0 - 1e-3 = 0.999
-        
+
         graph.execute();
 
         let new_weights = adam.new_weight_datas(&mut graph);
         println!("Manual calculation expected: weight = 0.999");
         println!("Actual weight after Adam update: {:?}", new_weights);
 
-        assert_eq!(new_weights[0][0], 0.999, "Weight did not match expected value");
-
+        assert_eq!(
+            new_weights[0][0], 0.999,
+            "Weight did not match expected value"
+        );
     }
 
     /// Test Adam on simple quadratic function: f(x) = (x - 3)²
     /// Gradient: f'(x) = 2(x - 3)
     /// Optimal: x* = 3
-    #[test] 
+    #[test]
     fn test_quadratic_convergence() {
         let mut graph = Graph::new();
 
@@ -283,7 +297,7 @@ mod tests {
 
         graph.compile(GenericCompiler::default(), (&mut x, &mut gradient));
         // Should converge to x ≈ 3.0 after sufficient iterations
-        
+
         for step in 0..2001 {
             graph.execute();
 
@@ -291,20 +305,30 @@ mod tests {
             adam.step_after_execution(&mut graph);
 
             if step % 50 == 0 {
-                println!("Step {}, Time: {:?}: x = {:?}, target = {:?}, gradients = {:?}", step, adam.time(&mut graph), x.data(), target.data(), gradient.data());
+                println!(
+                    "Step {}, Time: {:?}: x = {:?}, target = {:?}, gradients = {:?}",
+                    step,
+                    adam.time(&mut graph),
+                    x.data(),
+                    target.data(),
+                    gradient.data()
+                );
             }
 
             gradient.drop();
         }
 
-        assert!((x.data()[0] - target.data()[0]).abs() < 1e-3, "Failed to converge to optimum");
+        assert!(
+            (x.data()[0] - target.data()[0]).abs() < 1e-3,
+            "Failed to converge to optimum"
+        );
     }
 
     /// Test on Rosenbrock function
     /// f(x,y) = (a-x)² + b(y-x²)²  where a=1, b=100
     /// dx = -2(a-x) - 4b*x(y-x²)
     /// dy = 2b(y-x²)
-    /// Optimal: (x*,y*) = (1,1) 
+    /// Optimal: (x*,y*) = (1,1)
     #[test]
     fn test_rosenbrock_convergence() {
         let mut graph = Graph::new();
@@ -319,7 +343,10 @@ mod tests {
         gradient_x.keep();
         gradient_y.keep();
 
-        let grads = vec![(gradient_x.id, gradient_x.shape), (gradient_y.id, gradient_y.shape)];
+        let grads = vec![
+            (gradient_x.id, gradient_x.shape),
+            (gradient_y.id, gradient_y.shape),
+        ];
         let params = vec![x.id, y.id];
 
         let mut adam = AdamOptimizer::new(&mut graph, params, &grads);
@@ -329,7 +356,10 @@ mod tests {
         adam.set_learning_rate(1e-2, &mut graph);
         adam.set_epsilon(1e-8, &mut graph);
 
-        graph.compile(GenericCompiler::default(), (&mut x, &mut y, &mut gradient_x, &mut gradient_y));
+        graph.compile(
+            GenericCompiler::default(),
+            (&mut x, &mut y, &mut gradient_x, &mut gradient_y),
+        );
         // Should converge to x ≈ 3.0 after sufficient iterations
 
         for step in 0..5000 {
@@ -342,15 +372,23 @@ mod tests {
             adam.step_after_execution(&mut graph);
 
             if step % 50 == 0 {
-                println!("Step {}, Time: {:?}: x = {:?}, y = {:?}, gradient_x = {:?}, gradient_y = {:?}", step, adam.time(&mut graph), x.data(), y.data(), gradient_x.data(), gradient_y.data());
+                println!(
+                    "Step {}, Time: {:?}: x = {:?}, y = {:?}, gradient_x = {:?}, gradient_y = {:?}",
+                    step,
+                    adam.time(&mut graph),
+                    x.data(),
+                    y.data(),
+                    gradient_x.data(),
+                    gradient_y.data()
+                );
             }
 
             gradient_x.drop();
             gradient_y.drop();
         }
-        
+
         // Should converge close to (1,1)
         assert!((x.data()[0] - 1.0).abs() < 1e-2, "x didn't converge");
         assert!((y.data()[0] - 1.0).abs() < 1e-2, "y didn't converge");
-    }    
+    }
 }
