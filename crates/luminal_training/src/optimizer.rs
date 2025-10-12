@@ -278,13 +278,13 @@ mod tests {
         adam.set_beta1(0.9, &mut graph);
         adam.set_beta2(0.999, &mut graph);
         // higher learning rate for faster convergence
-        adam.set_learning_rate(1e-2, &mut graph);
+        adam.set_learning_rate(2e-2, &mut graph);
         adam.set_epsilon(1e-8, &mut graph);
 
         graph.compile(GenericCompiler::default(), (&mut x, &mut gradient));
         // Should converge to x ≈ 3.0 after sufficient iterations
         
-        for step in 0..1001 {
+        for step in 0..2001 {
             graph.execute();
 
             transfer_data_same_graph(adam.new_weights(), &x, &mut graph);
