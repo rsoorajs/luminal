@@ -58,22 +58,42 @@ pub fn sgd_on_graph(
     (new_weights, lr)
 }
 
+struct TensorRef {
+    id: NodeIndex,
+    shape: ShapeTracker,
+}
+
+impl TensorRef {
+    fn to_tensor(&self, graph: &mut Graph) -> GraphTensor {
+        GraphTensor::from_id(self.id, self.shape, graph)
+    }
+}
+
+impl From<GraphTensor> for TensorRef {
+    fn from(tensor: GraphTensor) -> Self {
+        TensorRef {
+            id: tensor.id,
+            shape: tensor.shape,
+        }
+    }
+}
+
 pub struct AdamOptimizer {
     states: Vec<AdamGradientState>,
-    time_input: GraphTensor,
-    time_output: GraphTensor,
-    pub learning_rate: GraphTensor,
-    pub beta1: GraphTensor,
-    pub beta2: GraphTensor,
-    pub epsilon: GraphTensor,
+    time_input: TensorRef,
+    time_output: TensorRef,
+    learning_rate: TensorRef,
+    beta1: TensorRef,
+    beta2: TensorRef,
+    epsilon: TensorRef,
 }
 
 struct AdamGradientState {
-    weight: GraphTensor,
-    momentum_input: GraphTensor,
-    momentum_output : GraphTensor, 
-    variance_input : GraphTensor,
-    variance_output : GraphTensor, 
+    weight: TensorRef,
+    momentum_input: TensorRef,
+    momentum_output: TensorRef,
+    variance_input: TensorRef,
+    variance_output: TensorRef,
 }
 
 /// Implements the [Adam](https://arxiv.org/abs/1412.6980) algorithm.
@@ -87,8 +107,8 @@ impl AdamOptimizer {
         let epsilon = graph.named_tensor("Epsilon", 1).set(1e-8).keep();
         let one = graph.constant(1.0);
         
-        let time_input = graph.tensor(1).set(0.0).keep();
-        let time_output = time_input + graph.constant(1.0);
+        let time_input = graph.tensor(1).set(0.0);
+        let time_output = time_input + graph.constant(1.0).expand(time_input.shape);
         time_output.keep();
 
         for ((grad_id, grad_shape), old_weight_id) in grads.iter().copied().zip(old_weights.to_ids()) {
@@ -122,34 +142,42 @@ impl AdamOptimizer {
             new_weight.keep();
 
             let state = AdamGradientState {
-                weight: new_weight,
-                momentum_input,
-                momentum_output,
-                variance_input,
-                variance_output,
+                weight: new_weight.into(),
+                momentum_input: momentum_input.into(),
+                momentum_output: momentum_output.into(),
+                variance_input: variance_input.into(),
+                variance_output: variance_output.into(),
             };
 
             states.push(state);
         }
 
         Self {
-            learning_rate: lr,
-            time_input,
-            time_output,
-            beta1,
-            beta2,
-            epsilon,
+            learning_rate: lr.into(),
+            time_input: time_input.into(),
+            time_output: time_output.into(),
+            beta1: beta1.into(),
+            beta2: beta2.into(),
+            epsilon: epsilon.into(),
             states
         }
     }
 
-    pub fn step_after_execution(&mut self) {
-        transfer_data_same_graph(self.time_output, self.time_input, self.time_input.graph());
+    pub fn step_after_execution(&mut self, graph: &mut Graph) {
+        let time_input = self.time_input.to_tensor(graph);
+        let time_output = self.time_output.to_tensor(graph);
+
+        transfer_data_same_graph(time_output,   time_input, graph);
 
         for state in &mut self.states {
+            let momentum_input = state.momentum_input.to_tensor(graph);
+            let momentum_output = state.momentum_output.to_tensor(graph);
+            let variance_input = state.variance_input.to_tensor(graph);
+            let variance_output = state.variance_output.to_tensor(graph);
+
             // Update momentum and variance inputs for the next iteration
-            transfer_data_same_graph(state.momentum_output, state.momentum_input, state.momentum_input.graph());
-            transfer_data_same_graph(state.variance_output, state.variance_input, state.variance_input.graph());
+            transfer_data_same_graph(momentum_output, momentum_input, graph);
+            transfer_data_same_graph(variance_output, variance_input, graph);
         }
     }
 
@@ -157,19 +185,38 @@ impl AdamOptimizer {
         self.states.iter().map(|s| s.weight.id).collect()
     }
 
-    pub fn new_weight_datas(&self) -> Vec<Vec<f32>> {
-        self.states.iter().map(|s| s.weight.data()).collect()
+    pub fn new_weight_datas(&self, graph: &mut Graph) -> Vec<Vec<f32>> {
+        self.states.iter().map(|s| s.weight.to_tensor(graph).data()).collect()
     }
 
-    pub fn time(&self) -> Vec<f32> {
-        self.time_input.data()
+    pub fn time(&self, graph: &mut Graph) -> Vec<f32> {
+        let time_input = self.time_input.to_tensor(graph);
+        time_input.data()
+    }
+
+    pub fn set_beta1(&self, value: f32, graph: &mut Graph) {
+        let beta1 = self.beta1.to_tensor(graph);
+        beta1.set(value);
+    }
+
+    pub fn set_beta2(&self, value: f32, graph: &mut Graph) {
+        let beta2 = self.beta2.to_tensor(graph);
+        beta2.set(value);
+    }
+
+    pub fn set_learning_rate(&self, value: f32, graph: &mut Graph) {
+        let lr = self.learning_rate.to_tensor(graph);
+        lr.set(value);
+    }
+
+    pub fn set_epsilon(&self, value: f32, graph: &mut Graph) {
+        let epsilon = self.epsilon.to_tensor(graph);
+        epsilon.set(value);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::mse_loss;
-
     use super::*;
 
     /// Manual validation test with known values
@@ -185,10 +232,10 @@ mod tests {
 
         // Create Adam optimizer
         let adam = AdamOptimizer::new(&mut graph, params, &grads);
-        adam.beta1.set(0.9);
-        adam.beta2.set(0.999);
-        adam.learning_rate.set(1e-3);
-        adam.epsilon.set(1e-8);
+        adam.set_beta1(0.9, &mut graph);
+        adam.set_beta2(0.999, &mut graph);
+        adam.set_learning_rate(1e-3, &mut graph);
+        adam.set_epsilon(1e-8, &mut graph);
 
         graph.compile(GenericCompiler::default(), ());
 
@@ -203,7 +250,7 @@ mod tests {
         
         graph.execute();
 
-        let new_weights = adam.new_weight_datas();
+        let new_weights = adam.new_weight_datas(&mut graph);
         println!("Manual calculation expected: weight = 0.999");
         println!("Actual weight after Adam update: {:?}", new_weights);
 
@@ -228,11 +275,11 @@ mod tests {
         let params = vec![x.id];
 
         let mut adam = AdamOptimizer::new(&mut graph, params, &grads);
-        adam.beta1.set(0.9);
-        adam.beta2.set(0.999);
+        adam.set_beta1(0.9, &mut graph);
+        adam.set_beta2(0.999, &mut graph);
         // higher learning rate for faster convergence
-        adam.learning_rate.set(1e-2);
-        adam.epsilon.set(1e-8);
+        adam.set_learning_rate(1e-2, &mut graph);
+        adam.set_epsilon(1e-8, &mut graph);
 
         graph.compile(GenericCompiler::default(), (&mut x, &mut gradient));
         // Should converge to x ≈ 3.0 after sufficient iterations
@@ -241,10 +288,10 @@ mod tests {
             graph.execute();
 
             transfer_data_same_graph(adam.new_weights(), &x, &mut graph);
-            adam.step_after_execution();
+            adam.step_after_execution(&mut graph);
 
             if step % 50 == 0 {
-                println!("Step {}, Time: {:?}: x = {:?}, target = {:?}, gradients = {:?}", step, adam.time(), x.data(), target.data(), gradient.data());
+                println!("Step {}, Time: {:?}: x = {:?}, target = {:?}, gradients = {:?}", step, adam.time(&mut graph), x.data(), target.data(), gradient.data());
             }
 
             gradient.drop();
@@ -276,11 +323,11 @@ mod tests {
         let params = vec![x.id, y.id];
 
         let mut adam = AdamOptimizer::new(&mut graph, params, &grads);
-        adam.beta1.set(0.9);
-        adam.beta2.set(0.999);
+        adam.set_beta1(0.9, &mut graph);
+        adam.set_beta2(0.999, &mut graph);
         // higher learning rate for faster convergence
-        adam.learning_rate.set(1e-2);
-        adam.epsilon.set(1e-8);
+        adam.set_learning_rate(1e-2, &mut graph);
+        adam.set_epsilon(1e-8, &mut graph);
 
         graph.compile(GenericCompiler::default(), (&mut x, &mut y, &mut gradient_x, &mut gradient_y));
         // Should converge to x ≈ 3.0 after sufficient iterations
@@ -292,10 +339,10 @@ mod tests {
             transfer_data_same_graph(new_weights[0], &x, &mut graph);
             transfer_data_same_graph(new_weights[1], &y, &mut graph);
 
-            adam.step_after_execution();
+            adam.step_after_execution(&mut graph);
 
             if step % 50 == 0 {
-                println!("Step {}, Time: {:?}: x = {:?}, y = {:?}, gradient_x = {:?}, gradient_y = {:?}", step, adam.time(), x.data(), y.data(), gradient_x.data(), gradient_y.data());
+                println!("Step {}, Time: {:?}: x = {:?}, y = {:?}, gradient_x = {:?}, gradient_y = {:?}", step, adam.time(&mut graph), x.data(), y.data(), gradient_x.data(), gradient_y.data());
             }
 
             gradient_x.drop();
