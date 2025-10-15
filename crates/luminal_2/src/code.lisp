@@ -543,9 +543,8 @@
 (run-schedule
 	(saturate expr)
 	(saturate ir-prop)
-	(let-scheduler bo (back-off))
 	(repeat 1
-		(run-with bo ir)
+		(run ir)
 		(saturate ir-prop)
 		(saturate expr)
 		(saturate fusion)

@@ -2,19 +2,19 @@
 
 use std::{collections::HashMap, io::Write};
 
-use egglog::{CommandOutput, EGraph, Error, Term, prelude::exprs::var};
+use egglog::{prelude::exprs::var, CommandOutput, EGraph, Error, Term};
 use egui::Color32;
 use itertools::Itertools;
 use luminal::{
     prelude::{
-        NodeIndex,
         petgraph::{
-            Directed, Direction,
             algo::toposort,
             dot::{Config, Dot},
             prelude::StableGraph,
             visit::{EdgeRef, Topo},
+            Directed, Direction,
         },
+        NodeIndex,
     },
     shape::Expression,
 };
@@ -97,7 +97,7 @@ pub fn pad_out(
     node
 }
 
-use crate::{GraphTerm, Kernel, debug::display_graph};
+use crate::{debug::display_graph, GraphTerm, Kernel};
 
 pub fn validate_graph(graph: &StableGraph<(GraphTerm, usize), (), Directed>) {
     // walk the graph and make sure loopins -> next loop level (or loopout) and prev loop (or loopin) -> loopout
@@ -453,7 +453,7 @@ pub fn render_egglog_inline(
 /// Runs an Egglog program from a string and returns its output messages.
 fn run_egglog_program(code: &str, root: &str) -> Result<egraph_serialize::EGraph, Error> {
     // Create a fresh EGraph with all the defaults
-    let mut egraph = egglog_experimental::new_experimental_egraph();
+    let mut egraph = EGraph::default();
     let commands = egraph.parser.get_program_from_string(None, code)?;
     let start = std::time::Instant::now();
     let msgs = egraph.run_program(commands)?;
@@ -516,7 +516,6 @@ use crossterm::{
     terminal::{self, LeaveAlternateScreen},
 };
 use ratatui::{
-    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Layout},
     style::{Color, Style},
@@ -524,6 +523,7 @@ use ratatui::{
     widgets::{
         Block, Borders, Gauge, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
     },
+    Terminal,
 };
 use std::{
     sync::mpsc,
@@ -709,44 +709,44 @@ pub fn generate_proof(
     graph1: &StableGraph<GraphTerm, (), Directed>,
     graph2: &StableGraph<GraphTerm, (), Directed>,
 ) {
-    let egglog1 = render_egglog_inline(graph1, true);
-    let egglog2 = render_egglog_inline(graph2, true);
-    let mut egraph = egglog_proof::EGraph::with_tracing();
-    egraph
-        .parse_and_run_program(
-            None,
-            &include_str!("code.lisp")
-                .split("\n")
-                .take_while(|l| *l != "{code}")
-                .join("\n"),
-        )
-        .unwrap();
-    let expr1 = egraph.parser.get_expr_from_string(None, &egglog1).unwrap();
-    let expr2 = egraph.parser.get_expr_from_string(None, &egglog2).unwrap();
-    let (_, v1) = egraph.eval_expr(&expr1).unwrap();
-    let (_, v2) = egraph.eval_expr(&expr2).unwrap();
+    //     let egglog1 = render_egglog_inline(graph1, true);
+    //     let egglog2 = render_egglog_inline(graph2, true);
+    //     let mut egraph = EGraph::default();
+    //     egraph
+    //         .parse_and_run_program(
+    //             None,
+    //             &include_str!("code.lisp")
+    //                 .split("\n")
+    //                 .take_while(|l| *l != "{code}")
+    //                 .join("\n"),
+    //         )
+    //         .unwrap();
+    //     let expr1 = egraph.parser.get_expr_from_string(None, &egglog1).unwrap();
+    //     let expr2 = egraph.parser.get_expr_from_string(None, &egglog2).unwrap();
+    //     let (_, v1) = egraph.eval_expr(&expr1).unwrap();
+    //     let (_, v2) = egraph.eval_expr(&expr2).unwrap();
 
-    egraph
-        .parse_and_run_program(
-            None,
-            "
-(run-schedule
-	(run ir-generic)
-	(repeat 3
-		(run ir)
-		(repeat 3 ir-prop)
-		(repeat 3 expr)
-		(run ir-generic)
-	)
-)
-    ",
-        )
-        .unwrap();
-    if let Ok(proof) = egraph.backend.explain_terms_equal(v1, v2) {
-        println!("Proof: {:#?}", proof);
-    } else {
-        println!("Couldn't find proof");
-        println!("First Expression: {egglog1}");
-        println!("\n\nSecond Expression: {egglog2}");
-    }
+    //     egraph
+    //         .parse_and_run_program(
+    //             None,
+    //             "
+    // (run-schedule
+    // 	(run ir-generic)
+    // 	(repeat 3
+    // 		(run ir)
+    // 		(repeat 3 ir-prop)
+    // 		(repeat 3 expr)
+    // 		(run ir-generic)
+    // 	)
+    // )
+    //     ",
+    //         )
+    //         .unwrap();
+    //     if let Ok(proof) = egraph.backend.explain_terms_equal(v1, v2) {
+    //         println!("Proof: {:#?}", proof);
+    //     } else {
+    //         println!("Couldn't find proof");
+    //         println!("First Expression: {egglog1}");
+    //         println!("\n\nSecond Expression: {egglog2}");
+    //     }
 }

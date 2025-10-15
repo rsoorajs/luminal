@@ -41,7 +41,7 @@ fn main() {
         let arch = GPUArch::CUDA;
 
         #[allow(non_snake_case)]
-        let (hidden, intermediate) = (4096, 14336); // llama numbers divided by 8
+        let (hidden, intermediate) = (512, 512); // llama numbers divided by 8
         let mut cx = Graph::new();
         let a = cx.named_tensor("Input", (8, hidden));
         let gate = cx.named_tensor("Gate", (hidden, intermediate));

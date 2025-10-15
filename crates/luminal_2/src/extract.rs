@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::usize;
 
 use crate::codegen::codegen;
@@ -14,18 +14,18 @@ use colored::Colorize;
 use cudarc::driver::CudaContext;
 use egraph_serialize::{ClassId, EGraph, NodeId};
 use itertools::Itertools;
-use luminal::prelude::NodeIndex;
 use luminal::prelude::petgraph::prelude::StableGraph;
 use luminal::prelude::petgraph::{Directed, Direction};
+use luminal::prelude::NodeIndex;
 use luminal::shape::{Expression, Term};
 #[cfg(feature = "metal")]
 use objc2_metal::MTLCreateSystemDefaultDevice;
-use rand::{Rng, rng};
+use rand::{rng, Rng};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 const WARMUP_TRIALS: usize = 0;
 const TRIALS: usize = 1;
-const MAX_SEARCHED_GRAPHS: usize = 1_000;
+const MAX_SEARCHED_GRAPHS: usize = 10_000;
 const MAX_CYCLES: usize = 1;
 const INVALID_IR: &[&str] = &[
     "SwapLoops",
@@ -606,8 +606,8 @@ pub fn extraction_to_graph(
                 *current += 1;
                 Expression::from(Term::Acc('a'))
             }
-            op if op.starts_with("Boxed(\"") => {
-                let name = op.replace("Boxed(\"", "").replace("\")", "");
+            op if op.starts_with("\"") => {
+                let name = op.replace("\"", "");
                 Expression::from(name.chars().next().unwrap())
             }
             op => op
@@ -639,10 +639,7 @@ pub fn extraction_to_graph(
                     NodeIndex::default()
                 } else {
                     *prev_placed.entry(node_choice).or_insert_with(|| {
-                        let label = egraph.nodes[&enode.children[0]]
-                            .op
-                            .replace("Boxed(\"", "")
-                            .replace("\")", "");
+                        let label = egraph.nodes[&enode.children[0]].op.replace("\"", "");
                         g.add_node(GraphTerm::GMEM { label })
                     })
                 }
