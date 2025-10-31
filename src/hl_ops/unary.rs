@@ -168,7 +168,7 @@ impl GraphTensor {
     /// The sigmoid activation function
     pub fn sigmoid(self) -> GraphTensor {
         // Based on https://github.com/tinygrad/tinygrad/blob/9d142430cbe61121c864c0015f1de83c94a7d2c0/tinygrad/mlops.py#L70
-        1. / (1. + (-self).exp())
+        (1. + (-self).exp()).reciprocal()
     }
 
     /// The swish (aka silu) activation function
