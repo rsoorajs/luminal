@@ -20,7 +20,7 @@ cudarc = { version = "0.16.6", features = [
 objc2 = { version = "0.6.2", optional = true }
 objc2-metal = { version = "0.3.1", optional = true }
 itertools = "0.14.0"
-egglog = { git = "https://github.com/egraphs-good/egglog", branch="main" }
+egglog = "1.0.0"
 egglog-ast = { git = "https://github.com/egraphs-good/egglog", branch="main" }
 urlencoding = "2.1.3"
 webbrowser = "1.0.4"
