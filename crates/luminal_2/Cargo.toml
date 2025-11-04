@@ -20,9 +20,8 @@ cudarc = { version = "0.16.6", features = [
 objc2 = { version = "0.6.2", optional = true }
 objc2-metal = { version = "0.3.1", optional = true }
 itertools = "0.14.0"
-egglog = { git = "https://github.com/egraphs-good/egglog", branch="main" }
+egglog = "1.0.0"
 egglog-ast = { git = "https://github.com/egraphs-good/egglog", branch="main" }
-egglog_proof = { git = "https://github.com/MilkBlock/egglog", branch="main", package="egglog" }
 urlencoding = "2.1.3"
 webbrowser = "1.0.4"
 regex = "1.11.1"
@@ -33,7 +32,7 @@ egg = "0.9.5"
 symbolic_expressions = "5.0.3"
 rustc-hash = "2.1.1"
 rand = "0.9.1"
-egraph-serialize = {git="https://github.com/egraphs-good/egraph-serialize", branch="main"}
+egraph-serialize = "0.3.0"
 indexmap = "2.9.0"
 serde = "1.0.219"
 ratatui = "0.29.0"

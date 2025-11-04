@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, io::Write};
 
-use egglog::{prelude::exprs::var, CommandOutput, EGraph, Error, Term};
+use egglog::{prelude::{exprs::var, RustSpan, Span}, CommandOutput, EGraph, Error, Term};
 use egui::Color32;
 use itertools::Itertools;
 use luminal::{
@@ -519,7 +519,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Layout},
     style::{Color, Style},
-    text::{Line, Span},
+    text::Line,
     widgets::{
         Block, Borders, Gauge, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
     },
