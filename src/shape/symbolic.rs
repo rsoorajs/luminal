@@ -69,6 +69,7 @@ pub enum Term {
     Sub,
     Mul,
     Div,
+    CeilDiv,
     Mod,
     Min,
     Max,
@@ -90,6 +91,7 @@ impl std::fmt::Debug for Term {
             Term::Div => write!(f, "/"),
             Term::Mod => write!(f, "%"),
             Term::Min => write!(f, "min"),
+            Term::CeilDiv => write!(f, "^/"),
             Term::Max => write!(f, "max"),
             Term::And => write!(f, "&&"),
             Term::Or => write!(f, "||"),
@@ -120,6 +122,7 @@ impl Term {
             Term::Or => Some(|a, b| Some((a != 0 || b != 0) as i64)),
             Term::Gte => Some(|a, b| Some((a >= b) as i64)),
             Term::Lt => Some(|a, b| Some((a < b) as i64)),
+            Term::CeilDiv => Some(|a, b| Some(if a % b != 0 { a / b + 1 } else { a / b })),
             _ => None,
         }
     }
@@ -136,6 +139,7 @@ impl Term {
             Term::Or => Some(|a, b| (a.abs() > 1e-4 || b.abs() > 1e-4) as i32 as f64),
             Term::Gte => Some(|a, b| (a >= b) as i32 as f64),
             Term::Lt => Some(|a, b| (a < b) as i32 as f64),
+            Term::CeilDiv => Some(|a, b| (a / b).ceil()),
             _ => None,
         }
     }
@@ -148,6 +152,7 @@ impl Term {
             Term::Mod => "MMod",
             Term::Max => "MMax",
             Term::Min => "MMin",
+            Term::CeilDiv => "MCeilDiv",
             _ => panic!("egglog doesn't implement {self:?}"),
         }
         .to_string()
@@ -362,6 +367,15 @@ impl Expression {
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::Gte);
+        Expression::new(terms)
+    }
+
+    /// Ceil Division
+    pub fn ceil_div<E: Into<Expression>>(self, rhs: E) -> Self {
+        let rhs = rhs.into();
+        let mut terms = rhs.terms.read().clone();
+        terms.extend(self.terms.read().iter().copied());
+        terms.push(Term::CeilDiv);
         Expression::new(terms)
     }
 
