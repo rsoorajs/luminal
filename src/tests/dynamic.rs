@@ -18,6 +18,7 @@ fn test_movement() {
         (3, 2, 2),
     );
     let b = a.reshape((6, 'a')).permute((1, 0)).keep().retrieve();
+    println!("b: {:?}", b.shape);
 
     cx.execute();
 

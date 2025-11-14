@@ -19,7 +19,7 @@ impl ShapeTracker {
         let mut stride = Expression::from(1);
         for d in dims.to_shape().into_iter().rev() {
             s.dims.insert(0, d);
-            s.strides.insert(0, stride);
+            s.strides.insert(0, Expression::from('z') * stride);
             stride *= d;
         }
         s
@@ -144,10 +144,8 @@ impl ShapeTracker {
             dim_ind /= current_elem_size;
             // Get position in current dim
             dim_ind %= d;
-            // Multiply by stride
-            dim_ind *= s;
             // Add to index expression
-            ind_expr += dim_ind;
+            ind_expr += s.substitute('z', dim_ind);
             // Keep track of element size for next dimension
             current_elem_size *= d;
         }
@@ -237,8 +235,28 @@ impl ShapeTracker {
         stack: &mut Vec<i64>,
     ) {
         for d in self.dims.iter_mut().chain(&mut self.strides) {
-            *d = d.exec_stack(dyn_dim_map, stack).unwrap().into();
+            for t in d.terms.write().iter_mut() {
+                if let Term::Var(v) = *t
+                    && let Some(val) = dyn_dim_map.get(&v)
+                {
+                    *t = Term::Num(*val as i32);
+                }
+            }
+            if let Some(i) = d.exec_stack(dyn_dim_map, stack) {
+                *d = i.into();
+            }
         }
+    }
+
+    /// Merge two dimensions together
+    pub fn merge_dims(&mut self, axis1: usize, axis2: usize) {
+        let inner_stride = self.strides.remove(axis2);
+        let inner_dim = self.dims.remove(axis2);
+        self.dims[axis1] *= inner_dim;
+        self.strides[axis1] = (self.strides[axis1]
+            .substitute('z', Expression::from('z') / inner_dim)
+            + inner_stride.substitute('z', Expression::from('z') % inner_dim))
+        .simplify();
     }
 }
 
@@ -257,6 +275,16 @@ mod tests {
         println!("Strides: {:?}", tracker.strides);
         println!("Ind: {:?}", tracker.index_expression());
         println!("Val: {:?}", tracker.valid_expression());
+    }
+
+    #[test]
+    fn test_merge_dims() {
+        let mut tracker = ShapeTracker::new((10, 5, 3));
+        println!("Shape: {:?}", tracker.dims);
+        println!("Strides: {:?}", tracker.strides);
+        tracker.merge_dims(1, 2);
+        println!("Shape: {:?}", tracker.dims);
+        println!("Strides: {:?}", tracker.strides);
     }
 
     // #[test]
