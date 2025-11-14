@@ -15,7 +15,7 @@ impl GraphTensor {
             // Sum Reduce
             let mut ret = mul.sum(2);
             if vec {
-                ret = ret.reshape(ret.dims().last().unwrap());
+                ret.shape.remove_dim(0);
             }
             ret
         } else if self.shape.len() == 3 {
@@ -82,17 +82,19 @@ impl GraphTensor {
             }
         } else if self.shape.len() == 5 && rhs.shape.len() == 5 {
             // ABCDExABCEF -> ABCDF
-            let (a, b, c, e, f) = rhs.dims5();
+            let (a, b, c, _, f) = rhs.dims5();
             let (_, _, _, d, _) = self.dims5();
             // Reshape
-            let w = rhs.reshape((a * b * c, e, f)).permute((0, 2, 1));
-            let s = self.reshape((a * b * c, d, e));
+            let w = rhs.merge_dims(0, 1).merge_dims(0, 1).permute((0, 2, 1));
+            let s = self.merge_dims(0, 1).merge_dims(0, 1);
 
             // Broadcasted Multiply
             let mul = s.expand_dim(2, f) * w.expand_dim(1, d);
 
             // Sum Reduce
-            mul.sum(3).reshape((a, b, c, d, f))
+            let mut r = mul.sum(3);
+            r.shape = ShapeTracker::new((a, b, c, d, f));
+            r
         } else {
             panic!(
                 "Can't matmul lhs {:?} and rhs {:?}",

@@ -39,11 +39,9 @@ impl GraphTensor {
         self
     }
 
-    /// Convert tensor to a new shape with an equivalent number of elements
-    pub fn reshape(mut self, new_shape: impl ToShape) -> GraphTensor {
-        // Insert contiguous call
-        self = self.contiguous();
-        self.shape = ShapeTracker::new(new_shape);
+    /// Merge two dimensions together
+    pub fn merge_dims(mut self, axis1: usize, axis2: usize) -> GraphTensor {
+        self.shape.merge_dims(axis1, axis2);
         self
     }
 

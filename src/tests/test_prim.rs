@@ -5,20 +5,6 @@ use itertools::Itertools;
 // Movement op tests
 
 #[test]
-fn test_reshape() {
-    let mut cx = Graph::new();
-    let a = cx.tensor((2, 3)).set([[1., 2., 3.], [1., 2., 3.]]);
-    let b = a.reshape(6).retrieve();
-    cx.execute();
-
-    let d_dev = Cpu::default();
-    let d_a = d_dev.tensor([[1., 2., 3.], [1., 2., 3.]]);
-    let d_b: dfdx::tensor::Tensor<Rank1<6>, f32, Cpu> = d_a.reshape();
-
-    assert_close(&b.data(), &d_b.as_vec());
-}
-
-#[test]
 fn test_permute() {
     let mut cx = Graph::new();
     let a = cx.tensor((2, 3)).set([[1., 2., 3.], [1., 2., 3.]]);
