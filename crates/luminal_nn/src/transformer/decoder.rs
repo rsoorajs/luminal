@@ -70,27 +70,28 @@ impl Module<(GraphTensor, GraphTensor)> for TransformerDecoderBlock {
     type Output = GraphTensor;
 
     fn forward(&self, (input, from_enc): (GraphTensor, GraphTensor)) -> Self::Output {
-        // Input: batch_dims, seq1, dim
-        // From_enc: batch_dims, seq2, dim
-        // Flatten to single batch dim
-        let seq1 = input.dims()[input.shape.len() - 2];
-        let seq2 = from_enc.dims()[from_enc.shape.len() - 2];
-        let dim = *input.dims().last().unwrap();
-        let n_batches = input
-            .dims()
-            .into_iter()
-            .take(input.shape.len() - 2)
-            .product::<Expression>()
-            .max(1);
-        let inp = input.reshape((n_batches, seq1, dim));
-        let fe = from_enc.reshape((n_batches, seq2, dim));
-        // Batched forward pass
-        let y = self.self_attention.forward(inp);
-        let x = (y + inp).layer_norm(2, 1e-5);
-        let y = self.cross_attention.forward((fe, x, fe));
-        let x = (y + x).layer_norm(2, 1e-5);
-        let y = self.ff.forward(x);
-        (y + x).layer_norm(2, 1e-5).reshape(input.shape)
+        todo!()
+        // // Input: batch_dims, seq1, dim
+        // // From_enc: batch_dims, seq2, dim
+        // // Flatten to single batch dim
+        // let seq1 = input.dims()[input.shape.len() - 2];
+        // let seq2 = from_enc.dims()[from_enc.shape.len() - 2];
+        // let dim = *input.dims().last().unwrap();
+        // let n_batches = input
+        //     .dims()
+        //     .into_iter()
+        //     .take(input.shape.len() - 2)
+        //     .product::<Expression>()
+        //     .max(1);
+        // let inp = input.reshape((n_batches, seq1, dim));
+        // let fe = from_enc.reshape((n_batches, seq2, dim));
+        // // Batched forward pass
+        // let y = self.self_attention.forward(inp);
+        // let x = (y + inp).layer_norm(2, 1e-5);
+        // let y = self.cross_attention.forward((fe, x, fe));
+        // let x = (y + x).layer_norm(2, 1e-5);
+        // let y = self.ff.forward(x);
+        // (y + x).layer_norm(2, 1e-5).reshape(input.shape)
     }
 }
 

@@ -62,45 +62,46 @@ impl Module<(GraphTensor, GraphTensor, GraphTensor)> for MultiHeadSelfAttention 
             GraphTensor, // batch, s1, dim
         ),
     ) -> Self::Output {
-        let orig_query_shape = queries.dims();
-        let s1 = keys.dims()[keys.shape.len() - 2];
-        let s2 = queries.dims()[queries.shape.len() - 2];
-        let n_batches = queries
-            .dims()
-            .into_iter()
-            .take(queries.shape.len() - 2)
-            .product::<Expression>()
-            .max(1);
-        let dim = *queries.dims().last().unwrap();
-        let keys = keys.reshape((n_batches, s1, dim));
-        let values = values.reshape((n_batches, s1, dim));
-        let queries = queries.reshape((n_batches, s2, dim));
-        let values = self
-            .w_v
-            .forward(values)
-            .reshape((n_batches, s1, self.heads, self.k_dim / self.heads))
-            .permute((0, 2, 1, 3));
-        let keys = self
-            .w_k
-            .forward(keys)
-            .reshape((n_batches, s1, self.heads, self.k_dim / self.heads))
-            .permute((0, 2, 3, 1));
-        let queries = self
-            .w_q
-            .forward(queries)
-            .reshape((n_batches, s2, self.heads, self.k_dim / self.heads))
-            .permute((0, 2, 1, 3));
+        todo!()
+        // let orig_query_shape = queries.dims();
+        // let s1 = keys.dims()[keys.shape.len() - 2];
+        // let s2 = queries.dims()[queries.shape.len() - 2];
+        // let n_batches = queries
+        //     .dims()
+        //     .into_iter()
+        //     .take(queries.shape.len() - 2)
+        //     .product::<Expression>()
+        //     .max(1);
+        // let dim = *queries.dims().last().unwrap();
+        // let keys = keys.reshape((n_batches, s1, dim));
+        // let values = values.reshape((n_batches, s1, dim));
+        // let queries = queries.reshape((n_batches, s2, dim));
+        // let values = self
+        //     .w_v
+        //     .forward(values)
+        //     .split_dims(2, self.k_dim / self.heads)
+        //     .permute((0, 2, 1, 3));
+        // let keys = self
+        //     .w_k
+        //     .forward(keys)
+        //     .reshape((n_batches, s1, self.heads, self.k_dim / self.heads))
+        //     .permute((0, 2, 3, 1));
+        // let queries = self
+        //     .w_q
+        //     .forward(queries)
+        //     .reshape((n_batches, s2, self.heads, self.k_dim / self.heads))
+        //     .permute((0, 2, 1, 3));
 
-        let weights = queries
-            .matmul(keys)
-            .mul((1.0 / ((self.k_dim / self.heads) as f64).sqrt()) as f32)
-            .softmax(3);
+        // let weights = queries
+        //     .matmul(keys)
+        //     .mul((1.0 / ((self.k_dim / self.heads) as f64).sqrt()) as f32)
+        //     .softmax(3);
 
-        let tokens = weights
-            .matmul(values)
-            .permute((0, 2, 1, 3))
-            .reshape((n_batches, s2, self.v_dim));
-        self.w_o.forward(tokens).reshape(orig_query_shape) // batch_dims, s2, dim
+        // let tokens = weights
+        //     .matmul(values)
+        //     .permute((0, 2, 1, 3))
+        //     .reshape((n_batches, s2, self.v_dim));
+        // self.w_o.forward(tokens).reshape(orig_query_shape) // batch_dims, s2, dim
     }
 }
 

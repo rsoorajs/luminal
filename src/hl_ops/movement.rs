@@ -45,6 +45,12 @@ impl GraphTensor {
         self
     }
 
+    //// Split a dim into 2 dims, new dim is placed directly after original dim
+    pub fn split_dims(mut self, axis: usize, new_dim_size: impl Into<Expression>) -> GraphTensor {
+        self.shape.split_dims(axis, new_dim_size);
+        self
+    }
+
     /// add a new dimension of size 1 at the specified place
     pub fn unsqueeze(mut self, dim: usize) -> GraphTensor {
         // Insert contiguous call

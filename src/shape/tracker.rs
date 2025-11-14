@@ -258,6 +258,15 @@ impl ShapeTracker {
             + inner_stride.substitute('z', Expression::from('z') % inner_dim))
         .simplify();
     }
+
+    /// Split a dim into 2 dims, new dim is placed directly after original dim
+    pub fn split_dims(&mut self, axis: usize, new_dim_size: impl Into<Expression>) {
+        let new_dim_size = new_dim_size.into();
+        self.dims.insert(axis + 1, new_dim_size);
+        self.strides.insert(axis + 1, self.strides[axis]);
+        self.dims[axis] /= new_dim_size;
+        self.strides[axis] *= new_dim_size;
+    }
 }
 
 #[cfg(test)]
