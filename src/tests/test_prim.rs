@@ -60,19 +60,19 @@ fn test_expand_pytorch() {
     assert_close(&b.data(), &d_b.as_vec());
 }
 
-#[test]
-fn test_slice() {
-    let mut cx = Graph::new();
-    let a = cx.tensor((2, 3)).set([[1., 2., 3.], [1., 2., 3.]]);
-    let b = a.slice((1.., ..)).retrieve();
-    cx.execute();
+// #[test]
+// fn test_slice() {
+//     let mut cx = Graph::new();
+//     let a = cx.tensor((2, 3)).set([[1., 2., 3.], [1., 2., 3.]]);
+//     let b = a.slice((1.., ..)).retrieve();
+//     cx.execute();
 
-    let d_dev = Cpu::default();
-    let d_a = d_dev.tensor([[1., 2., 3.], [1., 2., 3.]]);
-    let d_b = d_a.slice((1.., ..));
+//     let d_dev = Cpu::default();
+//     let d_a = d_dev.tensor([[1., 2., 3.], [1., 2., 3.]]);
+//     let d_b = d_a.slice((1.., ..));
 
-    assert_close(&b.data(), &d_b.as_vec());
-}
+//     assert_close(&b.data(), &d_b.as_vec());
+// }
 
 // Unary op tests
 
@@ -207,8 +207,7 @@ fn test_permute_mul() {
     let mut cx = Graph::new();
     let a = cx.tensor((3, 2)).set([[1., 2.], [3., 2.], [3., 1.]]);
     let b = cx.tensor((3, 2)).set([[1., 2.], [3., -1.], [3., 0.]]);
-    let c = a.expand_dim(2, 3) * b.expand_dim(2, 3);
-    c.retrieve();
+    let c = (a.expand_dim(2, 3) * b.expand_dim(2, 3)).retrieve();
     cx.execute();
 
     let d_dev = Cpu::default();

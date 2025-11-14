@@ -9,7 +9,7 @@ use luminal::{
         Add, Contiguous, Exp2, Function, LessThan, Log2, MaxReduce, Mod, Mul, Recip, Sin, Sqrt,
         SumReduce,
     },
-    prelude::{tinyvec::ArrayVec, *},
+    prelude::*,
 };
 
 #[derive(Clone, Debug)]
@@ -123,9 +123,7 @@ impl Compiler for Autograd {
                 // f(x) = sum_reduce(x)
                 // f'(x) = 1
                 if valid_set.contains(&inps[0].id) {
-                    prev_grad
-                        .shape
-                        .expand_dim(op.0, inps[0].shape.dims[inps[0].shape.indexes[op.0]]);
+                    prev_grad.shape.expand_dim(op.0, inps[0].shape.dims[op.0]);
                     add_grad(prev_grad, inps[0], graph, &mut grads);
                 }
             } else if let Some(op) = unsafe { graph_ref.as_ref().unwrap() } // Needed to get around multiple borrows
@@ -136,9 +134,7 @@ impl Compiler for Autograd {
                 // f'(x) = x == max_reduce(x)
                 if valid_set.contains(&inps[0].id) {
                     // fwd_nod is already max_reduce(x)
-                    prev_grad
-                        .shape
-                        .expand_dim(op.0, inps[0].shape.dims[inps[0].shape.indexes[op.0]]);
+                    prev_grad.shape.expand_dim(op.0, inps[0].shape.dims[op.0]);
                     let reduced = GraphTensor::from_id(fwd_node, prev_grad.shape, graph_ref);
                     let grad = inps[0].eq(reduced) * prev_grad;
                     add_grad(grad, inps[0], graph, &mut grads);
@@ -190,17 +186,17 @@ fn add_grad(
     grad_map: &mut FxHashMap<NodeIndex, (NodeIndex, ShapeTracker)>,
 ) {
     // Reshape gradient to match the shape of the input source (before the input was reshaped)
-    // Undo permutes
-    let mut new_indexes = ArrayVec::new();
-    new_indexes.resize(fwd.shape.len(), 0);
-    for i in 0..fwd.shape.len() {
-        new_indexes[fwd.shape.indexes[i]] = grad.shape.indexes[i];
-    }
-    grad.shape.indexes = new_indexes;
+    // // Undo permutes
+    // let mut new_indexes = ArrayVec::new();
+    // new_indexes.resize(fwd.shape.len(), 0);
+    // for i in 0..fwd.shape.len() {
+    //     new_indexes[fwd.shape.indexes[i]] = grad.shape.indexes[i];
+    // }
+    // grad.shape.indexes = new_indexes;
 
     // Undo expands (sum reduce)
-    for i in fwd.shape.indexes.into_iter().rev() {
-        if fwd.shape.fake[i] {
+    for i in (0..fwd.shape.len()).rev() {
+        if fwd.shape.strides[i] == 0 {
             grad.id = graph
                 .add_op(SumReduce(i))
                 .input(grad.id, 0, grad.shape)
@@ -217,7 +213,7 @@ fn add_grad(
         } else if let Some(MaxReduce(dim)) = graph.try_get_op(fwd.id) {
             pre_fwd_shape.remove_dim(*dim);
         }
-        if grad.shape.dims() != pre_fwd_shape.dims() {
+        if grad.shape.dims != pre_fwd_shape.dims {
             if !grad.shape.is_contiguous() {
                 grad = grad.contiguous();
             }

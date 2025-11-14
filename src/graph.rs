@@ -300,18 +300,7 @@ impl Graph {
             }
 
             // All sources are ready
-            let mut shapes_string = srcs
-                .iter()
-                .map(|(_, s)| {
-                    format!(
-                        "{:?}",
-                        s.dims()
-                            .into_iter()
-                            .map(|i| i.to_usize().unwrap())
-                            .collect::<Vec<_>>()
-                    )
-                })
-                .join(", ");
+            let mut shapes_string = srcs.iter().map(|(_, s)| format!("{:?}", s.dims)).join(", ");
             if !shapes_string.is_empty() {
                 shapes_string = format!(" ({shapes_string})");
             }
