@@ -46,6 +46,30 @@ impl Expression {
     pub fn is_acc(&self) -> bool {
         self.terms.read().iter().any(|i| matches!(i, Term::Acc(_)))
     }
+
+    pub fn is_dynamic(&self) -> bool {
+        self.terms.read().iter().any(|i| {
+            if let Term::Var(v) = i {
+                *v != 'z'
+            } else {
+                false
+            }
+        })
+    }
+
+    pub fn dyn_vars(&self) -> Vec<char> {
+        self.terms
+            .read()
+            .iter()
+            .filter_map(|i| {
+                if let Term::Var(v) = i {
+                    if *v != 'z' { Some(*v) } else { None }
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 impl Hash for Expression {
@@ -241,7 +265,7 @@ impl Expression {
         for term in self.terms.read().iter() {
             let new_symbol = match term {
                 Term::Num(n) => n.to_string(),
-                Term::Var(c) => format!("const_{c}"),
+                Term::Var(c) => format!("{}const_{c}", if *c == 'z' { "" } else { "*" }),
                 Term::Acc(_) => unreachable!(),
                 Term::Max => format!(
                     "max((int){}, (int){})",
@@ -263,6 +287,12 @@ impl Expression {
                     symbols.pop().unwrap(),
                     symbols.pop().unwrap()
                 ),
+                Term::CeilDiv => {
+                    let a = symbols.pop().unwrap();
+                    let b = symbols.pop().unwrap();
+                    format!("(({a} + {b} - 1) / {b})")
+                }
+                Term::Div => format!("({} / {})", symbols.pop().unwrap(), symbols.pop().unwrap()),
                 _ => format!(
                     "({}{term:?}{})",
                     symbols.pop().unwrap(),
