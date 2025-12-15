@@ -1,216 +1,223 @@
-#![allow(unreachable_code)]
-
-use std::{
-    io::{self, Write},
-    time::Instant,
-};
-
-use clap::Parser;
-use colored::Colorize;
-use itertools::Itertools;
-use model::{HEAD_DIM, N_KV_HEADS};
-use tokenizers::Tokenizer;
-
-mod gguf;
-mod loader;
 mod model;
 
-use crate::model::KVCache;
-use luminal::prelude::*;
+use half::bf16;
+use itertools::Itertools;
+use luminal::{
+    graph::{Graph, Runtime},
+    utils::IntoEgglogOp,
+};
+use luminal_cuda::{
+    block::{self, record_exec_timings_to_file, CudaRuntime, CustomState, IntoBlockOp},
+    kernel,
+};
+use rustc_hash::*;
+use safetensors::SafeTensors;
+use std::{
+    fs::{self, File},
+    io::Write,
+    time::Duration,
+};
+use tokenizers::Tokenizer;
+use tracing::{span, Level};
+use tracing_appender::non_blocking;
+use tracing_perfetto_sdk_layer::NativeLayer;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-// Command args parser
-#[derive(Debug, Parser)]
-#[command(author, version, about, long_about = None)]
-pub struct CLIArgs {
-    /// Number of tokens to generate
-    #[clap(short = 't', long = "gen_tokens", default_value = "256")]
-    gen_tokens: i32,
+fn load_safetensor(st: &SafeTensors, name: &str) -> Vec<f32> {
+    let tensor = st.tensor(name).unwrap();
+    let data: Vec<f32> = tensor
+        .data()
+        .chunks_exact(2)
+        .map(|chunk| bf16::from_le_bytes([chunk[0], chunk[1]]).to_f32())
+        .collect();
+    data
+}
 
-    /// Prompt for the model
-    #[clap(short = 'p', long = "prompt", default_value = include_str!("../prompts/merge_sort.txt"))]
-    prompt: String,
+fn trace_config() -> tracing_perfetto_sdk_schema::TraceConfig {
+    tracing_perfetto_sdk_schema::TraceConfig {
+        buffers: vec![tracing_perfetto_sdk_schema::trace_config::BufferConfig {
+            size_kb: Some(4096),
+            ..Default::default()
+        }],
+        data_sources: vec![tracing_perfetto_sdk_schema::trace_config::DataSource {
+            config: Some(tracing_perfetto_sdk_schema::DataSourceConfig {
+                name: Some("rust_tracing".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
 }
 
 fn main() {
-    #[cfg(all(not(feature = "metal"), not(feature = "cuda")))]
-    panic!("Either metal or cuda feature must be used for this example!");
+    let file = File::create("trace.pftrace").unwrap();
+    let (writer, _guard) = non_blocking(file);
+    let layer = NativeLayer::from_config(trace_config(), writer)
+        .build()
+        .unwrap();
+    let filter = EnvFilter::builder()
+        .parse(format!("{}=trace", env!("CARGO_PKG_NAME")))
+        .unwrap();
+    let layer_handle = layer.clone();
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(layer)
+        .init();
+    let (batch, hidden, intermediate, n_heads, n_kv_heads, vocab_size, max_seq_len) =
+        ('s', 4096, 14336, 32, 8, 128256, 4096);
+    let n_kv_groups = n_heads / n_kv_heads;
+    let layers: usize = 32;
+    let n_tokens: usize = 5;
 
-    let cli_args = CLIArgs::parse();
-    let tokenizer = Tokenizer::from_file("setup/tokenizer.json").unwrap();
+    let tokenizer = Tokenizer::from_file("tokenizer.json").expect("Failed to load tokenizer");
+    let input_sentence = "Hello, how are you";
+    let encoding = tokenizer
+        .encode(input_sentence, true)
+        .expect("Failed to encode");
+    let mut sentence = encoding.get_ids().to_vec();
 
-    print!("Defining graph");
-    io::stdout().flush().unwrap();
-    let now = Instant::now();
+    // Load embedding weights from safetensors
+    let embed_file = fs::read("model_combined.safetensors").unwrap();
+    let st = SafeTensors::deserialize(&embed_file).expect("Failed to deserialize safetensors");
+    let embed_data = load_safetensor(&st, "model.embed_tokens.weight");
 
-    // Set up graph
-    let mut cx = Graph::new();
-    let mut input = cx.named_tensor("Input", (1, 's'));
-    let mut cache_src: Vec<KVCache> = (0..model::NUM_LAYERS)
-        .map(|_| {
-            (
-                cx.named_tensor("Key Cache", (1, N_KV_HEADS, 'p', HEAD_DIM)),
-                cx.named_tensor("Value Cache", (1, N_KV_HEADS, 'p', HEAD_DIM)),
-            )
-        })
-        .collect();
-    cache_src.set_dyn(vec![], (1, model::N_KV_HEADS, 0, model::HEAD_DIM));
-    let model = model::Llama::new(&mut cx);
-    let mut model_weights = params(&model);
-    cx.keep_tensors(&model_weights);
-    let (logits, mut cache_dest) = model.forward((input, &cache_src));
-    let mut logits = logits
-        .slice((.., Expression::from('s') - 1.., ..))
-        .retrieve();
-    cache_dest.keep();
-    println!("\t\t - {}ms", now.elapsed().as_millis());
+    let mut cx = Graph::default();
 
-    print!("Compiling graph");
-    io::stdout().flush().unwrap();
-    let now = Instant::now();
+    let input = cx.named_tensor("input", (batch, hidden));
+    let token_ids = cx.named_tensor("token_ids", batch);
+    let model = model::Llama::init(
+        &mut cx,
+        batch,
+        hidden,
+        intermediate,
+        n_heads,
+        n_kv_heads,
+        vocab_size,
+        layers,
+    );
+    let _logits = model.forward(input, token_ids);
 
-    // Set up model loading
-    #[cfg(any(feature = "metal", feature = "cuda"))]
-    let q_weights = loader::q8_load("setup/llama3-8b.gguf", &model, &mut cx);
-    #[cfg(all(not(feature = "metal"), not(feature = "cuda")))]
-    loader::q8_load("setup/llama3-8b.gguf", &model, &mut cx);
-
-    cx.compile(
-        (
-            GenericCompiler::default(),
-            #[cfg(feature = "metal")]
-            (
-                luminal_metal::MetalCompilerPreBuffer::<f16>::default(),
-                luminal_metal::quantized::MetalQuantizedCompiler::<f16>::new(q_weights),
-                luminal_metal::BufferCompilers::default(),
-            ),
-            #[cfg(feature = "cuda")]
-            (
-                luminal_cuda::CudaCompiler::<f16>::default(),
-                luminal_cuda::CudaQuantizedCompiler::<f16>::new(q_weights),
-            ),
+    // compile
+    println!("Building E-graph...");
+    let ops = <(luminal::logical::Ops, kernel::ops::Ops, block::MKOps) as IntoEgglogOp>::into_vec();
+    cx.build_search_space(&ops);
+    let ctx = luminal_cuda::cudarc::driver::CudaContext::new(0).unwrap();
+    ctx.bind_to_thread().unwrap();
+    let stream = ctx.default_stream();
+    let mut custom_state = FxHashMap::default();
+    custom_state.insert(
+        "kv_cache".to_string(),
+        CustomState::KVCache(
+            (0..layers)
+                .map(|_| {
+                    (
+                        stream
+                            .alloc_zeros::<f32>((hidden / n_kv_groups) * max_seq_len)
+                            .unwrap(),
+                        stream
+                            .alloc_zeros::<f32>((hidden / n_kv_groups) * max_seq_len)
+                            .unwrap(),
+                    )
+                })
+                .collect_vec(),
         ),
-        (
-            &mut input,
-            &mut logits,
-            &mut cache_src,
-            &mut cache_dest,
-            &mut model_weights,
-        ),
     );
-    let cache_src = downstream(&cache_src, &cx);
-    println!("\t\t - {}ms", now.elapsed().as_millis());
+    let mut runtime = cx.search(CudaRuntime::initialize(custom_state), &ops, 10_000);
 
-    // Initial forward pass to load weights
-    print!("Loading model");
-    io::stdout().flush().unwrap();
-    let now = Instant::now();
-    input.set_dyn(vec![1.], (1, 1));
-    cx.set_dyn_dim('t', 1);
-    cx.execute();
-    logits.drop();
-    transfer_data_same_graph(&cache_dest, &cache_src, &mut cx);
-    println!("\t\t - {}ms", now.elapsed().as_millis());
+    // load weights
+    println!("Compiling...");
+    println!("Loading weights...");
+    runtime.load_safetensors("model_combined.safetensors");
 
-    // Now that weights are loaded, delete the loading nodes so they don't run again
-    delete_inputs(&cache_src, &mut cx);
-    delete_inputs(downstream(model_weights, &cx), &mut cx);
+    print!("{input_sentence}");
+    std::io::stdout().flush().unwrap();
 
-    // Run prompt processing pass
-    let input_ids = tokenizer
-        .encode(&cli_args.prompt as &str, false)
-        .unwrap()
-        .get_ids()
-        .to_vec();
-    input.set_dyn(
-        input_ids.iter().map(|i| *i as f32).collect::<Vec<_>>(),
-        (1, input_ids.len()),
-    );
-    cx.set_dyn_dim('t', input_ids.len());
-    print!("Processing Prompt");
-    io::stdout().flush().unwrap();
-    let now = Instant::now();
-    cx.execute();
-    let elapsed_ms = now.elapsed().as_millis();
-    println!(
-        "\t - {elapsed_ms}ms ({:.2} tok/s, {} prompt tokens)",
-        1000.0 * (input_ids.len() as f64) / (elapsed_ms as f64),
-        input_ids.len()
-    );
-    let mut output_ids = vec![argmax(&logits.data())];
-    logits.drop();
-
-    // Decode token
-    print!("{}", cli_args.prompt.white().bold());
-    let initial = tokenizer.decode(&output_ids, false).unwrap().bright_green();
-    print!("{initial}",);
-    io::stdout().flush().unwrap();
-
-    // Swap caches
-    transfer_data_same_graph(&cache_dest, &cache_src, &mut cx);
-
-    // Decode loop
-    let start_decode = std::time::Instant::now();
-    let mut prev_output_len = initial.len();
-    for _ in 0..cli_args.gen_tokens {
-        input.set_dyn(vec![*output_ids.last().unwrap() as f32], (1, 1));
-        cx.set_dyn_dim('p', input_ids.len() + output_ids.len() - 1);
-        cx.execute();
-
-        // Sample tokens
-        let output_id = argmax(&logits.data());
-        logits.drop();
-        output_ids.push(output_id);
-
-        // Get the current decoded output
-        let current_output = tokenizer.decode(&output_ids, false).unwrap();
-
-        // Print the new substring added to the decoded output
-        let legal_byte_num = utf8_legal_byte_num(current_output.as_bytes()[prev_output_len]);
-        if let Some(byte_num) = legal_byte_num {
-            if current_output.len() > legal_byte_num.unwrap() + prev_output_len {
-                print!(
-                    "{}",
-                    current_output[prev_output_len..prev_output_len + byte_num].bright_green()
-                );
-                io::stdout().flush().unwrap();
-
-                // Update the previous output
-                prev_output_len += byte_num
-            }
+    let mut timings = vec![];
+    let mut start_times = vec![];
+    let mut prev_seq = 0;
+    for i in 0..n_tokens {
+        let span = if i == 0 {
+            span!(Level::INFO, "prefill")
+        } else {
+            span!(Level::INFO, "decode")
+        };
+        let _entered = span.enter();
+        // Embed the tokenized sequence
+        let seq_len = sentence.len();
+        cx.set_dyn_dim('s', seq_len);
+        cx.set_dyn_dim('p', prev_seq);
+        let mut embeddings = vec![0.0f32; seq_len * hidden];
+        for (i, &token_id) in sentence.iter().enumerate() {
+            let start = token_id as usize * hidden;
+            let end = start + hidden;
+            embeddings[i * hidden..(i + 1) * hidden].copy_from_slice(&embed_data[start..end]);
         }
-        // Swap caches
-        transfer_data_same_graph(&cache_dest, &cache_src, &mut cx);
-    }
 
+        let mut inputs = FxHashMap::default();
+        inputs.insert(input.id.index(), embeddings);
+        inputs.insert(
+            token_ids.id.index(),
+            (prev_seq..seq_len + prev_seq).map(|i| i as f32).collect(),
+        );
+        runtime.update_buffers(block::allocate_input_buffers(
+            &stream,
+            &inputs,
+            &runtime.llir_graph,
+        ));
+        if i < 2 {
+            // Re-allocate intermediate buffers
+            runtime.update_buffers(block::allocate_intermediate_buffers(
+                &stream,
+                &runtime.llir_graph,
+                &cx.dyn_map,
+            ));
+        }
+
+        runtime.execute(&cx.dyn_map);
+        // timings.push(new_timings);
+        // start_times.push(new_start_time);
+        let outs = runtime.dtoh_outputs();
+        // if let Some(CustomState::DebugBuffers(debug_buffers)) = custom_state.remove("debug") {
+        //     print_debug_buffers(debug_buffers);
+        // }
+
+        let sample_span = span!(Level::INFO, "sample");
+        let _sample_entered = sample_span.enter();
+        sentence = vec![*sample(&outs[0], vocab_size).last().unwrap()];
+        prev_seq += seq_len;
+        print!("{}", tokenizer.decode(&sentence, true).unwrap());
+        std::io::stdout().flush().unwrap();
+    }
     println!();
-    let avg_token_time =
-        start_decode.elapsed().as_micros() as f32 / (output_ids.len() - 1) as f32 / 1000.0;
-    println!(
-        "\nAverage token generated in {:.2}ms\t - ({:.2} tok/s)",
-        avg_token_time,
-        1000.0 / avg_token_time
+
+    layer_handle
+        .flush(Duration::from_secs(5), Duration::from_secs(5))
+        .unwrap();
+    layer_handle.stop().unwrap();
+    drop(_guard);
+    record_exec_timings_to_file(
+        &timings,
+        &start_times,
+        &<block::MKOps as IntoBlockOp>::into_vec(),
+        "trace.pftrace",
     );
 }
 
-// Currently just an argmax, do actual sampling here
-fn argmax(dist: &[f32]) -> u32 {
-    dist.iter()
-        .position_max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap() as u32
-}
-
-/// return utf8 char num corresponding to start byte, if it's not a start byte return [`None`]
-fn utf8_legal_byte_num(byte: u8) -> Option<usize> {
-    match byte {
-        // ASCII  (0xxxxxxx)
-        0x00..=0x7F => Some(1),
-        // char of 2 bytes (110xxxxx)
-        0xC0..=0xDF => Some(2),
-        // char of 3 bytes (1110xxxx)
-        0xE0..=0xEF => Some(3),
-        // char of 4 bytes (11110xxx)
-        0xF0..=0xF7 => Some(4),
-        // not a start byte
-        _ => None,
-    }
+#[tracing::instrument(skip_all)]
+fn sample(logits: &[f32], vocab_size: usize) -> Vec<u32> {
+    logits
+        .iter()
+        .chunks(vocab_size)
+        .into_iter()
+        .map(|logits| {
+            logits
+                .into_iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap()
+                .0 as u32
+        })
+        .collect()
 }

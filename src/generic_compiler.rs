@@ -133,12 +133,7 @@ impl Compiler for RemoveSingleReductions {
                     .map(|e| {
                         e.weight()
                             .as_data()
-                            .map(|w| {
-                                w.2.dims[w.2.indexes[dim]]
-                                    .to_usize()
-                                    .map(|i| i == 1)
-                                    .unwrap_or_default()
-                            })
+                            .map(|w| w.2.dims[dim].to_usize().map(|i| i == 1).unwrap_or_default())
                             .unwrap_or_default()
                     })
                     .unwrap_or_default()
@@ -267,13 +262,13 @@ impl Compiler for ArithmeticElimination {
                 .find_map(|e| e.weight().as_data())
                 .unwrap()
                 .2;
-            if input_shape.is_reshaped() {
+            if !input_shape.is_contiguous() {
                 // If any output shape is non-contiguous, we need to keep the op for it's contiguous functionality TODO: replace with explicit contiguous op here
                 if graph
                     .graph
                     .edges_connecting(inp, add)
                     .filter_map(|e| e.weight().as_data())
-                    .any(|(_, _, sh)| sh.is_reshaped())
+                    .any(|(_, _, sh)| !sh.is_contiguous())
                 {
                     continue;
                 }
@@ -332,13 +327,13 @@ impl Compiler for ArithmeticElimination {
                 .find_map(|e| e.weight().as_data())
                 .unwrap()
                 .2;
-            if input_shape.is_reshaped() {
+            if !input_shape.is_contiguous() {
                 // If any output shape is non-contiguous, we need to keep the op for it's contiguous functionality TODO: replace with explicit contiguous op here
                 if graph
                     .graph
                     .edges_connecting(inp, mul)
                     .filter_map(|e| e.weight().as_data())
-                    .any(|(_, _, sh)| sh.is_reshaped())
+                    .any(|(_, _, sh)| !sh.is_contiguous())
                 {
                     continue;
                 }
@@ -384,18 +379,18 @@ impl Compiler for ArithmeticElimination {
                 .find_map(|e| e.weight().as_data())
                 .unwrap()
                 .2;
-            if input_shape.is_reshaped() {
+            if !input_shape.is_contiguous() {
                 // If any output shape is non-contiguous, we need to keep the op for it's contiguous functionality TODO: replace with explicit contiguous op here
                 if graph
                     .graph
                     .edges_connecting(inp, intermediate)
                     .filter_map(|e| e.weight().as_data())
-                    .any(|(_, _, sh)| sh.is_reshaped())
+                    .any(|(_, _, sh)| !sh.is_contiguous())
                     || graph
                         .graph
                         .edges_connecting(intermediate, out)
                         .filter_map(|e| e.weight().as_data())
-                        .any(|(_, _, sh)| sh.is_reshaped())
+                        .any(|(_, _, sh)| !sh.is_contiguous())
                 {
                     continue;
                 }
@@ -443,18 +438,18 @@ impl Compiler for ArithmeticElimination {
                 .find_map(|e| e.weight().as_data())
                 .unwrap()
                 .2;
-            if input_shape.is_reshaped() {
+            if !input_shape.is_contiguous() {
                 // If any output shape is non-contiguous, we need to keep the op for it's contiguous functionality TODO: replace with explicit contiguous op here
                 if graph
                     .graph
                     .edges_connecting(inp, intermediate)
                     .filter_map(|e| e.weight().as_data())
-                    .any(|(_, _, sh)| sh.is_reshaped())
+                    .any(|(_, _, sh)| !sh.is_contiguous())
                     || graph
                         .graph
                         .edges_connecting(intermediate, out)
                         .filter_map(|e| e.weight().as_data())
-                        .any(|(_, _, sh)| sh.is_reshaped())
+                        .any(|(_, _, sh)| !sh.is_contiguous())
                 {
                     continue;
                 }

@@ -416,10 +416,7 @@ impl Graph {
                     new_graph
                         .node_weight_mut(id_map[&edge.target()])
                         .unwrap()
-                        .push_str(&format!(
-                            " | {:?}",
-                            edge.weight().as_data().unwrap().2.dims()
-                        ));
+                        .push_str(&format!(" | {:?}", edge.weight().as_data().unwrap().2.dims));
                 }
             }
         }
@@ -763,7 +760,7 @@ fn test_node(
             if a_sh.len() != b_sh.dims.len() {
                 return false;
             }
-            for (a, b) in a_sh.iter().zip(b_sh.dims().into_iter()) {
+            for (a, b) in a_sh.iter().zip(b_sh.dims.into_iter()) {
                 match a.to_usize() {
                     Some(n) => {
                         if b.to_usize().map(|i| i != n).unwrap_or(true) {
@@ -790,7 +787,7 @@ fn test_node(
     // Test fakes
     if let Some(fakes) = fake {
         for (a_sh, b_sh) in fakes.iter().zip(input_shapes.iter()) {
-            for (a, b) in a_sh.iter().zip(b_sh.indexes.iter().map(|i| b_sh.fake[*i])) {
+            for (a, b) in a_sh.iter().zip(b_sh.strides.iter().map(|i| *i == 0)) {
                 if let Some(a) = a {
                     if *a != b {
                         return false;

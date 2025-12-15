@@ -13,11 +13,11 @@ use super::assert_close;
 #[test]
 fn test_movement() {
     let mut cx = Graph::new();
-    let a = cx.tensor((3, 'a', 2)).set_dyn(
+    let a = cx.tensor((3, 2, 'a')).set_dyn(
         vec![1., 2., 3., 1., 2., 3., 1., 2., 3., 1., 2., 3.],
         (3, 2, 2),
     );
-    let b = a.reshape((6, 'a')).permute((1, 0)).keep().retrieve();
+    let b = a.merge_dims(0, 1).permute((1, 0)).keep().retrieve();
 
     cx.execute();
 

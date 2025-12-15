@@ -1,259 +1,298 @@
-use luminal::prelude::{binary::F32Pow, *};
-use luminal_nn::{Embedding, LayerNorm, Linear};
-
-// Llama3 8B Config
-pub const VOCAB_SIZE: usize = 128256;
-pub const HIDDEN_DIM: usize = 4096;
-pub const NUM_LAYERS: usize = 32;
-pub const N_HEADS: usize = 32;
-pub const N_KV_HEADS: usize = 8;
-pub const MLP_DIM: usize = 14336;
-
-pub const N_ATTENTION_GROUPS: usize = N_HEADS / N_KV_HEADS;
-pub const HEAD_DIM: usize = HIDDEN_DIM / N_HEADS;
-pub const ATTN_PROJ_DIM: usize = HEAD_DIM * N_KV_HEADS;
-
-pub type KVCache = (GraphTensor, GraphTensor);
-
-pub struct Mlp {
-    pub gate_proj: Linear, // hidden -> intermediate
-    pub down_proj: Linear, // intermediate -> hidden
-    pub up_proj: Linear,   // hidden -> intermediate
-}
-
-impl Module<GraphTensor> for Mlp {
-    type Output = GraphTensor;
-
-    fn forward(&self, input: GraphTensor) -> Self::Output {
-        let gate = self.gate_proj.forward(input).swish();
-        let up = self.up_proj.forward(input) * gate;
-        self.down_proj.forward(up)
-    }
-}
-
-impl Mlp {
-    pub fn new(hidden: usize, intermediate: usize, cx: &mut Graph) -> Self {
-        Self {
-            gate_proj: Linear::new_permuted(hidden, intermediate, false, cx),
-            down_proj: Linear::new_permuted(intermediate, hidden, false, cx),
-            up_proj: Linear::new_permuted(hidden, intermediate, false, cx),
-        }
-    }
-}
-
-impl SerializeModule for Mlp {
-    fn serialize(&self, s: &mut Serializer) {
-        s.module("ffn_gate", &self.gate_proj);
-        s.module("ffn_up", &self.up_proj);
-        s.module("ffn_down", &self.down_proj);
-    }
-}
-
-fn apply_rotary_embeddings_ggml(input: GraphTensor, prev_seq: Expression) -> GraphTensor {
-    assert_eq!(input.shape.len(), 4); // batch, n_heads, seq, head_dim
-    let (batch, n_heads, seq, head_dim) = input.dims4();
-    // Get freqs
-    let freqs = (input.graph().arange(head_dim / 2) * 2.0) / (head_dim.to_usize().unwrap() as f32);
-    let inv_freqs = 500_000_f32.pow(freqs).reciprocal();
-    let pos = input.graph().arange(seq) + prev_seq;
-    let emb = pos.expand_dim(1, 1).matmul(inv_freqs.expand_dim(0, 1));
-
-    // Split input into evens and odds
-    let split = input.reshape((batch, n_heads, seq, head_dim / 2, 2));
-    let x0 = split.slice((.., .., .., .., ..1));
-    let x1 = split.slice((.., .., .., .., 1..));
-
-    // Apply sin and cos embeddings
-    let x0_out = x0 * emb.cos().expand(x0.shape) - x1 * emb.sin().expand(x1.shape);
-    let x1_out = x0 * emb.sin().expand(x0.shape) + x1 * emb.cos().expand(x1.shape);
-
-    // Combine back into output
-    x0_out.concat_along(x1_out, 4).reshape(input.shape)
-}
-
-pub struct SelfAttention {
-    pub q_proj: GraphTensor, // Hidden -> hidden
-    pub k_proj: GraphTensor, // Proj dim -> hidden
-    pub v_proj: GraphTensor, // Proj dim -> hidden
-    pub o_proj: GraphTensor, // Hidden -> hidden
-}
-
-impl Module<(GraphTensor, KVCache)> for SelfAttention {
-    type Output = (GraphTensor, KVCache);
-    fn forward(&self, (x, (k_cache, v_cache)): (GraphTensor, KVCache)) -> Self::Output {
-        // x: batch, seq, hidden
-        // cache: batch, kv_heads, prev_seq, head_dim
-        let (batch, seq, _) = x.dims3();
-        let (_, _, prev_seq, _) = k_cache.dims4();
-        // Apply the Projections
-        let queries = x
-            .matmul(self.q_proj.permute((1, 0)))
-            .reshape((batch, seq, N_HEADS, HEAD_DIM))
-            .permute((0, 2, 1, 3));
-
-        let keys = x
-            .matmul(self.k_proj.permute((1, 0)))
-            .reshape((batch, seq, N_KV_HEADS, HEAD_DIM))
-            .permute((0, 2, 1, 3));
-
-        let values = x
-            .matmul(self.v_proj.permute((1, 0)))
-            .reshape((batch, seq, N_KV_HEADS, HEAD_DIM))
-            .permute((0, 2, 1, 3));
-
-        // Rotary embed queries and keys
-        let queries = apply_rotary_embeddings_ggml(queries, prev_seq);
-        let keys = apply_rotary_embeddings_ggml(keys, prev_seq);
-
-        // Add KV cache
-        let keys = k_cache.concat_along(keys, 2);
-        let values = v_cache.concat_along(values, 2);
-
-        // Repeat the KV States for Grouped-Query Attention
-        let repeated_keys = keys.expand_dim(2, N_ATTENTION_GROUPS);
-        let repeated_values = values.expand_dim(2, N_ATTENTION_GROUPS);
-
-        // Calculate attention weights
-        let mut attention_weights = queries
-            .reshape((batch, N_KV_HEADS, N_ATTENTION_GROUPS, seq, HEAD_DIM)) // Split query heads into groups
-            .matmul(repeated_keys.permute((0, 1, 2, 4, 3)))
-            / (HEAD_DIM as f32).sqrt();
-
-        let attention_mask = self.k_proj.graph().triu(seq, 1) * f16::MIN.to_f32();
-        attention_weights += attention_mask
-            .pad(((0, 0), (prev_seq, 0)))
-            .expand_dim(0, batch)
-            .expand_dim(1, N_KV_HEADS)
-            .expand_dim(2, N_ATTENTION_GROUPS);
-
-        // Calculate final outputs
-        let output = attention_weights
-            .softmax(4)
-            // Apply distribution to values
-            .matmul(repeated_values)
-            // Merge heads
-            .permute((0, 3, 1, 2, 4))
-            .reshape((batch, seq, HIDDEN_DIM));
-        let output = output
-            // Apply output projection
-            .matmul(self.o_proj.permute((1, 0)));
-        (output, (keys.contiguous(), values.contiguous())) // Cache needs to be contiguous for transferring to another graph
-    }
-}
-
-impl SelfAttention {
-    pub fn new(cx: &mut Graph) -> Self {
-        Self {
-            q_proj: cx.named_tensor("Q Proj", (HIDDEN_DIM, HIDDEN_DIM)),
-            k_proj: cx.named_tensor("K Proj", (ATTN_PROJ_DIM, HIDDEN_DIM)),
-            v_proj: cx.named_tensor("V Proj", (ATTN_PROJ_DIM, HIDDEN_DIM)),
-            o_proj: cx.named_tensor("O Proj", (HIDDEN_DIM, HIDDEN_DIM)),
-        }
-    }
-}
-
-impl SerializeModule for SelfAttention {
-    fn serialize(&self, s: &mut Serializer) {
-        s.tensor("attn_q/weight", self.q_proj);
-        s.tensor("attn_v/weight", self.v_proj);
-        s.tensor("attn_k/weight", self.k_proj);
-        s.tensor("attn_output/weight", self.o_proj);
-    }
-}
-
-pub struct TransformerBlock {
-    pub attention: SelfAttention,
-    pub attention_norm: LayerNorm,
-    pub feed_forward: Mlp,
-    pub feed_forward_norm: LayerNorm,
-}
-
-impl Module<(GraphTensor, KVCache)> for TransformerBlock {
-    type Output = (GraphTensor, KVCache);
-    fn forward(&self, (mut x, cache): (GraphTensor, KVCache)) -> Self::Output {
-        // Attention
-        let (y, cache) = self
-            .attention
-            .forward((self.attention_norm.forward(x), cache));
-
-        // Residual
-        x += y;
-
-        // Feed Forward
-        let y = self.feed_forward.forward(self.feed_forward_norm.forward(x));
-
-        // Residual
-        (x + y, cache)
-    }
-}
-
-impl TransformerBlock {
-    pub fn new(cx: &mut Graph) -> Self {
-        Self {
-            attention: SelfAttention::new(cx),
-            attention_norm: LayerNorm::new(HIDDEN_DIM, true, false, false, 1e-5, cx),
-            feed_forward: Mlp::new(HIDDEN_DIM, MLP_DIM, cx),
-            feed_forward_norm: LayerNorm::new(HIDDEN_DIM, true, false, false, 1e-5, cx),
-        }
-    }
-}
-
-impl SerializeModule for TransformerBlock {
-    fn serialize(&self, s: &mut Serializer) {
-        s.module("", &self.attention);
-        s.module("attn_norm", &self.attention_norm);
-        s.module("ffn_norm", &self.feed_forward_norm);
-        s.module("", &self.feed_forward);
-    }
-}
+use luminal::{
+    graph::{shape_to_egglog, strides_to_egglog, Graph},
+    module::Module,
+    op::Operator,
+    prelude::GraphTensor,
+    shape::{Expression, ShapeTracker},
+};
+use luminal_nn::LayerNorm;
+use std::fmt::Debug;
 
 pub struct Llama {
-    // Token embeddings
-    pub embedding: Embedding,
-    // Transformer layers
-    pub layers: Vec<TransformerBlock>,
-    // Norm + LM head
-    pub head: (LayerNorm, Linear),
-}
-
-impl Module<(GraphTensor, &[KVCache])> for Llama {
-    type Output = (GraphTensor, Vec<KVCache>);
-    fn forward(&self, (input, cache): (GraphTensor, &[KVCache])) -> Self::Output {
-        // Embed tokens
-        let mut x = self.embedding.forward(input);
-
-        // Run through layers and collect new caches
-        let mut new_caches = vec![];
-        let mut new_cache;
-        for (i, layer) in self.layers.iter().enumerate() {
-            (x, new_cache) = layer.forward((x, cache[i]));
-            new_caches.push(new_cache);
-        }
-        // Run through last norm and output projection
-        (self.head.forward(x), new_caches)
-    }
+    layers: Vec<LlamaLayer>,
+    lm_norm: LayerNorm,
+    lm_head: GraphTensor,
 }
 
 impl Llama {
-    pub fn new(cx: &mut Graph) -> Self {
-        Self {
-            embedding: Embedding::new(VOCAB_SIZE, HIDDEN_DIM, cx),
-            head: (
-                LayerNorm::new(HIDDEN_DIM, true, false, false, 1e-5, cx),
-                Linear::new_permuted(HIDDEN_DIM, VOCAB_SIZE, false, cx),
-            ),
-            layers: (0..NUM_LAYERS).map(|_| TransformerBlock::new(cx)).collect(),
+    pub fn init(
+        cx: &mut Graph,
+        batch: impl Into<Expression>,
+        hidden: usize,
+        intermediate: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        vocab_size: usize,
+        layers: usize,
+    ) -> Self {
+        let batch = batch.into();
+        let mut w = vec![];
+        let n_kv_groups = n_heads / n_kv_heads;
+        for l in 0..layers {
+            w.push(LlamaLayer {
+                up: cx.named_tensor(
+                    &format!("model.layers.{l}.mlp.up_proj.weight"),
+                    (intermediate, hidden),
+                ),
+                gate: cx.named_tensor(
+                    &format!("model.layers.{l}.mlp.gate_proj.weight"),
+                    (intermediate, hidden),
+                ),
+                down: cx.named_tensor(
+                    &format!("model.layers.{l}.mlp.down_proj.weight"),
+                    (hidden, intermediate),
+                ),
+                q_proj: cx.named_tensor(
+                    &format!("model.layers.{l}.self_attn.q_proj.weight"),
+                    (hidden, hidden),
+                ),
+                k_proj: cx.named_tensor(
+                    &format!("model.layers.{l}.self_attn.k_proj.weight"),
+                    (hidden / n_kv_groups, hidden),
+                ),
+                v_proj: cx.named_tensor(
+                    &format!("model.layers.{l}.self_attn.v_proj.weight"),
+                    (hidden / n_kv_groups, hidden),
+                ),
+                o_proj: cx.named_tensor(
+                    &format!("model.layers.{l}.self_attn.o_proj.weight"),
+                    (hidden, hidden),
+                ),
+                attn_rms: LayerNorm::new(
+                    hidden,
+                    Some(&format!("model.layers.{l}.input_layernorm.weight")),
+                    None,
+                    false,
+                    1e-5,
+                    cx,
+                ),
+                mlp_rms: LayerNorm::new(
+                    hidden,
+                    Some(&format!("model.layers.{l}.post_attention_layernorm.weight")),
+                    None,
+                    false,
+                    1e-5,
+                    cx,
+                ),
+                batch,
+                hidden,
+                n_heads,
+                n_kv_heads,
+                layer: l,
+            });
         }
+        let lm_norm = LayerNorm::new(hidden, Some("model.norm.weight"), None, false, 1e-5, cx);
+        let lm_head = cx.named_tensor("lm_head.weight", (vocab_size, hidden));
+        Self {
+            layers: w,
+            lm_head,
+            lm_norm,
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn forward(&self, input: GraphTensor, token_ids: GraphTensor) -> GraphTensor {
+        let mut x = input;
+        for layer in &self.layers {
+            x = layer.forward(x, token_ids);
+        }
+        self.lm_norm.forward(x).matmul(self.lm_head.transpose(0, 1))
     }
 }
 
-impl SerializeModule for Llama {
-    fn serialize(&self, s: &mut Serializer) {
-        s.module("token_embd", &self.embedding);
-        s.module("output_norm", &self.head.0);
-        s.module("output", &self.head.1);
-        for (i, layer) in self.layers.iter().enumerate() {
-            s.module(&format!("blk/{i}"), layer);
-        }
+struct LlamaLayer {
+    up: GraphTensor,
+    gate: GraphTensor,
+    down: GraphTensor,
+    q_proj: GraphTensor,
+    k_proj: GraphTensor,
+    v_proj: GraphTensor,
+    o_proj: GraphTensor,
+    attn_rms: LayerNorm,
+    mlp_rms: LayerNorm,
+    batch: Expression,
+    hidden: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
+    layer: usize,
+}
+
+impl LlamaLayer {
+    pub fn forward(&self, input: GraphTensor, token_ids: GraphTensor) -> GraphTensor {
+        let cx = input.graph();
+        let x_attn = self.attn_rms.forward(input);
+        let q = x_attn.matmul(self.q_proj.transpose(0, 1));
+        let k = x_attn.matmul(self.k_proj.transpose(0, 1));
+        let v = x_attn.matmul(self.v_proj.transpose(0, 1));
+        let q_rope = GraphTensor::from_id(
+            cx.add_op(RopeFrontendOp {
+                range: vec![Expression::from(self.batch)],
+                stride: vec![Expression::from('z') * self.hidden],
+                row_width: Expression::from(self.hidden),
+            })
+            .input(q.id, 0, q.shape)
+            .input(token_ids.id, 0, token_ids.shape)
+            .finish(),
+            q.shape,
+            cx,
+        );
+        let n_kv_groups = self.n_heads / self.n_kv_heads;
+        let k_rope = GraphTensor::from_id(
+            cx.add_op(RopeFrontendOp {
+                range: vec![Expression::from(self.batch)],
+                stride: vec![Expression::from('z') * (self.hidden / n_kv_groups)],
+                row_width: Expression::from(self.hidden / n_kv_groups),
+            })
+            .input(k.id, 0, k.shape)
+            .input(token_ids.id, 0, token_ids.shape)
+            .finish(),
+            k.shape,
+            cx,
+        );
+
+        let attn_out = GraphTensor::from_id(
+            cx.add_op(GQAAttentionFrontendOp {
+                head_dim: 128,
+                prev_seq: 'p'.into(),
+                layer: self.layer,
+            })
+            .input(q_rope.id, 0, q_rope.shape)
+            .input(k_rope.id, 0, k_rope.shape)
+            .input(v.id, 0, v.shape)
+            .finish(),
+            ShapeTracker::new((self.batch, self.hidden)),
+            cx,
+        );
+        let attn_out = attn_out.matmul(self.o_proj.transpose(0, 1));
+        let resid1 = input + attn_out;
+        let x_mlp = self.mlp_rms.forward(resid1);
+        resid1
+            + (x_mlp.matmul(self.gate.transpose(0, 1)).swish()
+                * x_mlp.matmul(self.up.transpose(0, 1)))
+            .matmul(self.down.transpose(0, 1))
     }
+}
+
+#[derive(Debug)]
+pub struct RopeFrontendOp {
+    pub range: Vec<Expression>,
+    pub stride: Vec<Expression>,
+    pub row_width: Expression,
+}
+
+impl Operator for RopeFrontendOp {
+    fn process(
+        &mut self,
+        _inp: Vec<(
+            luminal::prelude::InputTensor,
+            luminal::prelude::ShapeTracker,
+        )>,
+    ) -> Vec<luminal::prelude::Tensor> {
+        todo!()
+    }
+
+    fn to_egglog(
+        &self,
+        inputs: &Vec<(luminal::prelude::NodeIndex, String, ShapeTracker)>,
+    ) -> String {
+        format!(
+            "(RowRope {} {} {} {} {})",
+            shape_to_egglog(&self.range),
+            inputs[0].1,
+            strides_to_egglog(&self.stride),
+            self.row_width.to_egglog(),
+            inputs[1].1,
+        )
+    }
+}
+
+#[derive(Debug)]
+pub struct PrintFrontendOp {
+    pub path: String,
+}
+
+impl Operator for PrintFrontendOp {
+    fn process(
+        &mut self,
+        _inp: Vec<(
+            luminal::prelude::InputTensor,
+            luminal::prelude::ShapeTracker,
+        )>,
+    ) -> Vec<luminal::prelude::Tensor> {
+        todo!()
+    }
+
+    fn to_egglog(&self, _: &Vec<(luminal::prelude::NodeIndex, String, ShapeTracker)>) -> String {
+        todo!()
+    }
+}
+
+#[derive(Debug)]
+pub struct GQAAttentionFrontendOp {
+    pub head_dim: usize,
+    pub prev_seq: Expression,
+    pub layer: usize,
+}
+
+impl Operator for GQAAttentionFrontendOp {
+    fn process(
+        &mut self,
+        _inp: Vec<(
+            luminal::prelude::InputTensor,
+            luminal::prelude::ShapeTracker,
+        )>,
+    ) -> Vec<luminal::prelude::Tensor> {
+        todo!()
+    }
+
+    fn to_egglog(
+        &self,
+        inputs: &Vec<(luminal::prelude::NodeIndex, String, ShapeTracker)>,
+    ) -> String {
+        let seq = inputs[0].2.dims[0];
+        let hidden = inputs[0].2.dims[1].to_usize().unwrap();
+        let kv_hidden = inputs[1].2.dims[1].to_usize().unwrap();
+        let kv_row_width = inputs[1].2.dims[1].to_usize().unwrap();
+        let n_heads = hidden / self.head_dim;
+        let n_kv_heads = kv_hidden / self.head_dim;
+        let n_kv_groups = n_heads / n_kv_heads;
+        format!(
+            "(GQAAttention {} {} {} {} {} {} {} {} {} {} {} {} {})",
+            shape_to_egglog(&[n_kv_heads.into(), n_kv_groups.into(), seq]),
+            Expression::from(self.head_dim).to_egglog(),
+            seq.to_egglog(),
+            Expression::from(kv_row_width).to_egglog(),
+            inputs[0].1,
+            strides_to_egglog(&[
+                Expression::from(self.head_dim * n_kv_groups) * 'z',
+                Expression::from(self.head_dim) * 'z',
+                Expression::from(hidden) * 'z'
+            ]),
+            inputs[1].1,
+            strides_to_egglog(&[Expression::from(self.head_dim) * 'z', 0.into(), 0.into()]),
+            inputs[2].1,
+            strides_to_egglog(&[Expression::from(self.head_dim) * 'z', 0.into(), 0.into()]),
+            strides_to_egglog(&[
+                Expression::from(self.head_dim * n_kv_groups) * 'z',
+                Expression::from(self.head_dim) * 'z',
+                Expression::from(hidden) * 'z'
+            ]),
+            self.prev_seq.to_egglog(),
+            self.layer,
+        )
+    }
+}
+
+#[allow(unused)]
+fn print_tensor(tensor: GraphTensor, path: impl ToString) -> GraphTensor {
+    let cx = tensor.graph();
+    GraphTensor::from_id(
+        cx.add_op(PrintFrontendOp {
+            path: path.to_string(),
+        })
+        .input(tensor.id, 0, tensor.shape)
+        .finish(),
+        tensor.shape,
+        cx,
+    )
 }

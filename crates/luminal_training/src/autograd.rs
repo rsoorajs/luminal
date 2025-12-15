@@ -9,7 +9,7 @@ use luminal::{
         Add, Contiguous, Exp2, Function, LessThan, Log2, MaxReduce, Mod, Mul, Recip, Sin, Sqrt,
         SumReduce,
     },
-    prelude::{tinyvec::ArrayVec, *},
+    prelude::*,
 };
 
 #[derive(Clone, Debug)]
@@ -123,9 +123,7 @@ impl Compiler for Autograd {
                 // f(x) = sum_reduce(x)
                 // f'(x) = 1
                 if valid_set.contains(&inps[0].id) {
-                    prev_grad
-                        .shape
-                        .expand_dim(op.0, inps[0].shape.dims[inps[0].shape.indexes[op.0]]);
+                    prev_grad.shape.expand_dim(op.0, inps[0].shape.dims[op.0]);
                     add_grad(prev_grad, inps[0], graph, &mut grads);
                 }
             } else if let Some(op) = unsafe { graph_ref.as_ref().unwrap() } // Needed to get around multiple borrows
@@ -136,9 +134,7 @@ impl Compiler for Autograd {
                 // f'(x) = x == max_reduce(x)
                 if valid_set.contains(&inps[0].id) {
                     // fwd_nod is already max_reduce(x)
-                    prev_grad
-                        .shape
-                        .expand_dim(op.0, inps[0].shape.dims[inps[0].shape.indexes[op.0]]);
+                    prev_grad.shape.expand_dim(op.0, inps[0].shape.dims[op.0]);
                     let reduced = GraphTensor::from_id(fwd_node, prev_grad.shape, graph_ref);
                     let grad = inps[0].eq(reduced) * prev_grad;
                     add_grad(grad, inps[0], graph, &mut grads);
@@ -190,17 +186,17 @@ fn add_grad(
     grad_map: &mut FxHashMap<NodeIndex, (NodeIndex, ShapeTracker)>,
 ) {
     // Reshape gradient to match the shape of the input source (before the input was reshaped)
-    // Undo permutes
-    let mut new_indexes = ArrayVec::new();
-    new_indexes.resize(fwd.shape.len(), 0);
-    for i in 0..fwd.shape.len() {
-        new_indexes[fwd.shape.indexes[i]] = grad.shape.indexes[i];
-    }
-    grad.shape.indexes = new_indexes;
+    // // Undo permutes
+    // let mut new_indexes = ArrayVec::new();
+    // new_indexes.resize(fwd.shape.len(), 0);
+    // for i in 0..fwd.shape.len() {
+    //     new_indexes[fwd.shape.indexes[i]] = grad.shape.indexes[i];
+    // }
+    // grad.shape.indexes = new_indexes;
 
     // Undo expands (sum reduce)
-    for i in fwd.shape.indexes.into_iter().rev() {
-        if fwd.shape.fake[i] {
+    for i in (0..fwd.shape.len()).rev() {
+        if fwd.shape.strides[i] == 0 {
             grad.id = graph
                 .add_op(SumReduce(i))
                 .input(grad.id, 0, grad.shape)
@@ -217,7 +213,7 @@ fn add_grad(
         } else if let Some(MaxReduce(dim)) = graph.try_get_op(fwd.id) {
             pre_fwd_shape.remove_dim(*dim);
         }
-        if grad.shape.dims() != pre_fwd_shape.dims() {
+        if grad.shape.dims != pre_fwd_shape.dims {
             if !grad.shape.is_contiguous() {
                 grad = grad.contiguous();
             }
@@ -360,195 +356,5 @@ mod tests {
         assert_close(&b.data(), &d_b.as_vec());
         let d_grads = d_b.backward();
         assert_close(&get_vec(grads[0], &mut cx), &d_grads.get(&d_a).as_vec());
-    }
-
-    #[test]
-    fn test_autograd_transformer() {
-        let mut cx = Graph::new();
-        let model = luminal_nn::TransformerEncoderBlock::new(3, 4, 1, &mut cx);
-        model
-            .attention
-            .w_k
-            .weight
-            .set(vec![1., 22., 3., 1., 2., 3., 1., 2., 3.]);
-        model
-            .attention
-            .w_q
-            .weight
-            .set(vec![3., 2., 3., 1.3, 2., 3., 3., 2., 3.]);
-        model
-            .attention
-            .w_v
-            .weight
-            .set(vec![-1., 12., 3., -1., 2., -3., 11., 2., 3.]);
-        model
-            .attention
-            .w_o
-            .weight
-            .set(vec![1., 22., 3., 1., 2., 3., 1., 2., 3.]);
-        model
-            .ff
-            .0
-            .weight
-            .set(vec![-1., 12., 3., -1., 2., -3., 11., 2., 3., 11., 2., 3.]);
-        model
-            .ff
-            .2
-            .weight
-            .set(vec![-1., 12., 3., -1., 2., -3., 11., 2., 3., 3., -1., 2.]);
-
-        let a = cx.tensor((2, 3)).set([[-1., 2., 3.], [3., 3., -1.]]);
-        let target = cx.tensor((2, 3)).set([[0., 1., 0.], [0., 0., 1.]]);
-        let out = model.forward(a);
-        let mut loss = crate::cross_entropy_with_logits_loss(out, target).retrieve();
-
-        let mut model_params = params(&model);
-        let mut grads = cx.compile(
-            Autograd::new((&model_params, a), loss),
-            (&mut model_params, &mut loss),
-        );
-        cx.keep_tensors(&grads);
-        cx.compile(
-            GenericCompiler::default(),
-            (&mut model_params, &mut grads, &mut loss),
-        );
-        cx.execute();
-
-        let d_dev = Cpu::default();
-        let mut d_model = d_dev
-            .build_module::<dfdx::nn::modules::builders::TransformerEncoderBlock<3, 1, 4>, f32>();
-        d_model.self_attn.w_k.bias.copy_from(&[0.0, 0.0, 0.0]);
-        d_model.self_attn.w_v.bias.copy_from(&[0.0, 0.0, 0.0]);
-        d_model.self_attn.w_q.bias.copy_from(&[0.0, 0.0, 0.0]);
-        d_model.self_attn.w_o.bias.copy_from(&[0., 0., 0.]);
-        d_model.self_attn.w_o.weight = d_dev
-            .tensor_from_vec(
-                vec![1., 22., 3., 1., 2., 3., 1., 2., 3.],
-                (DConst::<3>, DConst::<3>),
-            )
-            .permute();
-        d_model.self_attn.w_k.weight = d_dev
-            .tensor_from_vec(
-                vec![1., 22., 3., 1., 2., 3., 1., 2., 3.],
-                (DConst::<3>, DConst::<3>),
-            )
-            .permute();
-        d_model.self_attn.w_q.weight = d_dev
-            .tensor_from_vec(
-                vec![3., 2., 3., 1.3, 2., 3., 3., 2., 3.],
-                (DConst::<3>, DConst::<3>),
-            )
-            .permute();
-        d_model.self_attn.w_v.weight = d_dev
-            .tensor_from_vec(
-                vec![-1., 12., 3., -1., 2., -3., 11., 2., 3.],
-                (DConst::<3>, DConst::<3>),
-            )
-            .permute();
-        d_model.ff.0 .0.weight = d_dev
-            .tensor_from_vec(
-                vec![-1., 12., 3., -1., 2., -3., 11., 2., 3., 11., 2., 3.],
-                (DConst::<3>, DConst::<4>),
-            )
-            .permute();
-        d_model.ff.0 .0.bias = d_dev.tensor_from_vec(vec![0., 0., 0., 0.], (DConst::<4>,));
-        d_model.ff.0 .2.weight = d_dev
-            .tensor_from_vec(
-                vec![-1., 12., 3., -1., 2., -3., 11., 2., 3., 3., -1., 2.],
-                (DConst::<4>, DConst::<3>),
-            )
-            .permute();
-        d_model.ff.0 .2.bias = d_dev.tensor_from_vec(vec![0., 0., 0.], (DConst::<3>,));
-        d_model.norm1.gamma = d_dev.tensor_from_vec(vec![1., 1., 1.], (DConst::<3>,));
-        d_model.norm2.gamma = d_dev.tensor_from_vec(vec![1., 1., 1.], (DConst::<3>,));
-        d_model.norm1.epsilon = 1e-5;
-        d_model.norm2.beta = d_dev.tensor_from_vec(vec![0., 0., 0.], (DConst::<3>,));
-        d_model.norm1.beta = d_dev.tensor_from_vec(vec![0., 0., 0.], (DConst::<3>,));
-        d_model.norm2.epsilon = 1e-5;
-        let d_a = d_dev.tensor_from_vec(vec![-1., 2., 3., 3., 3., -1.], (DConst::<2>, DConst::<3>));
-        let d_target =
-            d_dev.tensor_from_vec(vec![0., 1., 0., 0., 0., 1.], (DConst::<2>, DConst::<3>));
-        let d_b = d_model.forward(d_a.trace(Gradients::leaky()));
-        let d_loss = dfdx::prelude::cross_entropy_with_logits_loss(d_b, d_target);
-
-        assert_close(&loss.data(), &d_loss.as_vec());
-
-        let d_grads = d_loss.backward();
-        assert_close(
-            &get_vec(*grads.last().unwrap(), &mut cx),
-            &d_grads.get(&d_a).as_vec(),
-        );
-        assert_close(
-            &get_vec(
-                grads[model_params
-                    .iter()
-                    .position(|i| *i == model.ff.2.weight.id)
-                    .unwrap()],
-                &mut cx,
-            ),
-            &d_grads.get(&d_model.ff.0 .2.weight).permute().as_vec(),
-        );
-        assert_close(
-            &get_vec(
-                grads[model_params
-                    .iter()
-                    .position(|i| *i == model.ff.0.weight.id)
-                    .unwrap()],
-                &mut cx,
-            ),
-            &d_grads.get(&d_model.ff.0 .0.weight).permute().as_vec(),
-        );
-        assert_close(
-            &get_vec(
-                grads[model_params
-                    .iter()
-                    .position(|i| *i == model.attention.w_o.weight.id)
-                    .unwrap()],
-                &mut cx,
-            ),
-            &d_grads
-                .get(&d_model.self_attn.w_o.weight)
-                .permute()
-                .as_vec(),
-        );
-        assert_close(
-            &get_vec(
-                grads[model_params
-                    .iter()
-                    .position(|i| *i == model.attention.w_q.weight.id)
-                    .unwrap()],
-                &mut cx,
-            ),
-            &d_grads
-                .get(&d_model.self_attn.w_q.weight)
-                .permute()
-                .as_vec(),
-        );
-        assert_close(
-            &get_vec(
-                grads[model_params
-                    .iter()
-                    .position(|i| *i == model.attention.w_k.weight.id)
-                    .unwrap()],
-                &mut cx,
-            ),
-            &d_grads
-                .get(&d_model.self_attn.w_k.weight)
-                .permute()
-                .as_vec(),
-        );
-        assert_close(
-            &get_vec(
-                grads[model_params
-                    .iter()
-                    .position(|i| *i == model.attention.w_v.weight.id)
-                    .unwrap()],
-                &mut cx,
-            ),
-            &d_grads
-                .get(&d_model.self_attn.w_v.weight)
-                .permute()
-                .as_vec(),
-        );
     }
 }

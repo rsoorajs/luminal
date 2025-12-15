@@ -8,7 +8,5 @@ mod linear;
 pub use linear::*;
 mod norm;
 pub use norm::*;
-mod transformer;
-pub use transformer::*;
 mod pooling;
 pub use pooling::*;

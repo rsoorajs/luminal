@@ -5,7 +5,7 @@ impl Neg for GraphTensor {
     type Output = GraphTensor;
 
     fn neg(self) -> Self::Output {
-        self * -1.0
+        self * -1
     }
 }
 
@@ -135,20 +135,20 @@ impl GraphTensor {
         m - m.exp().sum(axes.to_axes()).log().expand(m.shape)
     }
 
-    /// Get the indicies of the max elements along the last axis
-    pub fn argmax(self) -> GraphTensor {
-        // Get one-hot along last dimension
-        let x_equal = self.eq(self.max(self.shape.len() - 1).expand(self.shape));
-        // Create index arange for last dimension
-        let r = self
-            .graph()
-            .constant(1.)
-            .expand(self.shape.dims().last().unwrap())
-            .cumsum_last_dim()
-            - 1.;
-        // Multiply one-hot by expanded index arange
-        (x_equal * r.expand(self.shape)).max(self.shape.len() - 1)
-    }
+    // /// Get the indicies of the max elements along the last axis
+    // pub fn argmax(self) -> GraphTensor {
+    //     // Get one-hot along last dimension
+    //     let x_equal = self.eq(self.max(self.shape.len() - 1).expand(self.shape));
+    //     // Create index arange for last dimension
+    //     let r = self
+    //         .graph()
+    //         .constant(1.)
+    //         .expand(self.shape.dims.last().unwrap())
+    //         .cumsum_last_dim()
+    //         - 1.;
+    //     // Multiply one-hot by expanded index arange
+    //     (x_equal * r.expand(self.shape)).max(self.shape.len() - 1)
+    // }
 
     /// Take the absolute value
     pub fn abs(self) -> GraphTensor {

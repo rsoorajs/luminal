@@ -8,7 +8,7 @@ use std::fmt::Debug;
 
 #[cfg(test)]
 use crate::prelude::*;
-use rand::{rng, Rng};
+use rand::{Rng, rng};
 
 // Integration and other tests
 
@@ -56,8 +56,8 @@ fn test_matmul() {
 #[test]
 fn test_shapes() {
     let mut cx = Graph::new();
-    let a = cx.tensor(4).set(vec![1., 2., 3., 4.]);
-    let b = a.reshape((2, 2)).permute((1, 0)).retrieve();
+    let a = cx.tensor((2, 2)).set(vec![1., 2., 3., 4.]);
+    let b = a.permute((1, 0)).retrieve();
     cx.execute();
 
     assert_exact(&b.data(), &[1., 3., 2., 4.]);

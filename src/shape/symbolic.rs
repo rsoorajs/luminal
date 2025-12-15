@@ -46,6 +46,30 @@ impl Expression {
     pub fn is_acc(&self) -> bool {
         self.terms.read().iter().any(|i| matches!(i, Term::Acc(_)))
     }
+
+    pub fn is_dynamic(&self) -> bool {
+        self.terms.read().iter().any(|i| {
+            if let Term::Var(v) = i {
+                *v != 'z'
+            } else {
+                false
+            }
+        })
+    }
+
+    pub fn dyn_vars(&self) -> Vec<char> {
+        self.terms
+            .read()
+            .iter()
+            .filter_map(|i| {
+                if let Term::Var(v) = i {
+                    if *v != 'z' { Some(*v) } else { None }
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 impl Hash for Expression {
@@ -241,7 +265,7 @@ impl Expression {
         for term in self.terms.read().iter() {
             let new_symbol = match term {
                 Term::Num(n) => n.to_string(),
-                Term::Var(c) => format!("const_{c}"),
+                Term::Var(c) => format!("{}const_{c}", if *c == 'z' { "" } else { "*" }),
                 Term::Acc(_) => unreachable!(),
                 Term::Max => format!(
                     "max((int){}, (int){})",
@@ -263,6 +287,12 @@ impl Expression {
                     symbols.pop().unwrap(),
                     symbols.pop().unwrap()
                 ),
+                Term::CeilDiv => {
+                    let a = symbols.pop().unwrap();
+                    let b = symbols.pop().unwrap();
+                    format!("(({a} + {b} - 1) / {b})")
+                }
+                Term::Div => format!("({} / {})", symbols.pop().unwrap(), symbols.pop().unwrap()),
                 _ => format!(
                     "({}{term:?}{})",
                     symbols.pop().unwrap(),
@@ -1140,25 +1170,17 @@ fn make_rules(lower_bound_zero: bool) -> Vec<Rewrite> {
         rewrite!("assoc-add"; "(+ ?a (+ ?b ?c))" => "(+ (+ ?a ?b) ?c)"),
         rewrite!("assoc-mul"; "(* ?a (* ?b ?c))" => "(* (* ?a ?b) ?c)"),
         rewrite!("assoc-div"; "(/ (/ ?a ?b) ?c)" => "(/ ?a (* ?b ?c))"),
-        rewrite!("mul-div-associative"; "(/ (* ?a ?b) ?c)" => "(* ?a (/ ?b ?c))"),
-        // rewrite!("mul-div-associative-rev"; "(* ?a (/ ?b ?c))" => "(/ (* ?a ?b) ?c)"), // BAD? Makes test_pool_1d fail
         rewrite!("sub-canon"; "(- ?a ?b)" => "(+ ?a (* -1 ?b))"),
         // Distributive
         rewrite!("distribute-mul"; "(* ?a (+ ?b ?c))" => "(+ (* ?a ?b) (* ?a ?c))"),
         rewrite!("distribute-div"; "(/ (+ ?a ?b) ?c)" => "(+ (/ ?a ?c) (/ ?b ?c))"),
         rewrite!("distribute-max"; "(* ?a (max ?b ?c))" => "(max (* ?a ?b) (* ?a ?c))" if is_const_positive(&["?a"])),
         rewrite!("distribute-min"; "(* ?a (min ?b ?c))" => "(min (* ?a ?b) (* ?a ?c))"),
-        // rewrite!("distribute-mod"; "(* (% ?b ?c) ?a)" => "(% (* ?b ?a) (* ?c ?a))"),
         // Factoring
         rewrite!("factor-mul"    ; "(+ (* ?a ?b) (* ?a ?c))" => "(* ?a (+ ?b ?c))"),
-        // rewrite!("factor-div"    ; "(+ (/ ?a ?b) (/ ?a ?c))" => "(/ ?a (+ ?b ?c))"),
         rewrite!("group-terms"; "(+ ?a ?a)" => "(* 2 ?a)"),
         // Other
-        // rewrite!("explicit-truncate"; "(* (/ ?a ?b) ?b)" => "(- ?a (% ?a ?b))"),
-        // rewrite!("mul-mod"; "(% (* ?a ?b) ?b)" => "0"),
         rewrite!("div-move-inside"; "(+ (/ ?a ?b) ?c)" => "(/ (+ ?a (* ?c ?b)) ?b)"),
-        // rewrite!("mul-distribute"; "(* ?a (% (/ ?b ?c) ?d))" => "(% (/ ?b (* ?c ?a)) (* ?d ?a))"), // BAD
-        // rewrite!("div-mod-mul"; "(% (/ ?a ?b) ?c)" => "(% ?a (* ?b ?c))"),
         // Simple binary reductions
         rewrite!("add-0"; "(+ ?a 0)" => "?a"),
         rewrite!("mul-0"; "(* ?a 0)" => "0"),

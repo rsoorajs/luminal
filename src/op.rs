@@ -7,7 +7,7 @@ use std::{
 
 use crate::prelude::*;
 
-use dyn_clone::{clone_trait_object, DynClone};
+use dyn_clone::{DynClone, clone_trait_object};
 use rustc_hash::FxHashMap;
 
 /// A tensor with data. The data can be anything that implements the Data trait
@@ -87,6 +87,8 @@ pub trait Operator: Debug + as_any::AsAny {
     fn custom(&mut self, key: &str, input: Box<dyn Any>) -> Option<Box<dyn Any>> {
         None
     }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String;
 }
 
 impl<T: Operator> Operator for Box<T> {
@@ -96,6 +98,10 @@ impl<T: Operator> Operator for Box<T> {
     fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
         <T as Operator>::process(self, inp)
     }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        <T as Operator>::to_egglog(&self, inputs)
+    }
 }
 impl<T: Operator> Operator for Arc<Mutex<T>> {
     fn custom(&mut self, key: &str, input: Box<dyn Any>) -> Option<Box<dyn Any>> {
@@ -103,6 +109,10 @@ impl<T: Operator> Operator for Arc<Mutex<T>> {
     }
     fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
         <T as Operator>::process(self.lock().unwrap().borrow_mut(), inp)
+    }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        <T as Operator>::to_egglog(&self.lock().unwrap(), inputs)
     }
 }
 
@@ -122,6 +132,10 @@ impl PartialEq for Function {
 impl Operator for Function {
     fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
         (self.1)(inp)
+    }
+
+    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        panic!("Cannot turn Function into egglog op!");
     }
 }
 
@@ -177,6 +191,13 @@ impl Operator for Constant {
             ConstantValue::Float(f) => *f,
         }])]
     }
+
+    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        match self.0 {
+            ConstantValue::Expression(e) => format!("(Constant {})", e.to_egglog()),
+            ConstantValue::Float(f) => format!("(Constant (MFloat {f:.6}))"),
+        }
+    }
 }
 
 /// Graph break for chunking search graphs
@@ -191,6 +212,10 @@ impl Debug for GraphBreak {
 impl Operator for GraphBreak {
     fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
         inp.into_iter().map(|(t, _)| t.cloned()).collect() // inefficient, but we don't care as this won't execute on the kernel
+    }
+
+    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        panic!("Cannot turn GraphBreak into egglog op!");
     }
 }
 
@@ -211,6 +236,10 @@ impl Operator for Contiguous {
         }
         vec![Tensor::new(out_data)]
     }
+
+    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        panic!("Cannot turn Contiguous into egglog op!");
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -225,6 +254,16 @@ impl Operator for Log2 {
             *out = get_index(inp_data, &expr, &mut stack, i).log2();
         }
         vec![Tensor::new(out_data)]
+    }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!(
+            "(Log2 {} {} {} {})",
+            shape_to_egglog(&inputs[0].2.dims),
+            inputs[0].1,
+            strides_to_egglog(&inputs[0].2.strides),
+            strides_to_egglog(&inputs[0].2.contiguous().strides)
+        )
     }
 }
 
@@ -241,6 +280,16 @@ impl Operator for Exp2 {
         }
         vec![Tensor::new(out_data)]
     }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!(
+            "(Exp2 {} {} {} {})",
+            shape_to_egglog(&inputs[0].2.dims),
+            inputs[0].1,
+            strides_to_egglog(&inputs[0].2.strides),
+            strides_to_egglog(&inputs[0].2.contiguous().strides)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -255,6 +304,16 @@ impl Operator for Sin {
             *out = get_index(inp_data, &expr, &mut stack, i).sin();
         }
         vec![Tensor::new(out_data)]
+    }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!(
+            "(Sin {} {} {} {})",
+            shape_to_egglog(&inputs[0].2.dims),
+            inputs[0].1,
+            strides_to_egglog(&inputs[0].2.strides),
+            strides_to_egglog(&inputs[0].2.contiguous().strides)
+        )
     }
 }
 
@@ -271,6 +330,16 @@ impl Operator for Recip {
         }
         vec![Tensor::new(out_data)]
     }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!(
+            "(Recip {} {} {} {})",
+            shape_to_egglog(&inputs[0].2.dims),
+            inputs[0].1,
+            strides_to_egglog(&inputs[0].2.strides),
+            strides_to_egglog(&inputs[0].2.contiguous().strides)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -285,6 +354,16 @@ impl Operator for Sqrt {
             *out = get_index(inp_data, &expr, &mut stack, i).sqrt();
         }
         vec![Tensor::new(out_data)]
+    }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!(
+            "(Sqrt {} {} {} {})",
+            shape_to_egglog(&inputs[0].2.dims),
+            inputs[0].1,
+            strides_to_egglog(&inputs[0].2.strides),
+            strides_to_egglog(&inputs[0].2.contiguous().strides)
+        )
     }
 }
 
@@ -304,6 +383,18 @@ impl Operator for Add {
         }
         vec![Tensor::new(out_data)]
     }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!(
+            "(Add {} {} {} {} {} {})",
+            shape_to_egglog(&inputs[0].2.dims),
+            inputs[0].1,
+            strides_to_egglog(&inputs[0].2.strides),
+            inputs[1].1,
+            strides_to_egglog(&inputs[1].2.strides),
+            strides_to_egglog(&inputs[0].2.contiguous().strides)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -319,6 +410,18 @@ impl Operator for Mul {
             *out = get_index(lhs, &lexpr, &mut stack, i) * get_index(rhs, &rexpr, &mut stack, i);
         }
         vec![Tensor::new(out_data)]
+    }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!(
+            "(Mul {} {} {} {} {} {})",
+            shape_to_egglog(&inputs[0].2.dims),
+            inputs[0].1,
+            strides_to_egglog(&inputs[0].2.strides),
+            inputs[1].1,
+            strides_to_egglog(&inputs[1].2.strides),
+            strides_to_egglog(&inputs[0].2.contiguous().strides)
+        )
     }
 }
 
@@ -336,6 +439,18 @@ impl Operator for Mod {
         }
         vec![Tensor::new(out_data)]
     }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!(
+            "(Mod {} {} {} {} {} {})",
+            shape_to_egglog(&inputs[0].2.dims),
+            inputs[0].1,
+            strides_to_egglog(&inputs[0].2.strides),
+            inputs[1].1,
+            strides_to_egglog(&inputs[1].2.strides),
+            strides_to_egglog(&inputs[0].2.contiguous().strides)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -352,6 +467,18 @@ impl Operator for LessThan {
                 as i32 as f32;
         }
         vec![Tensor::new(out_data)]
+    }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!(
+            "(LessThan {} {} {} {} {} {})",
+            shape_to_egglog(&inputs[0].2.dims),
+            inputs[0].1,
+            strides_to_egglog(&inputs[0].2.strides),
+            inputs[1].1,
+            strides_to_egglog(&inputs[1].2.strides),
+            strides_to_egglog(&inputs[0].2.contiguous().strides)
+        )
     }
 }
 
@@ -379,6 +506,24 @@ impl Operator for SumReduce {
         }
         vec![Tensor::new(result)]
     }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        let mut non_reduced_shape = inputs[0].2;
+        non_reduced_shape.remove_dim(self.0);
+        let reduced_dim = inputs[0].2.dims[self.0];
+        let reduced_stride = inputs[0].2.strides[self.0];
+        let mut non_reduced_strides = inputs[0].2.strides;
+        non_reduced_strides.remove(self.0);
+        format!(
+            "(Sum {} {} {} {} {} {})",
+            shape_to_egglog(&non_reduced_shape.dims),
+            reduced_dim.to_egglog(),
+            inputs[0].1,
+            strides_to_egglog(&non_reduced_strides),
+            reduced_stride.to_egglog(),
+            strides_to_egglog(&non_reduced_shape.contiguous().strides)
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -405,6 +550,24 @@ impl Operator for MaxReduce {
             }
         }
         vec![Tensor::new(result)]
+    }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        let mut non_reduced_shape = inputs[0].2;
+        non_reduced_shape.remove_dim(self.0);
+        let reduced_dim = inputs[0].2.dims[self.0];
+        let reduced_stride = inputs[0].2.strides[self.0];
+        let mut non_reduced_strides = inputs[0].2.strides;
+        non_reduced_strides.remove(self.0);
+        format!(
+            "(Max {} {} {} {} {} {})",
+            shape_to_egglog(&non_reduced_shape.dims),
+            reduced_dim.to_egglog(),
+            inputs[0].1,
+            strides_to_egglog(&non_reduced_strides),
+            reduced_stride.to_egglog(),
+            strides_to_egglog(&non_reduced_shape.contiguous().strides)
+        )
     }
 }
 

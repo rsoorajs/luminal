@@ -71,7 +71,7 @@ impl GraphTensor {
     /// ```
     pub fn set_dyn(self, data: impl Data + Clone, shape: impl ToShape) -> Self {
         // Report dyn dim values to graph dyn map
-        for (d, s) in self.shape.dims().iter().zip(shape.to_shape().into_iter()) {
+        for (d, s) in self.shape.dims.iter().zip(shape.to_shape().into_iter()) {
             if let Some(c) = d.to_symbols().pop() {
                 self.graph().dyn_map.insert(c, s.to_usize().unwrap());
             }
@@ -96,7 +96,7 @@ impl GraphTensor {
             .downcast_ref::<Vec<f32>>()
             .expect("Data for tensor is not Vec<f32>!");
         let mut st = self.shape;
-        if !st.is_reshaped() {
+        if st.is_contiguous() {
             return orig_data.clone();
         }
         st.resolve_global_dyn_dims(&self.graph().dyn_map);
@@ -115,7 +115,7 @@ impl GraphTensor {
     }
 
     pub fn dims(&self) -> Vec<Expression> {
-        self.shape.dims()
+        self.shape.dims.to_vec()
     }
 
     pub fn dims1(&self) -> Expression {

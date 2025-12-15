@@ -75,10 +75,7 @@ pub fn cross_entropy_with_logits_loss(
     logits: GraphTensor,
     target_probabilities: GraphTensor,
 ) -> GraphTensor {
-    let inv_last_axis_numel = 1.0
-        / logits
-            .graph()
-            .constant(*logits.shape.dims().last().unwrap());
+    let inv_last_axis_numel = 1.0 / logits.graph().constant(*logits.shape.dims.last().unwrap());
     let probs = logits.log_softmax(logits.shape.last_axis());
     (-(probs * target_probabilities).mean(target_probabilities.shape.all_axes()))
         / inv_last_axis_numel
@@ -98,10 +95,7 @@ pub fn kl_div_with_logits_loss(
     logits: GraphTensor,
     target_probabilities: GraphTensor,
 ) -> GraphTensor {
-    let inv_last_axis_numel = 1.0
-        / logits
-            .graph()
-            .constant(*logits.shape.dims().last().unwrap());
+    let inv_last_axis_numel = 1.0 / logits.graph().constant(*logits.shape.dims.last().unwrap());
     let probs = logits.log_softmax(logits.shape.last_axis());
     (-((probs - target_probabilities.log()) * target_probabilities)
         .mean(target_probabilities.shape.all_axes()))

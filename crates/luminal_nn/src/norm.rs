@@ -13,20 +13,20 @@ pub struct LayerNorm {
 impl LayerNorm {
     pub fn new(
         dim: usize,
-        weight: bool,
-        bias: bool,
+        weight: Option<&str>,
+        bias: Option<&str>,
         mean_norm: bool,
         epsilon: f32,
         cx: &mut Graph,
     ) -> Self {
         Self {
-            weight: if weight {
-                Some(cx.named_tensor("LayerNorm Weight", dim))
+            weight: if let Some(w) = weight {
+                Some(cx.named_tensor(w, dim))
             } else {
                 None
             },
-            bias: if bias {
-                Some(cx.named_tensor("LayerNorm Bias", dim))
+            bias: if let Some(b) = bias {
+                Some(cx.named_tensor(b, dim))
             } else {
                 None
             },

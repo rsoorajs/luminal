@@ -1,5 +1,0 @@
-<|system|>
-You are a helpful AI assistant.<|end|>
-<|user|>
-Please write a python implementation of merge sort.<|end|>
-<|assistant|>

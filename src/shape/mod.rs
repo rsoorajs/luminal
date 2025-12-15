@@ -517,6 +517,6 @@ impl<A: Into<Expression>> ToShape for A {
 
 impl ToShape for ShapeTracker {
     fn to_shape(self) -> Vec<Expression> {
-        self.dims().to_shape()
+        self.dims.to_shape()
     }
 }
