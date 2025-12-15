@@ -2,13 +2,36 @@ use std::{
     any::Any,
     borrow::BorrowMut,
     fmt::Debug,
+    ptr::null,
     sync::{Arc, Mutex},
 };
 
-use crate::prelude::*;
+use crate::{
+    prelude::*,
+    utils::{
+        EgglogOp,
+        OpParam::{self, *},
+    },
+};
 
 use dyn_clone::{DynClone, clone_trait_object};
 use rustc_hash::FxHashMap;
+
+pub type Ops = (
+    GMEM,
+    Constant,
+    Exp2,
+    Log2,
+    Sin,
+    Recip,
+    Sqrt,
+    Add,
+    Mul,
+    Mod,
+    LessThan,
+    SumReduce,
+    MaxReduce,
+);
 
 /// A tensor with data. The data can be anything that implements the Data trait
 #[derive(Debug, Clone)]
@@ -139,6 +162,23 @@ impl Operator for Function {
     }
 }
 
+#[allow(unused)]
+#[derive(Default, Debug, Clone)]
+pub struct GMEM {
+    pub node: usize,
+    pub label: String,
+}
+
+impl EgglogOp for GMEM {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        ("GMEM".to_string(), vec![Int, Str])
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+}
+
 impl Debug for Function {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -165,6 +205,12 @@ impl From<f64> for ConstantValue {
 impl<T: Into<Expression>> From<T> for ConstantValue {
     fn from(value: T) -> Self {
         ConstantValue::Expression(value.into())
+    }
+}
+
+impl Default for Constant {
+    fn default() -> Self {
+        Self(ConstantValue::Expression(0.into()), null())
     }
 }
 
@@ -200,6 +246,15 @@ impl Operator for Constant {
     }
 }
 
+impl EgglogOp for Constant {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        ("Constant".to_string(), vec![Expr])
+    }
+    fn cleanup(&self) -> bool {
+        true
+    }
+}
+
 /// Graph break for chunking search graphs
 #[derive(Clone, PartialEq)]
 pub struct GraphBreak;
@@ -220,27 +275,6 @@ impl Operator for GraphBreak {
 }
 
 // Unary Op (A -> A)
-
-/// Ensure a tensor is contiguously layed out in memory. May involve copying
-#[derive(Debug, Clone, PartialEq)]
-pub struct Contiguous;
-impl Operator for Contiguous {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        // Copy data over to new tensor
-        let inp_data = get_vec(&inp[0].0);
-        let mut out_data = vec![0.; inp[0].1.n_elements().to_usize().unwrap()];
-        let expr = (inp[0].1.index_expression(), inp[0].1.valid_expression());
-        let mut stack = vec![];
-        for (i, out) in out_data.iter_mut().enumerate() {
-            *out = get_index(inp_data, &expr, &mut stack, i);
-        }
-        vec![Tensor::new(out_data)]
-    }
-
-    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
-        panic!("Cannot turn Contiguous into egglog op!");
-    }
-}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Log2;
@@ -264,6 +298,15 @@ impl Operator for Log2 {
             strides_to_egglog(&inputs[0].2.strides),
             strides_to_egglog(&inputs[0].2.contiguous().strides)
         )
+    }
+}
+
+impl EgglogOp for Log2 {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        ("Log2".to_string(), vec![EList, Input, EList, EList])
+    }
+    fn cleanup(&self) -> bool {
+        true
     }
 }
 
@@ -292,6 +335,15 @@ impl Operator for Exp2 {
     }
 }
 
+impl EgglogOp for Exp2 {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        ("Exp2".to_string(), vec![EList, Input, EList, EList])
+    }
+    fn cleanup(&self) -> bool {
+        true
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Sin;
 impl Operator for Sin {
@@ -314,6 +366,15 @@ impl Operator for Sin {
             strides_to_egglog(&inputs[0].2.strides),
             strides_to_egglog(&inputs[0].2.contiguous().strides)
         )
+    }
+}
+
+impl EgglogOp for Sin {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        ("Sin".to_string(), vec![EList, Input, EList, EList])
+    }
+    fn cleanup(&self) -> bool {
+        true
     }
 }
 
@@ -342,6 +403,15 @@ impl Operator for Recip {
     }
 }
 
+impl EgglogOp for Recip {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        ("Recip".to_string(), vec![EList, Input, EList, EList])
+    }
+    fn cleanup(&self) -> bool {
+        true
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Sqrt;
 impl Operator for Sqrt {
@@ -364,6 +434,15 @@ impl Operator for Sqrt {
             strides_to_egglog(&inputs[0].2.strides),
             strides_to_egglog(&inputs[0].2.contiguous().strides)
         )
+    }
+}
+
+impl EgglogOp for Sqrt {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        ("Sqrt".to_string(), vec![EList, Input, EList, EList])
+    }
+    fn cleanup(&self) -> bool {
+        true
     }
 }
 
@@ -397,6 +476,18 @@ impl Operator for Add {
     }
 }
 
+impl EgglogOp for Add {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "Add".to_string(),
+            vec![EList, Input, EList, Input, EList, EList],
+        )
+    }
+    fn cleanup(&self) -> bool {
+        true
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mul;
 impl Operator for Mul {
@@ -425,6 +516,18 @@ impl Operator for Mul {
     }
 }
 
+impl EgglogOp for Mul {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "Mul".to_string(),
+            vec![EList, Input, EList, Input, EList, EList],
+        )
+    }
+    fn cleanup(&self) -> bool {
+        true
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mod;
 impl Operator for Mod {
@@ -450,6 +553,18 @@ impl Operator for Mod {
             strides_to_egglog(&inputs[1].2.strides),
             strides_to_egglog(&inputs[0].2.contiguous().strides)
         )
+    }
+}
+
+impl EgglogOp for Mod {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "Mod".to_string(),
+            vec![EList, Input, EList, Input, EList, EList],
+        )
+    }
+    fn cleanup(&self) -> bool {
+        true
     }
 }
 
@@ -482,9 +597,21 @@ impl Operator for LessThan {
     }
 }
 
+impl EgglogOp for LessThan {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "LessThan".to_string(),
+            vec![EList, Input, EList, Input, EList, EList],
+        )
+    }
+    fn cleanup(&self) -> bool {
+        true
+    }
+}
+
 // Reduce Ops (A -> B (different shape))
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct SumReduce(pub usize);
 impl Operator for SumReduce {
     fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
@@ -526,7 +653,19 @@ impl Operator for SumReduce {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl EgglogOp for SumReduce {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "Sum".to_string(),
+            vec![EList, Expr, Input, EList, Expr, EList],
+        )
+    }
+    fn cleanup(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct MaxReduce(pub usize);
 impl Operator for MaxReduce {
     fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
@@ -568,6 +707,18 @@ impl Operator for MaxReduce {
             reduced_stride.to_egglog(),
             strides_to_egglog(&non_reduced_shape.contiguous().strides)
         )
+    }
+}
+
+impl EgglogOp for MaxReduce {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "Max".to_string(),
+            vec![EList, Expr, Input, EList, Expr, EList],
+        )
+    }
+    fn cleanup(&self) -> bool {
+        true
     }
 }
 

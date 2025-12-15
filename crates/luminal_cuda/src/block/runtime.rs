@@ -8,7 +8,7 @@ use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
 use luminal::graph::{LLIRGraph, Runtime};
-use luminal::logical::GMEM;
+use luminal::op::GMEM;
 use luminal::prelude::{
     petgraph::{
         algo::{toposort, Cycle},

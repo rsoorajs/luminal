@@ -8,7 +8,7 @@ use luminal::{
 };
 use luminal_cuda::{
     block::{self, record_exec_timings_to_file, CudaRuntime, CustomState, IntoBlockOp},
-    kernel,
+    kernel, logical,
 };
 use rustc_hash::*;
 use safetensors::SafeTensors;
@@ -101,7 +101,12 @@ fn main() {
 
     // compile
     println!("Building E-graph...");
-    let ops = <(luminal::logical::Ops, kernel::ops::Ops, block::MKOps) as IntoEgglogOp>::into_vec();
+    let ops = <(
+        luminal::op::Ops,
+        logical::Ops,
+        kernel::ops::Ops,
+        block::MKOps,
+    ) as IntoEgglogOp>::into_vec();
     cx.build_search_space(&ops);
     let ctx = luminal_cuda::cudarc::driver::CudaContext::new(0).unwrap();
     ctx.bind_to_thread().unwrap();

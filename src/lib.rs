@@ -3,7 +3,6 @@ pub mod generic_compiler;
 pub mod graph;
 pub mod graph_tensor;
 pub mod hl_ops;
-pub mod logical;
 pub mod module;
 pub mod op;
 pub mod shape;

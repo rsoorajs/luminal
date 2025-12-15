@@ -1,198 +1,11 @@
 use std::fmt::Debug;
 
-use crate::utils::{
+use luminal::utils::{
     EgglogOp,
     OpParam::{self, *},
 };
 
-pub type Ops = (
-    GMEM,
-    Constant,
-    Exp2,
-    Log2,
-    Sin,
-    Recip,
-    Sqrt,
-    Add,
-    Mul,
-    Mod,
-    LessThan,
-    Sum,
-    Max,
-    Exp,
-    Sigmoid,
-    CubeMul,
-    TileSum,
-    Softmax,
-);
-
-#[allow(unused)]
-#[derive(Default, Debug, Clone)]
-pub struct GMEM {
-    pub node: usize,
-    pub label: String,
-}
-
-impl EgglogOp for GMEM {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        ("GMEM".to_string(), vec![Int, Str])
-    }
-
-    fn cleanup(&self) -> bool {
-        false
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct Constant;
-
-impl EgglogOp for Constant {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        ("Constant".to_string(), vec![Expr])
-    }
-    fn cleanup(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct Recip;
-impl EgglogOp for Recip {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        ("Recip".to_string(), vec![EList, Input, EList, EList])
-    }
-    fn cleanup(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct Sqrt;
-impl EgglogOp for Sqrt {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        ("Sqrt".to_string(), vec![EList, Input, EList, EList])
-    }
-    fn cleanup(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct Exp2;
-impl EgglogOp for Exp2 {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        ("Exp2".to_string(), vec![EList, Input, EList, EList])
-    }
-    fn cleanup(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct Log2;
-impl EgglogOp for Log2 {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        ("Log2".to_string(), vec![EList, Input, EList, EList])
-    }
-    fn cleanup(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct Sin;
-impl EgglogOp for Sin {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        ("Sin".to_string(), vec![EList, Input, EList, EList])
-    }
-    fn cleanup(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct Add;
-impl EgglogOp for Add {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        (
-            "Add".to_string(),
-            vec![EList, Input, EList, Input, EList, EList],
-        )
-    }
-    fn cleanup(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct Mul;
-impl EgglogOp for Mul {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        (
-            "Mul".to_string(),
-            vec![EList, Input, EList, Input, EList, EList],
-        )
-    }
-    fn cleanup(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct Mod;
-impl EgglogOp for Mod {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        (
-            "Mod".to_string(),
-            vec![EList, Input, EList, Input, EList, EList],
-        )
-    }
-    fn cleanup(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct LessThan;
-impl EgglogOp for LessThan {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        (
-            "LessThan".to_string(),
-            vec![EList, Input, EList, Input, EList, EList],
-        )
-    }
-    fn cleanup(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct Sum;
-impl EgglogOp for Sum {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        (
-            "Sum".to_string(),
-            vec![EList, Expr, Input, EList, Expr, EList],
-        )
-    }
-    fn cleanup(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct Max;
-impl EgglogOp for Max {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        (
-            "Max".to_string(),
-            vec![EList, Expr, Input, EList, Expr, EList],
-        )
-    }
-    fn cleanup(&self) -> bool {
-        true
-    }
-}
+pub type Ops = (Exp, Sigmoid, CubeMul, TileSum, Softmax);
 
 #[derive(Default, Debug, Clone)]
 pub struct CubeMul;
@@ -352,8 +165,7 @@ impl EgglogOp for Exp {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec![
-            "(rule
+        vec!["(rule
             (
                 (= ?exp_const (Constant (MFloat 1.442695)))
                 (= ?mul (Mul ?shape ?x ?x_stride ?exp_const ?const_stride ?intermediate_stride))
@@ -363,8 +175,7 @@ impl EgglogOp for Exp {
                 (union ?exp2 (Exp ?shape ?x ?x_stride ?out_stride))
             )
         )"
-            .to_string(),
-        ]
+        .to_string()]
     }
 }
 

@@ -54,22 +54,8 @@ impl GraphTensor {
     /// add a new dimension of size 1 at the specified place
     pub fn unsqueeze(mut self, dim: usize) -> GraphTensor {
         // Insert contiguous call
-        self = self.contiguous();
-        assert!(self.shape.len() < 6, "Shape is maxed out at 6 dimensions");
+        assert!(self.shape.len() < 10, "Shape is maxed out at 10 dimensions");
         self.shape.expand_dim(dim, 1);
-        self
-    }
-
-    pub fn contiguous(mut self) -> GraphTensor {
-        if self.shape.is_contiguous() {
-            return self;
-        }
-        self.id = self
-            .graph()
-            .add_op(op::Contiguous)
-            .input(self.id, 0, self.shape)
-            .finish();
-        self.shape = self.shape.contiguous();
         self
     }
 

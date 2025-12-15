@@ -1,5 +1,4 @@
 use crate::{
-    logical::GMEM,
     prelude::*,
     utils::{EgglogOp, LLIROp},
 };
