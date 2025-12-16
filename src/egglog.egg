@@ -30,15 +30,23 @@
         (MReplaceList EList Expression Expression)
         (ReplaceNthFromEnd EList Expression i64)
         (RemoveNthFromEnd EList i64)
+        (RowMajor EList)
+    )
+
+    (DType
+        (F32)
+        (F16)
+        (Bf16)
+        (Int)
     )
 )
 
 ; ---- Algebraic rewrites ----
 (rewrite (MAdd a b) (MAdd b a) :ruleset expr)
-(rewrite (MMul a b) (MMul b a) :ruleset expr)
+;(rewrite (MMul a b) (MMul b a) :ruleset expr)
 
 (rewrite (MAdd (MAdd a b) c) (MAdd a (MAdd b c)) :ruleset expr)
-(rewrite (MMul (MMul a b) c) (MMul a (MMul b c)) :ruleset expr)
+;(rewrite (MMul (MMul a b) c) (MMul a (MMul b c)) :ruleset expr)
 
 (rewrite (MAdd (MNum a) (MNum b)) (MNum (+ a b)) :ruleset expr)
 (rewrite (MSub (MNum a) (MNum b)) (MNum (- a b)) :ruleset expr)
@@ -63,7 +71,7 @@
 (rewrite (MDiv (MMul ?x (MNum ?a)) (MNum ?b)) (MMul ?x (MNum (/ ?a ?b))) :when ((< ?b ?a) (= (% ?a ?b) 0))) ; why does this explode???
 
 (rewrite (MAdd a (MNum 0)) a :ruleset expr)
-(rule ((= ?e (MMul ?a (MNum 1)))) ((union ?e ?a) (delete (MMul ?a (MNum 1)))) :ruleset expr)
+(rule ((= ?e (MMul ?a (MNum 1)))) ((union ?e ?a)) :ruleset expr)
 ;(rewrite (MMul ?a (MNum 0)) (MNum 0) :ruleset expr) ; Why does this cause an infinite loop?
 (rewrite (MDiv a (MNum 1)) a :ruleset expr)
 (rewrite (MMod (MMul ?x ?y) ?y) (MNum 0) :ruleset expr)
@@ -96,6 +104,31 @@
 (function nth_from_end (EList i64) Expression :merge new)
 (rule ((= ?e (ECons ?expr ?list)) (= ?list_len (len ?list))) ((set (nth_from_end ?e ?list_len) ?expr)) :ruleset expr)
 (rule ((= ?e (ECons ?expr ?list)) (= ?other_nth (nth_from_end ?list ?n))) ((set (nth_from_end ?e ?n) ?other_nth)) :ruleset expr)
+
+(function n_elements (EList) Expression :no-merge)
+(rule ((= ?e (ENil))) ((set (n_elements ?e) (MNum 1))) :ruleset expr)
+(rule
+ 	(
+     	(= ?e (ECons ?dim ?other))
+     	(= ?other_elems (n_elements ?other))
+    )
+ 	((set (n_elements ?e) (MMul ?dim ?other_elems)))
+ 	:ruleset expr
+)
+
+(rule
+    (
+     	(= ?other (ECons ?other_dim ?other_other))
+        (= ?list (ECons ?d ?other))
+        (= ?e (RowMajor ?list))
+        (= ?n_elems (n_elements ?other))
+    )
+    (
+        (union ?e (ECons (MMul (MIter) ?n_elems) (RowMajor ?other)))
+    )
+    :ruleset expr
+)
+(rewrite (RowMajor (ECons ?dim (ENil))) (ECons (MIter) (ENil)) :ruleset expr)
 
 (rewrite (MReplaceList (ECons ?expr ?list) ?from ?to) (ECons (MReplace ?expr ?from ?to) (MReplaceList ?list ?from ?to)) :ruleset expr)
 (rule
@@ -176,6 +209,16 @@
 (rule
     ((= ?m (nth_from_end ?x ?y)))
     ((delete (nth_from_end ?x ?y)))
+    :ruleset base_cleanup
+)
+(rule
+    ((= ?m (n_elements ?x)))
+    ((delete (n_elements ?x)))
+    :ruleset base_cleanup
+)
+(rule
+    ((= ?m (RowMajor ?x)))
+    ((delete (RowMajor ?x)))
     :ruleset base_cleanup
 )
 {cleanups}

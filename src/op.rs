@@ -20,6 +20,7 @@ use rustc_hash::FxHashMap;
 pub type Ops = (
     GMEM,
     Constant,
+    Iota,
     Exp2,
     Log2,
     Sin,
@@ -29,6 +30,7 @@ pub type Ops = (
     Mul,
     Mod,
     LessThan,
+    Gather,
     SumReduce,
     MaxReduce,
 );
@@ -250,6 +252,61 @@ impl EgglogOp for Constant {
     fn term(&self) -> (String, Vec<OpParam>) {
         ("Constant".to_string(), vec![Expr])
     }
+    fn cleanup(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Iota(pub Expression);
+impl Operator for Iota {
+    fn process(&mut self, _: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
+        todo!()
+    }
+
+    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!("(Iota {})", self.0.to_egglog())
+    }
+}
+impl EgglogOp for Iota {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        ("Iota".to_string(), vec![Expr])
+    }
+
+    fn cleanup(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DType {
+    F32,
+    F16,
+    Bf16,
+    Int,
+}
+impl Default for DType {
+    fn default() -> Self {
+        Self::F32
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Cast(pub DType);
+impl Operator for Cast {
+    fn process(&mut self, _: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
+        todo!()
+    }
+
+    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!("(Cast {:?})", self.0)
+    }
+}
+impl EgglogOp for Cast {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        ("Cast".to_string(), vec![Expr])
+    }
+
     fn cleanup(&self) -> bool {
         true
     }
@@ -602,6 +659,37 @@ impl EgglogOp for LessThan {
         (
             "LessThan".to_string(),
             vec![EList, Input, EList, Input, EList, EList],
+        )
+    }
+    fn cleanup(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Gather;
+impl Operator for Gather {
+    fn process(&mut self, _: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
+        todo!()
+    }
+
+    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!(
+            "(Gather {} {} {} {} {})",
+            shape_to_egglog(&inputs[0].2.dims),
+            inputs[0].1,
+            strides_to_egglog(&inputs[0].2.strides),
+            inputs[1].1,
+            strides_to_egglog(&inputs[1].2.strides),
+        )
+    }
+}
+
+impl EgglogOp for Gather {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "Gather".to_string(),
+            vec![EList, Input, EList, Input, EList],
         )
     }
     fn cleanup(&self) -> bool {

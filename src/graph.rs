@@ -137,6 +137,7 @@ impl Graph {
             ))),
             graph_ref: self,
             shape: ShapeTracker::new(shape),
+            dtype: DType::default(),
         }
     }
 
@@ -383,8 +384,10 @@ impl Graph {
 
 pub trait Runtime {
     type CompileArg;
+    type Data;
     fn initialize(arg: Self::CompileArg) -> Self;
     fn compile(&mut self, llir_graph: &LLIRGraph);
+    fn set_data(&mut self, id: NodeIndex, data: Self::Data);
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>);
 }
 
@@ -583,7 +586,23 @@ fn run_egglog(
     let commands = egraph.parser.get_program_from_string(None, &code)?;
     let start = std::time::Instant::now();
     let msgs = egraph.run_program(commands)?;
-    println!("Egglog Took {}ms", start.elapsed().as_millis());
+    if std::env::var("EGGLOG")
+        .map(|s| s == "1")
+        .unwrap_or_default()
+    {
+        println!("---- Rule Matches ----");
+        println!(
+            "{}",
+            egraph
+                .get_overall_run_report()
+                .num_matches_per_rule
+                .iter()
+                .filter(|(k, _)| !k.contains("("))
+                .map(|(k, v)| format!("{k}: {v}"))
+                .join("\n")
+        );
+        println!("Egglog Took {}ms", start.elapsed().as_millis());
+    }
 
     let (sort, value) = egraph.eval_expr(&var!(root))?;
     let s = egraph.serialize(egglog::SerializeConfig {
@@ -932,7 +951,6 @@ pub fn egglog_to_llir(
     graphs
 }
 
-/// Helper: implement `$name` for a tuple arity `(A, B, C, ...)` by concatenation.
 #[macro_export]
 macro_rules! __impl_tuple_into_dyn_arcbox_concat_arity {
     ($tr:ident; $($T:ident),+ $(,)?) => {
@@ -958,11 +976,6 @@ macro_rules! __impl_tuple_into_dyn_arcbox_concat_arity {
     };
 }
 
-/// Define `$name` which builds `Vec<Arc<Box<dyn $tr + 'static>>>`
-/// from leaf types (`$tr + Default + 'static`) and supports nested tuples.
-///
-/// Tuples work as long as every element implements `$name`, so you can nest:
-/// `(Op1, (Op2, Op3), (), (Op4, (Op5,)))`.
 #[macro_export]
 macro_rules! impl_into_ops {
     ($tr:ident) => {

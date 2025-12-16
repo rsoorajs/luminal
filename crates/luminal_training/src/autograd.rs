@@ -5,10 +5,7 @@ use petgraph::{algo::toposort, visit::EdgeRef, Direction};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use luminal::{
-    op::{
-        Add, Contiguous, Exp2, Function, LessThan, Log2, MaxReduce, Mod, Mul, Recip, Sin, Sqrt,
-        SumReduce,
-    },
+    op::{Add, Exp2, Function, LessThan, Log2, MaxReduce, Mod, Mul, Recip, Sin, Sqrt, SumReduce},
     prelude::*,
 };
 
@@ -90,11 +87,11 @@ impl Compiler for Autograd {
                 .edges_directed(fwd_node, Direction::Incoming)
                 .filter_map(|e| e.weight().as_data().map(|i| (e.source(), i)))
                 .sorted_by_key(|(_, (a, _, _))| *a)
-                .map(|(node, (_, _, sh))| GraphTensor::from_id(node, sh, graph_ref))
+                .map(|(node, (_, _, sh))| GraphTensor::from_id(node, sh, graph_ref, DType::F32))
                 .collect::<Vec<_>>();
             let mut prev_grad = {
                 let (id, sh) = grads[&fwd_node];
-                GraphTensor::from_id(id, sh, graph_ref)
+                GraphTensor::from_id(id, sh, graph_ref, DType::F32)
             };
             if op == TypeId::of::<Add>() {
                 // f(a, b) = a + b
@@ -135,13 +132,10 @@ impl Compiler for Autograd {
                 if valid_set.contains(&inps[0].id) {
                     // fwd_nod is already max_reduce(x)
                     prev_grad.shape.expand_dim(op.0, inps[0].shape.dims[op.0]);
-                    let reduced = GraphTensor::from_id(fwd_node, prev_grad.shape, graph_ref);
+                    let reduced =
+                        GraphTensor::from_id(fwd_node, prev_grad.shape, graph_ref, DType::F32);
                     let grad = inps[0].eq(reduced) * prev_grad;
                     add_grad(grad, inps[0], graph, &mut grads);
-                }
-            } else if op == TypeId::of::<Contiguous>() {
-                if valid_set.contains(&inps[0].id) {
-                    add_grad(prev_grad, inps[0], graph, &mut grads);
                 }
             } else {
                 if !valid_set.contains(&inps[0].id) {
@@ -214,16 +208,18 @@ fn add_grad(
             pre_fwd_shape.remove_dim(*dim);
         }
         if grad.shape.dims != pre_fwd_shape.dims {
-            if !grad.shape.is_contiguous() {
-                grad = grad.contiguous();
-            }
-            grad.shape = pre_fwd_shape.contiguous();
+            todo!("contiguous doesn't exist anymore, handle this a different way");
+            // if !grad.shape.is_contiguous() {
+            //     grad = grad.contiguous();
+            // }
+            // grad.shape = pre_fwd_shape.contiguous();
         }
     }
 
     if let Some((existing_grad_node, existing_grad_shape)) = grad_map.get(&fwd.id).copied() {
-        let grad = GraphTensor::from_id(grad.id, grad.shape, graph);
-        let existing_grad = GraphTensor::from_id(existing_grad_node, existing_grad_shape, graph);
+        let grad = GraphTensor::from_id(grad.id, grad.shape, graph, DType::F32);
+        let existing_grad =
+            GraphTensor::from_id(existing_grad_node, existing_grad_shape, graph, DType::F32);
         let new_grad = grad + existing_grad;
         grad_map.insert(fwd.id, (new_grad.id, new_grad.shape));
     } else {
@@ -239,7 +235,7 @@ mod tests {
     luminal::test_imports!();
 
     fn get_vec(grad: (NodeIndex, ShapeTracker), cx: &mut Graph) -> Vec<f32> {
-        GraphTensor::from_id(grad.0, grad.1, cx).data()
+        GraphTensor::from_id(grad.0, grad.1, cx, DType::F32).data()
     }
 
     #[test]

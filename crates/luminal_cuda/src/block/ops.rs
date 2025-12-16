@@ -556,13 +556,13 @@ impl BlockOp for RowRope {
         let function_body = "
             const float* inp = source_ptrs[0] + eval_expression(payload.inp, current);
             float*       out = out_ptr + eval_expression(payload.out, current);
-            const float* token_ids = source_ptrs[1] + eval_expression(payload.token_ids, current);
+            const int* token_ids = (const int*)source_ptrs[1] + eval_expression(payload.token_ids, current);
 
             const int D_total = eval_expression(payload.row_width, 0);    // = n_heads * d_head
             const int d_head  = 128;            // head_dim
             const int n_heads = D_total / d_head;
 
-            const int   pos  = (int)token_ids[0];   // must match position_ids[batch, seq]
+            const int   pos  = token_ids[0];   // must match position_ids[batch, seq]
             const float base = 500000.0f;
 
             const int half = d_head / 2;            // 64 when d_head = 128

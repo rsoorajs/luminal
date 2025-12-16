@@ -58,6 +58,12 @@ impl LLIROp {
     }
 }
 
+impl ToString for LLIROp {
+    fn to_string(&self) -> String {
+        format!("{:?}", self)
+    }
+}
+
 #[derive(Debug)]
 struct DialectOp<T>(pub Arc<T>);
 
@@ -182,6 +188,7 @@ pub enum OpParam {
     Input,
     Int,
     Str,
+    Dty,
 }
 
 impl Debug for OpParam {
@@ -192,6 +199,7 @@ impl Debug for OpParam {
             OpParam::Input => write!(f, "IR"),
             OpParam::Int => write!(f, "i64"),
             OpParam::Str => write!(f, "String"),
+            OpParam::Dty => write!(f, "DType",),
         }
     }
 }
@@ -210,8 +218,8 @@ pub fn flatten_strides(range: &Vec<Expression>, strides: &Vec<Expression>) -> Ex
 
 #[allow(unused)]
 /// View a debug graph in the browser
-pub fn display_graph(
-    graph: &StableGraph<impl ToString, impl ToString, Directed, u32>,
+pub fn display_graph<E>(
+    graph: &StableGraph<impl ToString, E, Directed, u32>,
     mark_nodes: Option<Vec<NodeIndex>>,
     file_name: &str,
 ) {
@@ -220,8 +228,8 @@ pub fn display_graph(
         .unwrap();
 }
 
-fn display_graph_text(
-    graph: &StableGraph<impl ToString, impl ToString, Directed, u32>,
+fn display_graph_text<E>(
+    graph: &StableGraph<impl ToString, E, Directed, u32>,
     mark_nodes: Option<Vec<NodeIndex>>,
 ) -> String {
     let mut new_graph = StableGraph::new();
@@ -239,10 +247,9 @@ fn display_graph_text(
         }
     }
     for edge in graph.edge_indices() {
-        let weight = graph.edge_weight(edge).unwrap();
         let (src, dest) = graph.edge_endpoints(edge).unwrap();
         if let (Some(src), Some(dest)) = (map.get(&src), map.get(&dest)) {
-            new_graph.add_edge(*src, *dest, weight.to_string());
+            new_graph.add_edge(*src, *dest, "".to_string());
         }
     }
     let mut graph_string = crate::prelude::petgraph::dot::Dot::with_config(

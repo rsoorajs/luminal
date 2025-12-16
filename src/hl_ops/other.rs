@@ -56,7 +56,14 @@ impl Graph {
             self.add_op(Constant(i.into(), &self.dyn_map)).finish(),
             ShapeTracker::new(()),
             self,
+            DType::F32,
         )
+    }
+
+    /// Iota expression
+    pub fn iota(&mut self, i: impl Into<Expression>, shape: impl ToShape) -> GraphTensor {
+        let id = self.add_op(Iota(i.into())).finish();
+        GraphTensor::from_id(id, ShapeTracker::new(shape), self, DType::Int)
     }
 
     // /// ARange from 0 to N
@@ -110,17 +117,20 @@ impl Graph {
 }
 
 impl GraphTensor {
-    // /// Gather a batch of vectors from a matrix
-    // pub fn gather(self, indexes: GraphTensor) -> GraphTensor {
-    //     let (vocab, dim) = self.dims2();
-    //     let batch = indexes.dims1();
-    //     let one_hot = indexes
-    //         .graph()
-    //         .arange(vocab)
-    //         .expand_dim(0, batch)
-    //         .eq(indexes.expand_dim(1, vocab));
-    //     (one_hot.expand_dim(2, dim) * self.expand_dim(0, batch)).sum(1)
-    // }
+    pub fn cast(self, dtype: DType) -> GraphTensor {
+        let id = self
+            .graph()
+            .add_op(Cast(dtype))
+            .input(self.id, 0, self.shape)
+            .finish();
+        GraphTensor::from_id(id, self.shape, self.graph_ref, dtype)
+    }
+
+    /// Sets this tensor's dtype without doing a cast
+    pub fn as_dtype(mut self, dtype: DType) -> GraphTensor {
+        self.dtype = dtype;
+        self
+    }
 
     /// Print the value of this tensor when the graph is ran
     pub fn print<T: ToString>(&self, message: T) -> Self {

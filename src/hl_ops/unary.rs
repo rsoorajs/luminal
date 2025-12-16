@@ -17,7 +17,7 @@ impl GraphTensor {
             .add_op(op::Log2)
             .input(self.id, 0, self.shape)
             .finish();
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref)
+        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// Base 2 exp
@@ -27,7 +27,7 @@ impl GraphTensor {
             .add_op(op::Exp2)
             .input(self.id, 0, self.shape)
             .finish();
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref)
+        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// Natural exp
@@ -47,7 +47,7 @@ impl GraphTensor {
             .add_op(op::Recip)
             .input(self.id, 0, self.shape)
             .finish();
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref)
+        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// The sin(x) function
@@ -57,7 +57,7 @@ impl GraphTensor {
             .add_op(op::Sin)
             .input(self.id, 0, self.shape)
             .finish();
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref)
+        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// The cos(x) function
@@ -77,7 +77,7 @@ impl GraphTensor {
             .add_op(op::Sqrt)
             .input(self.id, 0, self.shape)
             .finish();
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref)
+        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
     pub fn graph_break(self) -> GraphTensor {
@@ -86,7 +86,7 @@ impl GraphTensor {
             .add_op(op::GraphBreak)
             .input(self.id, 0, self.shape)
             .finish();
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref)
+        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// Scale so std is 1.0

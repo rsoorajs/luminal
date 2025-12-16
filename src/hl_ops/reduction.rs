@@ -16,7 +16,7 @@ impl GraphTensor {
                 .finish();
             shape.remove_dim(dim);
         }
-        GraphTensor::from_id(id, shape.contiguous(), self.graph_ref)
+        GraphTensor::from_id(id, shape.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// Reduce a dimension of the tensor by taking the maximum of all elements along that axis.
@@ -31,7 +31,7 @@ impl GraphTensor {
                 .finish();
             shape.remove_dim(dim);
         }
-        GraphTensor::from_id(id, shape.contiguous(), self.graph_ref)
+        GraphTensor::from_id(id, shape.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// Reduce a dimension of the tensor by taking the mean of all elements along that axis.

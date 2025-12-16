@@ -28,7 +28,7 @@ impl Add for GraphTensor {
             .input(self.id, 0, self.shape)
             .input(rhs.id, 0, rhs.shape)
             .finish();
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref)
+        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 }
 
@@ -83,7 +83,7 @@ impl Mul for GraphTensor {
             .input(self.id, 0, self.shape)
             .input(rhs.id, 0, rhs.shape)
             .finish();
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref)
+        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 }
 
@@ -136,7 +136,7 @@ impl Rem<GraphTensor> for GraphTensor {
             .input(self.id, 0, self.shape)
             .input(rhs.id, 0, rhs.shape)
             .finish();
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref)
+        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 }
 
@@ -237,7 +237,7 @@ impl GraphTensor {
             .input(self.id, 0, self.shape)
             .input(rhs.id, 0, rhs.shape)
             .finish();
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref)
+        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
     pub fn gt(self, rhs: GraphTensor) -> GraphTensor {

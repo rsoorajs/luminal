@@ -1,7 +1,7 @@
 use luminal::{
     graph::{shape_to_egglog, strides_to_egglog, Graph},
     module::Module,
-    op::Operator,
+    op::{DType, Operator},
     prelude::GraphTensor,
     shape::{Expression, ShapeTracker},
 };
@@ -9,9 +9,11 @@ use luminal_nn::LayerNorm;
 use std::fmt::Debug;
 
 pub struct Llama {
+    embedding: GraphTensor,
     layers: Vec<LlamaLayer>,
     lm_norm: LayerNorm,
     lm_head: GraphTensor,
+    hidden: usize,
 }
 
 impl Llama {
@@ -84,15 +86,19 @@ impl Llama {
         let lm_norm = LayerNorm::new(hidden, Some("model.norm.weight"), None, false, 1e-5, cx);
         let lm_head = cx.named_tensor("lm_head.weight", (vocab_size, hidden));
         Self {
+            embedding: cx.named_tensor("model.embed_tokens.weight", (vocab_size, hidden)),
             layers: w,
             lm_head,
             lm_norm,
+            hidden,
         }
     }
 
     #[tracing::instrument(skip_all)]
     pub fn forward(&self, input: GraphTensor, token_ids: GraphTensor) -> GraphTensor {
-        let mut x = input;
+        let mut x = self.embedding.gather(input);
+        let batch = input.dims1();
+        x.shape = ShapeTracker::new((batch, 4096));
         for layer in &self.layers {
             x = layer.forward(x, token_ids);
         }
@@ -135,6 +141,7 @@ impl LlamaLayer {
             .finish(),
             q.shape,
             cx,
+            DType::F32,
         );
         let n_kv_groups = self.n_heads / self.n_kv_heads;
         let k_rope = GraphTensor::from_id(
@@ -148,6 +155,7 @@ impl LlamaLayer {
             .finish(),
             k.shape,
             cx,
+            DType::F32,
         );
 
         let attn_out = GraphTensor::from_id(
@@ -162,6 +170,7 @@ impl LlamaLayer {
             .finish(),
             ShapeTracker::new((self.batch, self.hidden)),
             cx,
+            DType::F32,
         );
         let attn_out = attn_out.matmul(self.o_proj.transpose(0, 1));
         let resid1 = input + attn_out;
@@ -203,27 +212,6 @@ impl Operator for RopeFrontendOp {
             self.row_width.to_egglog(),
             inputs[1].1,
         )
-    }
-}
-
-#[derive(Debug)]
-pub struct PrintFrontendOp {
-    pub path: String,
-}
-
-impl Operator for PrintFrontendOp {
-    fn process(
-        &mut self,
-        _inp: Vec<(
-            luminal::prelude::InputTensor,
-            luminal::prelude::ShapeTracker,
-        )>,
-    ) -> Vec<luminal::prelude::Tensor> {
-        todo!()
-    }
-
-    fn to_egglog(&self, _: &Vec<(luminal::prelude::NodeIndex, String, ShapeTracker)>) -> String {
-        todo!()
     }
 }
 
@@ -281,18 +269,4 @@ impl Operator for GQAAttentionFrontendOp {
             self.layer,
         )
     }
-}
-
-#[allow(unused)]
-fn print_tensor(tensor: GraphTensor, path: impl ToString) -> GraphTensor {
-    let cx = tensor.graph();
-    GraphTensor::from_id(
-        cx.add_op(PrintFrontendOp {
-            path: path.to_string(),
-        })
-        .input(tensor.id, 0, tensor.shape)
-        .finish(),
-        tensor.shape,
-        cx,
-    )
 }

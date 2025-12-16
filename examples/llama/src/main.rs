@@ -4,6 +4,7 @@ use half::bf16;
 use itertools::Itertools;
 use luminal::{
     graph::{Graph, Runtime},
+    op::DType,
     utils::IntoEgglogOp,
 };
 use luminal_cuda::{
@@ -85,8 +86,8 @@ fn main() {
 
     let mut cx = Graph::default();
 
-    let input = cx.named_tensor("input", (batch, hidden));
-    let token_ids = cx.named_tensor("token_ids", batch);
+    let input = cx.named_tensor("input", batch).as_dtype(DType::Int);
+    let token_ids = cx.named_tensor("token_ids", batch).as_dtype(DType::Int);
     let model = model::Llama::init(
         &mut cx,
         batch,
@@ -129,7 +130,11 @@ fn main() {
                 .collect_vec(),
         ),
     );
-    let mut runtime = cx.search(CudaRuntime::initialize(custom_state), &ops, 10_000);
+    let mut runtime = cx.search(
+        CudaRuntime::initialize((ctx, stream, custom_state)),
+        &ops,
+        10_000,
+    );
 
     // load weights
     println!("Compiling...");
@@ -160,24 +165,27 @@ fn main() {
             embeddings[i * hidden..(i + 1) * hidden].copy_from_slice(&embed_data[start..end]);
         }
 
-        let mut inputs = FxHashMap::default();
-        inputs.insert(input.id.index(), embeddings);
-        inputs.insert(
-            token_ids.id.index(),
-            (prev_seq..seq_len + prev_seq).map(|i| i as f32).collect(),
+        runtime.set_data(
+            input.id,
+            Box::new(
+                sentence
+                    .iter()
+                    .map(|i| *i as i32)
+                    // .flat_map(|i| (0..hidden).map(|k| (*i as usize * hidden + k) as f32))
+                    .collect_vec(),
+            ),
         );
-        runtime.update_buffers(block::allocate_input_buffers(
-            &stream,
-            &inputs,
-            &runtime.llir_graph,
-        ));
+        runtime.set_data(
+            token_ids.id,
+            Box::new(
+                (prev_seq..seq_len + prev_seq)
+                    .map(|i| i as i32)
+                    .collect_vec(),
+            ),
+        );
         if i < 2 {
             // Re-allocate intermediate buffers
-            runtime.update_buffers(block::allocate_intermediate_buffers(
-                &stream,
-                &runtime.llir_graph,
-                &cx.dyn_map,
-            ));
+            runtime.allocate_intermediate_buffers(&cx.dyn_map);
         }
 
         runtime.execute(&cx.dyn_map);

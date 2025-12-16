@@ -19,6 +19,7 @@ pub struct GraphTensor {
     pub id: NodeIndex,
     pub graph_ref: *mut Graph,
     pub shape: ShapeTracker,
+    pub dtype: DType,
 }
 
 impl From<&GraphTensor> for GraphTensor {
@@ -29,11 +30,17 @@ impl From<&GraphTensor> for GraphTensor {
 
 impl GraphTensor {
     /// Create a GraphTensor from a NodeIndex
-    pub fn from_id(id: NodeIndex, shape: ShapeTracker, graph_ref: *mut Graph) -> Self {
+    pub fn from_id(
+        id: NodeIndex,
+        shape: ShapeTracker,
+        graph_ref: *mut Graph,
+        dtype: DType,
+    ) -> Self {
         Self {
             id,
             graph_ref,
             shape,
+            dtype,
         }
     }
 

@@ -1,4 +1,4 @@
-use crate::{op, prelude::*};
+use crate::prelude::*;
 
 impl GraphTensor {
     /// Swap dimensions of the tensor
@@ -57,6 +57,16 @@ impl GraphTensor {
         assert!(self.shape.len() < 10, "Shape is maxed out at 10 dimensions");
         self.shape.expand_dim(dim, 1);
         self
+    }
+
+    pub fn gather(self, indexes: GraphTensor) -> GraphTensor {
+        let id = self
+            .graph()
+            .add_op(Gather)
+            .input(indexes.id, 0, indexes.shape)
+            .input(self.id, 0, self.shape)
+            .finish();
+        GraphTensor::from_id(id, indexes.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
     // /// Take a slice of the original tensor. Any dimension with bounds becomes a dynamic dimension

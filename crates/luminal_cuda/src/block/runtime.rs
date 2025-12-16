@@ -82,7 +82,7 @@ impl Debug for ExecutableKernel {
 }
 
 pub struct CudaRuntime {
-    pub buffers: FxHashMap<NodeIndex, CudaSlice<f32>>,
+    pub buffers: FxHashMap<NodeIndex, CudaSlice<u8>>,
     pub llir_graph: luminal::graph::LLIRGraph,
     cuda_stream: Arc<CudaStream>,
     cuda_context: Arc<CudaContext>,
@@ -96,8 +96,7 @@ impl CudaRuntime {
     pub fn load_safetensors(&mut self, file_path: &str) {
         let file = std::fs::read(file_path).unwrap();
         let st = SafeTensors::deserialize(&file).unwrap();
-        let mut buffers = FxHashMap::default();
-        for node in self.llir_graph.node_indices() {
+        for node in self.llir_graph.node_indices().collect_vec() {
             if let Some(GMEM { label, .. }) = self.llir_graph[node].to_op::<GMEM>() {
                 if let Ok(tensor) = st.tensor(label) {
                     let data: Vec<f32> = tensor
@@ -105,11 +104,14 @@ impl CudaRuntime {
                         .chunks_exact(2)
                         .map(|chunk| half::bf16::from_le_bytes([chunk[0], chunk[1]]).to_f32())
                         .collect();
-                    buffers.insert(node, self.cuda_stream.memcpy_stod(&data).unwrap());
+                    self.buffers.insert(
+                        node,
+                        data.to_cuda_buffer(&self.cuda_context, &self.cuda_stream),
+                    );
+                    self.register_buffer(node);
                 }
             }
         }
-        self.update_buffers(buffers);
     }
 
     #[tracing::instrument(skip_all)]
@@ -117,62 +119,125 @@ impl CudaRuntime {
         self.llir_graph
             .externals(Direction::Outgoing)
             .sorted()
-            .map(|n| self.cuda_stream.memcpy_dtov(&self.buffers[&n]).unwrap())
+            .map(|n| {
+                self.cuda_stream
+                    .memcpy_dtov(&self.buffers[&n])
+                    .unwrap()
+                    .chunks_exact(4)
+                    .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect_vec()
+            })
             .collect()
     }
 }
 
 impl CudaRuntime {
-    pub fn update_buffers(&mut self, mut new_buffers: FxHashMap<NodeIndex, CudaSlice<f32>>) {
+    fn register_buffer(&mut self, llir_node: NodeIndex) {
         // Remap pointers in work queue
-        for (node, buffer) in new_buffers.iter_mut() {
+        if let Some(ExecutableKernel::Megakernel {
+            work_queue,
+            node_to_task_index,
+            ..
+        }) = self
+            .node_to_exec
+            .get(&llir_node)
+            .and_then(|n| self.exec_graph.node_weight_mut(*n))
+        {
+            if self.llir_graph[llir_node].to_op::<GMEM>().is_none() {
+                work_queue[node_to_task_index[&llir_node]].out_ptr =
+                    self.buffers
+                        .get_mut(&llir_node)
+                        .unwrap()
+                        .device_ptr_mut(&self.cuda_stream)
+                        .0 as *mut f32;
+            }
+        }
+        for edge in self
+            .llir_graph
+            .edges_directed(llir_node, Direction::Outgoing)
+        {
+            let dest = edge.target();
+            let n_input = self
+                .llir_graph
+                .edges_directed(dest, Direction::Incoming)
+                .sorted_by_key(|e| e.id())
+                .position(|e| e.id() == edge.id())
+                .unwrap();
             if let Some(ExecutableKernel::Megakernel {
                 work_queue,
                 node_to_task_index,
                 ..
             }) = self
                 .node_to_exec
-                .get(&node)
+                .get(&dest)
                 .and_then(|n| self.exec_graph.node_weight_mut(*n))
             {
-                if self.llir_graph[*node].to_op::<GMEM>().is_none() {
-                    work_queue[node_to_task_index[node]].out_ptr =
-                        buffer.device_ptr_mut(&self.cuda_stream).0 as *mut f32;
-                }
-            }
-            for edge in self.llir_graph.edges_directed(*node, Direction::Outgoing) {
-                let dest = edge.target();
-                let n_input = self
-                    .llir_graph
-                    .edges_directed(dest, Direction::Incoming)
-                    .sorted_by_key(|e| e.id())
-                    .position(|e| e.id() == edge.id())
-                    .unwrap();
-                if let Some(ExecutableKernel::Megakernel {
-                    work_queue,
-                    node_to_task_index,
-                    ..
-                }) = self
-                    .node_to_exec
-                    .get(&dest)
-                    .and_then(|n| self.exec_graph.node_weight_mut(*n))
-                {
-                    work_queue[node_to_task_index[&dest]].source_ptrs[n_input] =
-                        buffer.device_ptr(&self.cuda_stream).0 as *const f32;
-                }
+                work_queue[node_to_task_index[&dest]].source_ptrs[n_input] =
+                    self.buffers[&llir_node].device_ptr(&self.cuda_stream).0 as *const f32;
             }
         }
-        self.buffers.extend(new_buffers);
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn allocate_intermediate_buffers(&mut self, dyn_dims: &FxHashMap<char, usize>) {
+        for node in self.llir_graph.node_indices().collect_vec() {
+            if self.llir_graph[node].to_op::<GMEM>().is_some() {
+                continue;
+            }
+            if let Some(op) = self.llir_graph[node].to_dialect::<dyn BlockOp>() {
+                self.buffers.insert(
+                    node,
+                    self.cuda_stream
+                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
+                        .unwrap(),
+                );
+                self.register_buffer(node);
+            } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
+                self.buffers.insert(
+                    node,
+                    self.cuda_stream
+                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
+                        .unwrap(),
+                );
+                self.register_buffer(node);
+            }
+        }
+    }
+}
+
+pub trait ToCudaBuffer {
+    fn to_cuda_buffer(&self, ctx: &Arc<CudaContext>, stream: &Arc<CudaStream>) -> CudaSlice<u8>;
+}
+
+impl ToCudaBuffer for Vec<f32> {
+    fn to_cuda_buffer(&self, _: &Arc<CudaContext>, stream: &Arc<CudaStream>) -> CudaSlice<u8> {
+        stream
+            .memcpy_stod(unsafe {
+                std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
+            })
+            .unwrap()
+    }
+}
+
+impl ToCudaBuffer for Vec<i32> {
+    fn to_cuda_buffer(&self, _: &Arc<CudaContext>, stream: &Arc<CudaStream>) -> CudaSlice<u8> {
+        stream
+            .memcpy_stod(unsafe {
+                std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
+            })
+            .unwrap()
     }
 }
 
 impl Runtime for CudaRuntime {
-    type CompileArg = FxHashMap<String, CustomState>;
+    type CompileArg = (
+        Arc<CudaContext>,
+        Arc<CudaStream>,
+        FxHashMap<String, CustomState>,
+    );
+    type Data = Box<dyn ToCudaBuffer>;
 
-    fn initialize(custom_state: Self::CompileArg) -> Self {
-        let ctx = cudarc::driver::CudaContext::new(0).unwrap();
-        ctx.bind_to_thread().unwrap();
-        let stream = ctx.default_stream();
+    fn initialize((ctx, stream, custom_state): Self::CompileArg) -> Self {
         Self {
             buffers: FxHashMap::default(),
             cuda_stream: stream,
@@ -434,6 +499,25 @@ impl Runtime for CudaRuntime {
             }
         }
     }
+
+    fn set_data(&mut self, id: NodeIndex, data: Self::Data) {
+        let id = self
+            .llir_graph
+            .node_indices()
+            .find(|n| {
+                if let Some(GMEM { node, .. }) = self.llir_graph[*n].to_op::<GMEM>() {
+                    *node == id.index()
+                } else {
+                    false
+                }
+            })
+            .unwrap();
+        self.buffers.insert(
+            id,
+            data.to_cuda_buffer(&self.cuda_context, &self.cuda_stream),
+        );
+        self.register_buffer(id);
+    }
 }
 
 // TODO: get rid of this, go through all ops to get largest payload, and build the Task struct with CStructBuilder
@@ -607,36 +691,6 @@ pub fn allocate_input_buffers(
             if let Some(buf) = inputs.get(&gmem.node) {
                 buffers.insert(node, stream.memcpy_stod(buf).unwrap());
             }
-        }
-    }
-    buffers
-}
-
-#[tracing::instrument(skip_all)]
-pub fn allocate_intermediate_buffers(
-    stream: &Arc<CudaStream>,
-    graph: &LLIRGraph,
-    dyn_dims: &FxHashMap<char, usize>,
-) -> FxHashMap<NodeIndex, CudaSlice<f32>> {
-    let mut buffers = FxHashMap::default();
-    for node in graph.node_indices() {
-        if graph[node].to_op::<GMEM>().is_some() {
-            continue;
-        }
-        if let Some(op) = graph[node].to_dialect::<dyn BlockOp>() {
-            buffers.insert(
-                node,
-                stream
-                    .alloc_zeros::<f32>(op.output_size().exec(dyn_dims).unwrap())
-                    .unwrap(),
-            );
-        } else if let Some(op) = graph[node].to_dialect::<dyn KernelOp>() {
-            buffers.insert(
-                node,
-                stream
-                    .alloc_zeros::<f32>(op.output_size().exec(dyn_dims).unwrap())
-                    .unwrap(),
-            );
         }
     }
     buffers

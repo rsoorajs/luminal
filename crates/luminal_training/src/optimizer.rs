@@ -45,8 +45,8 @@ pub fn sgd_on_graph(
     let lr = graph.named_tensor("Learning Rate", 1).set(3e-4).keep(); // Karpathy constant
     let mut new_weights = vec![];
     for ((grad_id, grad_shape), old_weight_id) in grads.iter().copied().zip(old_weights.to_ids()) {
-        let old_weight = GraphTensor::from_id(old_weight_id, grad_shape, graph);
-        let gradient = GraphTensor::from_id(grad_id, grad_shape, graph);
+        let old_weight = GraphTensor::from_id(old_weight_id, grad_shape, graph, DType::F32);
+        let gradient = GraphTensor::from_id(grad_id, grad_shape, graph, DType::F32);
 
         // SGD
         let new_weight = old_weight - (gradient * lr.expand(grad_shape));
@@ -65,7 +65,7 @@ struct TensorRef {
 
 impl TensorRef {
     fn to_tensor(&self, graph: &mut Graph) -> GraphTensor {
-        GraphTensor::from_id(self.id, self.shape, graph)
+        GraphTensor::from_id(self.id, self.shape, graph, DType::F32)
     }
 }
 
@@ -119,8 +119,8 @@ impl AdamOptimizer {
             grads.iter().copied().zip(old_weights.to_ids())
         {
             let shape = grad_shape;
-            let weight = GraphTensor::from_id(old_weight_id, grad_shape, graph);
-            let gradient = GraphTensor::from_id(grad_id, grad_shape, graph);
+            let weight = GraphTensor::from_id(old_weight_id, grad_shape, graph, DType::F32);
+            let gradient = GraphTensor::from_id(grad_id, grad_shape, graph, DType::F32);
             let momentum_input = graph.tensor(1).set(0.0).expand(grad_shape).keep();
             let variance_input = graph.tensor(1).set(0.0).expand(grad_shape).keep();
 
