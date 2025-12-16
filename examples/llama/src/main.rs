@@ -86,7 +86,9 @@ fn main() {
 
     let mut cx = Graph::default();
 
-    let input = cx.named_tensor("input", batch).as_dtype(DType::Int);
+    let input = cx
+        .named_tensor("input", (batch, hidden))
+        .as_dtype(DType::Int);
     let token_ids = cx.named_tensor("token_ids", batch).as_dtype(DType::Int);
     let model = model::Llama::init(
         &mut cx,
@@ -170,8 +172,7 @@ fn main() {
             Box::new(
                 sentence
                     .iter()
-                    .map(|i| *i as i32)
-                    // .flat_map(|i| (0..hidden).map(|k| (*i as usize * hidden + k) as f32))
+                    .flat_map(|i| (0..hidden).map(|k| (*i as usize * hidden + k) as i32))
                     .collect_vec(),
             ),
         );

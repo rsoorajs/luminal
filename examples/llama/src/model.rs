@@ -97,8 +97,6 @@ impl Llama {
     #[tracing::instrument(skip_all)]
     pub fn forward(&self, input: GraphTensor, token_ids: GraphTensor) -> GraphTensor {
         let mut x = self.embedding.gather(input);
-        let batch = input.dims1();
-        x.shape = ShapeTracker::new((batch, 4096));
         for layer in &self.layers {
             x = layer.forward(x, token_ids);
         }

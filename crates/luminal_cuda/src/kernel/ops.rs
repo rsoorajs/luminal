@@ -187,11 +187,9 @@ impl EgglogOp for KernelGather {
         list_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Vec<Expression>>,
         expr_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Expression>,
     ) -> (LLIROp, Vec<&'a egraph_serialize::NodeId>) {
-        let mut out_sh = extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap();
-        out_sh.push(4096.into());
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: out_sh,
+                out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
                 index_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache)
                     .unwrap(),
                 data_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache)
@@ -223,24 +221,23 @@ impl KernelOp for KernelGather {
             .chain(self.data_stride.iter().flat_map(|e| e.dyn_vars()))
             .chain(self.out_stride.iter().flat_map(|e| e.dyn_vars()))
             .collect::<FxHashSet<_>>();
-        println!("{:?}", self.out_shape);
         let kernel = format!(
             "
 {}
 extern \"C\" {{
     __global__ void gather(float *C, const int *indexes, const float *data) {{
         int const_z = blockIdx.x * blockDim.x + threadIdx.x;
-        for (int i = 0; i < 4096; i++) {{
-            C[const_z * 4096 + i] = data[indexes[const_z] * 4096 + i];
-        }}
+        float* out = C + {};
+        const_z = indexes[{}];
+        *out = data[{}];
     }}
 }}",
             vars.iter()
                 .map(|i| format!("__constant__ int const_{i}[1];"))
                 .join("\n"),
-            // flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            // flatten_strides(&self.out_shape, &self.index_stride).to_kernel(),
-            // flatten_strides(&self.out_shape, &self.data_stride).to_kernel()
+            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.index_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.data_stride).to_kernel()
         );
         let ptx = compile_ptx_with_opts(
             &kernel,
@@ -263,7 +260,7 @@ extern \"C\" {{
             .collect();
         (
             func,
-            (self.out_shape[0], 1.into(), 1.into()),
+            (self.out_shape.iter().copied().product(), 1.into(), 1.into()),
             (1.into(), 1.into(), 1.into()),
             0.into(),
             constants,
