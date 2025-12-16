@@ -1,12 +1,4 @@
-use std::{f32, path::PathBuf};
-
-use colored::Colorize;
-use itertools::Itertools;
-
-use crate::{
-    op::{self, Constant, ConstantValue},
-    prelude::*,
-};
+use crate::{op::Constant, prelude::*};
 
 // impl GraphTensor {
 //     /// Cumulative sum last dimension
@@ -50,10 +42,20 @@ use crate::{
 // }
 
 impl Graph {
-    /// A scalar constant
-    pub fn constant(&mut self, i: impl Into<ConstantValue>) -> GraphTensor {
+    /// A scalar expression constant
+    pub fn constant(&mut self, i: impl Into<Expression>) -> GraphTensor {
         GraphTensor::from_id(
-            self.add_op(Constant(i.into(), &self.dyn_map)).finish(),
+            self.add_op(Iota(i.into(), 1.into())).finish(),
+            ShapeTracker::new(()),
+            self,
+            DType::Int,
+        )
+    }
+
+    /// A scalar float constant
+    pub fn constant_float(&mut self, i: f32) -> GraphTensor {
+        GraphTensor::from_id(
+            self.add_op(Constant(i)).finish(),
             ShapeTracker::new(()),
             self,
             DType::F32,
@@ -62,36 +64,31 @@ impl Graph {
 
     /// Iota expression
     pub fn iota(&mut self, i: impl Into<Expression>, shape: impl ToShape) -> GraphTensor {
-        let id = self.add_op(Iota(i.into())).finish();
-        GraphTensor::from_id(id, ShapeTracker::new(shape), self, DType::Int)
+        let sh = shape.to_shape();
+        GraphTensor::from_id(
+            self.add_op(Iota(i.into(), sh.iter().copied().product()))
+                .finish(),
+            ShapeTracker::new(sh),
+            self,
+            DType::Int,
+        )
     }
 
-    // /// ARange from 0 to N
-    // pub fn arange(&mut self, to: impl Into<Expression>) -> GraphTensor {
-    //     let to = to.into();
-    //     if to.to_usize().map(|i| i == 1).unwrap_or_default() {
-    //         // Single number ARange is just 0
-    //         self.constant(0.).expand_dim(0, to)
-    //     } else {
-    //         self.constant(1.).expand_dim(0, to).cumsum_last_dim() - 1.
-    //     }
-    // }
+    /// ARange from 0 to N
+    pub fn arange(&mut self, to: impl Into<Expression>) -> GraphTensor {
+        self.iota('z', to)
+    }
 
-    // /// ARange from beg to end
-    // pub fn arange_in_range(&mut self, beg: usize, end: usize) -> GraphTensor {
-    //     self.arange(end - beg) + beg
-    // }
-
-    // /// ARange from beg to end
-    // pub fn arange_step(&mut self, beg: f32, end: f32, step: f32) -> GraphTensor {
-    //     assert!(step > 0.0, "step must be positive");
-
-    //     let num_steps = ((end - beg) / step).ceil() as usize;
-
-    //     let mut tensor = self.arange(num_steps);
-    //     tensor = tensor * step + beg;
-    //     tensor
-    // }
+    /// ARange from beg to end
+    pub fn arange_opt(
+        &mut self,
+        start: impl Into<Expression>,
+        end: impl Into<Expression>,
+        step: impl Into<Expression>,
+    ) -> GraphTensor {
+        let (start, end, step) = (start.into(), end.into(), step.into());
+        self.iota((Expression::from('z') * step) + start, (end - start) / step)
+    }
 
     // /// Lower left-hand triangle of 1s. Currently required to be square
     // ///
@@ -129,232 +126,16 @@ impl GraphTensor {
     /// Sets this tensor's dtype without doing a cast
     pub fn as_dtype(mut self, dtype: DType) -> GraphTensor {
         self.dtype = dtype;
+        if let Some(gmem) = self.graph().try_get_op_mut::<GMEM>(self.id) {
+            gmem.dtype = dtype;
+        }
         self
-    }
-
-    /// Print the value of this tensor when the graph is ran
-    pub fn print<T: ToString>(&self, message: T) -> Self {
-        let message = message.to_string();
-        let id = self
-            .graph()
-            .add_op(op::Function(
-                "Print".to_string(),
-                Box::new(move |inp| {
-                    for (i, (tensor, tracker)) in inp.iter().enumerate() {
-                        println!("{message} ({})", i + 1);
-                        let d = tensor.borrowed().downcast_ref::<Vec<f32>>().unwrap();
-                        println!(
-                            "Elements: {} Start: {:?} Mid: {:?} End: {:?}",
-                            d.len(),
-                            &d[..d.len().min(5)],
-                            &d[d.len().saturating_div(2)
-                                ..(d.len().saturating_div(2) + 5).min(d.len())],
-                            &d[d.len().saturating_sub(5)..]
-                        );
-                        println!("Shape: {tracker:?}");
-                    }
-                    vec![]
-                }),
-            ))
-            .input(self.id, 0, self.shape)
-            .finish();
-        self.graph().no_delete.insert(id);
-        *self
-    }
-
-    /// Check the tensor value against a binary file
-    pub fn diff(&self, file: impl Into<PathBuf>, atol: f32, rtol: f32) -> Self {
-        let path = file.into();
-        let id = self
-            .graph()
-            .add_op(op::Function(
-                format!("Diff {path:?}"),
-                Box::new(move |mut inp| {
-                    // Get tensor data and file data
-                    let (tensor, shape) = inp.pop().unwrap();
-                    let d = tensor.borrowed().downcast_ref::<Vec<f32>>().unwrap();
-                    let mut data = vec![0.; d.len()];
-                    let (ind, val) = (shape.index_expression(), shape.valid_expression());
-                    let mut stack = vec![];
-                    #[allow(unused_mut)]
-                    for (i, mut r) in data.iter_mut().enumerate() {
-                        if val.exec_single_var_stack(i, &mut stack) != 0 {
-                            *r = d[ind.exec_single_var_stack(i, &mut stack)];
-                        }
-                    }
-                    let Ok(bytes) = std::fs::read(&path) else {
-                        return vec![];
-                    };
-                    let bin_data = bytes
-                        .chunks(4)
-                        .map(|i| {
-                            f32::from_ne_bytes([i[0], i[1], i[2], i[3]]).clamp(f32::MIN, f32::MAX)
-                        })
-                        .collect::<Vec<_>>();
-                    if data.len() != bin_data.len() {
-                        println!(
-                            "{}",
-                            format!(
-                                "{} | Length mismatch! Data: {}, File: {}",
-                                path.as_os_str().to_str().unwrap(),
-                                data.len(),
-                                bin_data.len()
-                            )
-                            .bold()
-                            .red()
-                        );
-                        println!("Data Shape: {shape:?}");
-                        return vec![];
-                    }
-                    let data_nan = data.iter().any(|i| i.is_nan());
-                    let file_nan = bin_data.iter().any(|i| i.is_nan());
-                    if data_nan {
-                        println!(
-                            "{}",
-                            format!("{} | Data contains nan!", path.to_str().unwrap())
-                                .bold()
-                                .red()
-                        );
-                    }
-                    if file_nan {
-                        println!(
-                            "{}",
-                            format!("{} | File contains nan!", path.to_str().unwrap())
-                                .bold()
-                                .red()
-                        );
-                    }
-                    if data_nan || file_nan {
-                        return vec![];
-                    }
-                    let mut matched = true;
-                    for (i, (a, b)) in data.iter().zip(bin_data.iter()).enumerate() {
-                        let tolerance = atol + rtol * a.abs().max(b.abs());
-                        if (a - b).abs() > tolerance {
-                            println!(
-                                "{}",
-                                format!("{} | Value Mismatch!", path.to_str().unwrap())
-                                    .bold()
-                                    .red()
-                            );
-                            if let Some((i, _)) = data.iter().enumerate().find(|(_, i)| i.is_nan())
-                            {
-                                println!("Index {} is nan!", i.to_string().bold());
-                            }
-                            println!("{a} is not equal to {b}, index {i}");
-
-                            let mut diffs: Vec<f32> = data
-                                .iter()
-                                .zip(bin_data.iter())
-                                .map(|(a, b)| (a - b).abs())
-                                .collect();
-                            diffs.sort_by(|x, y| {
-                                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
-                            });
-                            let len = diffs.len();
-                            // percentile indices (clamp to len-1)
-                            let p50_idx = ((len as f32) * 0.50).round() as usize;
-                            let p95_idx = ((len as f32) * 0.95).round() as usize;
-                            let p99_idx = ((len as f32) * 0.99).round() as usize;
-                            let p50 = diffs[p50_idx.min(len - 1)];
-                            let p95 = diffs[p95_idx.min(len - 1)];
-                            let p99 = diffs[p99_idx.min(len - 1)];
-
-                            // summary stats
-                            let avg_dist = diffs.iter().sum::<f32>() / len as f32;
-                            let max_dist = *diffs.last().unwrap();
-                            let sum_dist = data
-                                .iter()
-                                .zip(bin_data.iter())
-                                .map(|(a, b)| (a - b).powi(2))
-                                .sum::<f32>();
-
-                            println!(
-                                "Avg dist: {}, Max dist: {} Sum dist: {}",
-                                avg_dist.to_string().bold().red(),
-                                max_dist.to_string().bold().red(),
-                                sum_dist.to_string().bold().red(),
-                            );
-                            println!(
-                                "p50: {}  p95: {}  p99: {}",
-                                p50.to_string().bold().red(),
-                                p95.to_string().bold().red(),
-                                p99.to_string().bold().red(),
-                            );
-
-                            println!("Data Shape: {shape:?}");
-                            println!("{}: {:?}", "This".bold(), &data[..10]);
-                            println!("{}: {:?}", "File".bold(), &bin_data[..10]);
-                            println!(
-                                "Largest Mismatches: {:?}",
-                                data.iter()
-                                    .zip(bin_data.iter())
-                                    .filter(|(a, b)| (**a - **b).abs() > 0.01)
-                                    .sorted_by(|(a, b), (c, d)| (**c - **d)
-                                        .abs()
-                                        .partial_cmp(&(**a - **b).abs())
-                                        .unwrap_or(std::cmp::Ordering::Equal))
-                                    .take(10)
-                                    .collect::<Vec<_>>()
-                            );
-                            println!(
-                                "A avg: {} B avg: {}",
-                                data.iter().sum::<f32>() / data.len() as f32,
-                                bin_data.iter().sum::<f32>() / bin_data.len() as f32
-                            );
-                            println!(
-                                "A max: {} B max: {}",
-                                data.iter()
-                                    .max_by(|a, b| a
-                                        .partial_cmp(b)
-                                        .unwrap_or(std::cmp::Ordering::Equal))
-                                    .unwrap(),
-                                bin_data
-                                    .iter()
-                                    .max_by(|a, b| a
-                                        .partial_cmp(b)
-                                        .unwrap_or(std::cmp::Ordering::Equal))
-                                    .unwrap()
-                            );
-                            println!(
-                                "A min: {} B min: {}",
-                                data.iter()
-                                    .min_by(|a, b| a
-                                        .partial_cmp(b)
-                                        .unwrap_or(std::cmp::Ordering::Equal))
-                                    .unwrap(),
-                                bin_data
-                                    .iter()
-                                    .min_by(|a, b| a
-                                        .partial_cmp(b)
-                                        .unwrap_or(std::cmp::Ordering::Equal))
-                                    .unwrap()
-                            );
-                            matched = false;
-                            break;
-                        }
-                    }
-                    if matched {
-                        println!(
-                            "{}",
-                            format!("{} matched", path.to_str().unwrap())
-                                .bold()
-                                .bright_green()
-                        );
-                    }
-                    vec![]
-                }),
-            ))
-            .input(self.id, 0, self.shape)
-            .finish();
-        self.graph().no_delete.insert(id);
-        *self
     }
 }
 
 #[cfg(test)]
 mod tests {
-    crate::test_imports!();
+    // crate::test_imports!();
     // #[test]
     // fn test_arange() {
     //     let mut cx = Graph::new();

@@ -187,6 +187,7 @@ pub enum OpParam {
     Expr,
     Input,
     Int,
+    Float,
     Str,
     Dty,
 }
@@ -200,6 +201,7 @@ impl Debug for OpParam {
             OpParam::Int => write!(f, "i64"),
             OpParam::Str => write!(f, "String"),
             OpParam::Dty => write!(f, "DType",),
+            OpParam::Float => write!(f, "f64"),
         }
     }
 }
@@ -219,7 +221,7 @@ pub fn flatten_strides(range: &Vec<Expression>, strides: &Vec<Expression>) -> Ex
 #[allow(unused)]
 /// View a debug graph in the browser
 pub fn display_graph<E>(
-    graph: &StableGraph<impl ToString, E, Directed, u32>,
+    graph: &StableGraph<impl Debug, E, Directed, u32>,
     mark_nodes: Option<Vec<NodeIndex>>,
     file_name: &str,
 ) {
@@ -229,7 +231,7 @@ pub fn display_graph<E>(
 }
 
 fn display_graph_text<E>(
-    graph: &StableGraph<impl ToString, E, Directed, u32>,
+    graph: &StableGraph<impl Debug, E, Directed, u32>,
     mark_nodes: Option<Vec<NodeIndex>>,
 ) -> String {
     let mut new_graph = StableGraph::new();
@@ -242,7 +244,7 @@ fn display_graph_text<E>(
         {
             map.insert(
                 node,
-                new_graph.add_node(graph.node_weight(node).unwrap().to_string()),
+                new_graph.add_node(format!("{:?}", graph.node_weight(node).unwrap())),
             );
         }
     }

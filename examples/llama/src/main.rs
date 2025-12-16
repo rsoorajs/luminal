@@ -5,7 +5,7 @@ use itertools::Itertools;
 use luminal::{
     graph::{Graph, Runtime},
     op::DType,
-    utils::IntoEgglogOp,
+    utils::{display_graph, IntoEgglogOp},
 };
 use luminal_cuda::{
     block::{self, record_exec_timings_to_file, CudaRuntime, CustomState, IntoBlockOp},
@@ -86,9 +86,7 @@ fn main() {
 
     let mut cx = Graph::default();
 
-    let input = cx
-        .named_tensor("input", (batch, hidden))
-        .as_dtype(DType::Int);
+    let input = cx.named_tensor("input", batch).as_dtype(DType::Int);
     let token_ids = cx.named_tensor("token_ids", batch).as_dtype(DType::Int);
     let model = model::Llama::init(
         &mut cx,
@@ -169,12 +167,7 @@ fn main() {
 
         runtime.set_data(
             input.id,
-            Box::new(
-                sentence
-                    .iter()
-                    .flat_map(|i| (0..hidden).map(|k| (*i as usize * hidden + k) as i32))
-                    .collect_vec(),
-            ),
+            Box::new(sentence.iter().map(|i| *i as i32).collect_vec()),
         );
         runtime.set_data(
             token_ids.id,

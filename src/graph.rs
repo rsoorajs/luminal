@@ -128,13 +128,15 @@ impl Graph {
     }
 
     /// Create a new tensor with shape S and a name. This name will show up on the graph when displayed
-    pub fn named_tensor(&mut self, name: &str, shape: impl ToShape) -> GraphTensor {
-        let name = name.to_string();
+    pub fn named_tensor(&mut self, name: impl ToString, shape: impl ToShape) -> GraphTensor {
+        let id = self.graph.add_node(Box::new(GMEM {
+            node: 0,
+            label: name.to_string(),
+            dtype: DType::default(),
+        }));
+        self.get_op_mut::<GMEM>(id).node = id.index();
         GraphTensor {
-            id: self.graph.add_node(Box::new(Function(
-                format!("{name} Load"),
-                Box::new(move |_| panic!("You must set a value for this tensor! ({name})")),
-            ))),
+            id,
             graph_ref: self,
             shape: ShapeTracker::new(shape),
             dtype: DType::default(),
@@ -477,19 +479,7 @@ fn hlir_to_egglog(graph: &Graph) -> (String, String) {
             )
             .map(|((n, _, sh), name)| (n, name, sh))
             .collect_vec();
-        let node_weight = graph.node_weight(n).unwrap();
-        let op_name_full = format!("{node_weight:?}");
-        let op = op_name_full
-            .split('|')
-            .next()
-            .unwrap_or(&op_name_full)
-            .trim();
-        let code = if op.contains("Load") {
-            format!("(GMEM {} \"{}\")", n.index(), op.replace(" Load", ""))
-        } else {
-            node_weight.to_egglog(&sources)
-        };
-
+        let code = graph[n].to_egglog(&sources);
         out.push_str(&format!("(let {var} {code})\n"));
         names.insert(n, var);
     }
@@ -731,6 +721,16 @@ pub fn extract_expr_list<'a>(
     }
 }
 
+pub fn extract_dtype<'a>(egraph: &'a SerializedEGraph, node: &'a NodeId) -> DType {
+    match egraph.enodes[node].0.as_str() {
+        "F32" => DType::F32,
+        "F16" => DType::F16,
+        "Bf16" => DType::Bf16,
+        "Int" => DType::Int,
+        other => panic!("unknown dtype {other}"),
+    }
+}
+
 pub fn extract_expr<'a>(
     egraph: &'a SerializedEGraph,
     node: &'a NodeId,
@@ -911,36 +911,19 @@ pub fn egglog_to_llir(
                     }
                 })
                 .collect_vec();
-            match egraph.enodes[node].0.as_str() {
-                "GMEM" => {
-                    let index = egraph.enodes[ch[0]]
-                        .0
-                        .replace("\"", "")
-                        .parse::<usize>()
-                        .unwrap();
-                    let label = egraph.enodes[ch[1]].0.replace("\"", "");
-                    enode_to_node.insert(
-                        node,
-                        graph.add_node(LLIROp::new(Box::new(GMEM { node: index, label }))),
-                    );
-                }
-                op => {
-                    for phys_op in ops {
-                        if op == phys_op.term().0 {
-                            // Extract this op
-                            let (op_instance, sources) =
-                                phys_op.extract(egraph, &ch, &mut lc, &mut c);
-                            let r = graph.add_node(op_instance);
-                            enode_to_node.insert(node, r);
-                            for source in sources {
-                                edges_to_place.push((source, node));
-                            }
-                            continue 'nodes;
-                        }
+            for phys_op in ops {
+                if egraph.enodes[node].0.as_str() == phys_op.term().0 {
+                    // Extract this op
+                    let (op_instance, sources) = phys_op.extract(egraph, &ch, &mut lc, &mut c);
+                    let r = graph.add_node(op_instance);
+                    enode_to_node.insert(node, r);
+                    for source in sources {
+                        edges_to_place.push((source, node));
                     }
-                    todo!("{op} extraction not implemented!");
+                    continue 'nodes;
                 }
             }
+            todo!("{} extraction not implemented!", egraph.enodes[node].0);
         }
         for (src, dest) in edges_to_place {
             graph.add_edge(enode_to_node[src], enode_to_node[dest], ());

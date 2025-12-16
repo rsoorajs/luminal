@@ -6,7 +6,8 @@ use cudarc::{
 };
 use itertools::Itertools;
 use luminal::{
-    graph::{extract_expr_list, SerializedEGraph},
+    graph::{extract_dtype, extract_expr, extract_expr_list, SerializedEGraph},
+    op::DType,
     shape::Expression,
     utils::{
         flatten_strides, EgglogOp, LLIROp,
@@ -15,9 +16,9 @@ use luminal::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::kernel::KernelOp;
+use crate::{cuda_dtype, kernel::KernelOp};
 
-pub type Ops = (KernelAdd, KernelGather);
+pub type Ops = (KernelAdd, KernelMul, KernelIota, KernelGather);
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelAdd {
@@ -25,13 +26,14 @@ pub struct KernelAdd {
     a_stride: Vec<Expression>,
     b_stride: Vec<Expression>,
     out_stride: Vec<Expression>,
+    dtype: DType,
 }
 
 impl EgglogOp for KernelAdd {
     fn term(&self) -> (String, Vec<OpParam>) {
         (
             "KernelAdd".to_string(),
-            vec![EList, Input, EList, Input, EList, EList],
+            vec![EList, Input, EList, Input, EList, EList, Dty],
         )
     }
 
@@ -40,9 +42,10 @@ impl EgglogOp for KernelAdd {
 (rule
     (
         (= ?a (Add ?out_shape ?inp_a ?inp_a_strides ?inp_b ?inp_b_strides ?out_strides))
+        (= ?dty (dtype ?inp_a))
     )
     (
-        (union ?a (KernelAdd ?out_shape ?inp_a ?inp_a_strides ?inp_b ?inp_b_strides ?out_strides))
+        (union ?a (KernelAdd ?out_shape ?inp_a ?inp_a_strides ?inp_b ?inp_b_strides ?out_strides ?dty))
     )
     :name \"kernel add\"
 )"
@@ -66,6 +69,7 @@ impl EgglogOp for KernelAdd {
                 a_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
                 b_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
                 out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
+                dtype: extract_dtype(egraph, children[6]),
             })),
             vec![children[1], children[3]],
         )
@@ -79,6 +83,7 @@ impl KernelOp for KernelAdd {
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
+        String,
         (Expression, Expression, Expression),
         (Expression, Expression, Expression),
         Expression,
@@ -92,11 +97,12 @@ impl KernelOp for KernelAdd {
             .chain(self.b_stride.iter().flat_map(|e| e.dyn_vars()))
             .chain(self.out_stride.iter().flat_map(|e| e.dyn_vars()))
             .collect::<FxHashSet<_>>();
+        let dtype = cuda_dtype(self.dtype);
         let kernel = format!(
             "
 {}
 extern \"C\" {{
-    __global__ void add_k(float *C, const float *A, const float *B) {{
+    __global__ void add_k({dtype} *C, const {dtype} *A, const {dtype} *B) {{
         int const_z = blockIdx.x * blockDim.x + threadIdx.x;
         C[{}] = A[{}] + B[{}];
     }}
@@ -129,6 +135,139 @@ extern \"C\" {{
             .collect();
         (
             func,
+            kernel,
+            (
+                self.out_shape.iter().copied().product::<Expression>(),
+                1.into(),
+                1.into(),
+            ),
+            (1.into(), 1.into(), 1.into()),
+            0.into(),
+            constants,
+        )
+    }
+
+    fn output_size(&self) -> Expression {
+        self.out_shape.iter().copied().product()
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct KernelMul {
+    out_shape: Vec<Expression>,
+    a_stride: Vec<Expression>,
+    b_stride: Vec<Expression>,
+    out_stride: Vec<Expression>,
+    dtype: DType,
+}
+
+impl EgglogOp for KernelMul {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "KernelMul".to_string(),
+            vec![EList, Input, EList, Input, EList, EList, Dty],
+        )
+    }
+
+    fn rewrites(&self) -> Vec<String> {
+        vec!["
+(rule
+    (
+        (= ?a (Mul ?out_shape ?inp_a ?inp_a_strides ?inp_b ?inp_b_strides ?out_strides))
+        (= (dtype ?inp_a) (Int))
+    )
+    (
+        (union ?a (KernelMul ?out_shape ?inp_a ?inp_a_strides ?inp_b ?inp_b_strides ?out_strides (Int)))
+    )
+    :name \"kernel mul\"
+)"
+        .to_string()]
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        children: &Vec<&'a egraph_serialize::NodeId>,
+        list_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Vec<Expression>>,
+        expr_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a egraph_serialize::NodeId>) {
+        (
+            LLIROp::new::<dyn KernelOp>(Box::new(Self {
+                out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
+                a_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
+                b_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
+                dtype: extract_dtype(egraph, children[6]),
+            })),
+            vec![children[1], children[3]],
+        )
+    }
+}
+
+impl KernelOp for KernelMul {
+    fn compile(
+        &self,
+        ctx: &Arc<CudaContext>,
+        stream: &Arc<CudaStream>,
+    ) -> (
+        CudaFunction,
+        String,
+        (Expression, Expression, Expression),
+        (Expression, Expression, Expression),
+        Expression,
+        FxHashMap<char, CudaSlice<u8>>,
+    ) {
+        let vars = self
+            .out_shape
+            .iter()
+            .flat_map(|e| e.dyn_vars())
+            .chain(self.a_stride.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.b_stride.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.out_stride.iter().flat_map(|e| e.dyn_vars()))
+            .collect::<FxHashSet<_>>();
+        let dtype = cuda_dtype(self.dtype);
+        let kernel = format!(
+            "
+{}
+extern \"C\" {{
+    __global__ void mul_k({dtype} *C, const {dtype} *A, const {dtype} *B) {{
+        int const_z = blockIdx.x * blockDim.x + threadIdx.x;
+        C[{}] = A[{}] * B[{}];
+    }}
+}}",
+            vars.iter()
+                .map(|i| format!("__constant__ int const_{i}[1];"))
+                .join("\n"),
+            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.a_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.b_stride).to_kernel()
+        );
+        let ptx = compile_ptx_with_opts(
+            &kernel,
+            CompileOptions {
+                arch: Some("sm_90a"),
+                options: vec!["--std=c++17".to_string(), "-default-device".to_string()],
+                include_paths: vec![
+                    "/usr/local/cuda/include".to_string(),
+                    "/usr/include".to_string(),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let module = ctx.load_module(ptx).unwrap();
+        let func = module.load_function("mul_k").unwrap();
+        let constants = vars
+            .into_iter()
+            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
+            .collect();
+        (
+            func,
+            kernel,
             (
                 self.out_shape.iter().copied().product::<Expression>(),
                 1.into(),
@@ -208,6 +347,7 @@ impl KernelOp for KernelGather {
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
+        String,
         (Expression, Expression, Expression),
         (Expression, Expression, Expression),
         Expression,
@@ -260,6 +400,7 @@ extern \"C\" {{
             .collect();
         (
             func,
+            kernel,
             (self.out_shape.iter().copied().product(), 1.into(), 1.into()),
             (1.into(), 1.into(), 1.into()),
             0.into(),
@@ -269,5 +410,115 @@ extern \"C\" {{
 
     fn output_size(&self) -> Expression {
         self.out_shape.iter().copied().product()
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct KernelIota {
+    expr: Expression,
+    range: Expression,
+}
+
+impl EgglogOp for KernelIota {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        ("KernelIota".to_string(), vec![Expr, Expr])
+    }
+
+    fn rewrites(&self) -> Vec<String> {
+        vec!["
+(rule
+    (
+        (= ?a (Iota ?expr ?range))
+    )
+    (
+        (let ?kernel_iota (KernelIota ?expr ?range))
+        (union ?a ?kernel_iota)
+        (set (dtype ?kernel_iota) (Int))
+    )
+    :name \"kernel iota\"
+)"
+        .to_string()]
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        children: &Vec<&'a egraph_serialize::NodeId>,
+        list_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Vec<Expression>>,
+        expr_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a egraph_serialize::NodeId>) {
+        (
+            LLIROp::new::<dyn KernelOp>(Box::new(Self {
+                expr: extract_expr(egraph, children[0], expr_cache).unwrap(),
+                range: extract_expr(egraph, children[1], expr_cache).unwrap(),
+            })),
+            vec![],
+        )
+    }
+}
+
+impl KernelOp for KernelIota {
+    fn compile(
+        &self,
+        ctx: &Arc<CudaContext>,
+        stream: &Arc<CudaStream>,
+    ) -> (
+        CudaFunction,
+        String,
+        (Expression, Expression, Expression),
+        (Expression, Expression, Expression),
+        Expression,
+        FxHashMap<char, CudaSlice<u8>>,
+    ) {
+        let vars = self.expr.dyn_vars().into_iter().collect::<FxHashSet<_>>();
+        let kernel = format!(
+            "
+{}
+extern \"C\" {{
+    __global__ void iota_k(int *C) {{
+        int const_z = blockIdx.x * blockDim.x + threadIdx.x;
+        C[const_z] = {};
+    }}
+}}",
+            vars.iter()
+                .map(|i| format!("__constant__ int const_{i}[1];"))
+                .join("\n"),
+            self.expr.to_kernel(),
+        );
+        let ptx = compile_ptx_with_opts(
+            &kernel,
+            CompileOptions {
+                arch: Some("sm_90a"),
+                options: vec!["--std=c++17".to_string(), "-default-device".to_string()],
+                include_paths: vec![
+                    "/usr/local/cuda/include".to_string(),
+                    "/usr/include".to_string(),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let module = ctx.load_module(ptx).unwrap();
+        let func = module.load_function("iota_k").unwrap();
+        let constants = vars
+            .into_iter()
+            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
+            .collect();
+        (
+            func,
+            kernel,
+            (self.range, 1.into(), 1.into()),
+            (1.into(), 1.into(), 1.into()),
+            0.into(),
+            constants,
+        )
+    }
+
+    fn output_size(&self) -> Expression {
+        self.range
     }
 }

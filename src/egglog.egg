@@ -176,6 +176,8 @@
     {ops}
 )
 
+(function dtype (IR) DType :merge new)
+
 {rewrites}
 
 ; CLEANUP

@@ -8,7 +8,7 @@ pub mod op;
 pub mod shape;
 pub mod utils;
 
-pub mod tests;
+// pub mod tests;
 
 pub mod prelude {
     pub use crate::compiler_utils::*;

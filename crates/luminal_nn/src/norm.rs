@@ -1,4 +1,4 @@
-use luminal::{prelude::*, tests::random_vec_rng};
+use luminal::prelude::*;
 use rand::rng;
 
 /// A simple layer norm with an optional weight and bias
@@ -34,23 +34,23 @@ impl LayerNorm {
             epsilon,
         }
     }
-    pub fn initialize(self) -> Self {
-        // Init weight as uniform(-1, 1)
-        let mut rng = rng();
-        if let Some(w) = self.weight {
-            w.set(random_vec_rng(
-                w.shape.n_elements().to_usize().unwrap(),
-                &mut rng,
-            ));
-        }
-        if let Some(b) = self.bias {
-            b.set(random_vec_rng(
-                b.shape.n_elements().to_usize().unwrap(),
-                &mut rng,
-            ));
-        }
-        self
-    }
+    // pub fn initialize(self) -> Self {
+    //     // Init weight as uniform(-1, 1)
+    //     let mut rng = rng();
+    //     if let Some(w) = self.weight {
+    //         w.set(random_vec_rng(
+    //             w.shape.n_elements().to_usize().unwrap(),
+    //             &mut rng,
+    //         ));
+    //     }
+    //     if let Some(b) = self.bias {
+    //         b.set(random_vec_rng(
+    //             b.shape.n_elements().to_usize().unwrap(),
+    //             &mut rng,
+    //         ));
+    //     }
+    //     self
+    // }
 }
 
 impl Module<GraphTensor> for LayerNorm {

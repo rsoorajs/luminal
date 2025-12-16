@@ -17,6 +17,7 @@ pub trait KernelOp: EgglogOp {
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
+        String,
         (Expression, Expression, Expression),
         (Expression, Expression, Expression),
         Expression,

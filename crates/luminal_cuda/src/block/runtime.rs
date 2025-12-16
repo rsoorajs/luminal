@@ -18,7 +18,7 @@ use luminal::prelude::{
     },
     Expression, NodeIndex,
 };
-use luminal::utils::flatten_strides;
+use luminal::utils::{display_graph, flatten_strides};
 use prost::Message as _;
 use rustc_hash::{FxHashMap, FxHashSet};
 use safetensors::SafeTensors;
@@ -59,6 +59,7 @@ pub enum ExecutableKernel {
     },
     Kernel {
         kernel: CudaFunction,
+        code: String,
         launch_grid: (Expression, Expression, Expression),
         launch_threadblock: (Expression, Expression, Expression),
         shared_mem: Expression,
@@ -392,7 +393,7 @@ impl Runtime for CudaRuntime {
         // Add kernels
         for kernel in llir_graph.node_indices() {
             if let Some(kernel_op) = llir_graph[kernel].to_dialect::<dyn KernelOp>() {
-                let (kernel_function, grid, tb, shared_mem, constants) =
+                let (kernel_function, code, grid, tb, shared_mem, constants) =
                     kernel_op.compile(&self.cuda_context, &self.cuda_stream);
                 let inputs = llir_graph
                     .edges_directed(kernel, Direction::Incoming)
@@ -403,6 +404,7 @@ impl Runtime for CudaRuntime {
                     kernel,
                     exec_graph.add_node(ExecutableKernel::Kernel {
                         kernel: kernel_function,
+                        code,
                         launch_grid: grid,
                         launch_threadblock: tb,
                         inputs,
@@ -439,6 +441,7 @@ impl Runtime for CudaRuntime {
             match &mut self.exec_graph[exec_node] {
                 ExecutableKernel::Kernel {
                     kernel,
+                    code,
                     launch_grid,
                     launch_threadblock,
                     inputs,
@@ -470,7 +473,7 @@ impl Runtime for CudaRuntime {
                     };
                     let mut lb = self.cuda_stream.launch_builder(kernel);
                     lb.arg(&self.buffers[output]);
-                    for inp in inputs {
+                    for (i, inp) in inputs.into_iter().enumerate() {
                         lb.arg(&self.buffers[inp]);
                     }
                     let span = span!(Level::INFO, "execute");

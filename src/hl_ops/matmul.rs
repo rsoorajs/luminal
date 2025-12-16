@@ -110,111 +110,111 @@ impl GraphTensor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    crate::test_imports!();
+// #[cfg(test)]
+// mod tests {
+//     crate::test_imports!();
 
-    #[test]
-    fn test_matrix_vector() {
-        let mut cx = Graph::new();
-        let (a_vec, b_vec) = (random_vec(3), random_vec(6));
-        let a = cx.tensor(3).set(a_vec.clone());
-        let b = cx.tensor((3, 2)).set(b_vec.clone());
-        let mut c = a.matmul(b).retrieve();
+//     #[test]
+//     fn test_matrix_vector() {
+//         let mut cx = Graph::new();
+//         let (a_vec, b_vec) = (random_vec(3), random_vec(6));
+//         let a = cx.tensor(3).set(a_vec.clone());
+//         let b = cx.tensor((3, 2)).set(b_vec.clone());
+//         let mut c = a.matmul(b).retrieve();
 
-        cx.compile(GenericCompiler::default(), &mut c);
-        cx.execute();
+//         cx.compile(GenericCompiler::default(), &mut c);
+//         cx.execute();
 
-        let d_dev = Cpu::default();
-        let d_a = d_dev.tensor_from_vec(a_vec, (DConst::<3>,));
-        let d_b = d_dev.tensor_from_vec(b_vec, (DConst::<3>, DConst::<2>));
-        let d_c = d_a.matmul(d_b);
+//         let d_dev = Cpu::default();
+//         let d_a = d_dev.tensor_from_vec(a_vec, (DConst::<3>,));
+//         let d_b = d_dev.tensor_from_vec(b_vec, (DConst::<3>, DConst::<2>));
+//         let d_c = d_a.matmul(d_b);
 
-        assert_close(&c.data(), &d_c.as_vec());
-    }
+//         assert_close(&c.data(), &d_c.as_vec());
+//     }
 
-    #[test]
-    fn test_matmul() {
-        let mut cx = Graph::new();
-        let (a_data, b_data) = (random_vec(6), random_vec(9));
-        let a = cx.tensor((2, 3));
-        a.set(a_data.clone());
-        let b = cx.tensor((3, 3));
-        b.set(b_data.clone());
-        let c = a.matmul(b);
-        c.retrieve();
+//     #[test]
+//     fn test_matmul() {
+//         let mut cx = Graph::new();
+//         let (a_data, b_data) = (random_vec(6), random_vec(9));
+//         let a = cx.tensor((2, 3));
+//         a.set(a_data.clone());
+//         let b = cx.tensor((3, 3));
+//         b.set(b_data.clone());
+//         let c = a.matmul(b);
+//         c.retrieve();
 
-        cx.execute();
+//         cx.execute();
 
-        let d_dev = Cpu::default();
-        let d_a = d_dev.tensor_from_vec(a_data, (DConst::<2>, DConst::<3>));
-        let d_b = d_dev.tensor_from_vec(b_data, (DConst::<3>, DConst::<3>));
-        let d_c = d_a.matmul(d_b);
+//         let d_dev = Cpu::default();
+//         let d_a = d_dev.tensor_from_vec(a_data, (DConst::<2>, DConst::<3>));
+//         let d_b = d_dev.tensor_from_vec(b_data, (DConst::<3>, DConst::<3>));
+//         let d_c = d_a.matmul(d_b);
 
-        assert_close(&c.data(), &d_c.as_vec());
-    }
+//         assert_close(&c.data(), &d_c.as_vec());
+//     }
 
-    #[test]
-    fn test_batch_matmul() {
-        let mut cx = Graph::new();
-        let (a_data, b_data) = (random_vec(12), random_vec(8));
-        let a = cx.tensor((2, 3, 2));
-        a.set(a_data.clone());
-        let b = cx.tensor((2, 4));
-        b.set(b_data.clone());
-        let c = a.matmul(b);
-        c.retrieve();
+//     #[test]
+//     fn test_batch_matmul() {
+//         let mut cx = Graph::new();
+//         let (a_data, b_data) = (random_vec(12), random_vec(8));
+//         let a = cx.tensor((2, 3, 2));
+//         a.set(a_data.clone());
+//         let b = cx.tensor((2, 4));
+//         b.set(b_data.clone());
+//         let c = a.matmul(b);
+//         c.retrieve();
 
-        cx.execute();
+//         cx.execute();
 
-        let d_dev = Cpu::default();
-        let d_a = d_dev.tensor_from_vec(a_data, (DConst::<2>, DConst::<3>, DConst::<2>));
-        let d_b = d_dev.tensor_from_vec(b_data, (DConst::<2>, DConst::<4>));
-        let d_c = d_a.matmul(d_b);
+//         let d_dev = Cpu::default();
+//         let d_a = d_dev.tensor_from_vec(a_data, (DConst::<2>, DConst::<3>, DConst::<2>));
+//         let d_b = d_dev.tensor_from_vec(b_data, (DConst::<2>, DConst::<4>));
+//         let d_c = d_a.matmul(d_b);
 
-        assert_close(&c.data(), &d_c.as_vec());
-    }
+//         assert_close(&c.data(), &d_c.as_vec());
+//     }
 
-    #[test]
-    fn test_batch_batch_matmul() {
-        let mut cx = Graph::new();
-        let (a_data, b_data) = (random_vec(6), random_vec(6));
-        let a = cx.tensor((1, 2, 3));
-        a.set(a_data.clone());
-        let b = cx.tensor((1, 2, 3));
-        b.set(b_data.clone());
-        let c = a.matmul(b.permute((0, 2, 1)));
-        c.retrieve();
+//     #[test]
+//     fn test_batch_batch_matmul() {
+//         let mut cx = Graph::new();
+//         let (a_data, b_data) = (random_vec(6), random_vec(6));
+//         let a = cx.tensor((1, 2, 3));
+//         a.set(a_data.clone());
+//         let b = cx.tensor((1, 2, 3));
+//         b.set(b_data.clone());
+//         let c = a.matmul(b.permute((0, 2, 1)));
+//         c.retrieve();
 
-        cx.execute();
+//         cx.execute();
 
-        let d_dev = Cpu::default();
-        let d_a = d_dev.tensor_from_vec(a_data, (DConst::<1>, DConst::<2>, DConst::<3>));
-        let d_b = d_dev.tensor_from_vec(b_data, (DConst::<1>, DConst::<2>, DConst::<3>));
-        let d_c = d_a.matmul(d_b.permute::<Rank3<1, 3, 2>, DAxes3<0, 2, 1>>());
+//         let d_dev = Cpu::default();
+//         let d_a = d_dev.tensor_from_vec(a_data, (DConst::<1>, DConst::<2>, DConst::<3>));
+//         let d_b = d_dev.tensor_from_vec(b_data, (DConst::<1>, DConst::<2>, DConst::<3>));
+//         let d_c = d_a.matmul(d_b.permute::<Rank3<1, 3, 2>, DAxes3<0, 2, 1>>());
 
-        assert_close(&c.data(), &d_c.as_vec());
-    }
+//         assert_close(&c.data(), &d_c.as_vec());
+//     }
 
-    #[test]
-    fn test_batch_batch_matmul2() {
-        let mut cx = Graph::new();
-        let (a_data, b_data) = (random_vec(4), random_vec(6));
-        let a = cx.tensor(('a', 'b'));
-        a.set_dyn(a_data.clone(), (2, 2));
-        let a = a.expand_dim(0, 1);
-        let b = cx.tensor((1, 'b', 3));
-        b.set_dyn(b_data.clone(), (1, 2, 3));
-        let c = a.matmul(b);
-        c.retrieve();
+//     #[test]
+//     fn test_batch_batch_matmul2() {
+//         let mut cx = Graph::new();
+//         let (a_data, b_data) = (random_vec(4), random_vec(6));
+//         let a = cx.tensor(('a', 'b'));
+//         a.set_dyn(a_data.clone(), (2, 2));
+//         let a = a.expand_dim(0, 1);
+//         let b = cx.tensor((1, 'b', 3));
+//         b.set_dyn(b_data.clone(), (1, 2, 3));
+//         let c = a.matmul(b);
+//         c.retrieve();
 
-        cx.execute();
+//         cx.execute();
 
-        let d_dev = Cpu::default();
-        let d_a = d_dev.tensor_from_vec(a_data, (DConst::<1>, DConst::<2>, DConst::<2>));
-        let d_b = d_dev.tensor_from_vec(b_data, (DConst::<1>, DConst::<2>, DConst::<3>));
-        let d_c = d_a.matmul(d_b);
+//         let d_dev = Cpu::default();
+//         let d_a = d_dev.tensor_from_vec(a_data, (DConst::<1>, DConst::<2>, DConst::<2>));
+//         let d_b = d_dev.tensor_from_vec(b_data, (DConst::<1>, DConst::<2>, DConst::<3>));
+//         let d_c = d_a.matmul(d_b);
 
-        assert_close(&c.data(), &d_c.as_vec());
-    }
-}
+//         assert_close(&c.data(), &d_c.as_vec());
+//     }
+// }

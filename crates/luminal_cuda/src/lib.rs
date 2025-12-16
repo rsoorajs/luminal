@@ -2,3 +2,14 @@ pub mod block;
 pub mod kernel;
 pub mod logical;
 pub use cudarc;
+use luminal::op::DType;
+
+fn cuda_dtype(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F32 => "float",
+        DType::F16 => "half",
+        DType::Bf16 => todo!(),
+        DType::Int => "int",
+    }
+}
+

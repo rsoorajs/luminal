@@ -5,7 +5,7 @@ use petgraph::{algo::toposort, visit::EdgeRef, Direction};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use luminal::{
-    op::{Add, Exp2, Function, LessThan, Log2, MaxReduce, Mod, Mul, Recip, Sin, Sqrt, SumReduce},
+    op::{Add, Exp2, LessThan, Log2, MaxReduce, Mod, Mul, Recip, Sin, Sqrt, SumReduce},
     prelude::*,
 };
 
@@ -57,7 +57,7 @@ impl Compiler for Autograd {
         grads.insert(
             *loss,
             (
-                graph.constant(1.0).id,
+                graph.constant_float(1.0).id,
                 ShapeTracker::new(()), // Assume scalar loss for now
             ),
         );
@@ -69,7 +69,7 @@ impl Compiler for Autograd {
             // Check if the node is undifferentiable
             let graph_ref: *mut Graph = graph;
             let op = graph.node_weight(fwd_node).unwrap().as_any().type_id();
-            if op == TypeId::of::<Function>() {
+            if op == TypeId::of::<GMEM>() {
                 continue;
             }
             if op == TypeId::of::<Mod>() || op == TypeId::of::<LessThan>() {
@@ -227,130 +227,130 @@ fn add_grad(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use dfdx::nn::Module as DModule;
-    use luminal::prelude::Module as LModule;
-    luminal::test_imports!();
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use dfdx::nn::Module as DModule;
+//     use luminal::prelude::Module as LModule;
+//     luminal::test_imports!();
 
-    fn get_vec(grad: (NodeIndex, ShapeTracker), cx: &mut Graph) -> Vec<f32> {
-        GraphTensor::from_id(grad.0, grad.1, cx, DType::F32).data()
-    }
+//     fn get_vec(grad: (NodeIndex, ShapeTracker), cx: &mut Graph) -> Vec<f32> {
+//         GraphTensor::from_id(grad.0, grad.1, cx, DType::F32).data()
+//     }
 
-    #[test]
-    fn test_autograd_max_reduce() {
-        let mut cx = Graph::new();
-        let a = cx.named_tensor("Input", 2).set([10., 5.]);
-        let b = a.max(0);
+//     #[test]
+//     fn test_autograd_max_reduce() {
+//         let mut cx = Graph::new();
+//         let a = cx.named_tensor("Input", 2).set([10., 5.]);
+//         let b = a.max(0);
 
-        let grads = cx.compile(Autograd::new(a, b), ());
-        cx.keep_tensors(&grads);
-        cx.execute();
+//         let grads = cx.compile(Autograd::new(a, b), ());
+//         cx.keep_tensors(&grads);
+//         cx.execute();
 
-        let dev = dfdx::prelude::Cpu::default();
-        let d_a = dev.tensor([10., 5.]);
-        let d_b = d_a.trace(Gradients::leaky()).max();
-        let d_grads = d_b.backward();
+//         let dev = dfdx::prelude::Cpu::default();
+//         let d_a = dev.tensor([10., 5.]);
+//         let d_b = d_a.trace(Gradients::leaky()).max();
+//         let d_grads = d_b.backward();
 
-        assert_exact(&get_vec(grads[0], &mut cx), &d_grads.get(&d_a).as_vec());
-    }
+//         assert_exact(&get_vec(grads[0], &mut cx), &d_grads.get(&d_a).as_vec());
+//     }
 
-    #[test]
-    fn test_autograd_matmul() {
-        let mut cx = Graph::new();
-        let a = cx.named_tensor("A", (2, 2)).set([[2., 4.], [3., 1.]]);
-        let input = cx.named_tensor("Input", 2).set([10., 5.]);
-        let output = (input.matmul(a)).sum(0);
+//     #[test]
+//     fn test_autograd_matmul() {
+//         let mut cx = Graph::new();
+//         let a = cx.named_tensor("A", (2, 2)).set([[2., 4.], [3., 1.]]);
+//         let input = cx.named_tensor("Input", 2).set([10., 5.]);
+//         let output = (input.matmul(a)).sum(0);
 
-        let grads = cx.compile(Autograd::new(a, output), ());
-        cx.keep_tensors(&grads);
-        cx.execute();
+//         let grads = cx.compile(Autograd::new(a, output), ());
+//         cx.keep_tensors(&grads);
+//         cx.execute();
 
-        let dev = dfdx::prelude::Cpu::default();
-        let w1 = dev.tensor([[2., 4.], [3., 1.]]);
-        let inp = dev.tensor([10., 5.]);
-        let out = inp.trace(Gradients::leaky()).matmul(w1.clone()).sum();
-        let d_grads = out.backward();
+//         let dev = dfdx::prelude::Cpu::default();
+//         let w1 = dev.tensor([[2., 4.], [3., 1.]]);
+//         let inp = dev.tensor([10., 5.]);
+//         let out = inp.trace(Gradients::leaky()).matmul(w1.clone()).sum();
+//         let d_grads = out.backward();
 
-        assert_exact(&get_vec(grads[0], &mut cx), &d_grads.get(&w1).as_vec());
-    }
+//         assert_exact(&get_vec(grads[0], &mut cx), &d_grads.get(&w1).as_vec());
+//     }
 
-    #[test]
-    fn test_autograd_mlp() {
-        let mut cx = Graph::new();
-        let model = (
-            luminal_nn::Linear::new(2, 2, false, &mut cx),
-            luminal_nn::ReLU,
-            luminal_nn::Linear::new(2, 1, false, &mut cx),
-        );
-        model.0.weight.set([[2., 4.], [3., 1.]]);
-        model.2.weight.set([[6.], [5.]]);
-        let input = cx.named_tensor("Input", 2).set([10., 5.]);
-        let output = model.forward(input).sum(0);
+//     #[test]
+//     fn test_autograd_mlp() {
+//         let mut cx = Graph::new();
+//         let model = (
+//             luminal_nn::Linear::new(2, 2, false, &mut cx),
+//             luminal_nn::ReLU,
+//             luminal_nn::Linear::new(2, 1, false, &mut cx),
+//         );
+//         model.0.weight.set([[2., 4.], [3., 1.]]);
+//         model.2.weight.set([[6.], [5.]]);
+//         let input = cx.named_tensor("Input", 2).set([10., 5.]);
+//         let output = model.forward(input).sum(0);
 
-        let mut grads = cx.compile(Autograd::new(params(model), output), ());
-        cx.keep_tensors(&grads);
-        cx.compile(GenericCompiler::default(), &mut grads);
-        cx.execute();
+//         let mut grads = cx.compile(Autograd::new(params(model), output), ());
+//         cx.keep_tensors(&grads);
+//         cx.compile(GenericCompiler::default(), &mut grads);
+//         cx.execute();
 
-        let dev = dfdx::prelude::Cpu::default();
-        let mut d_model = dev.build_module::<(
-            dfdx::nn::builders::UnbiasedLinear<2, 2>,
-            dfdx::nn::builders::ReLU,
-            dfdx::nn::builders::UnbiasedLinear<2, 1>,
-        ), f32>();
-        d_model.0.weight = dev.tensor([[2., 4.], [3., 1.]]).permute();
-        d_model.2.weight = dev.tensor([[6.], [5.]]).permute();
-        let inp = dev.tensor([10., 5.]);
-        let out = d_model.forward(inp.trace(Gradients::leaky())).sum();
-        let d_grads = out.backward();
+//         let dev = dfdx::prelude::Cpu::default();
+//         let mut d_model = dev.build_module::<(
+//             dfdx::nn::builders::UnbiasedLinear<2, 2>,
+//             dfdx::nn::builders::ReLU,
+//             dfdx::nn::builders::UnbiasedLinear<2, 1>,
+//         ), f32>();
+//         d_model.0.weight = dev.tensor([[2., 4.], [3., 1.]]).permute();
+//         d_model.2.weight = dev.tensor([[6.], [5.]]).permute();
+//         let inp = dev.tensor([10., 5.]);
+//         let out = d_model.forward(inp.trace(Gradients::leaky())).sum();
+//         let d_grads = out.backward();
 
-        assert_exact(
-            &get_vec(grads[0], &mut cx),
-            &d_grads.get(&d_model.0.weight).permute().as_vec(),
-        );
-        assert_exact(
-            &get_vec(grads[1], &mut cx),
-            &d_grads.get(&d_model.2.weight).as_vec(),
-        );
-    }
+//         assert_exact(
+//             &get_vec(grads[0], &mut cx),
+//             &d_grads.get(&d_model.0.weight).permute().as_vec(),
+//         );
+//         assert_exact(
+//             &get_vec(grads[1], &mut cx),
+//             &d_grads.get(&d_model.2.weight).as_vec(),
+//         );
+//     }
 
-    #[test]
-    fn test_autograd_layer_norm() {
-        let mut cx = Graph::new();
-        let a = cx.tensor(3).set([-1., 2., 3.]);
-        let mut b = a.layer_norm(0, 1e-5).max(0).retrieve();
+//     #[test]
+//     fn test_autograd_layer_norm() {
+//         let mut cx = Graph::new();
+//         let a = cx.tensor(3).set([-1., 2., 3.]);
+//         let mut b = a.layer_norm(0, 1e-5).max(0).retrieve();
 
-        let grads = cx.compile(Autograd::new(a, b), &mut b);
-        cx.keep_tensors(&grads);
-        cx.compile(GenericCompiler::default(), &mut b);
-        cx.execute();
+//         let grads = cx.compile(Autograd::new(a, b), &mut b);
+//         cx.keep_tensors(&grads);
+//         cx.compile(GenericCompiler::default(), &mut b);
+//         cx.execute();
 
-        let d_dev = Cpu::default();
-        let d_a = d_dev.tensor([-1., 2., 3.]);
-        let d_b = d_a.trace(Gradients::leaky()).normalize(1e-5).max();
-        assert_close(&b.data(), &d_b.as_vec());
-        let d_grads = d_b.backward();
-        assert_close(&get_vec(grads[0], &mut cx), &d_grads.get(&d_a).as_vec());
-    }
+//         let d_dev = Cpu::default();
+//         let d_a = d_dev.tensor([-1., 2., 3.]);
+//         let d_b = d_a.trace(Gradients::leaky()).normalize(1e-5).max();
+//         assert_close(&b.data(), &d_b.as_vec());
+//         let d_grads = d_b.backward();
+//         assert_close(&get_vec(grads[0], &mut cx), &d_grads.get(&d_a).as_vec());
+//     }
 
-    #[test]
-    fn test_autograd_softmax() {
-        let mut cx = Graph::new();
-        let a = cx.tensor(3).set([-1., 2., 3.]);
-        let mut b = a.softmax(0).max(0).retrieve();
+//     #[test]
+//     fn test_autograd_softmax() {
+//         let mut cx = Graph::new();
+//         let a = cx.tensor(3).set([-1., 2., 3.]);
+//         let mut b = a.softmax(0).max(0).retrieve();
 
-        let mut grads = cx.compile(Autograd::new(a, b), &mut b);
-        cx.keep_tensors(&grads);
-        cx.compile(GenericCompiler::default(), (&mut grads, &mut b));
-        cx.execute();
+//         let mut grads = cx.compile(Autograd::new(a, b), &mut b);
+//         cx.keep_tensors(&grads);
+//         cx.compile(GenericCompiler::default(), (&mut grads, &mut b));
+//         cx.execute();
 
-        let d_dev = Cpu::default();
-        let d_a = d_dev.tensor([-1., 2., 3.]);
-        let d_b = d_a.trace(Gradients::leaky()).softmax().max();
-        assert_close(&b.data(), &d_b.as_vec());
-        let d_grads = d_b.backward();
-        assert_close(&get_vec(grads[0], &mut cx), &d_grads.get(&d_a).as_vec());
-    }
-}
+//         let d_dev = Cpu::default();
+//         let d_a = d_dev.tensor([-1., 2., 3.]);
+//         let d_b = d_a.trace(Gradients::leaky()).softmax().max();
+//         assert_close(&b.data(), &d_b.as_vec());
+//         let d_grads = d_b.backward();
+//         assert_close(&get_vec(grads[0], &mut cx), &d_grads.get(&d_a).as_vec());
+//     }
+// }

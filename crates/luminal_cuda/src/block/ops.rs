@@ -314,7 +314,7 @@ impl EgglogOp for RowRMSNorm {
                     )
                 )
                 (= ?inv_div_factor
-                    (Recip (ECons ?batch (ENil)) (Constant ?width)
+                    (Recip (ECons ?batch (ENil)) (Iota ?width (MNum 1))
                                     (ECons (MNum 0) (ENil))  ; broadcast the constant
                                     (ECons (MIter) (ENil)))) ; produce per-batch vector
 
@@ -328,7 +328,7 @@ impl EgglogOp for RowRMSNorm {
                         (ECons ?batch (ENil))
                         ?mean
                         (ECons (MIter) (ENil))
-                        (Constant (MFloat ?eps))
+                        (Constant ?eps)
                         (ECons (MNum 0) (ENil))
                         (ECons (MIter) (ENil))
                     )

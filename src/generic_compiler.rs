@@ -1,15 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use itertools::Itertools;
 use petgraph::{
+    Direction,
     algo::toposort,
     stable_graph::{NodeIndex, StableGraph},
     visit::EdgeRef,
-    Direction,
 };
 
 use crate::{
-    op::{Add, Constant, ConstantValue, Function, MaxReduce, Mul, Operator, Recip, SumReduce},
+    op::{Add, Constant, MaxReduce, Mul, Operator, Recip, SumReduce},
     prelude::*,
 };
 
@@ -27,76 +27,8 @@ pub struct CSE;
 
 impl Compiler for CSE {
     type Output = ();
-    fn compile<T: ToIdsMut>(&self, graph: &mut Graph, mut ids: T) {
-        // Look for nodes that have the exact same srcs
-        // Loop cause I'm lazy
-        let mut eliminated = true;
-        while eliminated {
-            eliminated = false;
-            let mut srcs_set: HashMap<Vec<NodeIndex>, Vec<NodeIndex>> = HashMap::new();
-            for node in graph.graph.node_indices().collect_vec() {
-                if graph
-                    .graph
-                    .node_weight(node)
-                    .unwrap()
-                    .as_any()
-                    .is::<Function>()
-                {
-                    continue;
-                }
-                let srcs = graph
-                    .graph
-                    .edges_directed(node, petgraph::Direction::Incoming)
-                    .filter(|e| !e.weight().is_schedule())
-                    .sorted_by_key(|e| e.weight().as_data().unwrap().0)
-                    .map(|e| e.source())
-                    .collect_vec();
-
-                if let Some(other_nodes) = srcs_set.get(&srcs) {
-                    for other_node in other_nodes {
-                        let a = graph.graph.node_weight(node).unwrap();
-                        let Some(b) = graph.graph.node_weight(*other_node) else {
-                            continue;
-                        };
-                        if format!("{a:?}") != format!("{b:?}") {
-                            // Sloppy way to check if ops are equal, but we only expect primops here so it's ok
-                            continue;
-                        }
-                        let a_src_shapes = graph
-                            .get_sources(node)
-                            .into_iter()
-                            .map(|(_, _, a)| a)
-                            .collect_vec();
-                        let b_src_shapes = graph
-                            .get_sources(*other_node)
-                            .into_iter()
-                            .map(|(_, _, a)| a)
-                            .collect_vec();
-                        if a_src_shapes != b_src_shapes {
-                            continue;
-                        }
-                        // If the op, input shapes, and output shape is the same, we can combine them (UNCLEAR IF THIS IS TRUE, NEED PROPER PartialEq)
-                        // Carry over outgoing edges from node to other_node
-                        move_outgoing_edge(node, *other_node, &mut graph.graph);
-                        // Transfer all references to node over to other node
-                        remap(node, *other_node, &mut ids, graph);
-                        // Remove node
-                        graph.graph.remove_node(node);
-                        eliminated = true;
-                        break;
-                    }
-                    if eliminated {
-                        break;
-                    }
-                }
-                if let Some(nodes) = srcs_set.get_mut(&srcs) {
-                    nodes.push(node);
-                } else {
-                    srcs_set.insert(srcs, vec![node]);
-                }
-            }
-            srcs_set.clear();
-        }
+    fn compile<T: ToIdsMut>(&self, _: &mut Graph, _: T) {
+        todo!()
     }
 }
 
@@ -485,7 +417,7 @@ impl Compiler for ArithmeticElimination {
 fn constant(num: f32) -> SelectGraph {
     let mut n = op::<Constant>();
     n.check(move |o, _| {
-        if let Some(Constant(ConstantValue::Float(f), _)) = o.as_any().downcast_ref::<Constant>() {
+        if let Some(Constant(f)) = o.as_any().downcast_ref::<Constant>() {
             *f == num
         } else {
             false

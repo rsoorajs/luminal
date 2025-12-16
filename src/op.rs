@@ -9,7 +9,7 @@ use std::{
 use crate::{
     prelude::*,
     utils::{
-        EgglogOp,
+        EgglogOp, LLIROp,
         OpParam::{self, *},
     },
 };
@@ -141,140 +141,135 @@ impl<T: Operator> Operator for Arc<Mutex<T>> {
     }
 }
 
-/// An opaque function running on CPU that takes in Vec<f32> tensors and outputs Vec<f32> tensors
-#[allow(clippy::type_complexity)]
-pub struct Function(
-    pub String,
-    pub Box<dyn Fn(Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor>>,
-);
-
-impl PartialEq for Function {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl Operator for Function {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        (self.1)(inp)
-    }
-
-    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
-        panic!("Cannot turn Function into egglog op!");
-    }
-}
-
 #[allow(unused)]
 #[derive(Default, Debug, Clone)]
 pub struct GMEM {
     pub node: usize,
     pub label: String,
+    pub dtype: DType,
 }
 
 impl EgglogOp for GMEM {
     fn term(&self) -> (String, Vec<OpParam>) {
-        ("GMEM".to_string(), vec![Int, Str])
+        ("GMEM".to_string(), vec![Int, Str, Dty])
     }
 
     fn cleanup(&self) -> bool {
         false
     }
-}
 
-impl Debug for Function {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (GMEM ?node ?label ?dty)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
+    }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        children: &Vec<&'a egraph_serialize::NodeId>,
+        _: &mut FxHashMap<&'a egraph_serialize::NodeId, Vec<Expression>>,
+        _: &mut FxHashMap<&'a egraph_serialize::NodeId, Expression>,
+    ) -> (crate::utils::LLIROp, Vec<&'a egraph_serialize::NodeId>) {
+        let node = egraph.enodes[children[0]]
+            .0
+            .replace("\"", "")
+            .parse::<usize>()
+            .unwrap();
+        let label = egraph.enodes[children[1]].0.replace("\"", "");
+        (
+            LLIROp::new::<GMEM>(Box::new(Self {
+                node,
+                label,
+                dtype: extract_dtype(egraph, children[2]),
+            })),
+            vec![],
+        )
     }
 }
 
-/// A constant value placed on the graph at runtime. Can either be an expression evaluated at runtime, or a constant float
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConstantValue {
-    Expression(Expression),
-    Float(f32),
-}
+impl Operator for GMEM {
+    fn process(&mut self, _: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
+        todo!()
+    }
 
-impl From<f32> for ConstantValue {
-    fn from(value: f32) -> Self {
-        ConstantValue::Float(value)
-    }
-}
-impl From<f64> for ConstantValue {
-    fn from(value: f64) -> Self {
-        ConstantValue::Float(value as f32)
-    }
-}
-impl<T: Into<Expression>> From<T> for ConstantValue {
-    fn from(value: T) -> Self {
-        ConstantValue::Expression(value.into())
-    }
-}
-
-impl Default for Constant {
-    fn default() -> Self {
-        Self(ConstantValue::Expression(0.into()), null())
+    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!("(GMEM {} \"{}\" ({:?}))", self.node, self.label, self.dtype)
     }
 }
 
 /// Produces a single number constant from an expression or a float
-#[derive(Clone, PartialEq)]
-pub struct Constant(pub ConstantValue, pub *const FxHashMap<char, usize>);
+#[derive(Clone, PartialEq, Default)]
+pub struct Constant(pub f32);
 impl Debug for Constant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Constant(",)?;
-        match &self.0 {
-            ConstantValue::Expression(e) => e.fmt(f)?,
-            ConstantValue::Float(fl) => fl.fmt(f)?,
-        }
+        self.0.fmt(f)?;
         write!(f, ")")
     }
 }
 
 impl Operator for Constant {
     fn process(&mut self, _: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        vec![Tensor::new(vec![match &self.0 {
-            ConstantValue::Expression(e) => {
-                e.exec_float(unsafe { self.1.as_ref().unwrap() }).unwrap() as f32
-            }
-            ConstantValue::Float(f) => *f,
-        }])]
+        vec![Tensor::new(vec![self.0])]
     }
 
     fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
-        match self.0 {
-            ConstantValue::Expression(e) => format!("(Constant {})", e.to_egglog()),
-            ConstantValue::Float(f) => format!("(Constant (MFloat {f:.6}))"),
-        }
+        format!("(Constant {:.6})", self.0)
     }
 }
 
 impl EgglogOp for Constant {
     fn term(&self) -> (String, Vec<OpParam>) {
-        ("Constant".to_string(), vec![Expr])
+        ("Constant".to_string(), vec![Float])
     }
     fn cleanup(&self) -> bool {
         true
     }
+
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Constant ?f)))
+           ((set (dtype ?e) (F32)))
+        )"
+            .to_string(),
+        ]
+    }
 }
 
 #[derive(Clone, PartialEq, Debug, Default)]
-pub struct Iota(pub Expression);
+pub struct Iota(pub Expression, pub Expression);
 impl Operator for Iota {
     fn process(&mut self, _: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
         todo!()
     }
 
     fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
-        format!("(Iota {})", self.0.to_egglog())
+        format!("(Iota {} {})", self.0.to_egglog(), self.1.to_egglog())
     }
 }
 impl EgglogOp for Iota {
     fn term(&self) -> (String, Vec<OpParam>) {
-        ("Iota".to_string(), vec![Expr])
+        ("Iota".to_string(), vec![Expr, Expr])
     }
 
     fn cleanup(&self) -> bool {
         true
+    }
+
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Iota ?expr ?range)))
+           ((set (dtype ?e) (Int)))
+        )"
+            .to_string(),
+        ]
     }
 }
 
@@ -298,17 +293,27 @@ impl Operator for Cast {
         todo!()
     }
 
-    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
-        format!("(Cast {:?})", self.0)
+    fn to_egglog(&self, inp: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+        format!("(Cast {} {:?})", inp[0].1, self.0)
     }
 }
 impl EgglogOp for Cast {
     fn term(&self) -> (String, Vec<OpParam>) {
-        ("Cast".to_string(), vec![Expr])
+        ("Cast".to_string(), vec![Input, Expr])
     }
 
     fn cleanup(&self) -> bool {
         true
+    }
+
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Cast ?inp ?dty)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
     }
 }
 
@@ -365,6 +370,15 @@ impl EgglogOp for Log2 {
     fn cleanup(&self) -> bool {
         true
     }
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Log2 ?shape ?inp ?a ?b)) (= ?dty (dtype ?inp)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -398,6 +412,15 @@ impl EgglogOp for Exp2 {
     }
     fn cleanup(&self) -> bool {
         true
+    }
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Exp2 ?shape ?inp ?a ?b)) (= ?dty (dtype ?inp)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
     }
 }
 
@@ -433,6 +456,15 @@ impl EgglogOp for Sin {
     fn cleanup(&self) -> bool {
         true
     }
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Sin ?shape ?inp ?a ?b)) (= ?dty (dtype ?inp)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -467,6 +499,15 @@ impl EgglogOp for Recip {
     fn cleanup(&self) -> bool {
         true
     }
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Recip ?shape ?inp ?a ?b)) (= ?dty (dtype ?inp)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -500,6 +541,15 @@ impl EgglogOp for Sqrt {
     }
     fn cleanup(&self) -> bool {
         true
+    }
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Sqrt ?shape ?inp ?a ?b)) (= ?dty (dtype ?inp)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
     }
 }
 
@@ -543,6 +593,15 @@ impl EgglogOp for Add {
     fn cleanup(&self) -> bool {
         true
     }
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Add ?shape ?inp_a ?a ?inp_b ?b ?o)) (= ?dty (dtype ?inp_a)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -583,6 +642,15 @@ impl EgglogOp for Mul {
     fn cleanup(&self) -> bool {
         true
     }
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Mul ?shape ?inp_a ?a ?inp_b ?b ?o)) (= ?dty (dtype ?inp_a)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -622,6 +690,15 @@ impl EgglogOp for Mod {
     }
     fn cleanup(&self) -> bool {
         true
+    }
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Mod ?shape ?inp_a ?a ?inp_b ?b ?o)) (= ?dty (dtype ?inp_a)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
     }
 }
 
@@ -664,6 +741,15 @@ impl EgglogOp for LessThan {
     fn cleanup(&self) -> bool {
         true
     }
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (LessThan ?shape ?inp_a ?a ?inp_b ?b ?o)) (= ?dty (dtype ?inp_a)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -694,6 +780,15 @@ impl EgglogOp for Gather {
     }
     fn cleanup(&self) -> bool {
         true
+    }
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Gather ?shape ?indexes ?a ?data ?b)) (= ?dty (dtype ?data)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
     }
 }
 
@@ -751,6 +846,15 @@ impl EgglogOp for SumReduce {
     fn cleanup(&self) -> bool {
         true
     }
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Sum ?shape ?iters ?inp ?a ?stride ?o)) (= ?dty (dtype ?inp)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -807,6 +911,15 @@ impl EgglogOp for MaxReduce {
     }
     fn cleanup(&self) -> bool {
         true
+    }
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (Max ?shape ?iters ?inp ?a ?stride ?o)) (= ?dty (dtype ?inp)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
     }
 }
 

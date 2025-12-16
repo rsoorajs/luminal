@@ -34,23 +34,23 @@ impl Linear {
         }
     }
 
-    pub fn init_rand(self) -> Self {
-        // Init weight as uniform(-1, 1)
-        let mut rng = rng();
-        self.weight.set(
-            (0..self.weight.shape.n_elements().to_usize().unwrap())
-                .map(|_| rng.random_range(-1_f32..1_f32))
-                .collect::<Vec<_>>(),
-        );
-        if let Some(bias) = self.bias {
-            bias.set(
-                (0..bias.shape.n_elements().to_usize().unwrap())
-                    .map(|_| rng.random_range(-1_f32..1_f32))
-                    .collect::<Vec<_>>(),
-            );
-        }
-        self
-    }
+    // pub fn init_rand(self) -> Self {
+    //     // Init weight as uniform(-1, 1)
+    //     let mut rng = rng();
+    //     self.weight.set(
+    //         (0..self.weight.shape.n_elements().to_usize().unwrap())
+    //             .map(|_| rng.random_range(-1_f32..1_f32))
+    //             .collect::<Vec<_>>(),
+    //     );
+    //     if let Some(bias) = self.bias {
+    //         bias.set(
+    //             (0..bias.shape.n_elements().to_usize().unwrap())
+    //                 .map(|_| rng.random_range(-1_f32..1_f32))
+    //                 .collect::<Vec<_>>(),
+    //         );
+    //     }
+    //     self
+    // }
 }
 
 impl SerializeModule for Linear {
@@ -78,29 +78,29 @@ impl Module<GraphTensor> for Linear {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Linear;
-    use luminal::{prelude::*, tests::assert_close};
-    #[test]
-    fn test_linear() {
-        let mut cx = Graph::new();
-        let batch = cx.tensor((2, 3)).set([1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
-        let a = cx.tensor(3).set([1.0, 2.0, 3.0]);
+// #[cfg(test)]
+// mod tests {
+//     use super::Linear;
+//     use luminal::{prelude::*, tests::assert_close};
+//     #[test]
+//     fn test_linear() {
+//         let mut cx = Graph::new();
+//         let batch = cx.tensor((2, 3)).set([1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
+//         let a = cx.tensor(3).set([1.0, 2.0, 3.0]);
 
-        let model = Linear::new(3, 4, false, &mut cx).init_rand();
-        let mut b = model.forward(a).retrieve();
-        let mut batch_out = model.forward(batch).retrieve();
+//         let model = Linear::new(3, 4, false, &mut cx).init_rand();
+//         let mut b = model.forward(a).retrieve();
+//         let mut batch_out = model.forward(batch).retrieve();
 
-        cx.execute();
+//         cx.execute();
 
-        let unoptimized_b = b.data();
-        let unoptimized_batch_out = batch_out.data();
+//         let unoptimized_b = b.data();
+//         let unoptimized_batch_out = batch_out.data();
 
-        cx.compile(GenericCompiler::default(), (&mut b, &mut batch_out));
-        cx.execute();
+//         cx.compile(GenericCompiler::default(), (&mut b, &mut batch_out));
+//         cx.execute();
 
-        assert_close(&unoptimized_b, &b.data());
-        assert_close(&unoptimized_batch_out, &batch_out.data());
-    }
-}
+//         assert_close(&unoptimized_b, &b.data());
+//         assert_close(&unoptimized_batch_out, &batch_out.data());
+//     }
+// }

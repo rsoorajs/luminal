@@ -68,29 +68,9 @@ impl GraphTensor {
         unsafe { self.graph_ref.as_mut().unwrap() }
     }
 
-    /// Set the value of the tensor, with dynamic dimensions.
-    /// ```rust
-    /// use luminal::prelude::*;
-    /// let mut cx = Graph::new();
-    /// let a = cx
-    ///     .tensor((2, 's'))
-    ///     .set_dyn(vec![1., 2., 3., 4.], &[2, 2]);
-    /// ```
-    pub fn set_dyn(self, data: impl Data + Clone, shape: impl ToShape) -> Self {
-        // Report dyn dim values to graph dyn map
-        for (d, s) in self.shape.dims.iter().zip(shape.to_shape().into_iter()) {
-            if let Some(c) = d.to_symbols().pop() {
-                self.graph().dyn_map.insert(c, s.to_usize().unwrap());
-            }
-        }
-        self.graph().get_op_mut::<Function>(self.id).1 =
-            Box::new(move |_| vec![Tensor::new(data.to_owned())]);
-        self
-    }
-
     /// Set the name of a tensor
     pub fn set_name(&self, name: &str) {
-        self.graph().get_op_mut::<Function>(self.id).0 = name.to_string();
+        self.graph().get_op_mut::<GMEM>(self.id).label = name.to_string();
     }
 
     /// Get the contiguous data of the tensor
@@ -173,21 +153,6 @@ impl GraphTensor {
         );
         let dims = self.dims();
         (dims[0], dims[1], dims[2], dims[3], dims[4])
-    }
-
-    /// Set the value of the tensor matching the constant shape
-    pub fn set<T: Data + Clone, D: ToData<T>>(self, data: D) -> Self {
-        let (data, _) = data.to_data_vec();
-        self.graph().get_op_mut::<Function>(self.id).1 =
-            Box::new(move |_| vec![Tensor::new(data.to_owned())]);
-        self
-    }
-
-    /// Set the tensor with a generating closure to be ran at runtime
-    pub fn set_deferred(self, loader: impl Fn() -> Vec<f32> + 'static) -> Self {
-        self.graph().get_op_mut::<Function>(self.id).1 =
-            Box::new(move |_| vec![Tensor::new(loader())]);
-        self
     }
 }
 
@@ -297,8 +262,6 @@ pub trait MarkTensors {
     fn retrieve(&self);
     /// Drop all tensors in this collection
     fn drop(&self);
-    /// Set data
-    fn set_dyn(&self, data: impl Data + Clone, shape: impl ToShape + Copy);
 }
 
 impl MarkTensors for GraphTensor {
@@ -311,9 +274,6 @@ impl MarkTensors for GraphTensor {
     }
     fn drop(&self) {
         GraphTensor::drop(self);
-    }
-    fn set_dyn(&self, data: impl Data + Clone, shape: impl ToShape + Copy) {
-        GraphTensor::set_dyn(*self, data, shape);
     }
 }
 
@@ -335,11 +295,6 @@ impl<S: MarkTensors> MarkTensors for Vec<S> {
             t.drop();
         }
     }
-    fn set_dyn(&self, data: impl Data + Clone, shape: impl ToShape + Copy) {
-        for t in self {
-            t.set_dyn(data.clone(), shape);
-        }
-    }
 }
 impl<S: MarkTensors> MarkTensors for &[S] {
     fn keep(&self) {
@@ -359,11 +314,6 @@ impl<S: MarkTensors> MarkTensors for &[S] {
             t.drop();
         }
     }
-    fn set_dyn(&self, data: impl Data + Clone, shape: impl ToShape + Copy) {
-        for t in *self {
-            t.set_dyn(data.clone(), shape);
-        }
-    }
 }
 
 macro_rules! tuple_impls {
@@ -380,9 +330,6 @@ macro_rules! tuple_impls {
             }
             fn drop(&self) {
                 $(self.$idx.drop();)+
-            }
-            fn set_dyn(&self, data: impl Data + Clone, shape: impl ToShape + Copy) {
-                $(self.$idx.set_dyn(data.clone(), shape);)+
             }
         }
     };
