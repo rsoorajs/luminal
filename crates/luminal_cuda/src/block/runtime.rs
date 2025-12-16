@@ -18,7 +18,7 @@ use luminal::prelude::{
     },
     Expression, NodeIndex,
 };
-use luminal::utils::{display_graph, flatten_strides};
+use luminal::utils::flatten_strides;
 use prost::Message as _;
 use rustc_hash::{FxHashMap, FxHashSet};
 use safetensors::SafeTensors;
@@ -100,16 +100,23 @@ impl CudaRuntime {
         for node in self.llir_graph.node_indices().collect_vec() {
             if let Some(GMEM { label, .. }) = self.llir_graph[node].to_op::<GMEM>() {
                 if let Ok(tensor) = st.tensor(label) {
-                    let data: Vec<f32> = tensor
-                        .data()
-                        .chunks_exact(2)
-                        .map(|chunk| half::bf16::from_le_bytes([chunk[0], chunk[1]]).to_f32())
-                        .collect();
-                    self.buffers.insert(
-                        node,
-                        data.to_cuda_buffer(&self.cuda_context, &self.cuda_stream),
-                    );
-                    self.register_buffer(node);
+                    match tensor.dtype() {
+                        safetensors::Dtype::BF16 => {
+                            let data: Vec<f32> = tensor
+                                .data()
+                                .chunks_exact(2)
+                                .map(|chunk| {
+                                    half::bf16::from_le_bytes([chunk[0], chunk[1]]).to_f32()
+                                })
+                                .collect();
+                            self.buffers.insert(
+                                node,
+                                data.to_cuda_buffer(&self.cuda_context, &self.cuda_stream),
+                            );
+                            self.register_buffer(node);
+                        }
+                        dtype => unimplemented!("{dtype} loading not supported yet"),
+                    }
                 }
             }
         }
@@ -441,7 +448,7 @@ impl Runtime for CudaRuntime {
             match &mut self.exec_graph[exec_node] {
                 ExecutableKernel::Kernel {
                     kernel,
-                    code,
+                    code: _,
                     launch_grid,
                     launch_threadblock,
                     inputs,
@@ -473,7 +480,7 @@ impl Runtime for CudaRuntime {
                     };
                     let mut lb = self.cuda_stream.launch_builder(kernel);
                     lb.arg(&self.buffers[output]);
-                    for (i, inp) in inputs.into_iter().enumerate() {
+                    for inp in inputs {
                         lb.arg(&self.buffers[inp]);
                     }
                     let span = span!(Level::INFO, "execute");

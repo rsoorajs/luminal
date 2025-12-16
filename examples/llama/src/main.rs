@@ -1,39 +1,23 @@
 mod model;
 
-use half::bf16;
 use itertools::Itertools;
 use luminal::{
     graph::{Graph, Runtime},
     op::DType,
-    utils::{display_graph, IntoEgglogOp},
+    utils::IntoEgglogOp,
 };
 use luminal_cuda::{
     block::{self, record_exec_timings_to_file, CudaRuntime, CustomState, IntoBlockOp},
     kernel, logical,
 };
 use rustc_hash::*;
-use safetensors::SafeTensors;
-use std::{
-    fs::{self, File},
-    io::Write,
-    time::Duration,
-};
+use std::{fs::File, io::Write, time::Duration};
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
 use tracing_appender::non_blocking;
 use tracing_perfetto_sdk_layer::NativeLayer;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-fn load_safetensor(st: &SafeTensors, name: &str) -> Vec<f32> {
-    let tensor = st.tensor(name).unwrap();
-    let data: Vec<f32> = tensor
-        .data()
-        .chunks_exact(2)
-        .map(|chunk| bf16::from_le_bytes([chunk[0], chunk[1]]).to_f32())
-        .collect();
-    data
-}
 
 fn trace_config() -> tracing_perfetto_sdk_schema::TraceConfig {
     tracing_perfetto_sdk_schema::TraceConfig {
@@ -79,13 +63,7 @@ fn main() {
         .expect("Failed to encode");
     let mut sentence = encoding.get_ids().to_vec();
 
-    // Load embedding weights from safetensors
-    let embed_file = fs::read("model_combined.safetensors").unwrap();
-    let st = SafeTensors::deserialize(&embed_file).expect("Failed to deserialize safetensors");
-    let embed_data = load_safetensor(&st, "model.embed_tokens.weight");
-
     let mut cx = Graph::default();
-
     let input = cx.named_tensor("input", batch).as_dtype(DType::Int);
     let token_ids = cx.named_tensor("token_ids", batch).as_dtype(DType::Int);
     let model = model::Llama::init(
@@ -158,12 +136,6 @@ fn main() {
         let seq_len = sentence.len();
         cx.set_dyn_dim('s', seq_len);
         cx.set_dyn_dim('p', prev_seq);
-        let mut embeddings = vec![0.0f32; seq_len * hidden];
-        for (i, &token_id) in sentence.iter().enumerate() {
-            let start = token_id as usize * hidden;
-            let end = start + hidden;
-            embeddings[i * hidden..(i + 1) * hidden].copy_from_slice(&embed_data[start..end]);
-        }
 
         runtime.set_data(
             input.id,
