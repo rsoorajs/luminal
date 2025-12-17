@@ -105,7 +105,7 @@
 (rule ((= ?e (ECons ?expr ?list)) (= ?list_len (len ?list))) ((set (nth_from_end ?e ?list_len) ?expr)) :ruleset expr)
 (rule ((= ?e (ECons ?expr ?list)) (= ?other_nth (nth_from_end ?list ?n))) ((set (nth_from_end ?e ?n) ?other_nth)) :ruleset expr)
 
-(function n_elements (EList) Expression :no-merge)
+(function n_elements (EList) Expression :merge new)
 (rule ((= ?e (ENil))) ((set (n_elements ?e) (MNum 1))) :ruleset expr)
 (rule
  	(

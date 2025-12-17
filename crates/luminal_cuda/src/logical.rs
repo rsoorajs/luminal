@@ -26,7 +26,7 @@ impl EgglogOp for CubeMul {
     fn rewrites(&self) -> Vec<String> {
         vec!["(rule
             (
-                ; get  mul
+                ; get mul
                 (= ?sa (Mul ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
                 (= ?shape_last (nth_from_end ?shape 0))
                 (= ?shape_second_to_last (nth_from_end ?shape 1))
@@ -44,6 +44,7 @@ impl EgglogOp for CubeMul {
                 (= ?a_k_width (nth_from_end ?a_stride 0))
                 (= ?b_k_width (nth_from_end ?b_stride 0))
                 (= ?out_k_width (nth_from_end ?out_stride 0))
+                (= ?dt (dtype ?a))
             )
             (
                 ; divide the last 3 dimensions by 32
@@ -84,7 +85,9 @@ impl EgglogOp for CubeMul {
                         (MMul ?out_n_width (MNum 32)) 1)
                     (MMul ?out_m_width (MNum 32)) 2)
                 )
-                (union ?sa (CubeMul ?new_shape ?shape ?a ?new_a_stride ?a_m_width ?a_n_width ?a_k_width ?b ?new_b_stride ?b_m_width ?b_n_width ?b_k_width ?new_out_stride ?out_m_width ?out_n_width ?out_k_width))
+                (let ?cm (CubeMul ?new_shape ?shape ?a ?new_a_stride ?a_m_width ?a_n_width ?a_k_width ?b ?new_b_stride ?b_m_width ?b_n_width ?b_k_width ?new_out_stride ?out_m_width ?out_n_width ?out_k_width))
+                (union ?sa ?cm)
+                (set (dtype ?cm) (F32))
             )
         )".to_string()]
     }
@@ -119,6 +122,7 @@ impl EgglogOp for TileSum {
                 ; get m and n strides for out
                 (= ?out_m_stride (nth_from_end ?out_stride 1))
                 (= ?out_n_stride (nth_from_end ?out_stride 0))
+                (= (F32) (dtype ?a))
             )
             (
                 ; divide second to last and last dimensions by 32
@@ -144,10 +148,9 @@ impl EgglogOp for TileSum {
                         (MMul ?out_n_stride (MNum 32)) 0)
                     (MMul ?out_m_stride (MNum 32)) 1)
                 )
-                (union
-                    ?sa
-                    (TileSum ?new_shape ?shape ?iters ?a ?new_a_stride ?a_m_stride ?a_n_stride ?a_k_stride ?new_out_stride ?out_m_stride ?out_n_stride)
-                )
+                (let ?ts (TileSum ?new_shape ?shape ?iters ?a ?new_a_stride ?a_m_stride ?a_n_stride ?a_k_stride ?new_out_stride ?out_m_stride ?out_n_stride))
+                (union ?sa ?ts)
+                (set (dtype ?ts) (F32))
             )
         )".to_string()]
     }
@@ -170,9 +173,12 @@ impl EgglogOp for Exp {
                 (= ?exp_const (Constant 1.442695))
                 (= ?mul (Mul ?shape ?x ?x_stride ?exp_const ?const_stride ?intermediate_stride))
                 (= ?exp2 (Exp2 ?shape ?mul ?intermediate_stride ?out_stride))
+                (= ?dt (dtype ?x))
             )
             (
-                (union ?exp2 (Exp ?shape ?x ?x_stride ?out_stride))
+                (let ?exp (Exp ?shape ?x ?x_stride ?out_stride))
+                (union ?exp2 ?exp)
+                (set (dtype ?exp) ?dt)
             )
         )"
         .to_string()]
@@ -197,12 +203,12 @@ impl EgglogOp for Sigmoid {
                 (= ?exp (Exp ?input_range ?neg_input ?intermediate_stride ?exp_stride))
                 (= ?plus_one (Add ?input_range ?exp ?exp_stride (Constant 1.0) ?const_stride ?plus_one_stride))
                 (= ?sig_out (Recip ?input_range ?plus_one ?plus_one_stride ?out_stride))
+                (= ?dt (dtype ?input))
             )
             (
-                (union
-                    ?sig_out
-                    (Sigmoid ?input_range ?input ?input_stride ?out_stride)
-                )
+                (let ?sig (Sigmoid ?input_range ?input ?input_stride ?out_stride))
+                (union ?sig_out ?sig)
+                (set (dtype ?sig) ?dt)
             )
         )".to_string()]
     }
@@ -241,8 +247,13 @@ impl EgglogOp for Softmax {
             (= ?denom_2d (Recip ?full_range ?sum ?broadcast_stride ?full_stride))
             ; scores = exp / sum
             (= ?scores (Mul ?full_range ?qk_sub_exp ?full_stride ?denom_2d ?full_stride ?full_stride))
+            (= (F32) (dtype ?qk))
           )
-          ((union ?scores (Softmax ?batches ?row_width ?qk ?max_stride ?max_stride)))
+          (
+            (let ?sm (Softmax ?batches ?row_width ?qk ?max_stride ?max_stride))
+            (union ?scores ?sm)
+            (set (dtype ?sm) (F32))
+        )
         )".to_string()]
     }
 }

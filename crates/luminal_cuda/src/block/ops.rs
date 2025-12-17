@@ -45,20 +45,23 @@ impl EgglogOp for RowAdd {
     fn rewrites(&self) -> Vec<String> {
         vec!["(rule
             (
-                ; get  add
+                ; get add
                 (= ?sa (Add ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
                 (= ?row_width (nth_from_end ?shape 0))
                 ; assert the row is contiguous
                 (= (MIter) (nth_from_end ?a_stride 0))
                 (= (MIter) (nth_from_end ?b_stride 0))
                 (= (MIter) (nth_from_end ?out_stride 0))
+                ;(= (F32) (dtype ?a))
             )
             (
                 (let ?new_shape (RemoveNthFromEnd ?shape 0))
                 (let ?new_a_stride (RemoveNthFromEnd ?a_stride 0))
                 (let ?new_b_stride (RemoveNthFromEnd ?b_stride 0))
                 (let ?new_out_stride (RemoveNthFromEnd ?out_stride 0))
-                (union ?sa (RowAdd ?new_shape ?a ?new_a_stride ?b ?new_b_stride ?new_out_stride ?row_width))
+                (let ?ra (RowAdd ?new_shape ?a ?new_a_stride ?b ?new_b_stride ?new_out_stride ?row_width))
+                (union ?sa ?ra)
+                (set (dtype ?ra) (F32))
             )
             :name \"row add\"
         )".to_string()]
@@ -183,18 +186,19 @@ impl EgglogOp for RowSwishMul {
                     (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
                     (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
                 ))
+                ;(= (F32) (dtype ?self))
             )
             (
-                (union ?swishmul
-                    (RowSwishMul
-                        (ECons ?batch (ENil))
-                        ?self
-                        (ECons (MMul (MIter) ?width) (ENil))
-                        ?other
-                        (ECons (MMul (MIter) ?width) (ENil))
-                        ?width
-                    )
-                )
+                (let ?rsm (RowSwishMul
+                    (ECons ?batch (ENil))
+                    ?self
+                    (ECons (MMul (MIter) ?width) (ENil))
+                    ?other
+                    (ECons (MMul (MIter) ?width) (ENil))
+                    ?width
+                ))
+                (union ?swishmul ?rsm)
+                (set (dtype ?rsm) (F32))
             )
         )"
         .to_string()]
@@ -369,6 +373,7 @@ impl EgglogOp for RowRMSNorm {
                         ?inp_stride
                     )
                 )
+                ;(= (F32) (dtype ?x))
             )
             (
                 (let ?new
@@ -381,6 +386,7 @@ impl EgglogOp for RowRMSNorm {
                     )
                 )
                 (union ?final ?new)
+                (set (dtype ?new) (F32))
             )
         )"
         .to_string()]
@@ -530,6 +536,17 @@ impl EgglogOp for RowRope {
             vec![children[1], children[4]],
         )
     }
+
+    fn rewrites(&self) -> Vec<String> {
+        vec!["(rule
+           (
+                (= ?e (RowRope ?shape ?inp ?stride ?row_width ?out_stride))
+                (= (F32) (dtype ?inp))
+            )
+           ((set (dtype ?e) (F32)))
+        )"
+        .to_string()]
+    }
 }
 
 impl BlockOp for RowRope {
@@ -659,12 +676,15 @@ impl EgglogOp for TileMatmul {
                 ; get dimensions
                 (= ?t_n (nth_from_end ?mul_shape 1))
                 (= ?t_k (nth_from_end ?mul_shape 0))
+                (= (F32) (dtype ?a))
             )
             (
                 ; input strides are same as cube mul but without last element
                 (let ?new_a_stride (RemoveNthFromEnd ?a_stride 0))
                 (let ?new_b_stride (RemoveNthFromEnd ?b_stride 0))
-                (union ?ts (TileMatmul ?sum_shape ?untiled_sum_shape ?iters ?a ?new_a_stride (MMul ?t_k (MNum 32)) (MNum 1) ?b ?new_b_stride (MNum 1) (MMul ?t_n (MNum 32)) ?sum_out_stride (MMul ?t_n (MNum 32)) (MNum 1)))
+                (let ?tm (TileMatmul ?sum_shape ?untiled_sum_shape ?iters ?a ?new_a_stride (MMul ?t_k (MNum 32)) (MNum 1) ?b ?new_b_stride (MNum 1) (MMul ?t_n (MNum 32)) ?sum_out_stride (MMul ?t_n (MNum 32)) (MNum 1)))
+                (union ?ts ?tm)
+                (set (dtype ?tm) (F32))
             )
         )".to_string(),
         "
@@ -694,6 +714,7 @@ impl EgglogOp for TileMatmul {
                 ; get tile dims
                 (= ?t_n (nth_from_end ?mul_shape 1))
                 (= ?t_k (nth_from_end ?mul_shape 0))
+                ;(= (F32) (dtype ?a))
             )
             (
                 ; input strides are same as cube mul but without last element
@@ -704,11 +725,12 @@ impl EgglogOp for TileMatmul {
                 ;  - A row-major tile strides: m -> t_k*32, k -> 1
                 ;  - B col-major tile strides: k -> 1, n -> t_k*32
                 ;  - C row-major tile strides: m -> t_n*32, n -> 1
-                (union ?ts
-                    (TileMatmul ?sum_shape ?untiled_sum_shape ?iters
-                                ?a ?new_a_stride (MMul ?t_k (MNum 32)) (MNum 1)
-                                ?b ?new_b_stride (MReplace ?b_k_stride (MIter) (MNum 1)) (MMul ?t_k (MNum 32))
-                                ?sum_out_stride (MMul ?t_n (MNum 32)) (MNum 1)))
+                (let ?tm (TileMatmul ?sum_shape ?untiled_sum_shape ?iters
+                            ?a ?new_a_stride (MMul ?t_k (MNum 32)) (MNum 1)
+                            ?b ?new_b_stride (MReplace ?b_k_stride (MIter) (MNum 1)) (MMul ?t_k (MNum 32))
+                            ?sum_out_stride (MMul ?t_n (MNum 32)) (MNum 1)))
+                (union ?ts ?tm)
+                (set (dtype ?tm) (F32))
             )
         )
         ".to_string()]
@@ -1002,6 +1024,17 @@ impl EgglogOp for GQAAttention {
             })),
             vec![children[4], children[6], children[8]],
         )
+    }
+
+    fn rewrites(&self) -> Vec<String> {
+        vec!["(rule
+           (
+            (= ?e (GQAAttention ?a ?b ?c ?d ?inp ?z ?f ?g ?h ?i ?j ?k ?l))
+            (= (F32) (dtype ?inp))
+            )
+           ((set (dtype ?e) (F32)))
+        )"
+        .to_string()]
     }
 }
 

@@ -290,13 +290,14 @@ pub struct KernelGather {
     index_stride: Vec<Expression>,
     data_stride: Vec<Expression>,
     out_stride: Vec<Expression>,
+    dtype: DType,
 }
 
 impl EgglogOp for KernelGather {
     fn term(&self) -> (String, Vec<OpParam>) {
         (
             "KernelGather".to_string(),
-            vec![EList, Input, EList, Input, EList, EList],
+            vec![EList, Input, EList, Input, EList, EList, Dty],
         )
     }
 
@@ -305,10 +306,11 @@ impl EgglogOp for KernelGather {
 (rule
     (
         (= ?a (Gather ?out_shape ?indexes ?index_strides ?data ?data_strides))
+        (= ?dty (dtype ?data))
     )
     (
         (let ?out_strides (RowMajor ?out_shape))
-        (union ?a (KernelGather ?out_shape ?indexes ?index_strides ?data ?data_strides ?out_strides))
+        (union ?a (KernelGather ?out_shape ?indexes ?index_strides ?data ?data_strides ?out_strides ?dty))
     )
     :name \"kernel gather\"
 )"
@@ -334,6 +336,7 @@ impl EgglogOp for KernelGather {
                 data_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache)
                     .unwrap(),
                 out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
+                dtype: extract_dtype(egraph, children[6]),
             })),
             vec![children[1], children[3]],
         )
@@ -361,13 +364,14 @@ impl KernelOp for KernelGather {
             .chain(self.data_stride.iter().flat_map(|e| e.dyn_vars()))
             .chain(self.out_stride.iter().flat_map(|e| e.dyn_vars()))
             .collect::<FxHashSet<_>>();
+        let dtype = cuda_dtype(self.dtype);
         let kernel = format!(
             "
 {}
 extern \"C\" {{
-    __global__ void gather(float *C, const int *indexes, const float *data) {{
+    __global__ void gather({dtype} *C, const int *indexes, const {dtype} *data) {{
         int const_z = blockIdx.x * blockDim.x + threadIdx.x;
-        float* out = C + {};
+        {dtype}* out = C + {};
         const_z = indexes[{}];
         *out = data[{}];
     }}

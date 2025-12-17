@@ -95,14 +95,14 @@ impl Llama {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn forward(&self, input: GraphTensor, token_ids: GraphTensor) -> GraphTensor {
-        let batch = input.dims1();
+    pub fn forward(&self, token_ids: GraphTensor, pos_ids: GraphTensor) -> GraphTensor {
+        let batch = token_ids.dims1();
         let mut x = self.embedding.gather(
-            (input * self.hidden).expand_dim(1, self.hidden)
-                + input.graph().arange(self.hidden).expand_dim(0, batch),
+            (token_ids * self.hidden).expand_dim(1, self.hidden)
+                + token_ids.graph().arange(self.hidden).expand_dim(0, batch),
         );
         for layer in &self.layers {
-            x = layer.forward(x, token_ids);
+            x = layer.forward(x, pos_ids);
         }
         self.lm_norm.forward(x).matmul(self.lm_head.transpose(0, 1))
     }

@@ -2,7 +2,6 @@ use std::{
     any::Any,
     borrow::BorrowMut,
     fmt::Debug,
-    ptr::null,
     sync::{Arc, Mutex},
 };
 
