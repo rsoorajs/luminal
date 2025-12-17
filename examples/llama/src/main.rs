@@ -4,12 +4,12 @@ use itertools::Itertools;
 use luminal::{
     graph::{Graph, Runtime},
     op::DType,
-    utils::IntoEgglogOp,
 };
 use luminal_cuda::{
-    block::{self, record_exec_timings_to_file, CudaRuntime, CustomState, IntoBlockOp},
-    kernel, logical,
+    block::IntoBlockOp,
+    runtime::{record_exec_timings_to_file, CudaRuntime, CustomState},
 };
+use model::*;
 use rustc_hash::*;
 use std::{fs::File, io::Write, time::Duration};
 use tokenizers::Tokenizer;
@@ -19,103 +19,67 @@ use tracing_perfetto_sdk_layer::NativeLayer;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-fn trace_config() -> tracing_perfetto_sdk_schema::TraceConfig {
-    tracing_perfetto_sdk_schema::TraceConfig {
-        buffers: vec![tracing_perfetto_sdk_schema::trace_config::BufferConfig {
-            size_kb: Some(4096),
-            ..Default::default()
-        }],
-        data_sources: vec![tracing_perfetto_sdk_schema::trace_config::DataSource {
-            config: Some(tracing_perfetto_sdk_schema::DataSourceConfig {
-                name: Some("rust_tracing".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }],
-        ..Default::default()
-    }
-}
-
 fn main() {
+    // Set up tracing
     let file = File::create("trace.pftrace").unwrap();
     let (writer, _guard) = non_blocking(file);
     let layer = NativeLayer::from_config(trace_config(), writer)
         .build()
         .unwrap();
     let filter = EnvFilter::builder()
-        .parse(format!("{}=trace", env!("CARGO_PKG_NAME")))
+        .parse(format!("{}=trace,luminal=trace", env!("CARGO_PKG_NAME")))
         .unwrap();
     let layer_handle = layer.clone();
     tracing_subscriber::registry()
         .with(filter)
         .with(layer)
         .init();
-    let (batch, hidden, intermediate, n_heads, n_kv_heads, vocab_size, max_seq_len) =
-        ('s', 4096, 14336, 32, 8, 128256, 4096);
-    let n_kv_groups = n_heads / n_kv_heads;
-    let layers: usize = 32;
-    let n_tokens: usize = 5;
+
+    let max_seq_len = 4096;
+    let gen_tokens = 5;
+    let input_sentence = "Hello, how are you";
 
     let tokenizer = Tokenizer::from_file("tokenizer.json").expect("Failed to load tokenizer");
-    let input_sentence = "Hello, how are you";
-    let encoding = tokenizer
-        .encode(input_sentence, true)
-        .expect("Failed to encode");
+    let encoding = tokenizer.encode(input_sentence, true).unwrap();
     let mut sentence = encoding.get_ids().to_vec();
 
+    println!("Building Graph...");
     let mut cx = Graph::default();
-    let input = cx.named_tensor("input", batch).as_dtype(DType::Int);
-    let token_ids = cx.named_tensor("token_ids", batch).as_dtype(DType::Int);
-    let model = model::Llama::init(
-        &mut cx,
-        batch,
-        hidden,
-        intermediate,
-        n_heads,
-        n_kv_heads,
-        vocab_size,
-        layers,
-    );
+    let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
+    let token_ids = cx.named_tensor("token_ids", 's').as_dtype(DType::Int);
+    let model = model::Llama::init(&mut cx);
     let _logits = model.forward(input, token_ids);
 
-    // compile
-    println!("Building E-graph...");
-    let ops = <(
-        luminal::op::Ops,
-        logical::Ops,
-        kernel::ops::Ops,
-        block::MKOps,
-    ) as IntoEgglogOp>::into_vec();
-    cx.build_search_space(&ops);
     let ctx = luminal_cuda::cudarc::driver::CudaContext::new(0).unwrap();
     ctx.bind_to_thread().unwrap();
     let stream = ctx.default_stream();
+
+    println!("Allocating KV Cache...");
     let mut custom_state = FxHashMap::default();
     custom_state.insert(
         "kv_cache".to_string(),
         CustomState::KVCache(
-            (0..layers)
+            (0..LAYERS)
                 .map(|_| {
                     (
                         stream
-                            .alloc_zeros::<f32>((hidden / n_kv_groups) * max_seq_len)
+                            .alloc_zeros::<f32>((HIDDEN / KV_GROUPS) * max_seq_len)
                             .unwrap(),
                         stream
-                            .alloc_zeros::<f32>((hidden / n_kv_groups) * max_seq_len)
+                            .alloc_zeros::<f32>((HIDDEN / KV_GROUPS) * max_seq_len)
                             .unwrap(),
                     )
                 })
                 .collect_vec(),
         ),
     );
-    let mut runtime = cx.search(
-        CudaRuntime::initialize((ctx, stream, custom_state)),
-        &ops,
-        10_000,
-    );
 
-    // load weights
+    println!("Building E-Graph...");
+    cx.build_search_space::<CudaRuntime>();
+
     println!("Compiling...");
+    let mut runtime = cx.search(CudaRuntime::initialize((ctx, stream, custom_state)), 10_000);
+
     println!("Loading weights...");
     runtime.load_safetensors("model_combined.safetensors");
 
@@ -123,9 +87,8 @@ fn main() {
     std::io::stdout().flush().unwrap();
 
     let mut timings = vec![];
-    let mut start_times = vec![];
     let mut prev_seq = 0;
-    for i in 0..n_tokens {
+    for i in 0..gen_tokens {
         let span = if i == 0 {
             span!(Level::INFO, "prefill")
         } else {
@@ -154,17 +117,12 @@ fn main() {
             runtime.allocate_intermediate_buffers(&cx.dyn_map);
         }
 
-        runtime.execute(&cx.dyn_map);
-        // timings.push(new_timings);
-        // start_times.push(new_start_time);
+        timings.extend(runtime.execute(&cx.dyn_map));
         let outs = runtime.dtoh_outputs();
-        // if let Some(CustomState::DebugBuffers(debug_buffers)) = custom_state.remove("debug") {
-        //     print_debug_buffers(debug_buffers);
-        // }
 
         let sample_span = span!(Level::INFO, "sample");
         let _sample_entered = sample_span.enter();
-        sentence = vec![*sample(&outs[0], vocab_size).last().unwrap()];
+        sentence = vec![*sample(&outs[0], VOCAB_SIZE).last().unwrap()];
         prev_seq += seq_len;
         print!("{}", tokenizer.decode(&sentence, true).unwrap());
         std::io::stdout().flush().unwrap();
@@ -178,8 +136,7 @@ fn main() {
     drop(_guard);
     record_exec_timings_to_file(
         &timings,
-        &start_times,
-        &<block::MKOps as IntoBlockOp>::into_vec(),
+        &<luminal_cuda::block::Ops as IntoBlockOp>::into_vec(),
         "trace.pftrace",
     );
 }
@@ -199,4 +156,21 @@ fn sample(logits: &[f32], vocab_size: usize) -> Vec<u32> {
                 .0 as u32
         })
         .collect()
+}
+
+fn trace_config() -> tracing_perfetto_sdk_schema::TraceConfig {
+    tracing_perfetto_sdk_schema::TraceConfig {
+        buffers: vec![tracing_perfetto_sdk_schema::trace_config::BufferConfig {
+            size_kb: Some(4096),
+            ..Default::default()
+        }],
+        data_sources: vec![tracing_perfetto_sdk_schema::trace_config::DataSource {
+            config: Some(tracing_perfetto_sdk_schema::DataSourceConfig {
+                name: Some("rust_tracing".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
 }

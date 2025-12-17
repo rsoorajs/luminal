@@ -1,5 +1,7 @@
-use crate::block::IntoBlockOp;
-use crate::{block::BlockOp, kernel::KernelOp};
+use crate::{
+    block::{BlockOp, IntoBlockOp},
+    kernel::KernelOp,
+};
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr,
     LaunchConfig, PushKernelArg, ValidAsZeroBits,
@@ -7,8 +9,6 @@ use cudarc::driver::{
 use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
-use luminal::graph::{LLIRGraph, Runtime};
-use luminal::op::GMEM;
 use luminal::prelude::{
     petgraph::{
         algo::{toposort, Cycle},
@@ -16,7 +16,7 @@ use luminal::prelude::{
         visit::{EdgeRef, NodeIndexable},
         Directed, Direction,
     },
-    Expression, NodeIndex,
+    Expression, LLIRGraph, NodeIndex, Runtime, GMEM,
 };
 use luminal::utils::flatten_strides;
 use prost::Message as _;
@@ -238,12 +238,14 @@ impl ToCudaBuffer for Vec<i32> {
 }
 
 impl Runtime for CudaRuntime {
+    type Ops = (crate::logical::Ops, crate::kernel::Ops, crate::block::Ops);
     type CompileArg = (
         Arc<CudaContext>,
         Arc<CudaStream>,
         FxHashMap<String, CustomState>,
     );
     type Data = Box<dyn ToCudaBuffer>;
+    type ExecReturn = Vec<(Vec<SMEvent>, u64)>;
 
     fn initialize((ctx, stream, custom_state): Self::CompileArg) -> Self {
         Self {
@@ -259,7 +261,7 @@ impl Runtime for CudaRuntime {
 
     #[tracing::instrument(skip_all)]
     fn compile(&mut self, llir_graph: &LLIRGraph) {
-        let block_ops = <super::MKOps as IntoBlockOp>::into_vec();
+        let block_ops = <crate::block::Ops as IntoBlockOp>::into_vec();
 
         let block_ops_in_graph = llir_graph
             .node_indices()
@@ -443,7 +445,9 @@ impl Runtime for CudaRuntime {
         self.node_to_exec = node_to_exec;
     }
 
-    fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) {
+    #[tracing::instrument(skip_all)]
+    fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
+        let mut timings = vec![];
         for exec_node in toposort(&self.exec_graph, None).unwrap() {
             match &mut self.exec_graph[exec_node] {
                 ExecutableKernel::Kernel {
@@ -483,7 +487,7 @@ impl Runtime for CudaRuntime {
                     for inp in inputs {
                         lb.arg(&self.buffers[inp]);
                     }
-                    let span = span!(Level::INFO, "execute");
+                    let span = span!(Level::INFO, "kernel");
                     let _entered = span.enter();
                     unsafe { lb.launch(cfg) }.unwrap();
                     self.cuda_stream.synchronize().unwrap();
@@ -497,17 +501,75 @@ impl Runtime for CudaRuntime {
                     work_queue,
                     ..
                 } => {
-                    run_megakernel(
-                        &self.cuda_stream,
-                        interpreter,
-                        work_queue,
-                        n_barriers.exec(dyn_map).unwrap(),
-                        interpreter_constants,
-                        dyn_map,
-                    );
+                    let span = span!(Level::INFO, "megakernel_setup");
+                    let _entered = span.enter();
+                    // Upload queue, barriers and program counter
+                    let d_barriers = self
+                        .cuda_stream
+                        .alloc_zeros::<i32>(n_barriers.exec(dyn_map).unwrap())
+                        .unwrap();
+                    let d_tasks = self.cuda_stream.memcpy_stod(work_queue).unwrap();
+                    let d_head = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
+                    let queue_lock = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
+                    // Set up timing buffer (start_time_u64,[[event_start_u64,event_type_i32 for sm_event in sm[:1000] for sm in sms[:114]])
+                    let timing_buffer =
+                        self.cuda_stream.alloc_zeros::<SMEvent>(114 * 1000).unwrap();
+                    let start_time = self.cuda_stream.alloc_zeros::<u64>(114).unwrap();
+
+                    // Set up dyn dims
+                    for (dyn_dim, val) in dyn_map {
+                        if let Some(global) = interpreter_constants.get_mut(&dyn_dim) {
+                            let mut view = global.as_view_mut();
+                            let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
+                            self.cuda_stream
+                                .memcpy_htod(&[*val as i32], &mut symbol)
+                                .unwrap();
+                        }
+                    }
+
+                    interpreter.set_attribute(
+                        cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                        100_000,
+                    ).unwrap();
+
+                    // Launch kernel
+                    let num_sm = 114;
+                    let cfg = LaunchConfig {
+                        grid_dim: (num_sm, 1, 1),  // One block per SM
+                        block_dim: (1024, 1, 1),   // 512 threads per block
+                        shared_mem_bytes: 100_000, // 40 kb
+                    };
+                    let mut lb = self.cuda_stream.launch_builder(interpreter);
+                    let n_tasks = work_queue.len() as i32;
+                    lb.arg(&d_tasks);
+                    lb.arg(&n_tasks);
+                    lb.arg(&d_head);
+                    lb.arg(&d_barriers);
+                    lb.arg(&queue_lock);
+                    lb.arg(&timing_buffer);
+                    lb.arg(&start_time);
+                    drop(_entered);
+                    drop(span);
+                    let span = span!(Level::INFO, "megakernel");
+                    let _entered = span.enter();
+                    unsafe { lb.launch(cfg) }.unwrap();
+                    self.cuda_stream.synchronize().unwrap();
+                    drop(_entered);
+                    drop(span);
+
+                    timings.push((
+                        self.cuda_stream.memcpy_dtov(&timing_buffer).unwrap(),
+                        self.cuda_stream
+                            .memcpy_dtov(&start_time)
+                            .unwrap()
+                            .into_iter()
+                            .min()
+                            .unwrap(),
+                    ));
                 }
             }
         }
+        timings
     }
 
     fn set_data(&mut self, id: NodeIndex, data: Self::Data) {
@@ -706,75 +768,8 @@ pub fn allocate_input_buffers(
     buffers
 }
 
-#[tracing::instrument(skip_all)]
-pub fn run_megakernel(
-    stream: &Arc<CudaStream>,
-    interpreter: &CudaFunction,
-    tasks: &Vec<Task>,
-    n_barriers: usize,
-    interpreter_constants: &mut FxHashMap<char, CudaSlice<u8>>,
-    dyn_dims: &FxHashMap<char, usize>,
-) -> (Vec<SMEvent>, u64) {
-    // Upload queue, barriers and program counter
-    let d_barriers = stream.alloc_zeros::<i32>(n_barriers).unwrap();
-    let d_tasks = stream.memcpy_stod(tasks).unwrap();
-    let d_head = stream.memcpy_stod(&[0i32]).unwrap();
-    let queue_lock = stream.memcpy_stod(&[0i32]).unwrap();
-    // Set up timing buffer (start_time_u64,[[event_start_u64,event_type_i32 for sm_event in sm[:1000] for sm in sms[:114]])
-    let timings = stream.alloc_zeros::<SMEvent>(114 * 1000).unwrap();
-    let start_time = stream.alloc_zeros::<u64>(114).unwrap();
-
-    // Set up dyn dims
-    for (dyn_dim, val) in dyn_dims {
-        if let Some(global) = interpreter_constants.get_mut(&dyn_dim) {
-            let mut view = global.as_view_mut();
-            let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
-            stream.memcpy_htod(&[*val as i32], &mut symbol).unwrap();
-        }
-    }
-
-    interpreter.set_attribute(
-        cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-        100_000,
-    ).unwrap();
-
-    // Launch kernel
-    let num_sm = 114;
-    let cfg = LaunchConfig {
-        grid_dim: (num_sm, 1, 1),  // One block per SM
-        block_dim: (1024, 1, 1),   // 512 threads per block
-        shared_mem_bytes: 100_000, // 40 kb
-    };
-    let mut lb = stream.launch_builder(interpreter);
-    let n_tasks = tasks.len() as i32;
-    lb.arg(&d_tasks);
-    lb.arg(&n_tasks);
-    lb.arg(&d_head);
-    lb.arg(&d_barriers);
-    lb.arg(&queue_lock);
-    lb.arg(&timings);
-    lb.arg(&start_time);
-    let span = span!(Level::INFO, "execute");
-    let _entered = span.enter();
-    unsafe { lb.launch(cfg) }.unwrap();
-    stream.synchronize().unwrap();
-    drop(_entered);
-    drop(span);
-
-    (
-        stream.memcpy_dtov(&timings).unwrap(),
-        stream
-            .memcpy_dtov(&start_time)
-            .unwrap()
-            .into_iter()
-            .min()
-            .unwrap(),
-    )
-}
-
 pub fn record_exec_timings_to_file(
-    timings: &Vec<Vec<SMEvent>>,
-    start_times: &Vec<u64>,
+    timings: &Vec<(Vec<SMEvent>, u64)>,
     ops: &Vec<Arc<Box<dyn BlockOp>>>,
     file_path: &str,
 ) {
@@ -789,7 +784,7 @@ pub fn record_exec_timings_to_file(
                 name_field: Some(tracing_perfetto_sdk_schema::track_event::NameField::Name(s)),
                 r#type: ty,
                 ..
-            })) if s == "execute"
+            })) if s == "megakernel"
                 && *ty
                     == Some(tracing_perfetto_sdk_schema::track_event::Type::SliceBegin as i32) =>
             {
@@ -800,7 +795,7 @@ pub fn record_exec_timings_to_file(
         .sorted_by_key(|i| *i)
         .collect_vec();
     let mut extra_packets = Vec::new();
-    for (run, (device_timings, device_start_time)) in timings.iter().zip(start_times).enumerate() {
+    for (run, (device_timings, device_start_time)) in timings.iter().enumerate() {
         let (host_time, host_clock_id) = host_start_times[run];
         for (sm, sm_timings) in device_timings.chunks(1000).into_iter().enumerate() {
             let mut builder = ManualTrackBuilder::new(sm as u32, host_time, host_clock_id);
@@ -1081,7 +1076,7 @@ pub fn compile_interpreter(
     FxHashMap<char, CudaSlice<u8>>,
 ) {
     // Compile the interpreter
-    let mut kernel = include_str!("interpreter.cu").to_string();
+    let mut kernel = include_str!("block/interpreter.cu").to_string();
     kernel = kernel.replace(
         "const int N_OPS = 0;",
         &format!(

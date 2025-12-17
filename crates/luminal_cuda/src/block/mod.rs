@@ -1,12 +1,12 @@
 mod ops;
-mod runtime;
 pub use ops::*;
-pub use runtime::*;
 
 use cudarc::driver::CudaStream;
 use luminal::{shape::Expression, utils::EgglogOp};
 use rustc_hash::FxHashMap;
 use std::fmt::Debug;
+
+use crate::runtime::CustomState;
 
 #[allow(unused_variables)]
 pub trait BlockOp: Debug + as_any::AsAny + EgglogOp {

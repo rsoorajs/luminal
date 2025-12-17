@@ -1,12 +1,13 @@
 use crate::{
     prelude::*,
-    utils::{EgglogOp, LLIROp},
+    utils::{EgglogOp, IntoEgglogOp, LLIROp},
 };
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
 
+use colored::Colorize;
 use egglog::{prelude::RustSpan, var};
 use egglog_ast::span::Span;
 use egraph_serialize::{ClassId, NodeId};
@@ -28,6 +29,8 @@ pub struct Graph {
     pub graph: HLIRGraph,
     /// E-Graph search space
     egraph: Option<SerializedEGraph>,
+    /// Available ops
+    ops: Option<Vec<Arc<Box<dyn EgglogOp>>>>,
 }
 
 /// A dependency between two nodes
@@ -166,30 +169,65 @@ impl Graph {
         self.try_get_op_mut(node).unwrap()
     }
 
-    pub fn build_search_space(&mut self, ops: &[Arc<Box<dyn EgglogOp>>]) {
+    #[tracing::instrument(skip_all)]
+    pub fn build_search_space<Rt: Runtime>(&mut self) {
+        let mut ops = Rt::Ops::into_vec();
+        ops.extend(<crate::op::Ops as IntoEgglogOp>::into_vec());
         let (program, root) = hlir_to_egglog(self);
-        self.egraph = Some(run_egglog(&program, &root, ops).unwrap());
+        self.egraph = Some(run_egglog(&program, &root, &ops).unwrap());
+        self.ops = Some(ops);
     }
 
-    pub fn search<R: Runtime>(
-        &mut self,
-        mut runtime: R,
-        ops: &Vec<Arc<Box<dyn EgglogOp>>>,
-        limit: usize,
-    ) -> R {
-        let llir_graphs = egglog_to_llir(self.egraph.as_ref().unwrap(), ops, limit);
+    #[tracing::instrument(skip_all)]
+    pub fn search<R: Runtime>(&mut self, mut runtime: R, limit: usize) -> R {
+        let llir_graphs = egglog_to_llir(
+            self.egraph.as_ref().unwrap(),
+            self.ops.as_ref().unwrap(),
+            limit,
+        );
+        let print = std::env::var("SEARCH")
+            .map(|s| s == "1")
+            .unwrap_or_default();
+        let start = std::time::Instant::now();
+        if print {
+            println!(
+                "{}",
+                format!(
+                    "---- Searching through {}{} graphs ----",
+                    llir_graphs.len().to_string().bold(),
+                    if llir_graphs.len() == limit {
+                        "[limit]"
+                    } else {
+                        ""
+                    }
+                )
+                .bright_blue()
+            );
+        }
         runtime.compile(llir_graphs.last().unwrap());
+        if print {
+            println!(
+                "{}",
+                format!(
+                    "---- Search Took {} ----",
+                    pretty_duration::pretty_duration(&start.elapsed(), None).bold()
+                )
+                .bright_blue()
+            );
+        }
         runtime
     }
 }
 
 pub trait Runtime {
+    type Ops: IntoEgglogOp;
     type CompileArg;
     type Data;
+    type ExecReturn;
     fn initialize(arg: Self::CompileArg) -> Self;
     fn compile(&mut self, llir_graph: &LLIRGraph);
     fn set_data(&mut self, id: NodeIndex, data: Self::Data);
-    fn execute(&mut self, dyn_map: &FxHashMap<char, usize>);
+    fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn;
 }
 
 impl Deref for Graph {
@@ -380,7 +418,7 @@ fn run_egglog(
         .map(|s| s == "1")
         .unwrap_or_default()
     {
-        println!("---- Rule Matches ----");
+        println!("{}", "---- Egglog Rule Matches ----".green());
         println!(
             "{}",
             egraph
@@ -390,8 +428,16 @@ fn run_egglog(
                 .filter(|(k, _)| !k.contains("("))
                 .map(|(k, v)| format!("{k}: {v}"))
                 .join("\n")
+                .green()
         );
-        println!("Egglog Took {}ms", start.elapsed().as_millis());
+        println!(
+            "{}",
+            format!(
+                "---- Egglog Took {} ----",
+                pretty_duration::pretty_duration(&start.elapsed(), None).bold()
+            )
+            .green()
+        );
     }
 
     let (sort, value) = egraph.eval_expr(&var!(root))?;

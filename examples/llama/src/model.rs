@@ -7,60 +7,56 @@ use luminal::{
 use luminal_nn::LayerNorm;
 use std::fmt::Debug;
 
+// Llama 7b hyperparams
+pub const LAYERS: usize = 32;
+pub const HIDDEN: usize = 4096;
+pub const INTERMEDIATE: usize = 14336;
+pub const HEAD_DIM: usize = 128;
+pub const KV_GROUPS: usize = 4;
+pub const VOCAB_SIZE: usize = 128256;
+
 pub struct Llama {
     embedding: GraphTensor,
     layers: Vec<LlamaLayer>,
     lm_norm: LayerNorm,
     lm_head: GraphTensor,
-    hidden: usize,
 }
 
 impl Llama {
-    pub fn init(
-        cx: &mut Graph,
-        batch: impl Into<Expression>,
-        hidden: usize,
-        intermediate: usize,
-        n_heads: usize,
-        n_kv_heads: usize,
-        vocab_size: usize,
-        layers: usize,
-    ) -> Self {
-        let batch = batch.into();
+    pub fn init(cx: &mut Graph) -> Self {
         let mut w = vec![];
-        let n_kv_groups = n_heads / n_kv_heads;
-        for l in 0..layers {
+        for l in 0..LAYERS {
             w.push(LlamaLayer {
                 up: cx.named_tensor(
                     &format!("model.layers.{l}.mlp.up_proj.weight"),
-                    (intermediate, hidden),
+                    (INTERMEDIATE, HIDDEN),
                 ),
                 gate: cx.named_tensor(
                     &format!("model.layers.{l}.mlp.gate_proj.weight"),
-                    (intermediate, hidden),
+                    (INTERMEDIATE, HIDDEN),
                 ),
                 down: cx.named_tensor(
                     &format!("model.layers.{l}.mlp.down_proj.weight"),
-                    (hidden, intermediate),
+                    (HIDDEN, INTERMEDIATE),
                 ),
                 q_proj: cx.named_tensor(
                     &format!("model.layers.{l}.self_attn.q_proj.weight"),
-                    (hidden, hidden),
+                    (HIDDEN, HIDDEN),
                 ),
                 k_proj: cx.named_tensor(
                     &format!("model.layers.{l}.self_attn.k_proj.weight"),
-                    (hidden / n_kv_groups, hidden),
+                    (HIDDEN / KV_GROUPS, HIDDEN),
                 ),
                 v_proj: cx.named_tensor(
                     &format!("model.layers.{l}.self_attn.v_proj.weight"),
-                    (hidden / n_kv_groups, hidden),
+                    (HIDDEN / KV_GROUPS, HIDDEN),
                 ),
                 o_proj: cx.named_tensor(
                     &format!("model.layers.{l}.self_attn.o_proj.weight"),
-                    (hidden, hidden),
+                    (HIDDEN, HIDDEN),
                 ),
                 attn_rms: LayerNorm::new(
-                    hidden,
+                    HIDDEN,
                     Some(&format!("model.layers.{l}.input_layernorm.weight")),
                     None,
                     false,
@@ -68,28 +64,23 @@ impl Llama {
                     cx,
                 ),
                 mlp_rms: LayerNorm::new(
-                    hidden,
+                    HIDDEN,
                     Some(&format!("model.layers.{l}.post_attention_layernorm.weight")),
                     None,
                     false,
                     1e-5,
                     cx,
                 ),
-                batch,
-                hidden,
-                n_heads,
-                n_kv_heads,
                 layer: l,
             });
         }
-        let lm_norm = LayerNorm::new(hidden, Some("model.norm.weight"), None, false, 1e-5, cx);
-        let lm_head = cx.named_tensor("lm_head.weight", (vocab_size, hidden));
+        let lm_norm = LayerNorm::new(HIDDEN, Some("model.norm.weight"), None, false, 1e-5, cx);
+        let lm_head = cx.named_tensor("lm_head.weight", (VOCAB_SIZE, HIDDEN));
         Self {
-            embedding: cx.named_tensor("model.embed_tokens.weight", (vocab_size, hidden)),
+            embedding: cx.named_tensor("model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN)),
             layers: w,
             lm_head,
             lm_norm,
-            hidden,
         }
     }
 
@@ -97,8 +88,8 @@ impl Llama {
     pub fn forward(&self, token_ids: GraphTensor, pos_ids: GraphTensor) -> GraphTensor {
         let batch = token_ids.dims1();
         let mut x = self.embedding.gather(
-            (token_ids * self.hidden).expand_dim(1, self.hidden)
-                + token_ids.graph().arange(self.hidden).expand_dim(0, batch),
+            (token_ids * HIDDEN).expand_dim(1, HIDDEN)
+                + token_ids.graph().arange(HIDDEN).expand_dim(0, batch),
         );
         for layer in &self.layers {
             x = layer.forward(x, pos_ids);
@@ -117,25 +108,22 @@ struct LlamaLayer {
     o_proj: GraphTensor,
     attn_rms: LayerNorm,
     mlp_rms: LayerNorm,
-    batch: Expression,
-    hidden: usize,
-    n_heads: usize,
-    n_kv_heads: usize,
     layer: usize,
 }
 
 impl LlamaLayer {
     pub fn forward(&self, input: GraphTensor, token_ids: GraphTensor) -> GraphTensor {
         let cx = input.graph();
+        let batch = input.dims()[0];
         let x_attn = self.attn_rms.forward(input);
         let q = x_attn.matmul(self.q_proj.transpose(0, 1));
         let k = x_attn.matmul(self.k_proj.transpose(0, 1));
         let v = x_attn.matmul(self.v_proj.transpose(0, 1));
         let q_rope = GraphTensor::from_id(
             cx.add_op(RopeFrontendOp {
-                range: vec![Expression::from(self.batch)],
-                stride: vec![Expression::from('z') * self.hidden],
-                row_width: Expression::from(self.hidden),
+                range: vec![Expression::from(batch)],
+                stride: vec![Expression::from('z') * HIDDEN],
+                row_width: Expression::from(HIDDEN),
             })
             .input(q.id, 0, q.shape)
             .input(token_ids.id, 0, token_ids.shape)
@@ -144,12 +132,11 @@ impl LlamaLayer {
             cx,
             DType::F32,
         );
-        let n_kv_groups = self.n_heads / self.n_kv_heads;
         let k_rope = GraphTensor::from_id(
             cx.add_op(RopeFrontendOp {
-                range: vec![Expression::from(self.batch)],
-                stride: vec![Expression::from('z') * (self.hidden / n_kv_groups)],
-                row_width: Expression::from(self.hidden / n_kv_groups),
+                range: vec![Expression::from(batch)],
+                stride: vec![Expression::from('z') * (HIDDEN / KV_GROUPS)],
+                row_width: Expression::from(HIDDEN / KV_GROUPS),
             })
             .input(k.id, 0, k.shape)
             .input(token_ids.id, 0, token_ids.shape)
@@ -161,7 +148,7 @@ impl LlamaLayer {
 
         let attn_out = GraphTensor::from_id(
             cx.add_op(GQAAttentionFrontendOp {
-                head_dim: 128,
+                head_dim: HEAD_DIM,
                 prev_seq: 'p'.into(),
                 layer: self.layer,
             })
@@ -169,7 +156,7 @@ impl LlamaLayer {
             .input(k_rope.id, 0, k_rope.shape)
             .input(v.id, 0, v.shape)
             .finish(),
-            ShapeTracker::new((self.batch, self.hidden)),
+            ShapeTracker::new((batch, HIDDEN)),
             cx,
             DType::F32,
         );

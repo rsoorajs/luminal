@@ -33,6 +33,7 @@ egglog-ast = "1.0.0"
 egraph-serialize = "0.3.0"
 tracing = "0.1.43"
 paste = "1.0.15"
+pretty-duration = "0.1.1"
 
 [dev-dependencies]
 dfdx = { version = "0.13", features = ["f16"] }

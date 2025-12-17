@@ -16,7 +16,7 @@ use rustc_hash::FxHashMap;
 
 use crate::block::BlockOp;
 
-pub type MKOps = (
+pub type Ops = (
     RowAdd,
     RowSwishMul,
     RowRMSNorm,
