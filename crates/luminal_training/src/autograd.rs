@@ -21,7 +21,7 @@ impl Autograd {
 // Run dfs with a starting stack and record all encountered nodes in a set
 fn build_dfs_set(
     stack: &mut Vec<NodeIndex>,
-    graph: &StorageGraph,
+    graph: &HLIRGraph,
     direction: Direction,
 ) -> FxHashSet<NodeIndex> {
     let mut set = FxHashSet::default();
@@ -42,136 +42,136 @@ fn build_dfs_set(
     set
 }
 
-impl Compiler for Autograd {
-    type Output = Vec<(NodeIndex, ShapeTracker)>;
-    fn compile<T: ToIdsMut>(&self, graph: &mut Graph, _: T) -> Vec<(NodeIndex, ShapeTracker)> {
-        let Autograd(params, loss) = self;
-        // Build up valid set for nodes we want to pay attention to (everything outside of this set doesn't matter)
-        let forward_set = build_dfs_set(&mut params.clone(), graph, Direction::Outgoing);
-        let backward_set = build_dfs_set(&mut vec![*loss], graph, Direction::Incoming);
-        let valid_set: FxHashSet<_> = forward_set.intersection(&backward_set).copied().collect();
+// impl Compiler for Autograd {
+//     type Output = Vec<(NodeIndex, ShapeTracker)>;
+//     fn compile<T: ToIdsMut>(&self, graph: &mut Graph, _: T) -> Vec<(NodeIndex, ShapeTracker)> {
+//         let Autograd(params, loss) = self;
+//         // Build up valid set for nodes we want to pay attention to (everything outside of this set doesn't matter)
+//         let forward_set = build_dfs_set(&mut params.clone(), graph, Direction::Outgoing);
+//         let backward_set = build_dfs_set(&mut vec![*loss], graph, Direction::Incoming);
+//         let valid_set: FxHashSet<_> = forward_set.intersection(&backward_set).copied().collect();
 
-        // We have the last loss node, now let's backprop through everything to get the gradient graph
-        let mut grads = FxHashMap::default();
-        // Add loss gradient
-        grads.insert(
-            *loss,
-            (
-                graph.constant_float(1.0).id,
-                ShapeTracker::new(()), // Assume scalar loss for now
-            ),
-        );
-        let weight_set = params.iter().copied().collect::<FxHashSet<_>>();
-        for fwd_node in toposort(&graph.graph, None).unwrap().into_iter().rev() {
-            if !valid_set.contains(&fwd_node) {
-                continue;
-            }
-            // Check if the node is undifferentiable
-            let graph_ref: *mut Graph = graph;
-            let op = graph.node_weight(fwd_node).unwrap().as_any().type_id();
-            if op == TypeId::of::<GMEM>() {
-                continue;
-            }
-            if op == TypeId::of::<Mod>() || op == TypeId::of::<LessThan>() {
-                assert!(
-                    !weight_set.contains(&fwd_node),
-                    "{fwd_node:?} is marked as a weight but is undifferentiable: {:?}",
-                    graph.node_weight(fwd_node).unwrap()
-                );
-                continue;
-            }
+//         // We have the last loss node, now let's backprop through everything to get the gradient graph
+//         let mut grads = FxHashMap::default();
+//         // Add loss gradient
+//         grads.insert(
+//             *loss,
+//             (
+//                 graph.constant_float(1.0).id,
+//                 ShapeTracker::new(()), // Assume scalar loss for now
+//             ),
+//         );
+//         let weight_set = params.iter().copied().collect::<FxHashSet<_>>();
+//         for fwd_node in toposort(&graph.graph, None).unwrap().into_iter().rev() {
+//             if !valid_set.contains(&fwd_node) {
+//                 continue;
+//             }
+//             // Check if the node is undifferentiable
+//             let graph_ref: *mut Graph = graph;
+//             let op = graph.node_weight(fwd_node).unwrap().as_any().type_id();
+//             if op == TypeId::of::<GMEM>() {
+//                 continue;
+//             }
+//             if op == TypeId::of::<Mod>() || op == TypeId::of::<LessThan>() {
+//                 assert!(
+//                     !weight_set.contains(&fwd_node),
+//                     "{fwd_node:?} is marked as a weight but is undifferentiable: {:?}",
+//                     graph.node_weight(fwd_node).unwrap()
+//                 );
+//                 continue;
+//             }
 
-            // Differentiate through fwd_node to get gradients for it's sources
-            // Get input tensors
-            let inps = graph
-                .edges_directed(fwd_node, Direction::Incoming)
-                .filter_map(|e| e.weight().as_data().map(|i| (e.source(), i)))
-                .sorted_by_key(|(_, (a, _, _))| *a)
-                .map(|(node, (_, _, sh))| GraphTensor::from_id(node, sh, graph_ref, DType::F32))
-                .collect::<Vec<_>>();
-            let mut prev_grad = {
-                let (id, sh) = grads[&fwd_node];
-                GraphTensor::from_id(id, sh, graph_ref, DType::F32)
-            };
-            if op == TypeId::of::<Add>() {
-                // f(a, b) = a + b
-                // df/da = 1
-                if valid_set.contains(&inps[0].id) {
-                    add_grad(prev_grad, inps[0], graph, &mut grads);
-                }
-                // df/db = 1
-                if valid_set.contains(&inps[1].id) {
-                    add_grad(prev_grad, inps[1], graph, &mut grads);
-                }
-            } else if op == TypeId::of::<Mul>() {
-                // f(a, b) = a * b
-                // df/da = b
-                if valid_set.contains(&inps[0].id) {
-                    add_grad(inps[1] * prev_grad, inps[0], graph, &mut grads);
-                }
-                // df/db = a
-                if valid_set.contains(&inps[1].id) {
-                    add_grad(inps[0] * prev_grad, inps[1], graph, &mut grads);
-                }
-            } else if let Some(op) = unsafe { graph_ref.as_ref().unwrap() } // Needed to get around multiple borrows
-                .try_get_op::<SumReduce>(fwd_node)
-                .cloned()
-            {
-                // f(x) = sum_reduce(x)
-                // f'(x) = 1
-                if valid_set.contains(&inps[0].id) {
-                    prev_grad.shape.expand_dim(op.0, inps[0].shape.dims[op.0]);
-                    add_grad(prev_grad, inps[0], graph, &mut grads);
-                }
-            } else if let Some(op) = unsafe { graph_ref.as_ref().unwrap() } // Needed to get around multiple borrows
-                .try_get_op::<MaxReduce>(fwd_node)
-                .cloned()
-            {
-                // f(x) = max_reduce(x)
-                // f'(x) = x == max_reduce(x)
-                if valid_set.contains(&inps[0].id) {
-                    // fwd_nod is already max_reduce(x)
-                    prev_grad.shape.expand_dim(op.0, inps[0].shape.dims[op.0]);
-                    let reduced =
-                        GraphTensor::from_id(fwd_node, prev_grad.shape, graph_ref, DType::F32);
-                    let grad = inps[0].eq(reduced) * prev_grad;
-                    add_grad(grad, inps[0], graph, &mut grads);
-                }
-            } else {
-                if !valid_set.contains(&inps[0].id) {
-                    continue;
-                }
-                let local_grad = if op == TypeId::of::<Log2>() {
-                    // f(x) = log2(x)
-                    // f'(x) = 1 / (x * ln(2))
-                    1.0 / (inps[0] * 2_f32.ln())
-                } else if op == TypeId::of::<Exp2>() {
-                    // f(x) = exp2(x)
-                    // f'(x) = exp2(x) * ln(2)
-                    inps[0].exp2() * 2_f32.ln()
-                } else if op == TypeId::of::<Sin>() {
-                    // f(x) = sin(x)
-                    // f'(x) = cos(x)
-                    inps[0].cos()
-                } else if op == TypeId::of::<Sqrt>() {
-                    // f(x) = sqrt(x)
-                    // f'(x) = 1 / (2 * sqrt(x))
-                    1.0 / (2.0 * inps[0].sqrt())
-                } else if op == TypeId::of::<Recip>() {
-                    // f(x) = 1 / x
-                    // f'(x) = -1 / x**2
-                    -1.0 / (inps[0] * inps[0])
-                } else {
-                    unreachable!()
-                };
-                add_grad(local_grad * prev_grad, inps[0], graph, &mut grads);
-            }
-        }
+//             // Differentiate through fwd_node to get gradients for it's sources
+//             // Get input tensors
+//             let inps = graph
+//                 .edges_directed(fwd_node, Direction::Incoming)
+//                 .filter_map(|e| e.weight().as_data().map(|i| (e.source(), i)))
+//                 .sorted_by_key(|(_, (a, _, _))| *a)
+//                 .map(|(node, (_, _, sh))| GraphTensor::from_id(node, sh, graph_ref, DType::F32))
+//                 .collect::<Vec<_>>();
+//             let mut prev_grad = {
+//                 let (id, sh) = grads[&fwd_node];
+//                 GraphTensor::from_id(id, sh, graph_ref, DType::F32)
+//             };
+//             if op == TypeId::of::<Add>() {
+//                 // f(a, b) = a + b
+//                 // df/da = 1
+//                 if valid_set.contains(&inps[0].id) {
+//                     add_grad(prev_grad, inps[0], graph, &mut grads);
+//                 }
+//                 // df/db = 1
+//                 if valid_set.contains(&inps[1].id) {
+//                     add_grad(prev_grad, inps[1], graph, &mut grads);
+//                 }
+//             } else if op == TypeId::of::<Mul>() {
+//                 // f(a, b) = a * b
+//                 // df/da = b
+//                 if valid_set.contains(&inps[0].id) {
+//                     add_grad(inps[1] * prev_grad, inps[0], graph, &mut grads);
+//                 }
+//                 // df/db = a
+//                 if valid_set.contains(&inps[1].id) {
+//                     add_grad(inps[0] * prev_grad, inps[1], graph, &mut grads);
+//                 }
+//             } else if let Some(op) = unsafe { graph_ref.as_ref().unwrap() } // Needed to get around multiple borrows
+//                 .try_get_op::<SumReduce>(fwd_node)
+//                 .cloned()
+//             {
+//                 // f(x) = sum_reduce(x)
+//                 // f'(x) = 1
+//                 if valid_set.contains(&inps[0].id) {
+//                     prev_grad.shape.expand_dim(op.0, inps[0].shape.dims[op.0]);
+//                     add_grad(prev_grad, inps[0], graph, &mut grads);
+//                 }
+//             } else if let Some(op) = unsafe { graph_ref.as_ref().unwrap() } // Needed to get around multiple borrows
+//                 .try_get_op::<MaxReduce>(fwd_node)
+//                 .cloned()
+//             {
+//                 // f(x) = max_reduce(x)
+//                 // f'(x) = x == max_reduce(x)
+//                 if valid_set.contains(&inps[0].id) {
+//                     // fwd_nod is already max_reduce(x)
+//                     prev_grad.shape.expand_dim(op.0, inps[0].shape.dims[op.0]);
+//                     let reduced =
+//                         GraphTensor::from_id(fwd_node, prev_grad.shape, graph_ref, DType::F32);
+//                     let grad = inps[0].eq(reduced) * prev_grad;
+//                     add_grad(grad, inps[0], graph, &mut grads);
+//                 }
+//             } else {
+//                 if !valid_set.contains(&inps[0].id) {
+//                     continue;
+//                 }
+//                 let local_grad = if op == TypeId::of::<Log2>() {
+//                     // f(x) = log2(x)
+//                     // f'(x) = 1 / (x * ln(2))
+//                     1.0 / (inps[0] * 2_f32.ln())
+//                 } else if op == TypeId::of::<Exp2>() {
+//                     // f(x) = exp2(x)
+//                     // f'(x) = exp2(x) * ln(2)
+//                     inps[0].exp2() * 2_f32.ln()
+//                 } else if op == TypeId::of::<Sin>() {
+//                     // f(x) = sin(x)
+//                     // f'(x) = cos(x)
+//                     inps[0].cos()
+//                 } else if op == TypeId::of::<Sqrt>() {
+//                     // f(x) = sqrt(x)
+//                     // f'(x) = 1 / (2 * sqrt(x))
+//                     1.0 / (2.0 * inps[0].sqrt())
+//                 } else if op == TypeId::of::<Recip>() {
+//                     // f(x) = 1 / x
+//                     // f'(x) = -1 / x**2
+//                     -1.0 / (inps[0] * inps[0])
+//                 } else {
+//                     unreachable!()
+//                 };
+//                 add_grad(local_grad * prev_grad, inps[0], graph, &mut grads);
+//             }
+//         }
 
-        // Create a gradient array to match 1-1 with the weight array passed in
-        self.0.iter().map(|weight| grads[weight]).collect()
-    }
-}
+//         // Create a gradient array to match 1-1 with the weight array passed in
+//         self.0.iter().map(|weight| grads[weight]).collect()
+//     }
+// }
 
 fn add_grad(
     mut grad: GraphTensor,

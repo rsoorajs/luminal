@@ -2,6 +2,7 @@ use crate::prelude::*;
 use std::fmt::Debug;
 
 use petgraph::graph::NodeIndex;
+use rustc_hash::FxHashMap;
 
 /// A tensor on the graph.
 ///
@@ -44,24 +45,6 @@ impl GraphTensor {
         }
     }
 
-    /// Mark this tensor to not be deleted
-    pub fn keep(self) -> Self {
-        self.graph().keep_tensors(self.id);
-        self
-    }
-
-    /// Mark this tensor to be retrieved later
-    pub fn retrieve(self) -> Self {
-        self.keep();
-        self.graph().to_retrieve.insert(self.id, (0, self.shape));
-        self
-    }
-
-    /// Remove this tensor's data from the graph.
-    pub fn drop(&self) {
-        self.graph().drop_tensors(self.id);
-    }
-
     /// Get a mutable reference to the graph this tensor belongs to
     #[allow(clippy::mut_from_ref)]
     pub fn graph(&self) -> &mut Graph {
@@ -71,34 +54,6 @@ impl GraphTensor {
     /// Set the name of a tensor
     pub fn set_name(&self, name: &str) {
         self.graph().get_op_mut::<GMEM>(self.id).label = name.to_string();
-    }
-
-    /// Get the contiguous data of the tensor
-    pub fn data(&self) -> Vec<f32> {
-        let tensor = self
-            .graph()
-            .get_tensor_ref(self.id, 0)
-            .expect("Tensor not found in the graph!");
-        let orig_data = tensor
-            .downcast_ref::<Vec<f32>>()
-            .expect("Data for tensor is not Vec<f32>!");
-        let mut st = self.shape;
-        if st.is_contiguous() {
-            return orig_data.clone();
-        }
-        st.resolve_global_dyn_dims(&self.graph().dyn_map);
-        let mut data = vec![0.; st.n_elements().to_usize().unwrap()];
-        let (ind, val) = (
-            st.index_expression_no_simplify(),
-            st.valid_expression_no_simplify(),
-        );
-        #[allow(unused_mut)]
-        for (i, mut r) in data.iter_mut().enumerate() {
-            if val.exec_single_var(i) != 0 {
-                *r = orig_data[ind.exec_single_var(i)];
-            }
-        }
-        data
     }
 
     pub fn dims(&self) -> Vec<Expression> {
@@ -156,201 +111,15 @@ impl GraphTensor {
     }
 }
 
-fn pretty_print_tensor_recursive(
-    f: &mut std::fmt::Formatter<'_>,
-    data: &[f32],
-    shape: &[usize],
-    level: usize,
-) -> std::fmt::Result {
-    if shape.is_empty() {
-        // Base case: no dimensions left
-        return Ok(());
-    }
-
-    let indent = "  ".repeat(level);
-
-    if shape.len() == 1 {
-        // If this is the innermost dimension, print the raw data in a single line
-        write!(f, "{indent}[")?;
-        if data.len() > 10 {
-            for (i, value) in data.iter().take(5).enumerate() {
-                write!(f, "{value:.6}")?;
-                if i < data.len() - 1 {
-                    write!(f, ", ")?;
-                }
-            }
-            write!(f, "..., ")?;
-            for (i, value) in data.iter().skip(data.len() - 5).enumerate() {
-                write!(f, "{value:.6}")?;
-                if i < data.len() - 1 {
-                    write!(f, ", ")?;
-                }
-            }
-        } else {
-            for (i, value) in data.iter().enumerate() {
-                write!(f, "{value:.6}")?;
-                if i < data.len() - 1 {
-                    write!(f, ", ")?;
-                }
-            }
-        }
-        write!(f, "]")?; // No newline after the innermost array
-    } else {
-        // For higher dimensions, handle the nesting
-        writeln!(f, "{indent}[")?;
-        let stride = shape[1..].iter().product();
-        if data.len() / stride > 10 {
-            for (i, chunk) in data.chunks(stride).take(5).enumerate() {
-                pretty_print_tensor_recursive(f, chunk, &shape[1..], level + 1)?;
-                if i < shape[0] - 1 {
-                    writeln!(f, ",")?; // Place the comma right after the bracket and then a newline
-                }
-            }
-            writeln!(f, "{indent}  ..., ")?;
-            for (i, chunk) in data
-                .chunks(stride)
-                .skip(data.len() / stride - 5)
-                .enumerate()
-            {
-                pretty_print_tensor_recursive(f, chunk, &shape[1..], level + 1)?;
-                if i < shape[0] - 1 {
-                    writeln!(f, ",")?; // Place the comma right after the bracket and then a newline
-                }
-            }
-        } else {
-            for (i, chunk) in data.chunks(stride).enumerate() {
-                pretty_print_tensor_recursive(f, chunk, &shape[1..], level + 1)?;
-                if i < shape[0] - 1 {
-                    writeln!(f, ",")?; // Place the comma right after the bracket and then a newline
-                }
-            }
-        }
-        writeln!(f)?; // Add a newline before closing the current dimension bracket
-        write!(f, "{indent}]")?; // Close the current dimension bracket
-    }
-
-    // Only add a newline after the top-level closing bracket
-    if level == 0 {
-        writeln!(f)?;
-    }
-
-    Ok(())
-}
-
 impl Debug for GraphTensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Print the shape
         let mut shape = self.shape;
         shape.resolve_global_dyn_dims(&self.graph().dyn_map);
         let shape = shape.shape_usize();
-        writeln!(f, "Tensor with Shape: {shape:?}")?;
-
-        if self.graph().tensors.contains_key(&(self.id, 0)) {
-            // Print the data by going dimension by dimension, recursively
-            pretty_print_tensor_recursive(f, &self.data(), &shape, 0)
-        } else {
-            // Print for empty tensors
-            writeln!(f, "Tensor is empty.")
-        }
+        writeln!(f, "Tensor with Shape: {shape:?}")
     }
 }
-
-pub trait MarkTensors {
-    /// Mark all tensors in this collection to be kept
-    fn keep(&self);
-    /// Mark all tensors in this collection to be retrieved
-    fn retrieve(&self);
-    /// Drop all tensors in this collection
-    fn drop(&self);
-}
-
-impl MarkTensors for GraphTensor {
-    fn keep(&self) {
-        GraphTensor::keep(*self);
-    }
-
-    fn retrieve(&self) {
-        GraphTensor::retrieve(*self);
-    }
-    fn drop(&self) {
-        GraphTensor::drop(self);
-    }
-}
-
-impl<S: MarkTensors> MarkTensors for Vec<S> {
-    fn keep(&self) {
-        for t in self {
-            t.keep();
-        }
-    }
-
-    fn retrieve(&self) {
-        for t in self {
-            t.retrieve();
-        }
-    }
-
-    fn drop(&self) {
-        for t in self {
-            t.drop();
-        }
-    }
-}
-impl<S: MarkTensors> MarkTensors for &[S] {
-    fn keep(&self) {
-        for t in *self {
-            t.keep();
-        }
-    }
-
-    fn retrieve(&self) {
-        for t in *self {
-            t.retrieve();
-        }
-    }
-
-    fn drop(&self) {
-        for t in *self {
-            t.drop();
-        }
-    }
-}
-
-macro_rules! tuple_impls {
-    ([$($name:ident),+] , [$($idx:tt),+]) => {
-        impl<
-        $($name:
-            MarkTensors, )+
-        > MarkTensors for ($($name,)+) {
-            fn keep(&self) {
-                $(self.$idx.keep();)+
-            }
-            fn retrieve(&self) {
-                $(self.$idx.retrieve();)+
-            }
-            fn drop(&self) {
-                $(self.$idx.drop();)+
-            }
-        }
-    };
-}
-
-tuple_impls!([M1], [0]);
-tuple_impls!([M1, M2], [0, 1]);
-tuple_impls!([M1, M2, M3], [0, 1, 2]);
-tuple_impls!([M1, M2, M3, M4], [0, 1, 2, 3]);
-tuple_impls!([M1, M2, M3, M4, M5], [0, 1, 2, 3, 4]);
-tuple_impls!([M1, M2, M3, M4, M5, M6], [0, 1, 2, 3, 4, 5]);
-tuple_impls!([M1, M2, M3, M4, M5, M6, M7], [0, 1, 2, 3, 4, 5, 6]);
-tuple_impls!([M1, M2, M3, M4, M5, M6, M7, M8], [0, 1, 2, 3, 4, 5, 6, 7]);
-tuple_impls!(
-    [M1, M2, M3, M4, M5, M6, M7, M8, M9],
-    [0, 1, 2, 3, 4, 5, 6, 7, 8]
-);
-tuple_impls!(
-    [M1, M2, M3, M4, M5, M6, M7, M8, M9, M10],
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-);
 
 pub trait ToData<T> {
     fn to_data_vec(self) -> (T, Vec<usize>);
@@ -422,3 +191,159 @@ impl<const A: usize, const B: usize, const C: usize, const D: usize, const E: us
         )
     }
 }
+
+pub trait ToIdsMut {
+    fn to_ids_mut(&mut self) -> Vec<&mut NodeIndex>;
+}
+
+pub trait ToIds {
+    fn to_ids(&self) -> Vec<NodeIndex>;
+}
+
+pub trait ToId {
+    fn to_id(&self) -> NodeIndex;
+}
+
+impl ToId for GraphTensor {
+    fn to_id(&self) -> NodeIndex {
+        self.id
+    }
+}
+
+impl ToId for NodeIndex {
+    fn to_id(&self) -> NodeIndex {
+        *self
+    }
+}
+
+impl ToIdsMut for GraphTensor {
+    fn to_ids_mut(&mut self) -> Vec<&mut NodeIndex> {
+        vec![&mut self.id]
+    }
+}
+impl ToIds for GraphTensor {
+    fn to_ids(&self) -> Vec<NodeIndex> {
+        vec![self.id]
+    }
+}
+impl<T: ToIdsMut> ToIdsMut for Vec<T> {
+    fn to_ids_mut(&mut self) -> Vec<&mut NodeIndex> {
+        self.iter_mut().flat_map(|i| i.to_ids_mut()).collect()
+    }
+}
+impl<T: ToIds> ToIds for Vec<T> {
+    fn to_ids(&self) -> Vec<NodeIndex> {
+        self.iter().flat_map(|i| i.to_ids()).collect()
+    }
+}
+impl<T: ToIdsMut> ToIdsMut for &mut [T] {
+    fn to_ids_mut(&mut self) -> Vec<&mut NodeIndex> {
+        self.iter_mut().flat_map(|i| i.to_ids_mut()).collect()
+    }
+}
+impl ToIdsMut for &mut Vec<NodeIndex> {
+    fn to_ids_mut(&mut self) -> Vec<&mut NodeIndex> {
+        self.iter_mut().collect()
+    }
+}
+impl ToIdsMut for &mut [NodeIndex] {
+    fn to_ids_mut(&mut self) -> Vec<&mut NodeIndex> {
+        self.iter_mut().collect()
+    }
+}
+impl<T: ToIds> ToIds for &mut [T] {
+    fn to_ids(&self) -> Vec<NodeIndex> {
+        self.iter().flat_map(|i| i.to_ids()).collect()
+    }
+}
+
+impl<T: ToIdsMut> ToIdsMut for &mut T {
+    fn to_ids_mut(&mut self) -> Vec<&mut NodeIndex> {
+        (*self).to_ids_mut()
+    }
+}
+impl<T: ToIds> ToIds for &T {
+    fn to_ids(&self) -> Vec<NodeIndex> {
+        <T as ToIds>::to_ids(*self)
+    }
+}
+impl ToIds for NodeIndex {
+    fn to_ids(&self) -> Vec<NodeIndex> {
+        vec![*self]
+    }
+}
+impl ToIdsMut for &mut NodeIndex {
+    fn to_ids_mut(&mut self) -> Vec<&mut NodeIndex> {
+        vec![self]
+    }
+}
+impl ToIdsMut for () {
+    fn to_ids_mut(&mut self) -> Vec<&mut NodeIndex> {
+        vec![]
+    }
+}
+impl ToIds for () {
+    fn to_ids(&self) -> Vec<NodeIndex> {
+        vec![]
+    }
+}
+
+impl<T: ToIds> ToIds for FxHashMap<String, T> {
+    fn to_ids(&self) -> Vec<NodeIndex> {
+        self.values().flat_map(|i| i.to_ids()).collect()
+    }
+}
+
+impl ToIds for (NodeIndex, ShapeTracker) {
+    fn to_ids(&self) -> Vec<NodeIndex> {
+        vec![self.0]
+    }
+}
+
+impl ToIdsMut for (NodeIndex, ShapeTracker) {
+    fn to_ids_mut(&mut self) -> Vec<&mut NodeIndex> {
+        vec![&mut self.0]
+    }
+}
+
+macro_rules! tuple_impls {
+    ([$($name:ident),+] , [$($idx:tt),+]) => {
+        impl<
+        $($name:
+            ToIdsMut, )+
+        > ToIdsMut for ($($name,)+) {
+            fn to_ids_mut(&mut self) -> Vec<&mut NodeIndex> {
+                let mut v = vec![];
+                $(v.append(&mut self.$idx.to_ids_mut());)+
+                v
+            }
+        }
+        impl<
+        $($name:
+            ToIds, )+
+        > ToIds for ($($name,)+) {
+            fn to_ids(&self) -> Vec<NodeIndex> {
+                let mut v = vec![];
+                $(v.append(&mut self.$idx.to_ids());)+
+                v
+            }
+        }
+    };
+}
+
+tuple_impls!([M1], [0]);
+tuple_impls!([M1, M2], [0, 1]);
+tuple_impls!([M1, M2, M3], [0, 1, 2]);
+tuple_impls!([M1, M2, M3, M4], [0, 1, 2, 3]);
+tuple_impls!([M1, M2, M3, M4, M5], [0, 1, 2, 3, 4]);
+tuple_impls!([M1, M2, M3, M4, M5, M6], [0, 1, 2, 3, 4, 5]);
+tuple_impls!([M1, M2, M3, M4, M5, M6, M7], [0, 1, 2, 3, 4, 5, 6]);
+tuple_impls!([M1, M2, M3, M4, M5, M6, M7, M8], [0, 1, 2, 3, 4, 5, 6, 7]);
+tuple_impls!(
+    [M1, M2, M3, M4, M5, M6, M7, M8, M9],
+    [0, 1, 2, 3, 4, 5, 6, 7, 8]
+);
+tuple_impls!(
+    [M1, M2, M3, M4, M5, M6, M7, M8, M9, M10],
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+);

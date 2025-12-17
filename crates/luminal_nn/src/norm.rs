@@ -53,9 +53,8 @@ impl LayerNorm {
     // }
 }
 
-impl Module<GraphTensor> for LayerNorm {
-    type Output = GraphTensor;
-    fn forward(&self, mut input: GraphTensor) -> Self::Output {
+impl LayerNorm {
+    pub fn forward(&self, mut input: GraphTensor) -> GraphTensor {
         if self.mean_norm {
             input = input.mean_norm(input.shape.last_axis());
         }
@@ -67,16 +66,5 @@ impl Module<GraphTensor> for LayerNorm {
             input += b.expand(input.shape);
         }
         input
-    }
-}
-
-impl SerializeModule for LayerNorm {
-    fn serialize(&self, s: &mut Serializer) {
-        if let Some(w) = self.weight {
-            s.tensor("weight", w);
-        }
-        if let Some(b) = self.bias {
-            s.tensor("bias", b);
-        }
     }
 }

@@ -53,19 +53,8 @@ impl Linear {
     // }
 }
 
-impl SerializeModule for Linear {
-    fn serialize(&self, s: &mut luminal::module::Serializer) {
-        s.tensor("weight", self.weight);
-        if let Some(bias) = self.bias {
-            s.tensor("bias", bias);
-        }
-    }
-}
-
-impl Module<GraphTensor> for Linear {
-    type Output = GraphTensor;
-
-    fn forward(&self, input: GraphTensor) -> Self::Output {
+impl Linear {
+    pub fn forward(&self, input: GraphTensor) -> GraphTensor {
         let mut output = input.matmul(if self.permute {
             self.weight.permute((1, 0))
         } else {

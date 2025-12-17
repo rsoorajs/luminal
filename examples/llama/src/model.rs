@@ -1,7 +1,6 @@
 use luminal::{
     graph::{shape_to_egglog, strides_to_egglog, Graph},
-    module::Module,
-    op::{DType, Operator},
+    op::{DType, HLIROp},
     prelude::GraphTensor,
     shape::{Expression, ShapeTracker},
 };
@@ -191,17 +190,7 @@ pub struct RopeFrontendOp {
     pub row_width: Expression,
 }
 
-impl Operator for RopeFrontendOp {
-    fn process(
-        &mut self,
-        _inp: Vec<(
-            luminal::prelude::InputTensor,
-            luminal::prelude::ShapeTracker,
-        )>,
-    ) -> Vec<luminal::prelude::Tensor> {
-        todo!()
-    }
-
+impl HLIROp for RopeFrontendOp {
     fn to_egglog(
         &self,
         inputs: &Vec<(luminal::prelude::NodeIndex, String, ShapeTracker)>,
@@ -224,17 +213,7 @@ pub struct GQAAttentionFrontendOp {
     pub layer: usize,
 }
 
-impl Operator for GQAAttentionFrontendOp {
-    fn process(
-        &mut self,
-        _inp: Vec<(
-            luminal::prelude::InputTensor,
-            luminal::prelude::ShapeTracker,
-        )>,
-    ) -> Vec<luminal::prelude::Tensor> {
-        todo!()
-    }
-
+impl HLIROp for GQAAttentionFrontendOp {
     fn to_egglog(
         &self,
         inputs: &Vec<(luminal::prelude::NodeIndex, String, ShapeTracker)>,

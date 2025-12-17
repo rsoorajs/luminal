@@ -3,14 +3,10 @@ use crate::{
     utils::{EgglogOp, LLIROp},
 };
 use std::{
-    io::Write,
     ops::{Deref, DerefMut},
     sync::Arc,
-    time::Duration,
 };
 
-use super::compiler_utils::{ToIds, ToIdsMut};
-use colored::Colorize;
 use egglog::{prelude::RustSpan, var};
 use egglog_ast::span::Span;
 use egraph_serialize::{ClassId, NodeId};
@@ -19,30 +15,17 @@ use petgraph::{Direction, stable_graph::StableGraph, visit::EdgeRef};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 pub type LLIRGraph = StableGraph<LLIROp, (), petgraph::Directed>;
-
-pub type StorageGraph = StableGraph<Box<dyn Operator>, Dependency>;
+pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, Dependency>;
 
 /// A Luminal compute graph.
 ///
 /// All computation is represented as a directed acyclic graph.
-/// All data is stored inside this object as well.
 #[derive(Debug, Default)]
 pub struct Graph {
-    /// The store of tensors in the graph. Indexed by node index and output index.
-    pub tensors: FxHashMap<(NodeIndex, u8), Tensor>,
     /// A map of dynamic dimensions to concrete dimension sizes
     pub dyn_map: FxHashMap<char, usize>,
     /// Edge weights: (Input index, Output index, Input shape)
-    pub graph: StorageGraph,
-    /// Tensors marked in this set will not get deleted when the graph is ran
-    pub no_delete: FxHashSet<NodeIndex>,
-    /// Tensors marked in this set need to be retrieved later (mostly for optimizers to insert copy back calls, the graph itself doesn't treat these differently)
-    pub to_retrieve: FxHashMap<NodeIndex, (u8, ShapeTracker)>,
-    /// A cached list of nodes to run, source nodes, and view nodes to delete after execution.
-    #[allow(clippy::type_complexity)]
-    pub(crate) linearized_graph: Option<Vec<(NodeIndex, Vec<(NodeIndex, u8, ShapeTracker)>)>>,
-    /// Cached consumers (for execution only)
-    consumers_map: Option<FxHashMap<(NodeIndex, u8), usize>>,
+    pub graph: HLIRGraph,
     /// E-Graph search space
     egraph: Option<SerializedEGraph>,
 }
@@ -88,35 +71,6 @@ impl Graph {
         Graph::default()
     }
 
-    /// Try to remove the tensor data from the graph
-    pub fn get_tensor(&mut self, id: NodeIndex, ind: u8) -> Option<Tensor> {
-        self.tensors.remove(&(id, ind))
-    }
-
-    /// Try to get the tensor data in the graph
-    pub fn get_tensor_ref(&self, id: NodeIndex, ind: u8) -> Option<&Tensor> {
-        self.tensors.get(&(id, ind))
-    }
-
-    /// Delete the tensor data from the graph
-    pub fn drop_tensors<T: ToIds>(&mut self, tensors: T) {
-        for id in tensors.to_ids() {
-            self.tensors.remove(&(id, 0));
-        }
-    }
-
-    /// Mark tensors to be kept
-    pub fn keep_tensors<T: ToIds>(&mut self, tensors: T) {
-        for id in tensors.to_ids() {
-            self.no_delete.insert(id);
-        }
-    }
-
-    /// Set a tensor's data
-    pub fn set_tensor(&mut self, id: NodeIndex, ind: u8, tensor: Tensor) {
-        self.tensors.insert((id, ind), tensor);
-    }
-
     /// Set a dynamic dimension
     pub fn set_dyn_dim(&mut self, dimension: char, val: usize) {
         self.dyn_map.insert(dimension, val);
@@ -143,228 +97,73 @@ impl Graph {
         }
     }
 
-    /// Compile the graph using the given compiler
-    pub fn compile<T: ToIdsMut, C: Compiler>(&mut self, compiler: C, remap: T) -> C::Output {
-        let output = compiler.compile(self, remap);
-        self.toposort();
-        self.reset();
-        output
+    /// Get the sources of a node given it's id
+    pub fn get_sources(&self, node_id: NodeIndex) -> Vec<(NodeIndex, u8, ShapeTracker)> {
+        self.graph
+            .edges_directed(node_id, Direction::Incoming)
+            .filter_map(|e| e.weight().as_data().map(|i| (e.source(), i)))
+            .sorted_by_key(|(_, (i, _, _))| *i)
+            .map(|(a, (_, c, b))| (a, c, b))
+            .collect()
     }
 
-    /// Refresh the internally sorted graph
-    pub(crate) fn toposort(&mut self) {
-        self.linearized_graph = Some(
-            petgraph::algo::toposort(&self.graph, None)
-                .unwrap()
-                .into_iter()
-                .map(|node| (node, self.get_sources(node)))
-                .collect(),
-        );
-
-        // Refresh the internal remaining consumers map
-        self.consumers_map = Some(
-            self.graph
-                .node_indices()
-                .flat_map(|i| {
-                    self.graph
-                        .edges_directed(i, Direction::Outgoing)
-                        .filter_map(|e| e.weight().as_data().map(|i| (e.source(), i)))
-                        .group_by(|(_, (_, i, _))| *i)
-                        .into_iter()
-                        .map(|(ind, g)| ((i, ind), g.count()))
-                        .collect::<Vec<_>>()
-                })
-                .collect(),
-        );
+    /// Get the dests of a node given it's id
+    #[allow(clippy::borrowed_box)]
+    pub fn get_dests(&self, node_id: NodeIndex) -> Vec<(NodeIndex, &Box<dyn HLIROp>)> {
+        self.graph
+            .edges_directed(node_id, Direction::Outgoing)
+            .filter_map(|e| e.weight().as_data().map(|i| (e.target(), i)))
+            .sorted_by_key(|(_, (i, _, _))| *i)
+            .map(|(a, _)| (a, self.graph.node_weight(a).unwrap()))
+            .collect()
     }
 
-    /// Swap the tensors with these ids
-    pub fn swap_tensors(&mut self, a: GraphTensor, b: GraphTensor) {
-        // Swap tensors
-        for i in 0.. {
-            let a_t = self.tensors.remove(&(a.id, i));
-            let b_t = self.tensors.remove(&(b.id, i));
-            if a_t.is_none() && b_t.is_none() {
-                break;
-            }
-            if let Some(a_t) = a_t {
-                self.tensors.insert((b.id, i), a_t);
-            }
-            if let Some(b_t) = b_t {
-                self.tensors.insert((a.id, i), b_t);
-            }
+    /// Add op on the graph, and get back a NewOp
+    ///
+    /// ```rust
+    /// use luminal::prelude::*;
+    /// let mut cx = Graph::new();
+    /// let a = cx.tensor(3);
+    /// let b_id = cx
+    ///     .add_op(luminal::op::Mul)
+    ///     .input(a.id, 0, a.shape)
+    ///     .finish();
+    /// let b = GraphTensor::from_id(b_id, a.shape, a.graph());
+    /// ```
+    pub fn add_op<O: HLIROp + 'static>(&mut self, op: O) -> NewOp<'_> {
+        NewOp {
+            new_op_id: self.graph.add_node(Box::new(op)),
+            graph_ref: self,
+            num_srcs: 0,
         }
     }
-
-    /// Clear any remaining tensors that may be around from old executions
-    pub fn reset(&mut self) {
-        self.tensors.retain(|(n, _), _| self.no_delete.contains(n));
-    }
-
-    /// Execute the graph.
-    pub fn execute(&mut self) {
-        // Track the number of views pointing to each tensor so we know when to clear
-        if self.linearized_graph.is_none() {
-            self.toposort();
-        }
-        let mut consumers = self.consumers_map.as_ref().unwrap().clone();
-        let mut dim_stack = Vec::new();
-
-        for (node, src_ids) in self.linearized_graph.as_ref().unwrap() {
-            if self.tensors.contains_key(&(*node, 0)) {
-                continue;
-            }
-
-            let mut srcs =
-                get_source_tensors(&self.no_delete, &mut self.tensors, src_ids, &consumers);
-
-            // Substitute in the dyn dims
-            for (_, st) in srcs.iter_mut() {
-                st.resolve_global_dyn_dims_stack(&self.dyn_map, &mut dim_stack);
-            }
-
-            // Execute
-            let tensors = self.graph.node_weight_mut(*node).unwrap().process(srcs);
-            for (i, tensor) in tensors.into_iter().enumerate() {
-                self.tensors.insert((*node, i as u8), tensor);
-            }
-
-            // Bookkeep remaining consumers
-            for (id, ind, _) in src_ids {
-                *consumers.get_mut(&(*id, *ind)).unwrap() -= 1;
-            }
-        }
-        self.reset();
-    }
-
-    /// Execute the graph without deleting intermediate tensors
-    pub fn execute_no_delete(&mut self) {
-        // Track the number of views pointing to each tensor so we know when to clear;
-        if self.linearized_graph.is_none() {
-            self.toposort();
-        }
-        let mut dim_stack = Vec::new();
-        for (node, src_ids) in self.linearized_graph.as_ref().unwrap().iter() {
-            if self.tensors.contains_key(&(*node, 0)) {
-                continue;
-            }
-            let mut srcs = src_ids
-                .iter()
-                .map(|(id, ind, st)| {
-                    (
-                        InputTensor::Borrowed(self.tensors.get(&(*id, *ind)).unwrap()),
-                        *st,
-                    )
-                })
-                .collect_vec();
-
-            // Substitute in the dyn dims
-            for (_, st) in srcs.iter_mut() {
-                st.resolve_global_dyn_dims_stack(&self.dyn_map, &mut dim_stack);
-            }
-
-            // All sources are ready, execute
-            let tensors = self.graph.node_weight_mut(*node).unwrap().process(srcs);
-            for (i, tensor) in tensors.into_iter().enumerate() {
-                self.tensors.insert((*node, i as u8), tensor);
-            }
+    /// Add op on the graph, and get back a NewOp. Just like add_op, except a boxed op is expected.
+    pub fn add_boxed_op(&mut self, op: Box<dyn HLIROp + 'static>) -> NewOp<'_> {
+        NewOp {
+            new_op_id: self.graph.add_node(op),
+            graph_ref: self,
+            num_srcs: 0,
         }
     }
+    /// Create a schedule dependency between a and b
+    pub fn add_schedule_dependency(&mut self, a: NodeIndex, b: NodeIndex) {
+        self.graph.add_edge(a, b, Dependency::Schedule);
+    }
 
-    /// Execute the graph with debug prints
-    pub fn execute_debug(&mut self) {
-        fn format_duration(duration: &Duration) -> String {
-            if duration.as_secs() > 0 {
-                format!("{:.2}s", duration.as_secs_f32())
-            } else if duration.as_millis() > 0 {
-                format!("{}ms", duration.as_millis())
-            } else {
-                format!("{}µs", duration.as_micros())
-            }
-        }
-        // Track the number of views pointing to each tensor so we know when to clear
-        if self.linearized_graph.is_none() {
-            self.toposort();
-        }
-        let mut dim_stack = Vec::new();
-        let mut consumers = self.consumers_map.as_ref().unwrap().clone();
-        let mut op_times = FxHashMap::default();
-        let width = term_size::dimensions().unwrap().0;
-
-        println!(
-            "{:->2$} Executing {:->2$}",
-            "",
-            "",
-            (width.saturating_sub(" Executing ".len())) / 2
-        );
-        let start = std::time::Instant::now();
-        for (node, src_ids) in self.linearized_graph.as_ref().unwrap().iter() {
-            if self.tensors.contains_key(&(*node, 0)) {
-                continue;
-            }
-            let op_name = format!("{:?} | {}", self.node_weight(*node).unwrap(), node.index());
-            print!("{}", op_name.bold().bright_green());
-
-            let mut srcs =
-                get_source_tensors(&self.no_delete, &mut self.tensors, src_ids, &consumers);
-
-            // Substitute in the dyn dims
-            for (_, st) in srcs.iter_mut() {
-                st.resolve_global_dyn_dims_stack(&self.dyn_map, &mut dim_stack);
-            }
-
-            // All sources are ready
-            let mut shapes_string = srcs.iter().map(|(_, s)| format!("{:?}", s.dims)).join(", ");
-            if !shapes_string.is_empty() {
-                shapes_string = format!(" ({shapes_string})");
-            }
-            print!("{shapes_string}");
-            std::io::stdout().flush().unwrap();
-            // Execute
-            let now = std::time::Instant::now();
-            let tensors = self.graph.node_weight_mut(*node).unwrap().process(srcs);
-            let elapsed = now.elapsed();
-            println!(
-                "{:.>1$}",
-                format_duration(&elapsed).bold(),
-                width
-                    .saturating_sub(op_name.len())
-                    .saturating_sub(shapes_string.len()),
-            );
-            for (i, tensor) in tensors.into_iter().enumerate() {
-                self.tensors.insert((*node, i as u8), tensor);
-            }
-            let timed_op_name = format!("{:?}", self.node_weight(*node).unwrap());
-            if let Some(t) = op_times.get_mut(&timed_op_name) {
-                *t += elapsed;
-            } else {
-                op_times.insert(timed_op_name, elapsed);
-            }
-
-            // Check if we can delete the source tensors now
-            for (id, ind, _) in src_ids {
-                *consumers.get_mut(&(*id, *ind)).unwrap() -= 1;
-            }
-        }
-
-        // Print out total times
-        println!();
-        println!(
-            "{:->2$} Total Times {:->2$}",
-            "",
-            "",
-            (width.saturating_sub(" Total Times ".len())) / 2
-        );
-        for (name, elapsed) in op_times.into_iter().sorted_by(|(_, a), (_, b)| b.cmp(a)) {
-            print!("{}", name.bold().bright_green());
-            println!(
-                "{:.>1$}",
-                format_duration(&elapsed).bold(),
-                width.saturating_sub(name.len()),
-            );
-        }
-        println!("Total: {}", format_duration(&start.elapsed()).bold());
-        self.reset();
+    pub fn try_get_op<T: HLIROp + 'static>(&self, node: NodeIndex) -> Option<&T> {
+        self.node_weight(node).unwrap().as_any().downcast_ref::<T>()
+    }
+    pub fn get_op<T: HLIROp + 'static>(&self, node: NodeIndex) -> &T {
+        self.try_get_op(node).unwrap()
+    }
+    pub fn try_get_op_mut<T: HLIROp + 'static>(&mut self, node: NodeIndex) -> Option<&mut T> {
+        self.node_weight_mut(node)
+            .unwrap()
+            .as_any_mut()
+            .downcast_mut::<T>()
+    }
+    pub fn get_op_mut<T: HLIROp + 'static>(&mut self, node: NodeIndex) -> &mut T {
+        self.try_get_op_mut(node).unwrap()
     }
 
     pub fn build_search_space(&mut self, ops: &[Arc<Box<dyn EgglogOp>>]) {
@@ -394,7 +193,7 @@ pub trait Runtime {
 }
 
 impl Deref for Graph {
-    type Target = StorageGraph;
+    type Target = HLIRGraph;
     fn deref(&self) -> &Self::Target {
         &self.graph
     }
@@ -406,29 +205,30 @@ impl DerefMut for Graph {
     }
 }
 
-/// Get source tensor array for a node
-fn get_source_tensors<'a>(
-    no_delete: &'a FxHashSet<NodeIndex>,
-    tensors: *mut FxHashMap<(NodeIndex, u8), Tensor>,
-    src_ids: &'a [(NodeIndex, u8, ShapeTracker)],
-    consumers: &'a FxHashMap<(NodeIndex, u8), usize>,
-) -> Vec<(InputTensor<'a>, ShapeTracker)> {
-    let mut srcs = vec![];
-    for (id, ind, sh) in src_ids {
-        let id = &(*id, *ind);
-        if consumers[id] == 1 && !no_delete.contains(&id.0) {
-            srcs.push((
-                InputTensor::Owned(unsafe { tensors.as_mut().unwrap() }.remove(id).unwrap()),
-                *sh,
-            ));
-        } else {
-            srcs.push((
-                InputTensor::Borrowed(unsafe { tensors.as_ref().unwrap() }.get(id).unwrap()),
-                *sh,
-            ));
-        }
+pub struct NewOp<'a> {
+    new_op_id: NodeIndex,
+    graph_ref: &'a mut Graph,
+    num_srcs: u8,
+}
+
+impl NewOp<'_> {
+    pub fn finish(self) -> NodeIndex {
+        self.new_op_id
     }
-    srcs
+
+    pub fn input(mut self, id: NodeIndex, from_output: u8, shape: ShapeTracker) -> Self {
+        self.graph_ref.graph.add_edge(
+            id,
+            self.new_op_id,
+            Dependency::Data {
+                input_order: self.num_srcs,
+                output_order: from_output,
+                shape,
+            },
+        );
+        self.num_srcs += 1;
+        self
+    }
 }
 
 fn hlir_to_egglog(graph: &Graph) -> (String, String) {

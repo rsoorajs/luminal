@@ -1,6 +1,4 @@
 use std::{
-    any::Any,
-    borrow::BorrowMut,
     fmt::Debug,
     sync::{Arc, Mutex},
 };
@@ -13,7 +11,6 @@ use crate::{
     },
 };
 
-use dyn_clone::{DynClone, clone_trait_object};
 use rustc_hash::FxHashMap;
 
 pub type Ops = (
@@ -34,109 +31,21 @@ pub type Ops = (
     MaxReduce,
 );
 
-/// A tensor with data. The data can be anything that implements the Data trait
-#[derive(Debug, Clone)]
-pub struct Tensor {
-    data: Box<dyn Data>,
-}
-
-impl Tensor {
-    pub fn new<T: Data>(data: T) -> Self {
-        Self {
-            data: Box::new(data),
-        }
-    }
-    pub fn downcast_ref<T: Data>(&self) -> Option<&T> {
-        self.data.as_any().downcast_ref()
-    }
-    pub fn downcast_mut<T: Data>(&mut self) -> Option<&mut T> {
-        self.data.as_any_mut().downcast_mut()
-    }
-    pub fn is<T: Data>(&self) -> bool {
-        self.data.as_any().is::<T>()
-    }
-}
-
-/// Some sort of data, for instance a Vec<f32> on CPU, CudaSlice<f32> on Nvidia GPUs, or metal::Buffer for Apple GPUs
-pub trait Data: Any + Debug + DynClone {
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-}
-
-clone_trait_object!(Data);
-
-impl Data for Vec<f32> {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
-/// Either an owned or borrowed tensor that gets consumed by ops
-pub enum InputTensor<'a> {
-    /// An owned tensor
-    Owned(Tensor),
-    /// A borrowed tensor
-    Borrowed(&'a Tensor),
-}
-
-impl<'a> InputTensor<'a> {
-    /// Borrow the tensor
-    pub fn borrowed(&'a self) -> &'a Tensor {
-        match self {
-            InputTensor::Owned(t) => t,
-            InputTensor::Borrowed(t) => t,
-        }
-    }
-
-    /// Unwrap or clone the tensor, depending on if it's owned or not
-    pub fn cloned(self) -> Tensor {
-        match self {
-            InputTensor::Owned(t) => t,
-            InputTensor::Borrowed(t) => t.clone(),
-        }
-    }
-}
-
-/// The main operator trait.
+/// The main HLIROp trait.
 ///
-/// Defines an operator that takes in a vector of input tensors and shapes and produces a vector of output tensors
-pub trait Operator: Debug + as_any::AsAny {
-    /// Process the input tensors and produce output tensors
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor>;
-    /// Implement custom functionality
-    #[allow(unused)]
-    fn custom(&mut self, key: &str, input: Box<dyn Any>) -> Option<Box<dyn Any>> {
-        None
-    }
-
+/// Defines an HLIROp that implements a logical operation.
+pub trait HLIROp: Debug + as_any::AsAny {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String;
 }
 
-impl<T: Operator> Operator for Box<T> {
-    fn custom(&mut self, key: &str, input: Box<dyn Any>) -> Option<Box<dyn Any>> {
-        <T as Operator>::custom(self, key, input)
-    }
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        <T as Operator>::process(self, inp)
-    }
-
+impl<T: HLIROp> HLIROp for Box<T> {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
-        <T as Operator>::to_egglog(&self, inputs)
+        <T as HLIROp>::to_egglog(&self, inputs)
     }
 }
-impl<T: Operator> Operator for Arc<Mutex<T>> {
-    fn custom(&mut self, key: &str, input: Box<dyn Any>) -> Option<Box<dyn Any>> {
-        <T as Operator>::custom(self.lock().unwrap().borrow_mut(), key, input)
-    }
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        <T as Operator>::process(self.lock().unwrap().borrow_mut(), inp)
-    }
-
+impl<T: HLIROp> HLIROp for Arc<Mutex<T>> {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
-        <T as Operator>::to_egglog(&self.lock().unwrap(), inputs)
+        <T as HLIROp>::to_egglog(&self.lock().unwrap(), inputs)
     }
 }
 
@@ -191,11 +100,7 @@ impl EgglogOp for GMEM {
     }
 }
 
-impl Operator for GMEM {
-    fn process(&mut self, _: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        todo!()
-    }
-
+impl HLIROp for GMEM {
     fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!("(GMEM {} \"{}\" ({:?}))", self.node, self.label, self.dtype)
     }
@@ -212,11 +117,7 @@ impl Debug for Constant {
     }
 }
 
-impl Operator for Constant {
-    fn process(&mut self, _: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        vec![Tensor::new(vec![self.0])]
-    }
-
+impl HLIROp for Constant {
     fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!("(Constant {:.6})", self.0)
     }
@@ -243,11 +144,7 @@ impl EgglogOp for Constant {
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Iota(pub Expression, pub Expression);
-impl Operator for Iota {
-    fn process(&mut self, _: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        todo!()
-    }
-
+impl HLIROp for Iota {
     fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!("(Iota {} {})", self.0.to_egglog(), self.1.to_egglog())
     }
@@ -287,11 +184,7 @@ impl Default for DType {
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Cast(pub DType);
-impl Operator for Cast {
-    fn process(&mut self, _: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        todo!()
-    }
-
+impl HLIROp for Cast {
     fn to_egglog(&self, inp: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!("(Cast {} {:?})", inp[0].1, self.0)
     }
@@ -325,11 +218,7 @@ impl Debug for GraphBreak {
     }
 }
 
-impl Operator for GraphBreak {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        inp.into_iter().map(|(t, _)| t.cloned()).collect() // inefficient, but we don't care as this won't execute on the kernel
-    }
-
+impl HLIROp for GraphBreak {
     fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         panic!("Cannot turn GraphBreak into egglog op!");
     }
@@ -339,18 +228,7 @@ impl Operator for GraphBreak {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Log2;
-impl Operator for Log2 {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        let mut out_data = vec![0.; inp[0].1.n_elements().to_usize().unwrap()];
-        let inp_data = get_vec(&inp[0].0);
-        let expr = (inp[0].1.index_expression(), inp[0].1.valid_expression());
-        let mut stack = vec![];
-        for (i, out) in out_data.iter_mut().enumerate() {
-            *out = get_index(inp_data, &expr, &mut stack, i).log2();
-        }
-        vec![Tensor::new(out_data)]
-    }
-
+impl HLIROp for Log2 {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!(
             "(Log2 {} {} {} {})",
@@ -382,18 +260,7 @@ impl EgglogOp for Log2 {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Exp2;
-impl Operator for Exp2 {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        let mut out_data = vec![0.; inp[0].1.n_elements().to_usize().unwrap()];
-        let inp_data = get_vec(&inp[0].0);
-        let expr = (inp[0].1.index_expression(), inp[0].1.valid_expression());
-        let mut stack = vec![];
-        for (i, out) in out_data.iter_mut().enumerate() {
-            *out = get_index(inp_data, &expr, &mut stack, i).exp2();
-        }
-        vec![Tensor::new(out_data)]
-    }
-
+impl HLIROp for Exp2 {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!(
             "(Exp2 {} {} {} {})",
@@ -425,18 +292,7 @@ impl EgglogOp for Exp2 {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Sin;
-impl Operator for Sin {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        let mut out_data = vec![0.; inp[0].1.n_elements().to_usize().unwrap()];
-        let inp_data = get_vec(&inp[0].0);
-        let expr = (inp[0].1.index_expression(), inp[0].1.valid_expression());
-        let mut stack = vec![];
-        for (i, out) in out_data.iter_mut().enumerate() {
-            *out = get_index(inp_data, &expr, &mut stack, i).sin();
-        }
-        vec![Tensor::new(out_data)]
-    }
-
+impl HLIROp for Sin {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!(
             "(Sin {} {} {} {})",
@@ -468,18 +324,7 @@ impl EgglogOp for Sin {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Recip;
-impl Operator for Recip {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        let mut out_data = vec![0.; inp[0].1.n_elements().to_usize().unwrap()];
-        let inp_data = get_vec(&inp[0].0);
-        let expr = (inp[0].1.index_expression(), inp[0].1.valid_expression());
-        let mut stack = vec![];
-        for (i, out) in out_data.iter_mut().enumerate() {
-            *out = get_index(inp_data, &expr, &mut stack, i).recip();
-        }
-        vec![Tensor::new(out_data)]
-    }
-
+impl HLIROp for Recip {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!(
             "(Recip {} {} {} {})",
@@ -511,18 +356,7 @@ impl EgglogOp for Recip {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Sqrt;
-impl Operator for Sqrt {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        let mut out_data = vec![0.; inp[0].1.n_elements().to_usize().unwrap()];
-        let inp_data = get_vec(&inp[0].0);
-        let expr = (inp[0].1.index_expression(), inp[0].1.valid_expression());
-        let mut stack = vec![];
-        for (i, out) in out_data.iter_mut().enumerate() {
-            *out = get_index(inp_data, &expr, &mut stack, i).sqrt();
-        }
-        vec![Tensor::new(out_data)]
-    }
-
+impl HLIROp for Sqrt {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!(
             "(Sqrt {} {} {} {})",
@@ -556,19 +390,7 @@ impl EgglogOp for Sqrt {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Add;
-impl Operator for Add {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        let (lhs, rhs) = (get_vec(&inp[0].0), get_vec(&inp[1].0));
-        let lexpr = (inp[0].1.index_expression(), inp[0].1.valid_expression());
-        let rexpr = (inp[1].1.index_expression(), inp[1].1.valid_expression());
-        let mut stack = vec![];
-        let mut out_data = vec![0.; inp[0].1.n_elements().to_usize().unwrap()];
-        for (i, out) in out_data.iter_mut().enumerate() {
-            *out = get_index(lhs, &lexpr, &mut stack, i) + get_index(rhs, &rexpr, &mut stack, i);
-        }
-        vec![Tensor::new(out_data)]
-    }
-
+impl HLIROp for Add {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!(
             "(Add {} {} {} {} {} {})",
@@ -605,19 +427,7 @@ impl EgglogOp for Add {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mul;
-impl Operator for Mul {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        let (lhs, rhs) = (get_vec(&inp[0].0), get_vec(&inp[1].0));
-        let mut out_data = vec![0.; inp[0].1.n_elements().to_usize().unwrap()];
-        let lexpr = (inp[0].1.index_expression(), inp[0].1.valid_expression());
-        let rexpr = (inp[1].1.index_expression(), inp[1].1.valid_expression());
-        let mut stack = vec![];
-        for (i, out) in out_data.iter_mut().enumerate() {
-            *out = get_index(lhs, &lexpr, &mut stack, i) * get_index(rhs, &rexpr, &mut stack, i);
-        }
-        vec![Tensor::new(out_data)]
-    }
-
+impl HLIROp for Mul {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!(
             "(Mul {} {} {} {} {} {})",
@@ -654,19 +464,7 @@ impl EgglogOp for Mul {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mod;
-impl Operator for Mod {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        let (lhs, rhs) = (get_vec(&inp[0].0), get_vec(&inp[1].0));
-        let mut out_data = vec![0.; inp[0].1.n_elements().to_usize().unwrap()];
-        let lexpr = (inp[0].1.index_expression(), inp[0].1.valid_expression());
-        let rexpr = (inp[1].1.index_expression(), inp[1].1.valid_expression());
-        let mut stack = vec![];
-        for (i, out) in out_data.iter_mut().enumerate() {
-            *out = get_index(lhs, &lexpr, &mut stack, i) % get_index(rhs, &rexpr, &mut stack, i);
-        }
-        vec![Tensor::new(out_data)]
-    }
-
+impl HLIROp for Mod {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!(
             "(Mod {} {} {} {} {} {})",
@@ -703,20 +501,7 @@ impl EgglogOp for Mod {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LessThan;
-impl Operator for LessThan {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        let (lhs, rhs) = (get_vec(&inp[0].0), get_vec(&inp[1].0));
-        let mut out_data = vec![0.; inp[0].1.n_elements().to_usize().unwrap()];
-        let lexpr = (inp[0].1.index_expression(), inp[0].1.valid_expression());
-        let rexpr = (inp[1].1.index_expression(), inp[1].1.valid_expression());
-        let mut stack = vec![];
-        for (i, out) in out_data.iter_mut().enumerate() {
-            *out = (get_index(lhs, &lexpr, &mut stack, i) < get_index(rhs, &rexpr, &mut stack, i))
-                as i32 as f32;
-        }
-        vec![Tensor::new(out_data)]
-    }
-
+impl HLIROp for LessThan {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!(
             "(LessThan {} {} {} {} {} {})",
@@ -753,11 +538,7 @@ impl EgglogOp for LessThan {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Gather;
-impl Operator for Gather {
-    fn process(&mut self, _: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        todo!()
-    }
-
+impl HLIROp for Gather {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         format!(
             "(Gather {} {} {} {} {})",
@@ -795,27 +576,7 @@ impl EgglogOp for Gather {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SumReduce(pub usize);
-impl Operator for SumReduce {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        let sh = inp[0].1.shape_usize();
-        let front_size = sh.iter().take(self.0).product::<usize>().max(1);
-        let back_size = sh.iter().skip(self.0 + 1).product::<usize>().max(1);
-        let dim_size = sh[self.0];
-        let mut result = vec![0.0; front_size * back_size];
-        let input = get_vec(&inp[0].0);
-        let expr = (inp[0].1.index_expression(), inp[0].1.valid_expression());
-        let mut stack = vec![];
-        for i in 0..front_size {
-            for j in 0..back_size {
-                for k in 0..dim_size {
-                    let orig_index = i * dim_size * back_size + k * back_size + j;
-                    result[i * back_size + j] += get_index(input, &expr, &mut stack, orig_index);
-                }
-            }
-        }
-        vec![Tensor::new(result)]
-    }
-
+impl HLIROp for SumReduce {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         let mut non_reduced_shape = inputs[0].2;
         non_reduced_shape.remove_dim(self.0);
@@ -858,30 +619,7 @@ impl EgglogOp for SumReduce {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MaxReduce(pub usize);
-impl Operator for MaxReduce {
-    fn process(&mut self, inp: Vec<(InputTensor, ShapeTracker)>) -> Vec<Tensor> {
-        let sh = inp[0].1.shape_usize();
-        let front_size = sh.iter().take(self.0).product::<usize>().max(1);
-        let back_size = sh.iter().skip(self.0 + 1).product::<usize>().max(1);
-        let dim_size = sh[self.0];
-        let mut result = vec![-f32::INFINITY; front_size * back_size];
-        let input = get_vec(&inp[0].0);
-        let expr = (inp[0].1.index_expression(), inp[0].1.valid_expression());
-        let mut stack = vec![];
-
-        for i in 0..front_size {
-            for j in 0..back_size {
-                for k in 0..dim_size {
-                    let orig_index = i * dim_size * back_size + k * back_size + j;
-                    let new_index = i * back_size + j;
-                    result[new_index] =
-                        result[new_index].max(get_index(input, &expr, &mut stack, orig_index));
-                }
-            }
-        }
-        vec![Tensor::new(result)]
-    }
-
+impl HLIROp for MaxReduce {
     fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
         let mut non_reduced_shape = inputs[0].2;
         non_reduced_shape.remove_dim(self.0);
@@ -919,23 +657,5 @@ impl EgglogOp for MaxReduce {
         )"
             .to_string(),
         ]
-    }
-}
-
-fn get_vec<'a>(tensor: &'a InputTensor<'a>) -> &'a Vec<f32> {
-    tensor.borrowed().downcast_ref::<Vec<f32>>().unwrap()
-}
-
-fn get_index(
-    data: &[f32],
-    (ind, val): &(Expression, Expression),
-    stack: &mut Vec<i64>,
-    index: usize,
-) -> f32 {
-    if val.exec_single_var_stack(index, stack) != 0 {
-        let i = ind.exec_single_var_stack(index, stack);
-        data[i]
-    } else {
-        0.0
     }
 }

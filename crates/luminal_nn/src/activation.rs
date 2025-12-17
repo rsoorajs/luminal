@@ -4,14 +4,8 @@ use luminal::prelude::*;
 #[derive(Default)]
 pub struct ReLU;
 
-impl SerializeModule for ReLU {
-    fn serialize(&self, _: &mut Serializer) {}
-}
-
-impl Module<GraphTensor> for ReLU {
-    type Output = GraphTensor;
-
-    fn forward(&self, input: GraphTensor) -> Self::Output {
+impl ReLU {
+    pub fn forward(&self, input: GraphTensor) -> GraphTensor {
         input.relu()
     }
 }
@@ -20,14 +14,8 @@ impl Module<GraphTensor> for ReLU {
 #[derive(Default)]
 pub struct GeLU;
 
-impl SerializeModule for GeLU {
-    fn serialize(&self, _: &mut Serializer) {}
-}
-
-impl Module<GraphTensor> for GeLU {
-    type Output = GraphTensor;
-
-    fn forward(&self, input: GraphTensor) -> Self::Output {
+impl GeLU {
+    pub fn forward(&self, input: GraphTensor) -> GraphTensor {
         input.gelu()
     }
 }
@@ -36,14 +24,8 @@ impl Module<GraphTensor> for GeLU {
 #[derive(Default)]
 pub struct Sigmoid;
 
-impl SerializeModule for Sigmoid {
-    fn serialize(&self, _: &mut Serializer) {}
-}
-
-impl Module<GraphTensor> for Sigmoid {
-    type Output = GraphTensor;
-
-    fn forward(&self, input: GraphTensor) -> Self::Output {
+impl Sigmoid {
+    pub fn forward(&self, input: GraphTensor) -> GraphTensor {
         input.sigmoid()
     }
 }
@@ -52,14 +34,8 @@ impl Module<GraphTensor> for Sigmoid {
 #[derive(Default)]
 pub struct Swish;
 
-impl SerializeModule for Swish {
-    fn serialize(&self, _: &mut Serializer) {}
-}
-
-impl Module<GraphTensor> for Swish {
-    type Output = GraphTensor;
-
-    fn forward(&self, input: GraphTensor) -> Self::Output {
+impl Swish {
+    pub fn forward(&self, input: GraphTensor) -> GraphTensor {
         input.swish()
     }
 }
@@ -68,14 +44,8 @@ impl Module<GraphTensor> for Swish {
 #[derive(Default)]
 pub struct Tanh;
 
-impl SerializeModule for Tanh {
-    fn serialize(&self, _: &mut Serializer) {}
-}
-
-impl Module<GraphTensor> for Tanh {
-    type Output = GraphTensor;
-
-    fn forward(&self, input: GraphTensor) -> Self::Output {
+impl Tanh {
+    pub fn forward(&self, input: GraphTensor) -> GraphTensor {
         input.tanh()
     }
 }
