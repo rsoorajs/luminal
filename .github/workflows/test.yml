@@ -1,45 +1,44 @@
 name: Test
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    push:
+        branches: ["main"]
+    pull_request:
+        branches: ["main"]
 
 env:
-  CARGO_TERM_COLOR: always
+    CARGO_TERM_COLOR: always
 
 jobs:
-  unit_test:
-    name: Unit Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    unit_test:
+        name: Unit Tests
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
 
-    steps:
-    - uses: actions/checkout@v4
-    - name: Run tests
-      run: rustup update; cargo test --workspace --verbose
+        steps:
+            - uses: actions/checkout@v4
+            - name: Run tests
+              run: rustup update; cargo test --workspace --verbose
 
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    clippy:
+        name: Clippy
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
 
-    steps:
-    - uses: actions/checkout@v4
-    - name: Run clippy
-      run: rustup update; cargo clippy --all-targets -- -D warnings
+        steps:
+            - uses: actions/checkout@v4
+            - name: Run clippy
+              run: rustup update; cargo clippy --all-targets -- -D warnings
 
-  fmt:
-    name: Fmt
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    fmt:
+        name: Fmt
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
 
-    steps:
-    - uses: actions/checkout@v4
-    - name: Format
-      run: cargo fmt --all --check
-
+        steps:
+            - uses: actions/checkout@v4
+            - name: Format
+              run: cargo fmt --all --check
 #   macos_test:
 #     name: MacOS Tests
 #     runs-on: macos-13

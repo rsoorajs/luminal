@@ -1,14 +1,14 @@
 use crate::graph::SerializedEGraph;
 use crate::{
     prelude::{
-        NodeIndex,
+        ENodeId, NodeIndex,
         petgraph::{Directed, prelude::StableGraph},
     },
     shape::Expression,
 };
 use as_any::{AsAny, Downcast};
-use egraph_serialize::NodeId;
 use rustc_hash::FxHashMap;
+use std::fmt::Display;
 use std::{fmt::Debug, io::Write, sync::Arc};
 
 pub trait EgglogOp: Debug {
@@ -21,10 +21,10 @@ pub trait EgglogOp: Debug {
     fn extract<'a>(
         &'a self,
         egraph: &'a SerializedEGraph,
-        children: &Vec<&'a NodeId>,
-        list_cache: &mut FxHashMap<&'a NodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a NodeId>) {
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
         panic!("Extraction not implemented for {self:?}!");
     }
 }
@@ -47,7 +47,7 @@ impl LLIROp {
         Self(Arc::new(Box::new(DialectOp::new(op))))
     }
 
-    pub fn to_dialect<'a, T: ?Sized + 'static>(&'a self) -> Option<&'a Arc<Box<T>>> {
+    pub fn to_dialect<T: ?Sized + 'static>(&self) -> Option<&Arc<Box<T>>> {
         (**self.0).downcast_ref::<DialectOp<Box<T>>>().map(|i| &i.0)
     }
 
@@ -58,9 +58,9 @@ impl LLIROp {
     }
 }
 
-impl ToString for LLIROp {
-    fn to_string(&self) -> String {
-        format!("{:?}", self)
+impl Display for LLIROp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 
@@ -105,7 +105,7 @@ impl CStructBuilder {
         let rem = len % align;
         if rem != 0 {
             let pad = align - rem;
-            self.buf.extend(std::iter::repeat(0u8).take(pad));
+            self.buf.extend(std::iter::repeat_n(0u8, pad));
         }
     }
 
@@ -167,7 +167,7 @@ impl CStructBuilder {
             let rem = len % align;
             if rem != 0 {
                 let pad = align - rem;
-                self.buf.extend(std::iter::repeat(0u8).take(pad));
+                self.buf.extend(std::iter::repeat_n(0u8, pad));
             }
         }
         self.buf
@@ -206,7 +206,7 @@ impl Debug for OpParam {
     }
 }
 
-pub fn flatten_strides(range: &Vec<Expression>, strides: &Vec<Expression>) -> Expression {
+pub fn flatten_strides(range: &[Expression], strides: &[Expression]) -> Expression {
     assert_eq!(range.len(), strides.len());
     let mut current_elem_size = Expression::from(1);
     let mut flat_stride = Expression::from(0);

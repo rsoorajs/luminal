@@ -8,6 +8,7 @@ use itertools::Itertools;
 use luminal::{
     graph::{extract_dtype, extract_expr, extract_expr_list, SerializedEGraph},
     op::DType,
+    prelude::ENodeId,
     shape::Expression,
     utils::{
         flatten_strides, EgglogOp, LLIROp,
@@ -57,12 +58,12 @@ impl EgglogOp for KernelAdd {
     }
 
     fn extract<'a>(
-        &'a self,
+        &self,
         egraph: &'a SerializedEGraph,
-        children: &Vec<&'a egraph_serialize::NodeId>,
-        list_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Vec<Expression>>,
-        expr_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a egraph_serialize::NodeId>) {
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
                 out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -189,12 +190,12 @@ impl EgglogOp for KernelMul {
     }
 
     fn extract<'a>(
-        &'a self,
+        &self,
         egraph: &'a SerializedEGraph,
-        children: &Vec<&'a egraph_serialize::NodeId>,
-        list_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Vec<Expression>>,
-        expr_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a egraph_serialize::NodeId>) {
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
                 out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -322,12 +323,12 @@ impl EgglogOp for KernelGather {
     }
 
     fn extract<'a>(
-        &'a self,
+        &self,
         egraph: &'a SerializedEGraph,
-        children: &Vec<&'a egraph_serialize::NodeId>,
-        list_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Vec<Expression>>,
-        expr_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a egraph_serialize::NodeId>) {
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
                 out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -449,12 +450,12 @@ impl EgglogOp for KernelIota {
     }
 
     fn extract<'a>(
-        &'a self,
+        &self,
         egraph: &'a SerializedEGraph,
-        children: &Vec<&'a egraph_serialize::NodeId>,
-        list_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Vec<Expression>>,
-        expr_cache: &mut rustc_hash::FxHashMap<&'a egraph_serialize::NodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a egraph_serialize::NodeId>) {
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
                 expr: extract_expr(egraph, children[0], expr_cache).unwrap(),

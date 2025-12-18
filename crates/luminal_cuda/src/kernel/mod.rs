@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, CudaStream};
-use egraph_serialize::NodeId;
 use luminal::{shape::Expression, utils::EgglogOp};
 use rustc_hash::FxHashMap;
 

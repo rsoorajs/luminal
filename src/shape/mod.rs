@@ -206,7 +206,7 @@ impl<S: Into<Expression>, E: Into<Expression>> ToPad for (S, E) {
 
 impl<S: Into<Expression>, E: Into<Expression>> ToPad for ((S, E),) {
     fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
-        vec![(self.0 .0.into(), self.0 .1.into())]
+        vec![(self.0.0.into(), self.0.1.into())]
     }
 }
 
@@ -215,98 +215,98 @@ impl<S1: Into<Expression>, E1: Into<Expression>, S2: Into<Expression>, E2: Into<
 {
     fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
         vec![
-            (self.0 .0.into(), self.0 .1.into()),
-            (self.1 .0.into(), self.1 .1.into()),
+            (self.0.0.into(), self.0.1.into()),
+            (self.1.0.into(), self.1.1.into()),
         ]
     }
 }
 
 impl<
-        S1: Into<Expression>,
-        E1: Into<Expression>,
-        S2: Into<Expression>,
-        E2: Into<Expression>,
-        S3: Into<Expression>,
-        E3: Into<Expression>,
-    > ToPad for ((S1, E1), (S2, E2), (S3, E3))
+    S1: Into<Expression>,
+    E1: Into<Expression>,
+    S2: Into<Expression>,
+    E2: Into<Expression>,
+    S3: Into<Expression>,
+    E3: Into<Expression>,
+> ToPad for ((S1, E1), (S2, E2), (S3, E3))
 {
     fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
         vec![
-            (self.0 .0.into(), self.0 .1.into()),
-            (self.1 .0.into(), self.1 .1.into()),
-            (self.2 .0.into(), self.2 .1.into()),
+            (self.0.0.into(), self.0.1.into()),
+            (self.1.0.into(), self.1.1.into()),
+            (self.2.0.into(), self.2.1.into()),
         ]
     }
 }
 
 impl<
-        S1: Into<Expression>,
-        E1: Into<Expression>,
-        S2: Into<Expression>,
-        E2: Into<Expression>,
-        S3: Into<Expression>,
-        E3: Into<Expression>,
-        S4: Into<Expression>,
-        E4: Into<Expression>,
-    > ToPad for ((S1, E1), (S2, E2), (S3, E3), (S4, E4))
+    S1: Into<Expression>,
+    E1: Into<Expression>,
+    S2: Into<Expression>,
+    E2: Into<Expression>,
+    S3: Into<Expression>,
+    E3: Into<Expression>,
+    S4: Into<Expression>,
+    E4: Into<Expression>,
+> ToPad for ((S1, E1), (S2, E2), (S3, E3), (S4, E4))
 {
     fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
         vec![
-            (self.0 .0.into(), self.0 .1.into()),
-            (self.1 .0.into(), self.1 .1.into()),
-            (self.2 .0.into(), self.2 .1.into()),
-            (self.3 .0.into(), self.3 .1.into()),
+            (self.0.0.into(), self.0.1.into()),
+            (self.1.0.into(), self.1.1.into()),
+            (self.2.0.into(), self.2.1.into()),
+            (self.3.0.into(), self.3.1.into()),
         ]
     }
 }
 
 impl<
-        S1: Into<Expression>,
-        E1: Into<Expression>,
-        S2: Into<Expression>,
-        E2: Into<Expression>,
-        S3: Into<Expression>,
-        E3: Into<Expression>,
-        S4: Into<Expression>,
-        E4: Into<Expression>,
-        S5: Into<Expression>,
-        E5: Into<Expression>,
-    > ToPad for ((S1, E1), (S2, E2), (S3, E3), (S4, E4), (S5, E5))
+    S1: Into<Expression>,
+    E1: Into<Expression>,
+    S2: Into<Expression>,
+    E2: Into<Expression>,
+    S3: Into<Expression>,
+    E3: Into<Expression>,
+    S4: Into<Expression>,
+    E4: Into<Expression>,
+    S5: Into<Expression>,
+    E5: Into<Expression>,
+> ToPad for ((S1, E1), (S2, E2), (S3, E3), (S4, E4), (S5, E5))
 {
     fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
         vec![
-            (self.0 .0.into(), self.0 .1.into()),
-            (self.1 .0.into(), self.1 .1.into()),
-            (self.2 .0.into(), self.2 .1.into()),
-            (self.3 .0.into(), self.3 .1.into()),
-            (self.4 .0.into(), self.4 .1.into()),
+            (self.0.0.into(), self.0.1.into()),
+            (self.1.0.into(), self.1.1.into()),
+            (self.2.0.into(), self.2.1.into()),
+            (self.3.0.into(), self.3.1.into()),
+            (self.4.0.into(), self.4.1.into()),
         ]
     }
 }
 
 impl<
-        S1: Into<Expression>,
-        E1: Into<Expression>,
-        S2: Into<Expression>,
-        E2: Into<Expression>,
-        S3: Into<Expression>,
-        E3: Into<Expression>,
-        S4: Into<Expression>,
-        E4: Into<Expression>,
-        S5: Into<Expression>,
-        E5: Into<Expression>,
-        S6: Into<Expression>,
-        E6: Into<Expression>,
-    > ToPad for ((S1, E1), (S2, E2), (S3, E3), (S4, E4), (S5, E5), (S6, E6))
+    S1: Into<Expression>,
+    E1: Into<Expression>,
+    S2: Into<Expression>,
+    E2: Into<Expression>,
+    S3: Into<Expression>,
+    E3: Into<Expression>,
+    S4: Into<Expression>,
+    E4: Into<Expression>,
+    S5: Into<Expression>,
+    E5: Into<Expression>,
+    S6: Into<Expression>,
+    E6: Into<Expression>,
+> ToPad for ((S1, E1), (S2, E2), (S3, E3), (S4, E4), (S5, E5), (S6, E6))
 {
     fn to_pad_vec(self) -> Vec<(Expression, Expression)> {
         vec![
-            (self.0 .0.into(), self.0 .1.into()),
-            (self.1 .0.into(), self.1 .1.into()),
-            (self.2 .0.into(), self.2 .1.into()),
-            (self.3 .0.into(), self.3 .1.into()),
-            (self.4 .0.into(), self.4 .1.into()),
-            (self.5 .0.into(), self.5 .1.into()),
+            (self.0.0.into(), self.0.1.into()),
+            (self.1.0.into(), self.1.1.into()),
+            (self.2.0.into(), self.2.1.into()),
+            (self.3.0.into(), self.3.1.into()),
+            (self.4.0.into(), self.4.1.into()),
+            (self.5.0.into(), self.5.1.into()),
         ]
     }
 }
@@ -446,12 +446,12 @@ impl<A: Into<Expression>, B: Into<Expression>, C: Into<Expression>, D: Into<Expr
 }
 
 impl<
-        A: Into<Expression>,
-        B: Into<Expression>,
-        C: Into<Expression>,
-        D: Into<Expression>,
-        E: Into<Expression>,
-    > ToShape for (A, B, C, D, E)
+    A: Into<Expression>,
+    B: Into<Expression>,
+    C: Into<Expression>,
+    D: Into<Expression>,
+    E: Into<Expression>,
+> ToShape for (A, B, C, D, E)
 {
     fn to_shape(self) -> Vec<Expression> {
         vec![
@@ -465,13 +465,13 @@ impl<
 }
 
 impl<
-        A: Into<Expression>,
-        B: Into<Expression>,
-        C: Into<Expression>,
-        D: Into<Expression>,
-        E: Into<Expression>,
-        F: Into<Expression>,
-    > ToShape for (A, B, C, D, E, F)
+    A: Into<Expression>,
+    B: Into<Expression>,
+    C: Into<Expression>,
+    D: Into<Expression>,
+    E: Into<Expression>,
+    F: Into<Expression>,
+> ToShape for (A, B, C, D, E, F)
 {
     fn to_shape(self) -> Vec<Expression> {
         vec![

@@ -35,22 +35,16 @@ tracing = "0.1.43"
 paste = "1.0.15"
 pretty-duration = "0.1.1"
 
-[dev-dependencies]
-dfdx = { version = "0.13", features = ["f16"] }
-
 [workspace]
 members = [
-    "examples/llama",
+    #"examples/llama",
     #"examples/*",
     "crates/luminal_nn",
-    "crates/luminal_cuda",
+    #"crates/luminal_cuda",
     "crates/luminal_training",
     "docs/company",
 ]
 exclude = [
     "examples/yolo_v8",
     "crates/luminal_cuda",
-    "crates/luminal_metal",
-    "crates/luminal_2",
-    "demos/flash_attention",
 ]

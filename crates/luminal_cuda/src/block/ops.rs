@@ -2,10 +2,10 @@ use std::fmt::Debug;
 
 use super::CustomState;
 use cudarc::driver::{CudaStream, DevicePtr};
-use egraph_serialize::NodeId;
 use itertools::Itertools;
 use luminal::{
     graph::{extract_expr, extract_expr_list, SerializedEGraph},
+    prelude::ENodeId,
     shape::Expression,
     utils::{
         flatten_strides, CStructBuilder, EgglogOp, LLIROp,
@@ -74,10 +74,10 @@ impl EgglogOp for RowAdd {
     fn extract<'a>(
         &self,
         egraph: &'a SerializedEGraph,
-        children: &Vec<&'a NodeId>,
-        list_cache: &mut FxHashMap<&'a NodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a NodeId>) {
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
                 range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -211,10 +211,10 @@ impl EgglogOp for RowSwishMul {
     fn extract<'a>(
         &self,
         egraph: &'a SerializedEGraph,
-        children: &Vec<&'a NodeId>,
-        list_cache: &mut FxHashMap<&'a NodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a NodeId>) {
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
                 range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -399,10 +399,10 @@ impl EgglogOp for RowRMSNorm {
     fn extract<'a>(
         &self,
         egraph: &'a SerializedEGraph,
-        children: &Vec<&'a NodeId>,
-        list_cache: &mut FxHashMap<&'a NodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a NodeId>) {
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
                 range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -523,10 +523,10 @@ impl EgglogOp for RowRope {
     fn extract<'a>(
         &self,
         egraph: &'a SerializedEGraph,
-        children: &Vec<&'a NodeId>,
-        list_cache: &mut FxHashMap<&'a NodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a NodeId>) {
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
                 range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -743,10 +743,10 @@ impl EgglogOp for TileMatmul {
     fn extract<'a>(
         &self,
         egraph: &'a SerializedEGraph,
-        children: &Vec<&'a NodeId>,
-        list_cache: &mut FxHashMap<&'a NodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a NodeId>) {
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
                 range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -1005,10 +1005,10 @@ impl EgglogOp for GQAAttention {
     fn extract<'a>(
         &self,
         egraph: &'a SerializedEGraph,
-        children: &Vec<&'a NodeId>,
-        list_cache: &mut FxHashMap<&'a NodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a NodeId>) {
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
                 range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),

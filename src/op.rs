@@ -35,16 +35,16 @@ pub type Ops = (
 ///
 /// Defines an HLIROp that implements a logical operation.
 pub trait HLIROp: Debug + as_any::AsAny {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String;
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String;
 }
 
 impl<T: HLIROp> HLIROp for Box<T> {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
-        <T as HLIROp>::to_egglog(&self, inputs)
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+        <T as HLIROp>::to_egglog(self, inputs)
     }
 }
 impl<T: HLIROp> HLIROp for Arc<Mutex<T>> {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         <T as HLIROp>::to_egglog(&self.lock().unwrap(), inputs)
     }
 }
@@ -79,10 +79,10 @@ impl EgglogOp for GMEM {
     fn extract<'a>(
         &'a self,
         egraph: &'a SerializedEGraph,
-        children: &Vec<&'a egraph_serialize::NodeId>,
-        _: &mut FxHashMap<&'a egraph_serialize::NodeId, Vec<Expression>>,
-        _: &mut FxHashMap<&'a egraph_serialize::NodeId, Expression>,
-    ) -> (crate::utils::LLIROp, Vec<&'a egraph_serialize::NodeId>) {
+        children: &[&'a ENodeId],
+        _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        _: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (crate::utils::LLIROp, Vec<&'a ENodeId>) {
         let node = egraph.enodes[children[0]]
             .0
             .replace("\"", "")
@@ -101,7 +101,7 @@ impl EgglogOp for GMEM {
 }
 
 impl HLIROp for GMEM {
-    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, _: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!("(GMEM {} \"{}\" ({:?}))", self.node, self.label, self.dtype)
     }
 }
@@ -118,7 +118,7 @@ impl Debug for Constant {
 }
 
 impl HLIROp for Constant {
-    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, _: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!("(Constant {:.6})", self.0)
     }
 }
@@ -145,7 +145,7 @@ impl EgglogOp for Constant {
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Iota(pub Expression, pub Expression);
 impl HLIROp for Iota {
-    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, _: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!("(Iota {} {})", self.0.to_egglog(), self.1.to_egglog())
     }
 }
@@ -185,7 +185,7 @@ impl Default for DType {
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Cast(pub DType);
 impl HLIROp for Cast {
-    fn to_egglog(&self, inp: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inp: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!("(Cast {} {:?})", inp[0].1, self.0)
     }
 }
@@ -219,7 +219,7 @@ impl Debug for GraphBreak {
 }
 
 impl HLIROp for GraphBreak {
-    fn to_egglog(&self, _: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, _: &[(NodeIndex, String, ShapeTracker)]) -> String {
         panic!("Cannot turn GraphBreak into egglog op!");
     }
 }
@@ -229,7 +229,7 @@ impl HLIROp for GraphBreak {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Log2;
 impl HLIROp for Log2 {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Log2 {} {} {} {})",
             shape_to_egglog(&inputs[0].2.dims),
@@ -261,7 +261,7 @@ impl EgglogOp for Log2 {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Exp2;
 impl HLIROp for Exp2 {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Exp2 {} {} {} {})",
             shape_to_egglog(&inputs[0].2.dims),
@@ -293,7 +293,7 @@ impl EgglogOp for Exp2 {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Sin;
 impl HLIROp for Sin {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Sin {} {} {} {})",
             shape_to_egglog(&inputs[0].2.dims),
@@ -325,7 +325,7 @@ impl EgglogOp for Sin {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Recip;
 impl HLIROp for Recip {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Recip {} {} {} {})",
             shape_to_egglog(&inputs[0].2.dims),
@@ -357,7 +357,7 @@ impl EgglogOp for Recip {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Sqrt;
 impl HLIROp for Sqrt {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Sqrt {} {} {} {})",
             shape_to_egglog(&inputs[0].2.dims),
@@ -391,7 +391,7 @@ impl EgglogOp for Sqrt {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Add;
 impl HLIROp for Add {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Add {} {} {} {} {} {})",
             shape_to_egglog(&inputs[0].2.dims),
@@ -428,7 +428,7 @@ impl EgglogOp for Add {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mul;
 impl HLIROp for Mul {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Mul {} {} {} {} {} {})",
             shape_to_egglog(&inputs[0].2.dims),
@@ -465,7 +465,7 @@ impl EgglogOp for Mul {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mod;
 impl HLIROp for Mod {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Mod {} {} {} {} {} {})",
             shape_to_egglog(&inputs[0].2.dims),
@@ -502,7 +502,7 @@ impl EgglogOp for Mod {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LessThan;
 impl HLIROp for LessThan {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(LessThan {} {} {} {} {} {})",
             shape_to_egglog(&inputs[0].2.dims),
@@ -539,7 +539,7 @@ impl EgglogOp for LessThan {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Gather;
 impl HLIROp for Gather {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Gather {} {} {} {} {})",
             shape_to_egglog(&inputs[0].2.dims),
@@ -577,7 +577,7 @@ impl EgglogOp for Gather {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SumReduce(pub usize);
 impl HLIROp for SumReduce {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         let mut non_reduced_shape = inputs[0].2;
         non_reduced_shape.remove_dim(self.0);
         let reduced_dim = inputs[0].2.dims[self.0];
@@ -620,7 +620,7 @@ impl EgglogOp for SumReduce {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MaxReduce(pub usize);
 impl HLIROp for MaxReduce {
-    fn to_egglog(&self, inputs: &Vec<(NodeIndex, String, ShapeTracker)>) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         let mut non_reduced_shape = inputs[0].2;
         non_reduced_shape.remove_dim(self.0);
         let reduced_dim = inputs[0].2.dims[self.0];

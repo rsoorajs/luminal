@@ -178,10 +178,7 @@ pub struct RopeFrontendOp {
 }
 
 impl HLIROp for RopeFrontendOp {
-    fn to_egglog(
-        &self,
-        inputs: &Vec<(luminal::prelude::NodeIndex, String, ShapeTracker)>,
-    ) -> String {
+    fn to_egglog(&self, inputs: &[(luminal::prelude::NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(RowRope {} {} {} {} {})",
             shape_to_egglog(&self.range),
@@ -201,10 +198,7 @@ pub struct GQAAttentionFrontendOp {
 }
 
 impl HLIROp for GQAAttentionFrontendOp {
-    fn to_egglog(
-        &self,
-        inputs: &Vec<(luminal::prelude::NodeIndex, String, ShapeTracker)>,
-    ) -> String {
+    fn to_egglog(&self, inputs: &[(luminal::prelude::NodeIndex, String, ShapeTracker)]) -> String {
         let seq = inputs[0].2.dims[0];
         let hidden = inputs[0].2.dims[1].to_usize().unwrap();
         let kv_hidden = inputs[1].2.dims[1].to_usize().unwrap();

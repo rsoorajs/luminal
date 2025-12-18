@@ -300,12 +300,10 @@ fn hlir_to_egglog(graph: &Graph) -> (String, String) {
 
     // 2. Map <node-id> → <egglog var name>
     let mut names: HashMap<NodeIndex, String> = HashMap::new();
-    let mut next_id = 0usize;
     let mut out = String::new();
 
-    for n in topo_order {
+    for (next_id, n) in topo_order.into_iter().enumerate() {
         let var = format!("t{next_id}");
-        next_id += 1;
         let sources = graph
             .get_sources(n)
             .into_iter()
@@ -375,7 +373,7 @@ fn run_egglog(
     ops: &[Arc<Box<dyn EgglogOp>>],
 ) -> Result<SerializedEGraph, egglog::Error> {
     let mut egraph = egglog::EGraph::default();
-    let mut code = include_str!("egglog.egg").replace("{program}", &program);
+    let mut code = include_str!("egglog.egg").replace("{program}", program);
     code = code.replace(
         "{ops}",
         &ops.iter()
@@ -510,7 +508,7 @@ fn run_egglog(
         }
     }
     // Correct the eclass mapping
-    for (_, (_, enodes)) in &mut egraph.eclasses {
+    for (_, enodes) in egraph.eclasses.values_mut() {
         enodes.retain(|n| egraph.enodes.contains_key(n));
     }
     egraph.eclasses.retain(|_, (_, c)| !c.is_empty());
@@ -630,9 +628,9 @@ pub fn extract_expr<'a>(
         &mut FxHashMap::default(),
         &mut FxHashMap::default(),
     )?;
-    fn build_expression<'a>(
+    fn build_expression(
         egraph: &SerializedEGraph,
-        trajectory: &[&'a NodeId],
+        trajectory: &[&NodeId],
         current: &mut usize,
     ) -> Expression {
         let nid = trajectory[*current];
@@ -742,7 +740,7 @@ pub fn egglog_to_llir(
         let mut graph = LLIRGraph::default();
         let mut edges_to_place = vec![];
         let mut enode_to_node = FxHashMap::default();
-        'nodes: for (_, &node) in &choice {
+        'nodes: for &node in choice.values() {
             if !reachable.contains(node) {
                 continue;
             }
