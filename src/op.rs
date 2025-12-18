@@ -169,17 +169,13 @@ impl EgglogOp for Iota {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum DType {
+    #[default]
     F32,
     F16,
     Bf16,
     Int,
-}
-impl Default for DType {
-    fn default() -> Self {
-        Self::F32
-    }
 }
 
 #[derive(Clone, PartialEq, Debug, Default)]
