@@ -14,6 +14,7 @@ pub mod prelude {
     pub use crate::hl_ops::*;
     pub use crate::op::*;
     pub use crate::shape::*;
+    pub use crate::utils::*;
     pub use half::{bf16, f16};
     pub use petgraph;
     pub use petgraph::stable_graph::NodeIndex;
