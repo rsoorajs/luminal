@@ -124,14 +124,14 @@ impl Graph {
     /// Add op on the graph, and get back a NewOp
     ///
     /// ```rust
-    /// use luminal::prelude::*;
-    /// let mut cx = Graph::new();
+    /// # use luminal::prelude::*;
+    /// # let mut cx = Graph::new();
     /// let a = cx.tensor(3);
     /// let b_id = cx
     ///     .add_op(luminal::op::Mul)
     ///     .input(a.id, 0, a.shape)
     ///     .finish();
-    /// let b = GraphTensor::from_id(b_id, a.shape, a.graph());
+    /// let b = GraphTensor::from_id(b_id, a.shape, a.graph(), a.dtype);
     /// ```
     pub fn add_op<O: HLIROp + 'static>(&mut self, op: O) -> NewOp<'_> {
         NewOp {

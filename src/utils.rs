@@ -207,6 +207,7 @@ impl Debug for OpParam {
 }
 
 pub fn flatten_strides(range: &Vec<Expression>, strides: &Vec<Expression>) -> Expression {
+    assert_eq!(range.len(), strides.len());
     let mut current_elem_size = Expression::from(1);
     let mut flat_stride = Expression::from(0);
     for (dim, (range, stride)) in range.iter().zip(strides).enumerate().rev() {
