@@ -682,6 +682,8 @@ fn compute_barrier_strides(
     let max_range_len = prod_range
         .len()
         .max(cons_range.iter().map(|i| i.len()).max().unwrap_or_default());
+    let prod_range_len = prod_range.len();
+    let cons_range_lens = cons_range.iter().map(|c| c.len()).collect_vec();
     prod_range.append(&mut vec![1.into(); max_range_len - prod_range.len()]);
     for v in &mut cons_range {
         v.append(&mut vec![1.into(); max_range_len - v.len()]);
@@ -689,13 +691,13 @@ fn compute_barrier_strides(
     for v in &mut cons_shared {
         v.append(&mut vec![false; max_range_len - v.len()]);
     }
-    let cons_range = transpose(cons_range);
-    let cons_shared = transpose(cons_shared);
-    assert_eq!(cons_shared.len(), prod_range.len());
+    let cons_range_t = transpose(cons_range);
+    let cons_shared_t = transpose(cons_shared);
+    assert_eq!(cons_shared_t.len(), prod_range.len());
     let r = prod_range
         .iter()
-        .zip(cons_range)
-        .zip(cons_shared)
+        .zip(&cons_range_t)
+        .zip(cons_shared_t)
         .rev()
         .scan(Expression::from(1), |acc, ((pr, cr), cs)| {
             let prev = *acc;
@@ -747,8 +749,14 @@ fn compute_barrier_strides(
             }
         })
         .collect_vec();
-    let (p, c) = r.into_iter().rev().unzip();
-    (p, transpose(c))
+    let (mut p, c): (Vec<Expression>, Vec<Vec<Expression>>) = r.into_iter().rev().unzip();
+    let mut c = transpose(c);
+    // Re-trim down to original range lengths
+    p = p[..prod_range_len].to_vec();
+    for (c, r) in c.iter_mut().zip(cons_range_lens) {
+        *c = c[..r].to_vec();
+    }
+    (p, c)
 }
 
 #[tracing::instrument(skip_all)]
@@ -1017,9 +1025,9 @@ pub fn get_barrier_strides(
                     .launch_range()
             })
             .collect();
-        let (producer_strides, consumer_strides) = compute_barrier_strides(
-            prod_range,
-            cons_range,
+        let (mut producer_strides, mut consumer_strides) = compute_barrier_strides(
+            prod_range.clone(),
+            cons_range.clone(),
             consumers
                 .iter()
                 .map(|(n, i)| {

@@ -40,7 +40,7 @@ members = [
     "examples/llama",
     #"examples/*",
     "crates/luminal_nn",
-    #"crates/luminal_cuda",
+    "crates/luminal_cuda",
     "crates/luminal_training",
     "docs/company",
 ]
