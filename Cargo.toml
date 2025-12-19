@@ -37,10 +37,10 @@ pretty-duration = "0.1.1"
 
 [workspace]
 members = [
-    #"examples/llama",
+    "examples/llama",
     #"examples/*",
     "crates/luminal_nn",
-    #"crates/luminal_cuda",
+    "crates/luminal_cuda",
     "crates/luminal_training",
     "docs/company",
 ]
