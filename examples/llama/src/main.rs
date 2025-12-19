@@ -81,7 +81,7 @@ fn main() {
     let mut runtime = cx.search(CudaRuntime::initialize((ctx, stream, custom_state)), 10_000);
 
     println!("Loading weights...");
-    runtime.load_safetensors("setup/llama3-8b.safetensors");
+    runtime.load_safetensors("setup/model_combined.safetensors");
 
     print!("{input_sentence}");
     std::io::stdout().flush().unwrap();

@@ -49,7 +49,7 @@ def combine_safetensors(model_dir: Path):
     """Combine sharded safetensors files into a single file."""
 
     # Check if combined file already exists
-    output_path = model_dir / 'llama3-8b.safetensors'
+    output_path = model_dir / 'model_combined.safetensors'
     if output_path.exists():
         print(f"Combined safetensors file already exists at {output_path}")
         print("Skipping combination step.")
