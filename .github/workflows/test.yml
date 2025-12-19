@@ -18,7 +18,7 @@ jobs:
         steps:
             - uses: actions/checkout@v4
             - name: Run tests
-              run: rustup update; cargo test --workspace --verbose
+              run: apt-get install protobuf-compiler; rustup update; cargo test --workspace --verbose
 
     clippy:
         name: Clippy

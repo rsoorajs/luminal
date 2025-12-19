@@ -6,17 +6,17 @@ use cudarc::driver::{
     CudaContext, CudaFunction, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr,
     LaunchConfig, PushKernelArg, ValidAsZeroBits,
 };
-use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
+use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
 use luminal::prelude::{
-    Expression, GMEM, LLIRGraph, NodeIndex, Runtime,
     petgraph::{
-        Directed, Direction,
-        algo::{Cycle, toposort},
+        algo::{toposort, Cycle},
         prelude::StableGraph,
         visit::{EdgeRef, NodeIndexable},
+        Directed, Direction,
     },
+    Expression, LLIRGraph, NodeIndex, Runtime, GMEM,
 };
 use luminal::utils::flatten_strides;
 use prost::Message as _;
@@ -32,9 +32,9 @@ use std::{
     ptr::{null, null_mut},
     sync::Arc,
 };
-use tracing::{Level, span};
+use tracing::{span, Level};
 use tracing_perfetto_sdk_schema::{
-    self as schema, TrackEvent, trace_packet, track_descriptor, track_event,
+    self as schema, trace_packet, track_descriptor, track_event, TrackEvent,
 };
 
 #[allow(dead_code)]
