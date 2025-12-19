@@ -1,5 +1,5 @@
 use luminal::{
-    graph::{shape_to_egglog, strides_to_egglog, Graph},
+    graph::{Graph, shape_to_egglog, strides_to_egglog},
     op::{DType, HLIROp},
     prelude::GraphTensor,
     shape::{Expression, ShapeTracker},
