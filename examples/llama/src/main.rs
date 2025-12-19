@@ -39,7 +39,7 @@ fn main() {
     let gen_tokens = 5;
     let input_sentence = "Hello, how are you";
 
-    let tokenizer = Tokenizer::from_file("tokenizer.json").expect("Failed to load tokenizer");
+    let tokenizer = Tokenizer::from_file("setup/tokenizer.json").expect("Failed to load tokenizer");
     let encoding = tokenizer.encode(input_sentence, true).unwrap();
     let mut sentence = encoding.get_ids().to_vec();
 
@@ -81,7 +81,7 @@ fn main() {
     let mut runtime = cx.search(CudaRuntime::initialize((ctx, stream, custom_state)), 10_000);
 
     println!("Loading weights...");
-    runtime.load_safetensors("model_combined.safetensors");
+    runtime.load_safetensors("setup/llama3-8b.safetensors");
 
     print!("{input_sentence}");
     std::io::stdout().flush().unwrap();
