@@ -30,11 +30,12 @@ generational-box = "0.5.6"
 serde_json = "1.0.140"
 egglog = "1.0.0"
 egglog-ast = "1.0.0"
-egraph-serialize = "0.3.0"
+egraph-serialize = { version = "0.3.0", features = ["graphviz"]}
 tracing = "0.1.43"
 paste = "1.0.15"
 pretty-duration = "0.1.1"
 anyhow = "1.0"
+graphviz-rust = { version = "0.9", default-features = false}
 
 [workspace]
 members = [
