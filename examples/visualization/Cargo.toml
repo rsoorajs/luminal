@@ -1,0 +1,11 @@
+[package]
+name = "visualization"
+version = "0.1.0"
+edition.workspace = true
+
+[features]
+
+[dependencies]
+luminal = { path = "../.." }
+luminal_nn = { path = "../../crates/luminal_nn" }
+luminal_cuda = { path = "../../crates/luminal_cuda" }

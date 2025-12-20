@@ -1,7 +1,7 @@
 [package]
 name = "luminal"
 version = "0.2.0"
-edition = "2024"
+edition.workspace = true
 rust-version = "1.85"
 description = "Deep learning at the speed of light."
 license = "MIT OR Apache-2.0"
@@ -37,9 +37,13 @@ pretty-duration = "0.1.1"
 anyhow = "1.0"
 graphviz-rust = { version = "0.9", default-features = false}
 
+[workspace.package]
+edition = "2024"
+
 [workspace]
 members = [
     "examples/llama",
+    "examples/visualization",
     #"examples/*",
     "crates/luminal_nn",
     "crates/luminal_cuda",
