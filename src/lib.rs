@@ -4,6 +4,7 @@ pub mod hl_ops;
 pub mod op;
 pub mod shape;
 pub mod utils;
+pub mod visualization;
 
 // pub mod tests;
 
