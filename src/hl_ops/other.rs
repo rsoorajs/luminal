@@ -79,8 +79,8 @@ impl Graph {
         self.iota('z', to)
     }
 
-    /// ARange from beg to end
-    pub fn arange_opt(
+    /// ARange from beginning to end
+    pub fn arange_options(
         &mut self,
         start: impl Into<Expression>,
         end: impl Into<Expression>,

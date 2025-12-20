@@ -7,7 +7,7 @@ use std::{
     hash::Hash,
     ops::{
         Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, Div, DivAssign, Mul, MulAssign,
-        Rem, RemAssign, Sub, SubAssign,
+        Neg, Rem, RemAssign, Sub, SubAssign,
     },
     sync::OnceLock,
 };
@@ -714,6 +714,13 @@ impl BitOr<Expression> for i32 {
     }
 }
 
+impl Neg for Expression {
+    type Output = Expression;
+    fn neg(self) -> Self::Output {
+        self * -1
+    }
+}
+
 impl<E: Into<Expression>> Add<E> for Expression {
     type Output = Self;
     fn add(self, rhs: E) -> Self::Output {
@@ -1285,7 +1292,8 @@ mod tests {
         let z = Expression::from('z');
         let w = Expression::from('w');
         let h = Expression::from('h');
-        let x = (z % (((((153 + h) / 8) + -31) * ((((w + 153) / 8) + -31) / 16)) * 64)).simplify();
+        let x = z % (((((153 + h) / 8) + -31) * ((((w + 153) / 8) + -31) / 16)) * 64);
+        let x = x.simplify();
         assert_eq!(x.len(), 15); // Should be 11 if we can re-enable mul-div-associative-rev
     }
 }

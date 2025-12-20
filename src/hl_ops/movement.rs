@@ -74,6 +74,24 @@ impl GraphTensor {
         GraphTensor::from_id(id, indexes.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
+    /// Given a tensor of non-repeating indexes along a dimension, generate an inverse permutation
+    /// x = [3, 2, 4, 1, 5, 0]
+    /// inv_perm(x) = [5, 3, 1, 0, 2, 4]
+    pub fn inverse_permutation(self, axis: usize) -> GraphTensor {
+        // TODO: this is very inefficient because we need to do O(n^2) comparisons and allocations for the one-hot and then sum reduce. Need a better way!
+        let ax_size = self.dims()[axis];
+        let mut arange = self.graph().arange(ax_size);
+        for i in 0..axis {
+            arange = arange.expand_dim(i, self.dims()[i]);
+        }
+        for i in axis + 1..self.dims().len() {
+            arange = arange.expand_dim(i, self.dims()[i]);
+        }
+        arange = arange.expand_dim(axis + 1, ax_size);
+        let one_hot = self.expand_dim(axis + 1, ax_size).eq(arange);
+        (one_hot * arange).sum(axis + 1)
+    }
+
     /// Extracts sliding local windows from an input tensor.
     pub fn unfold(
         self,

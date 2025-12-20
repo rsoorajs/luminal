@@ -197,6 +197,29 @@ impl GraphTensor {
         // Based on https://github.com/tinygrad/tinygrad/blob/9fc4465557831b614b56dd645eebc940ca0fa1bb/tinygrad/tensor.py#L1162C26-L1162C104
         0.5 * self * (1. + (0.7978845608 * self * (1. + 0.044715 * self * self)).tanh())
     }
+
+    /// Compute the sorted indexes of this tensor along a certian axis
+    pub fn argsort_indexes(self, axis: usize, ascending: bool) -> GraphTensor {
+        // Compare all elements with all other elements by making a axis
+        let ax_size = self.dims()[axis];
+        let a = self.expand_dim(axis + 1, ax_size);
+        let b = self.expand_dim(axis, ax_size) + 1e-9; // eps for stable sort
+        let mut ind = a.lt(b).sum(axis).cast(DType::Int);
+        if ascending {
+            ind = -ind + (ax_size - 1);
+        }
+        ind.inverse_permutation(axis)
+    }
+
+    /// Sort the tensor along a certian axis
+    pub fn argsort(self, axis: usize, ascending: bool) -> GraphTensor {
+        self.gather(self.argsort_indexes(axis, ascending))
+    }
+
+    /// Sort and retrieve top-k indexes
+    pub fn topk(self, k: usize, axis: usize) -> GraphTensor {
+        self.argsort_indexes(axis, true).slice_along(..k, axis)
+    }
 }
 
 // #[cfg(test)]

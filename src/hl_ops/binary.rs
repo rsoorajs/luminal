@@ -40,8 +40,11 @@ impl Add<GraphTensor> for f32 {
     }
 }
 
-impl AddAssign for GraphTensor {
-    fn add_assign(&mut self, rhs: Self) {
+impl<T> AddAssign<T> for GraphTensor
+where
+    GraphTensor: Add<T, Output = GraphTensor>,
+{
+    fn add_assign(&mut self, rhs: T) {
         *self = *self + rhs;
     }
 }
@@ -62,8 +65,11 @@ impl Sub<GraphTensor> for f32 {
     }
 }
 
-impl SubAssign for GraphTensor {
-    fn sub_assign(&mut self, rhs: Self) {
+impl<T> SubAssign<T> for GraphTensor
+where
+    GraphTensor: Sub<T, Output = GraphTensor>,
+{
+    fn sub_assign(&mut self, rhs: T) {
         *self = *self - rhs;
     }
 }
@@ -95,8 +101,11 @@ impl Mul<GraphTensor> for f32 {
     }
 }
 
-impl MulAssign for GraphTensor {
-    fn mul_assign(&mut self, rhs: Self) {
+impl<T> MulAssign<T> for GraphTensor
+where
+    GraphTensor: Mul<T, Output = GraphTensor>,
+{
+    fn mul_assign(&mut self, rhs: T) {
         *self = *self * rhs;
     }
 }
@@ -119,8 +128,11 @@ impl Div<GraphTensor> for f32 {
     }
 }
 
-impl DivAssign for GraphTensor {
-    fn div_assign(&mut self, rhs: Self) {
+impl<T> DivAssign<T> for GraphTensor
+where
+    GraphTensor: Div<T, Output = GraphTensor>,
+{
+    fn div_assign(&mut self, rhs: T) {
         *self = *self / rhs;
     }
 }
@@ -140,8 +152,11 @@ impl Rem<GraphTensor> for GraphTensor {
     }
 }
 
-impl RemAssign for GraphTensor {
-    fn rem_assign(&mut self, rhs: Self) {
+impl<T> RemAssign<T> for GraphTensor
+where
+    GraphTensor: Rem<T, Output = GraphTensor>,
+{
+    fn rem_assign(&mut self, rhs: T) {
         *self = *self % rhs;
     }
 }
