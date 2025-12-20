@@ -20,6 +20,7 @@ pub mod prelude {
     pub use half::{bf16, f16};
     pub use petgraph;
     pub use petgraph::stable_graph::NodeIndex;
+    pub use rustc_hash::{FxHashMap, FxHashSet};
     pub use tinyvec;
 }
 
