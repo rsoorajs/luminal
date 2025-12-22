@@ -222,7 +222,11 @@ impl<S: Into<Expression>> Div<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn div(self, rhs: S) -> Self::Output {
-        self / self.graph().constant(rhs).expand(self.shape)
+        self / self
+            .graph()
+            .constant(rhs)
+            .cast(self.dtype)
+            .expand(self.shape)
     }
 }
 

@@ -47,7 +47,7 @@ impl GraphTensor {
             .into_iter()
             .map(|i| self.dims()[i])
             .product::<Expression>();
-        self.sum(axes) / self.graph().constant(reduced_elements).cast(DType::F32)
+        self.sum(axes) / reduced_elements
     }
 
     /// Reduce a dimension of the tensor by multiplying all elements along that axis.

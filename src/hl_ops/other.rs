@@ -115,6 +115,9 @@ impl Graph {
 
 impl GraphTensor {
     pub fn cast(self, dtype: DType) -> GraphTensor {
+        if self.dtype == dtype {
+            return self;
+        }
         let id = self
             .graph()
             .add_op(Cast(dtype))
