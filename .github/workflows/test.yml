@@ -48,7 +48,5 @@ jobs:
             - uses: actions/checkout@v4
             - name: GPU sanity check
               run: nvidia-smi
-            - name: Dependencies
-              run: curl https://sh.rustup.rs -sSf | sh -s -- -y && source "$HOME/.cargo/env"; sudo apt-get update && sudo apt-get install -y protobuf-compiler
             - name: Run CUDA crate tests
-              run: rustup update; cargo test -p luminal_cuda --verbose
+              run: curl https://sh.rustup.rs -sSf | sh -s -- -y && source "$HOME/.cargo/env"; sudo apt-get update && sudo apt-get install -y protobuf-compiler; rustup update; cargo test -p luminal_cuda --verbose
