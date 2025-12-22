@@ -47,6 +47,6 @@ jobs:
         steps:
             - uses: actions/checkout@v4
             - name: GPU sanity check
-              run: nvidia-smi
+              run: ls /usr/local; ls /usr/local/cuda; nvidia-smi
             - name: Run CUDA crate tests
-              run: curl https://sh.rustup.rs -sSf | sh -s -- -y && source "$HOME/.cargo/env"; sudo apt-get update && sudo apt-get install -y protobuf-compiler; rustup update; cargo test -p luminal_cuda --verbose
+              run: export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64; curl https://sh.rustup.rs -sSf | sh -s -- -y && source "$HOME/.cargo/env"; sudo apt-get update && sudo apt-get install -y protobuf-compiler; rustup update; cargo test -p luminal_cuda --verbose
