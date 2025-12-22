@@ -221,6 +221,19 @@ pub fn flatten_strides(range: &[Expression], strides: &[Expression]) -> Expressi
     flat_stride.simplify()
 }
 
+pub fn flatten_strides_mask(range: &[Expression], strides: &[Expression]) -> Expression {
+    assert_eq!(range.len(), strides.len());
+    let mut current_elem_size = Expression::from(1);
+    let mut flat_stride = Expression::from(1);
+    for (dim, (range, stride)) in range.iter().zip(strides).enumerate().rev() {
+        let div = Expression::from('z') / current_elem_size;
+        let m = if dim > 0 { div % range } else { div };
+        flat_stride *= stride.substitute('z', m);
+        current_elem_size *= range;
+    }
+    flat_stride.simplify()
+}
+
 #[allow(unused)]
 /// View a debug graph in the browser
 pub fn display_graph<E>(

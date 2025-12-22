@@ -244,7 +244,7 @@ impl GraphTensor {
         let mut index_expressions = vec![];
         let mut phys_size = Expression::from(1);
         let mut new_dims = vec![];
-        for (dim, (start, end)) in self.dims().into_iter().zip(&padding) {
+        for (dim, (start, end)) in self.dims().into_iter().zip(&padding).rev() {
             index_expressions
                 .push(((Expression::from('z') - *start).max(0).min(dim - 1)) * phys_size);
             phys_size *= dim;
@@ -261,7 +261,7 @@ impl GraphTensor {
             mask_expressions
                 .push(Expression::from('z').gte(start) * Expression::from('z').lt(start + dim));
         }
-        let mask_expression = flatten_strides(&new_dims, &mask_expressions);
+        let mask_expression = flatten_strides_mask(&new_dims, &mask_expressions);
         let mask = self.graph().iota(mask_expression, new_dims);
         new_tensor * mask
     }
@@ -295,6 +295,16 @@ mod tests {
             23,
             |a| a.pad((2, 6)) * 1.0,
             |a| a.pad_with_zeros(0, 2, 6).unwrap(),
+        );
+        test_unary(
+            (18, 72),
+            |a| a.pad(((4, 31), (2, 9))) * 1.0,
+            |a| {
+                a.pad_with_zeros(0, 4, 31)
+                    .unwrap()
+                    .pad_with_zeros(1, 2, 9)
+                    .unwrap()
+            },
         );
     }
 

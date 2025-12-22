@@ -372,7 +372,7 @@ impl Expression {
         if rhs == self || self == i32::MAX {
             return self;
         }
-        if self == 0 || rhs == i32::MAX {
+        if rhs == i32::MAX {
             return rhs;
         }
         if let (Some(a), Some(b)) = (self.as_num(), rhs.as_num()) {
