@@ -318,7 +318,7 @@ impl EgglogOp for RowRMSNorm {
                     )
                 )
                 (= ?inv_div_factor
-                    (Recip (ECons ?batch (ENil)) (Iota ?width (MNum 1))
+                    (Recip (ECons ?batch (ENil)) (Cast (Iota ?width (MNum 1)) (F32))
                                     (ECons (MNum 0) (ENil))  ; broadcast the constant
                                     (ECons (MIter) (ENil)))) ; produce per-batch vector
 
@@ -388,6 +388,7 @@ impl EgglogOp for RowRMSNorm {
                 (union ?final ?new)
                 (set (dtype ?new) (F32))
             )
+            :name \"row rms norm\"
         )"
         .to_string()]
     }
