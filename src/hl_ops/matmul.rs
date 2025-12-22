@@ -110,111 +110,147 @@ impl GraphTensor {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     crate::test_imports!();
+#[cfg(test)]
+mod tests {
+    use crate::{
+        prelude::*,
+        tests::{assert_close, random_vec},
+    };
+    use candle_core::{Device, Tensor};
 
-//     #[test]
-//     fn test_matrix_vector() {
-//         let mut cx = Graph::new();
-//         let (a_vec, b_vec) = (random_vec(3), random_vec(6));
-//         let a = cx.tensor(3).set(a_vec.clone());
-//         let b = cx.tensor((3, 2)).set(b_vec.clone());
-//         let mut c = a.matmul(b).retrieve();
+    #[test]
+    fn test_matrix_vector() {
+        let mut cx = Graph::new();
+        let a = cx.tensor(3);
+        let b = cx.tensor((3, 2));
+        let c = a.matmul(b).output();
 
-//         cx.compile(GenericCompiler::default(), &mut c);
-//         cx.execute();
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
 
-//         let d_dev = Cpu::default();
-//         let d_a = d_dev.tensor_from_vec(a_vec, (DConst::<3>,));
-//         let d_b = d_dev.tensor_from_vec(b_vec, (DConst::<3>, DConst::<2>));
-//         let d_c = d_a.matmul(d_b);
+        let a_vec = random_vec(3);
+        let b_vec = random_vec(6);
 
-//         assert_close(&c.data(), &d_c.as_vec());
-//     }
+        rt.set_data(a.id, a_vec.clone().into());
+        rt.set_data(b.id, b_vec.clone().into());
+        rt.execute(&cx.dyn_map);
 
-//     #[test]
-//     fn test_matmul() {
-//         let mut cx = Graph::new();
-//         let (a_data, b_data) = (random_vec(6), random_vec(9));
-//         let a = cx.tensor((2, 3));
-//         a.set(a_data.clone());
-//         let b = cx.tensor((3, 3));
-//         b.set(b_data.clone());
-//         let c = a.matmul(b);
-//         c.retrieve();
+        let device = Device::Cpu;
+        let ref_a = Tensor::from_vec(a_vec, (1, 3), &device).unwrap();
+        let ref_b = Tensor::from_vec(b_vec, (3, 2), &device).unwrap();
+        let ref_c = ref_a.matmul(&ref_b).unwrap().flatten_all().unwrap();
 
-//         cx.execute();
+        assert_close(rt.get_f32(c.id), &ref_c.to_vec1::<f32>().unwrap());
+    }
 
-//         let d_dev = Cpu::default();
-//         let d_a = d_dev.tensor_from_vec(a_data, (DConst::<2>, DConst::<3>));
-//         let d_b = d_dev.tensor_from_vec(b_data, (DConst::<3>, DConst::<3>));
-//         let d_c = d_a.matmul(d_b);
+    #[test]
+    fn test_matmul() {
+        let mut cx = Graph::new();
+        let a = cx.tensor((2, 3));
+        let b = cx.tensor((3, 3));
+        let c = a.matmul(b).output();
 
-//         assert_close(&c.data(), &d_c.as_vec());
-//     }
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
 
-//     #[test]
-//     fn test_batch_matmul() {
-//         let mut cx = Graph::new();
-//         let (a_data, b_data) = (random_vec(12), random_vec(8));
-//         let a = cx.tensor((2, 3, 2));
-//         a.set(a_data.clone());
-//         let b = cx.tensor((2, 4));
-//         b.set(b_data.clone());
-//         let c = a.matmul(b);
-//         c.retrieve();
+        let a_data = random_vec(6);
+        let b_data = random_vec(9);
 
-//         cx.execute();
+        rt.set_data(a.id, a_data.clone().into());
+        rt.set_data(b.id, b_data.clone().into());
+        rt.execute(&cx.dyn_map);
 
-//         let d_dev = Cpu::default();
-//         let d_a = d_dev.tensor_from_vec(a_data, (DConst::<2>, DConst::<3>, DConst::<2>));
-//         let d_b = d_dev.tensor_from_vec(b_data, (DConst::<2>, DConst::<4>));
-//         let d_c = d_a.matmul(d_b);
+        let device = Device::Cpu;
+        let ref_a = Tensor::from_vec(a_data, (2, 3), &device).unwrap();
+        let ref_b = Tensor::from_vec(b_data, (3, 3), &device).unwrap();
+        let ref_c = ref_a.matmul(&ref_b).unwrap().flatten_all().unwrap();
 
-//         assert_close(&c.data(), &d_c.as_vec());
-//     }
+        assert_close(rt.get_f32(c.id), &ref_c.to_vec1::<f32>().unwrap());
+    }
 
-//     #[test]
-//     fn test_batch_batch_matmul() {
-//         let mut cx = Graph::new();
-//         let (a_data, b_data) = (random_vec(6), random_vec(6));
-//         let a = cx.tensor((1, 2, 3));
-//         a.set(a_data.clone());
-//         let b = cx.tensor((1, 2, 3));
-//         b.set(b_data.clone());
-//         let c = a.matmul(b.permute((0, 2, 1)));
-//         c.retrieve();
+    #[test]
+    fn test_batch_matmul() {
+        let mut cx = Graph::new();
+        let a = cx.tensor((2, 3, 2));
+        let b = cx.tensor((2, 4));
+        let c = a.matmul(b).output();
 
-//         cx.execute();
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
 
-//         let d_dev = Cpu::default();
-//         let d_a = d_dev.tensor_from_vec(a_data, (DConst::<1>, DConst::<2>, DConst::<3>));
-//         let d_b = d_dev.tensor_from_vec(b_data, (DConst::<1>, DConst::<2>, DConst::<3>));
-//         let d_c = d_a.matmul(d_b.permute::<Rank3<1, 3, 2>, DAxes3<0, 2, 1>>());
+        let a_data = random_vec(12);
+        let b_data = random_vec(8);
 
-//         assert_close(&c.data(), &d_c.as_vec());
-//     }
+        rt.set_data(a.id, a_data.clone().into());
+        rt.set_data(b.id, b_data.clone().into());
+        rt.execute(&cx.dyn_map);
 
-//     #[test]
-//     fn test_batch_batch_matmul2() {
-//         let mut cx = Graph::new();
-//         let (a_data, b_data) = (random_vec(4), random_vec(6));
-//         let a = cx.tensor(('a', 'b'));
-//         a.set_dyn(a_data.clone(), (2, 2));
-//         let a = a.expand_dim(0, 1);
-//         let b = cx.tensor((1, 'b', 3));
-//         b.set_dyn(b_data.clone(), (1, 2, 3));
-//         let c = a.matmul(b);
-//         c.retrieve();
+        let device = Device::Cpu;
+        let ref_a = Tensor::from_vec(a_data, (2, 3, 2), &device).unwrap();
+        let ref_b = Tensor::from_vec(b_data, (2, 4), &device).unwrap();
+        let ref_c = ref_a
+            .reshape((6, 2))
+            .unwrap()
+            .matmul(&ref_b)
+            .unwrap()
+            .reshape((2, 3, 4))
+            .unwrap()
+            .flatten_all()
+            .unwrap();
 
-//         cx.execute();
+        assert_close(rt.get_f32(c.id), &ref_c.to_vec1::<f32>().unwrap());
+    }
 
-//         let d_dev = Cpu::default();
-//         let d_a = d_dev.tensor_from_vec(a_data, (DConst::<1>, DConst::<2>, DConst::<2>));
-//         let d_b = d_dev.tensor_from_vec(b_data, (DConst::<1>, DConst::<2>, DConst::<3>));
-//         let d_c = d_a.matmul(d_b);
+    #[test]
+    fn test_batch_batch_matmul() {
+        let mut cx = Graph::new();
+        let a = cx.tensor((1, 2, 3));
+        let b = cx.tensor((1, 2, 3));
+        let c = a.matmul(b.permute((0, 2, 1))).output();
 
-//         assert_close(&c.data(), &d_c.as_vec());
-//     }
-// }
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
+
+        let a_data = random_vec(6);
+        let b_data = random_vec(6);
+
+        rt.set_data(a.id, a_data.clone().into());
+        rt.set_data(b.id, b_data.clone().into());
+        rt.execute(&cx.dyn_map);
+
+        let device = Device::Cpu;
+        let ref_a = Tensor::from_vec(a_data, (1, 2, 3), &device).unwrap();
+        let ref_b = Tensor::from_vec(b_data, (1, 2, 3), &device)
+            .unwrap()
+            .permute((0, 2, 1))
+            .unwrap();
+        let ref_c = ref_a.matmul(&ref_b).unwrap().flatten_all().unwrap();
+
+        assert_close(rt.get_f32(c.id), &ref_c.to_vec1::<f32>().unwrap());
+    }
+
+    #[test]
+    fn test_batch_batch_matmul2() {
+        let mut cx = Graph::new();
+        let a = cx.tensor((1, 2, 2));
+        let b = cx.tensor((1, 2, 3));
+        let c = a.matmul(b).output();
+
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
+
+        let a_data = random_vec(4);
+        let b_data = random_vec(6);
+
+        rt.set_data(a.id, a_data.clone().into());
+        rt.set_data(b.id, b_data.clone().into());
+        rt.execute(&cx.dyn_map);
+
+        let device = Device::Cpu;
+        let ref_a = Tensor::from_vec(a_data, (1, 2, 2), &device).unwrap();
+        let ref_b = Tensor::from_vec(b_data, (1, 2, 3), &device).unwrap();
+        let ref_c = ref_a.matmul(&ref_b).unwrap().flatten_all().unwrap();
+
+        assert_close(rt.get_f32(c.id), &ref_c.to_vec1::<f32>().unwrap());
+    }
+}
