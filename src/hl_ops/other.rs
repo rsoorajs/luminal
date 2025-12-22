@@ -126,7 +126,7 @@ impl GraphTensor {
     /// Sets this tensor's dtype without doing a cast
     pub fn as_dtype(mut self, dtype: DType) -> GraphTensor {
         self.dtype = dtype;
-        if let Some(gmem) = self.graph().try_get_op_mut::<GMEM>(self.id) {
+        if let Some(gmem) = self.graph().try_get_op_mut::<Input>(self.id) {
             gmem.dtype = dtype;
         }
         self

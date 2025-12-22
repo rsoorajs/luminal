@@ -173,6 +173,7 @@
 )
 
 (datatype IR
+    (OutputJoin IR IR)
     {ops}
 )
 

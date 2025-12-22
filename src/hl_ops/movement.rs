@@ -67,7 +67,7 @@ impl GraphTensor {
         );
         let id = self
             .graph()
-            .add_op(Gather)
+            .add_op(Gather::default())
             .input(indexes.id, 0, indexes.shape)
             .input(self.id, 0, self.shape)
             .finish();

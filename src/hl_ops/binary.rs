@@ -24,7 +24,7 @@ impl Add for GraphTensor {
         // );
         let new_id = self
             .graph()
-            .add_op(op::Add)
+            .add_op(op::Add::default())
             .input(self.id, 0, self.shape)
             .input(rhs.id, 0, rhs.shape)
             .finish();
@@ -85,7 +85,7 @@ impl Mul for GraphTensor {
         // );
         let new_id = self
             .graph()
-            .add_op(op::Mul)
+            .add_op(op::Mul::default())
             .input(self.id, 0, self.shape)
             .input(rhs.id, 0, rhs.shape)
             .finish();
@@ -144,7 +144,7 @@ impl Rem<GraphTensor> for GraphTensor {
         assert_eq!(self.dims(), rhs.dims(), "Dims must match to mod tensors.");
         let new_id = self
             .graph()
-            .add_op(op::Mod)
+            .add_op(op::Mod::default())
             .input(self.id, 0, self.shape)
             .input(rhs.id, 0, rhs.shape)
             .finish();
@@ -248,7 +248,7 @@ impl GraphTensor {
         assert_eq!(self.dims(), rhs.dims(), "Dims must match to lt tensors.");
         let new_id = self
             .graph()
-            .add_op(op::LessThan)
+            .add_op(op::LessThan::default())
             .input(self.id, 0, self.shape)
             .input(rhs.id, 0, rhs.shape)
             .finish();

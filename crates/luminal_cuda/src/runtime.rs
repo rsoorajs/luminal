@@ -16,7 +16,7 @@ use luminal::prelude::{
         visit::{EdgeRef, NodeIndexable},
         Directed, Direction,
     },
-    Expression, LLIRGraph, NodeIndex, Runtime, GMEM,
+    Expression, Input, LLIRGraph, NodeIndex, Runtime,
 };
 use luminal::utils::flatten_strides;
 use prost::Message as _;
@@ -98,7 +98,7 @@ impl CudaRuntime {
         let file = std::fs::read(file_path).unwrap();
         let st = SafeTensors::deserialize(&file).unwrap();
         for node in self.llir_graph.node_indices().collect_vec() {
-            if let Some(GMEM { label, .. }) = self.llir_graph[node].to_op::<GMEM>() {
+            if let Some(Input { label, .. }) = self.llir_graph[node].to_op::<Input>() {
                 if let Ok(tensor) = st.tensor(label) {
                     match tensor.dtype() {
                         safetensors::Dtype::BF16 => {
@@ -151,7 +151,7 @@ impl CudaRuntime {
             .get(&llir_node)
             .and_then(|n| self.exec_graph.node_weight_mut(*n))
         {
-            if self.llir_graph[llir_node].to_op::<GMEM>().is_none() {
+            if self.llir_graph[llir_node].to_op::<Input>().is_none() {
                 work_queue[node_to_task_index[&llir_node]].out_ptr =
                     self.buffers
                         .get_mut(&llir_node)
@@ -189,7 +189,7 @@ impl CudaRuntime {
     #[tracing::instrument(skip_all)]
     pub fn allocate_intermediate_buffers(&mut self, dyn_dims: &FxHashMap<char, usize>) {
         for node in self.llir_graph.node_indices().collect_vec() {
-            if self.llir_graph[node].to_op::<GMEM>().is_some() {
+            if self.llir_graph[node].to_op::<Input>().is_some() {
                 continue;
             }
             if let Some(op) = self.llir_graph[node].to_dialect::<dyn BlockOp>() {
@@ -282,7 +282,7 @@ impl Runtime for CudaRuntime {
             ) = get_barrier_strides(&llir_graph, &subgraph);
             for node in llir_graph
                 .node_indices()
-                .filter(|n| llir_graph[*n].to_op::<GMEM>().is_some())
+                .filter(|n| llir_graph[*n].to_op::<Input>().is_some())
             {
                 producer_barrier_bases.insert(node, 0.into());
             }
@@ -577,7 +577,7 @@ impl Runtime for CudaRuntime {
             .llir_graph
             .node_indices()
             .find(|n| {
-                if let Some(GMEM { node, .. }) = self.llir_graph[*n].to_op::<GMEM>() {
+                if let Some(Input { node, .. }) = self.llir_graph[*n].to_op::<Input>() {
                     *node == id.index()
                 } else {
                     false
@@ -767,7 +767,7 @@ pub fn allocate_input_buffers(
 ) -> FxHashMap<NodeIndex, CudaSlice<f32>> {
     let mut buffers = FxHashMap::default();
     for node in graph.node_indices() {
-        if let Some(gmem) = graph[node].to_op::<GMEM>() {
+        if let Some(gmem) = graph[node].to_op::<Input>() {
             if let Some(buf) = inputs.get(&gmem.node) {
                 buffers.insert(node, stream.memcpy_stod(buf).unwrap());
             }
@@ -1025,7 +1025,7 @@ pub fn get_barrier_strides(
                     .launch_range()
             })
             .collect();
-        let (mut producer_strides, mut consumer_strides) = compute_barrier_strides(
+        let (producer_strides, consumer_strides) = compute_barrier_strides(
             prod_range.clone(),
             cons_range.clone(),
             consumers

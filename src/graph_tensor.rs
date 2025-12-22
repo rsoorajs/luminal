@@ -53,7 +53,13 @@ impl GraphTensor {
 
     /// Set the name of a tensor
     pub fn set_name(&self, name: &str) {
-        self.graph().get_op_mut::<GMEM>(self.id).label = name.to_string();
+        self.graph().get_op_mut::<Input>(self.id).label = name.to_string();
+    }
+
+    /// Mark this tensor as an output
+    pub fn output(&self) -> GraphTensor {
+        self.graph().outputs.insert(self.id);
+        *self
     }
 
     pub fn dims(&self) -> Vec<Expression> {

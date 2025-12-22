@@ -560,6 +560,16 @@ impl Expression {
             .iter()
             .any(|t| matches!(t, Term::Var('-')))
     }
+
+    pub fn resolve_vars(&mut self, dyn_map: &FxHashMap<char, usize>) {
+        for term in self.terms.write().iter_mut() {
+            if let Term::Var(v) = *term
+                && let Some(val) = dyn_map.get(&v)
+            {
+                *term = Term::Num(*val as i32);
+            }
+        }
+    }
 }
 
 impl From<Term> for Expression {

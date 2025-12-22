@@ -41,7 +41,9 @@ impl LLIROp {
         Box<T>: Debug + 'static,
     {
         assert!(
-            op.type_name().contains("dyn") || op.type_name().contains("GMEM"),
+            op.type_name().contains("dyn")
+                || op.type_name().contains("Input")
+                || op.type_name().contains("Output"),
             "op types must be erased into dialect traits for dialect casting to work!"
         );
         Self(Arc::new(Box::new(DialectOp::new(op))))

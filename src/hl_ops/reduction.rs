@@ -11,7 +11,10 @@ impl GraphTensor {
         for dim in axes.to_axes().into_iter().rev() {
             id = self
                 .graph()
-                .add_op(op::SumReduce(dim))
+                .add_op(op::SumReduce {
+                    dim,
+                    ..Default::default()
+                })
                 .input(id, 0, shape)
                 .finish();
             shape.remove_dim(dim);
@@ -26,7 +29,10 @@ impl GraphTensor {
         for dim in axes.to_axes().into_iter().rev() {
             id = self
                 .graph()
-                .add_op(op::MaxReduce(dim))
+                .add_op(op::MaxReduce {
+                    dim,
+                    ..Default::default()
+                })
                 .input(id, 0, shape)
                 .finish();
             shape.remove_dim(dim);

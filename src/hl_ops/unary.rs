@@ -14,7 +14,7 @@ impl GraphTensor {
     pub fn log2(self) -> GraphTensor {
         let new_id = self
             .graph()
-            .add_op(op::Log2)
+            .add_op(op::Log2::default())
             .input(self.id, 0, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
@@ -24,7 +24,7 @@ impl GraphTensor {
     pub fn exp2(self) -> GraphTensor {
         let new_id = self
             .graph()
-            .add_op(op::Exp2)
+            .add_op(op::Exp2::default())
             .input(self.id, 0, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
@@ -44,7 +44,7 @@ impl GraphTensor {
     pub fn reciprocal(self) -> GraphTensor {
         let new_id = self
             .graph()
-            .add_op(op::Recip)
+            .add_op(op::Recip::default())
             .input(self.id, 0, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
@@ -54,7 +54,7 @@ impl GraphTensor {
     pub fn sin(self) -> GraphTensor {
         let new_id = self
             .graph()
-            .add_op(op::Sin)
+            .add_op(op::Sin::default())
             .input(self.id, 0, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
@@ -74,7 +74,7 @@ impl GraphTensor {
     pub fn sqrt(self) -> GraphTensor {
         let new_id = self
             .graph()
-            .add_op(op::Sqrt)
+            .add_op(op::Sqrt::default())
             .input(self.id, 0, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
@@ -216,8 +216,8 @@ impl GraphTensor {
         self.gather(self.argsort_indexes(axis, ascending))
     }
 
-    /// Sort and retrieve top-k indexes
-    pub fn topk(self, k: usize, axis: usize) -> GraphTensor {
+    /// Sort and retrieve top-k **indexes**
+    pub fn topk_indexes(self, k: usize, axis: usize) -> GraphTensor {
         self.argsort_indexes(axis, true).slice_along(..k, axis)
     }
 }
