@@ -222,25 +222,81 @@ impl GraphTensor {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     crate::test_imports!();
+#[cfg(test)]
+mod tests {
+    use crate::{prelude::*, tests::assert_close};
+    use candle_core::{Device, Tensor};
 
-//     #[test]
-//     fn test_exp() {
-//         let mut cx = Graph::new();
-//         let a_data = random_vec(6);
-//         let a = cx.tensor((2, 3)).set(a_data.clone());
-//         let b = a.exp().retrieve();
-//         cx.execute();
+    fn test_unary(func: fn(GraphTensor) -> GraphTensor, ref_func: fn(Tensor, &Device) -> Tensor) {
+        let mut cx = Graph::new();
+        let a = cx.tensor(3);
+        let b = func(a).output();
 
-//         let d_dev = Cpu::default();
-//         let d_a = d_dev.tensor_from_vec(a_data, (DConst::<2>, DConst::<3>));
-//         let d_b = d_a.exp();
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
 
-//         assert_close(&b.data(), &d_b.as_vec());
-//     }
+        rt.set_data(a.id, vec![1.0, 2.0, 3.0].into());
+        rt.execute(&cx.dyn_map);
 
+        // Reference
+        let device = Device::Cpu;
+        let ref_a = Tensor::new(vec![1_f32, 2_f32, 3_f32], &device).unwrap();
+        let ref_b = ref_func(ref_a, &device);
+
+        // need to assert close because some unaries (exp and log) are (good) approximations
+        assert_close(rt.get_f32(b.id), &ref_b.to_vec1::<f32>().unwrap())
+    }
+
+    #[test]
+    fn test_exp() {
+        test_unary(|a| a.exp(), |a, _| a.exp().unwrap());
+    }
+    #[test]
+    fn test_log() {
+        test_unary(|a| a.log(), |a, _| a.log().unwrap());
+    }
+    #[test]
+    fn test_sin() {
+        test_unary(|a| a.sin(), |a, _| a.sin().unwrap());
+    }
+    #[test]
+    fn test_recip() {
+        test_unary(|a| a.reciprocal(), |a, _| a.recip().unwrap());
+    }
+    #[test]
+    fn test_sqrt() {
+        test_unary(|a| a.sqrt(), |a, _| a.sqrt().unwrap());
+    }
+    #[test]
+    fn test_square() {
+        test_unary(|a| a.square(), |a, _| a.powf(2.0).unwrap());
+    }
+
+    #[test]
+    fn test_layer_norm() {
+        test_unary(
+            |a| a.layer_norm(0, 1e-5),
+            |a, dev| {
+                let meaned = (a.clone() - a.mean(0).unwrap().broadcast_as(3)).unwrap();
+                meaned
+                    .powf(2.0)
+                    .unwrap()
+                    .mean(0)
+                    .unwrap()
+                    .add(&Tensor::new(1e-5_f32, dev).unwrap())
+                    .unwrap()
+                    .sqrt()
+                    .unwrap()
+                    .recip()
+                    .unwrap()
+                    .broadcast_as(3)
+                    .unwrap()
+                    .mul(&meaned)
+                    .unwrap()
+            },
+        );
+    }
+}
 //     #[test]
 //     fn test_layer_norm() {
 //         let mut cx = Graph::new();

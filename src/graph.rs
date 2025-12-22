@@ -563,11 +563,11 @@ pub fn extract_expr_list<'a>(
     if let Some(l) = list_cache.get(node) {
         return Some(l.clone());
     }
-    let expr = extract_expr(
-        egraph,
-        &egraph.eclasses[&egraph.enodes[node].1[0]].1[0],
-        expr_cache,
-    )?;
+    if egraph.enodes[node].0 == "ENil" {
+        return Some(vec![]);
+    }
+    let eclass = &egraph.enodes[node].1[0];
+    let expr = extract_expr(egraph, &egraph.eclasses[eclass].1[0], expr_cache)?;
     match egraph.enodes[&egraph.eclasses[&egraph.enodes[node].1[1]].1[0]]
         .0
         .as_str()
@@ -704,7 +704,7 @@ pub fn extract_expr<'a>(
                 Expression::from(name.chars().next().unwrap())
             }
             op => op
-                .parse::<usize>()
+                .parse::<i32>()
                 .map(Expression::from)
                 .or_else(|_| op.replace('"', "").parse::<char>().map(Expression::from))
                 .unwrap_or_else(|_| panic!("unsupported expression op '{op}'")),

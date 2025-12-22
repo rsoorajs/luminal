@@ -21,6 +21,7 @@ pub type Ops = (
     Input,
     Output,
     Constant,
+    Cast,
     Iota,
     Exp2,
     Log2,
@@ -274,6 +275,21 @@ impl EgglogOp for Iota {
             .to_string(),
         ]
     }
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        (
+            LLIROp::new::<dyn NativeOp>(Box::new(Self(
+                extract_expr(egraph, children[0], expr_cache).unwrap(),
+                extract_expr(egraph, children[1], expr_cache).unwrap(),
+            ))),
+            vec![],
+        )
+    }
 }
 impl NativeOp for Iota {
     fn execute(&self, _: Vec<&NativeData>, dyn_map: &FxHashMap<char, usize>) -> NativeData {
@@ -290,12 +306,12 @@ impl NativeOp for Iota {
 pub struct Cast(pub DType);
 impl HLIROp for Cast {
     fn to_egglog(&self, inp: &[(NodeIndex, String, ShapeTracker)]) -> String {
-        format!("(Cast {} {:?})", inp[0].1, self.0)
+        format!("(Cast {} ({:?}))", inp[0].1, self.0)
     }
 }
 impl EgglogOp for Cast {
     fn term(&self) -> (String, Vec<OpParam>) {
-        ("Cast".to_string(), vec![Input, Expr])
+        ("Cast".to_string(), vec![Input, Dty])
     }
 
     fn cleanup(&self) -> bool {
@@ -310,6 +326,18 @@ impl EgglogOp for Cast {
         )"
             .to_string(),
         ]
+    }
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        _: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        (
+            LLIROp::new::<dyn NativeOp>(Box::new(Self(extract_dtype(egraph, children[1])))),
+            vec![children[0]],
+        )
     }
 }
 impl NativeOp for Cast {
