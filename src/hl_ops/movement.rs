@@ -286,19 +286,22 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    use crate::{hl_ops::unary::tests::test_unary, prelude::*};
-    use candle_core::IndexOp;
+    use crate::{
+        hl_ops::{binary::tests::test_binary, unary::tests::test_unary},
+        prelude::*,
+    };
+    use candle_core::{IndexOp, Tensor};
 
     #[test]
     fn test_pad() {
         test_unary(
             23,
-            |a| a.pad((2, 6)) * 1.0,
+            |a| a.pad((2, 6)),
             |a| a.pad_with_zeros(0, 2, 6).unwrap(),
         );
         test_unary(
             (18, 72),
-            |a| a.pad(((4, 31), (2, 9))) * 1.0,
+            |a| a.pad(((4, 31), (2, 9))),
             |a| {
                 a.pad_with_zeros(0, 4, 31)
                     .unwrap()
@@ -311,9 +314,16 @@ mod tests {
     #[test]
     fn test_slice_pad() {
         test_unary(
-            17,
-            |a| a.slice(1..3).pad((3, 14)) * 1.0,
-            |a| a.i(1..3).unwrap().pad_with_zeros(0, 3, 14).unwrap(),
+            (17, 26),
+            |a| a.slice((1..3, 14..32)).pad(((3, 14), (5, 0))),
+            |a| {
+                a.i((1..3, 14..26)) // candle slice ranges can't go off end
+                    .unwrap()
+                    .pad_with_zeros(0, 3, 14)
+                    .unwrap()
+                    .pad_with_zeros(1, 5, 0)
+                    .unwrap()
+            },
         );
     }
 
@@ -334,185 +344,42 @@ mod tests {
         let _pooled = inp.unfold((3,), (1,), (1,));
     }
 
-    //     #[test]
-    //     fn test_unsqueeze_in_middle() {
-    //         let mut cx = Graph::new();
+    #[test]
+    fn test_unsqueeze() {
+        let mut cx = Graph::new();
+        let inp = cx.tensor((2, 2, 3));
+        let out1 = inp.unsqueeze(1);
+        let out2 = inp.unsqueeze(3);
+        assert_eq!(out1.dims(), &[2, 1, 2, 3]);
+        assert_eq!(out2.dims(), &[2, 2, 3, 1]);
+    }
 
-    //         let inp = cx.tensor((2, 2)).set(vec![1., 2., 3., 4.]);
-    //         let out = inp.unsqueeze(1).retrieve();
-
-    //         cx.execute();
-
-    //         assert_eq!(out.dims(), &[2, 1, 2]);
-    //         assert_exact(&out.data(), &[1., 2., 3., 4.]);
-    //     }
-
-    //     #[test]
-    //     fn test_unsqueeze_at_end() {
-    //         let mut cx = Graph::new();
-
-    //         let inp = cx.tensor((2, 2)).set(vec![1., 2., 3., 4.]);
-    //         let out = inp.unsqueeze(2).retrieve();
-
-    //         cx.execute();
-
-    //         assert_eq!(out.dims(), &[2, 2, 1]);
-    //         assert_exact(&out.data(), &[1., 2., 3., 4.]);
-    //     }
-
-    //     #[test]
-    //     fn test_transpose_simple_2d() {
-    //         let mut cx = Graph::new();
-
-    //         let inp1 = cx.tensor((4, 4)).set(vec![
-    //             1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16.,
-    //         ]);
-    //         // 3x3 kernel
-    //         let out1 = inp1
-    //             // Pool first dim first by moving it to end
-    //             .transpose(1, 0)
-    //             .retrieve();
-
-    //         cx.execute();
-
-    //         assert_exact(
-    //             &out1.data(),
-    //             &[
-    //                 1., 5., 9., 13., 2., 6., 10., 14., 3., 7., 11., 15., 4., 8., 12., 16.,
-    //             ],
-    //         );
-    //     }
-
-    //     #[test]
-    //     #[should_panic(expected = "transpose dimensions")]
-    //     fn test_transpose_out_of_bounds() {
-    //         let mut cx = Graph::new();
-
-    //         let inp1 = cx.tensor((4, 4)).set(vec![
-    //             1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16.,
-    //         ]);
-
-    //         // This should panic because dims 6 and 5 are out of bounds for a 2D tensor
-    //         let _out1 = inp1.transpose(6, 5);
-    //     }
-
-    //     // #[test]
-    //     // fn test_concat_1d() {
-    //     //     let mut cx = Graph::new();
-    //     //     let a = cx.tensor(4);
-    //     //     a.set(vec![1.4325, 2.492428, 3.127365, 3.54865]);
-    //     //     let b = cx.tensor(3);
-    //     //     b.set(vec![2.30434, 2.2343113, 1.4393]);
-    //     //     let c = a.concat_along(b, 0);
-    //     //     c.retrieve();
-    //     //     cx.execute();
-
-    //     //     let d_dev = Cpu::default();
-    //     //     let d_a = d_dev.tensor([1.4325, 2.492428, 3.127365, 3.54865]);
-    //     //     let d_b = d_dev.tensor([2.30434, 2.2343113, 1.4393]);
-    //     //     let d_c = (d_a.realize::<(usize,)>(), d_b.realize::<(usize,)>()).concat_along(DAxis::<0>);
-
-    //     //     assert_close(&c.data(), &d_c.as_vec());
-    //     // }
-
-    //     // #[test]
-    //     // fn test_concat_self() {
-    //     //     let mut cx = Graph::new();
-    //     //     let a = cx.tensor(4).set(vec![1.4325, 2.492428, 3.127365, 3.54865]);
-    //     //     let b = a.concat_along(a, 0).retrieve();
-    //     //     cx.execute();
-
-    //     //     let d_dev = Cpu::default();
-    //     //     let d_a = d_dev.tensor([1.4325, 2.492428, 3.127365, 3.54865]);
-    //     //     let d_b =
-    //     //         (d_a.clone().realize::<(usize,)>(), d_a.realize::<(usize,)>()).concat_along(DAxis::<0>);
-
-    //     //     assert_close(&b.data(), &d_b.as_vec());
-    //     // }
-
-    //     // #[test]
-    //     // fn test_concat_2d() {
-    //     //     let mut cx = Graph::new();
-    //     //     let a = cx.tensor((3, 2));
-    //     //     a.set(vec![1.4325, 2.492428, 3.127365, 33.2834, 4.18734, 23.854]);
-    //     //     let b = cx.tensor((3, 2));
-    //     //     b.set(vec![2.30434, 2.2343113, 1.4393, 482.4312, 8.1234, 54.2054]);
-    //     //     let c = a.concat_along(b, 1);
-    //     //     let d = a.concat_along(b, 0);
-    //     //     c.retrieve();
-    //     //     d.retrieve();
-    //     //     cx.execute();
-
-    //     //     let d_dev = Cpu::default();
-    //     //     let d_a = d_dev.tensor_from_vec(
-    //     //         vec![1.4325, 2.492428, 3.127365, 33.2834, 4.18734, 23.854],
-    //     //         (dfdx::shapes::Const::<3>, dfdx::shapes::Const::<2>),
-    //     //     );
-    //     //     let d_b = d_dev.tensor_from_vec(
-    //     //         vec![2.30434, 2.2343113, 1.4393, 482.4312, 8.1234, 54.2054],
-    //     //         (dfdx::shapes::Const::<3>, dfdx::shapes::Const::<2>),
-    //     //     );
-    //     //     let d_c = (
-    //     //         d_a.clone().realize::<(dfdx::shapes::Const<3>, usize)>(),
-    //     //         d_b.clone().realize::<(dfdx::shapes::Const<3>, usize)>(),
-    //     //     )
-    //     //         .concat_along(dfdx::shapes::Axis::<1>);
-    //     //     let d_d = (
-    //     //         d_a.realize::<(usize, dfdx::shapes::Const<2>)>(),
-    //     //         d_b.realize::<(usize, dfdx::shapes::Const<2>)>(),
-    //     //     )
-    //     //         .concat_along(dfdx::shapes::Axis::<0>);
-
-    //     //     assert_close(&c.data(), &d_c.as_vec());
-    //     //     assert_close(&d.data(), &d_d.as_vec());
-    //     // }
-
-    //     // #[test]
-    //     // fn test_pad_2d() {
-    //     //     let mut cx = Graph::new();
-    //     //     let a = cx
-    //     //         .tensor((3, 2))
-    //     //         .set(vec![1.4325, 2.492428, 3.127365, 33.2834, 4.18734, 23.854]);
-    //     //     let b = a.pad(((0, 0), (0, 2))).retrieve();
-    //     //     cx.execute();
-
-    //     //     let d_dev = Cpu::default();
-    //     //     let d_a = d_dev.tensor_from_vec(
-    //     //         vec![1.4325, 2.492428, 3.127365, 33.2834, 4.18734, 23.854],
-    //     //         (dfdx::shapes::Const::<3>, dfdx::shapes::Const::<2>),
-    //     //     );
-    //     //     let d_b = d_dev.tensor_from_vec(
-    //     //         vec![0., 0., 0., 0., 0., 0.],
-    //     //         (dfdx::shapes::Const::<3>, dfdx::shapes::Const::<2>),
-    //     //     );
-    //     //     let d_b = (
-    //     //         d_a.realize::<(dfdx::shapes::Const<3>, usize)>(),
-    //     //         d_b.realize::<(dfdx::shapes::Const<3>, usize)>(),
-    //     //     )
-    //     //         .concat_along(dfdx::shapes::Axis::<1>)
-    //     //         .realize::<Rank2<3, 4>>();
-
-    //     //     assert_close(&b.data(), &d_b.as_vec());
-    //     // }
-
-    //     // #[test]
-    //     // fn test_slice_2d() {
-    //     //     let mut cx = Graph::new();
-    //     //     let a = cx
-    //     //         .tensor((3, 2))
-    //     //         .set(vec![1.4325, 2.492428, 3.127365, 33.2834, 4.18734, 23.854]);
-    //     //     let b = a.slice((.., ..1)).retrieve();
-    //     //     cx.execute();
-
-    //     //     let d_dev = Cpu::default();
-    //     //     let d_a = d_dev.tensor_from_vec(
-    //     //         vec![1.4325, 2.492428, 3.127365, 33.2834, 4.18734, 23.854],
-    //     //         (dfdx::shapes::Const::<3>, dfdx::shapes::Const::<2>),
-    //     //     );
-    //     //     let d_b = d_a.slice((.., ..1)).realize::<Rank2<3, 1>>();
-
-    //     //     assert_close(&b.data(), &d_b.as_vec());
-    //     // }
+    #[test]
+    fn test_concat() {
+        test_binary(
+            17,
+            32,
+            |a, b| a.concat_along(b, 0),
+            |a, b| Tensor::cat(&[a, b], 0).unwrap(),
+        );
+        test_binary(
+            (10, 4),
+            (10, 6),
+            |a, b| a.concat_along(b, 1),
+            |a, b| Tensor::cat(&[a, b], 1).unwrap(),
+        );
+        test_binary(
+            (4, 10),
+            (6, 10),
+            |a, b| a.concat_along(b, 0),
+            |a, b| Tensor::cat(&[a, b], 0).unwrap(),
+        );
+        test_unary(
+            (4, 10),
+            |a| a.concat_along(a, 0),
+            |a| Tensor::cat(&[a.clone(), a], 0).unwrap(),
+        );
+    }
 
     //     // #[test]
     //     // fn test_cumsum() {
