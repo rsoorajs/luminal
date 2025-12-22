@@ -212,7 +212,7 @@ impl Graph {
                         ""
                     }
                 )
-                .bright_blue()
+                .cyan()
             );
         }
         runtime.compile(llir_graphs.last().unwrap());
@@ -223,7 +223,7 @@ impl Graph {
                     "---- Search Took {} ----",
                     pretty_duration::pretty_duration(&start.elapsed(), None).bold()
                 )
-                .bright_blue()
+                .cyan()
             );
         }
         runtime
@@ -435,7 +435,7 @@ fn run_egglog(
     let commands = egraph.parser.get_program_from_string(None, &code)?;
     let start = std::time::Instant::now();
     let msgs = egraph.run_program(commands)?;
-    if std::env::var("EGGLOG")
+    if std::env::var("SEARCH")
         .map(|s| s == "1")
         .unwrap_or_default()
     {

@@ -18,7 +18,7 @@ use luminal::prelude::{
     },
     Expression, Input, LLIRGraph, NodeIndex, Runtime,
 };
-use luminal::utils::flatten_strides;
+use luminal::{op::Output, utils::flatten_strides};
 use prost::Message as _;
 use rustc_hash::{FxHashMap, FxHashSet};
 use safetensors::SafeTensors;
@@ -123,19 +123,33 @@ impl CudaRuntime {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn dtoh_outputs(&self) -> Vec<Vec<f32>> {
-        self.llir_graph
-            .externals(Direction::Outgoing)
-            .sorted()
-            .map(|n| {
-                self.cuda_stream
-                    .memcpy_dtov(&self.buffers[&n])
-                    .unwrap()
-                    .chunks_exact(4)
-                    .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect_vec()
+    pub fn get_f32(&self, id: NodeIndex) -> Vec<f32> {
+        let output_id = self
+            .llir_graph
+            .node_indices()
+            .find(|n| {
+                if let Some(Output { node }) = self.llir_graph[*n].to_op::<Output>() {
+                    *node == id.index()
+                } else {
+                    false
+                }
             })
-            .collect()
+            .expect("Cannot find output tensor!");
+        let data_id = self
+            .llir_graph
+            .neighbors_directed(output_id, Direction::Incoming)
+            .next()
+            .unwrap();
+        self.cuda_stream
+            .memcpy_dtov(
+                self.buffers
+                    .get(&data_id)
+                    .expect("Cannot find tensor in runtime!"),
+            )
+            .unwrap()
+            .chunks_exact(4)
+            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect_vec()
     }
 }
 
