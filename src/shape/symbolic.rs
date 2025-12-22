@@ -177,6 +177,8 @@ impl Term {
             Term::Max => "MMax",
             Term::Min => "MMin",
             Term::CeilDiv => "MCeilDiv",
+            Term::Gte => "MGte",
+            Term::Lt => "MLt",
             _ => panic!("egglog doesn't implement {self:?}"),
         }
         .to_string()

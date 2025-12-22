@@ -223,32 +223,40 @@ impl GraphTensor {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use crate::{
         prelude::*,
         tests::{assert_close, random_vec},
     };
     use candle_core::{Device, Tensor};
     use candle_nn::ops::softmax;
+    use itertools::Itertools;
 
-    const N_ELEMENTS: usize = 27;
-
-    fn test_unary(func: fn(GraphTensor) -> GraphTensor, ref_func: fn(Tensor, &Device) -> Tensor) {
+    pub fn test_unary(
+        shape: impl ToShape,
+        func: fn(GraphTensor) -> GraphTensor,
+        ref_func: fn(Tensor) -> Tensor,
+    ) {
+        let shape = shape
+            .to_shape()
+            .into_iter()
+            .map(|e| e.to_usize().unwrap())
+            .collect_vec();
         let mut cx = Graph::new();
-        let a = cx.tensor(N_ELEMENTS);
+        let a = cx.tensor(shape.clone());
         let b = func(a).output();
 
         cx.build_search_space::<NativeRuntime>();
         let mut rt = cx.search(NativeRuntime::default(), 1);
 
-        let v = random_vec(N_ELEMENTS);
+        let v = random_vec(shape.iter().copied().product());
         rt.set_data(a.id, v.clone().into());
         rt.execute(&cx.dyn_map);
 
         // Reference
         let device = Device::Cpu;
-        let ref_a = Tensor::new(v, &device).unwrap();
-        let ref_b = ref_func(ref_a, &device);
+        let ref_a = Tensor::new(v, &device).unwrap().reshape(shape).unwrap();
+        let ref_b = ref_func(ref_a).flatten_all().unwrap();
 
         // need to assert close because some unaries (exp and log) are (good) approximations
         assert_close(rt.get_f32(b.id), &ref_b.to_vec1::<f32>().unwrap())
@@ -256,62 +264,63 @@ mod tests {
 
     #[test]
     fn test_exp() {
-        test_unary(|a| a.exp(), |a, _| a.exp().unwrap());
+        test_unary(27, |a| a.exp(), |a| a.exp().unwrap());
     }
     #[test]
     fn test_log() {
-        test_unary(|a| a.log(), |a, _| a.log().unwrap());
+        test_unary(27, |a| a.log(), |a| a.log().unwrap());
     }
     #[test]
     fn test_sin() {
-        test_unary(|a| a.sin(), |a, _| a.sin().unwrap());
+        test_unary(27, |a| a.sin(), |a| a.sin().unwrap());
     }
     #[test]
     fn test_cos() {
-        test_unary(|a| a.cos(), |a, _| a.cos().unwrap());
+        test_unary(27, |a| a.cos(), |a| a.cos().unwrap());
     }
     #[test]
     fn test_activations() {
-        test_unary(|a| a.relu(), |a, _| a.relu().unwrap());
-        test_unary(|a| a.gelu(), |a, _| a.gelu().unwrap());
-        test_unary(|a| a.swish(), |a, _| a.silu().unwrap());
-        test_unary(|a| a.tanh(), |a, _| a.tanh().unwrap());
+        test_unary(27, |a| a.relu(), |a| a.relu().unwrap());
+        test_unary(27, |a| a.gelu(), |a| a.gelu().unwrap());
+        test_unary(27, |a| a.swish(), |a| a.silu().unwrap());
+        test_unary(27, |a| a.tanh(), |a| a.tanh().unwrap());
     }
     #[test]
     fn test_recip() {
-        test_unary(|a| a.reciprocal(), |a, _| a.recip().unwrap());
+        test_unary(27, |a| a.reciprocal(), |a| a.recip().unwrap());
     }
     #[test]
     fn test_sqrt() {
-        test_unary(|a| a.sqrt(), |a, _| a.sqrt().unwrap());
+        test_unary(27, |a| a.sqrt(), |a| a.sqrt().unwrap());
     }
     #[test]
     fn test_square() {
-        test_unary(|a| a.square(), |a, _| a.powf(2.0).unwrap());
+        test_unary(27, |a| a.square(), |a| a.powf(2.0).unwrap());
     }
     #[test]
     fn test_softmax() {
-        test_unary(|a| a.softmax(0), |a, _| softmax(&a, 0).unwrap());
+        test_unary(27, |a| a.softmax(0), |a| softmax(&a, 0).unwrap());
     }
 
     #[test]
     fn test_layer_norm() {
         test_unary(
+            27,
             |a| a.layer_norm(0, 1e-5),
-            |a, dev| {
-                let meaned = (a.clone() - a.mean(0).unwrap().broadcast_as(N_ELEMENTS)).unwrap();
+            |a| {
+                let meaned = (a.clone() - a.mean(0).unwrap().broadcast_as(27)).unwrap();
                 meaned
                     .powf(2.0)
                     .unwrap()
                     .mean(0)
                     .unwrap()
-                    .add(&Tensor::new(1e-5_f32, dev).unwrap())
+                    .add(&Tensor::new(1e-5_f32, a.device()).unwrap())
                     .unwrap()
                     .sqrt()
                     .unwrap()
                     .recip()
                     .unwrap()
-                    .broadcast_as(N_ELEMENTS)
+                    .broadcast_as(27)
                     .unwrap()
                     .mul(&meaned)
                     .unwrap()

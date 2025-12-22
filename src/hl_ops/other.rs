@@ -138,72 +138,60 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    // crate::test_imports!();
-    // #[test]
-    // fn test_arange() {
-    //     let mut cx = Graph::new();
+    use crate::{prelude::*, tests::assert_close};
+    use candle_core::{Device, Tensor};
 
-    //     let arange = cx.arange(10).retrieve();
-    //     cx.execute();
+    pub fn test_init(
+        func: impl Fn(&mut Graph) -> GraphTensor,
+        ref_func: impl Fn(&Device) -> Tensor,
+    ) {
+        let mut cx = Graph::new();
+        let b = func(&mut cx).output();
 
-    //     assert_exact(&arange.data(), &[0., 1., 2., 3., 4., 5., 6., 7., 8., 9.]);
-    // }
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
 
-    // #[test]
-    // fn test_arange_from_zero() {
-    //     let mut cx = Graph::new();
+        rt.execute(&cx.dyn_map);
 
-    //     let tensor = cx.arange(5).retrieve();
-    //     cx.execute();
+        // Reference
+        let device = Device::Cpu;
+        let ref_b = ref_func(&device).flatten_all().unwrap();
 
-    //     assert_eq!(tensor.data(), vec![0., 1., 2., 3., 4.]);
-    // }
+        // need to assert close because some unaries (exp and log) are (good) approximations
+        assert_close(rt.get_f32(b.id), &ref_b.to_vec1::<f32>().unwrap())
+    }
 
-    // #[test]
-    // fn test_arange_in_range() {
-    //     let mut cx = Graph::new();
+    #[test]
+    fn test_arange() {
+        test_init(
+            |cx| cx.arange(13).cast(DType::F32) * 1.0,
+            |dev| Tensor::arange(0_f32, 13_f32, dev).unwrap(),
+        );
+        test_init(
+            |cx| cx.arange_options(-5, 25, 5).cast(DType::F32) * 1.0,
+            |dev| {
+                (Tensor::arange(-1_f32, 5_f32, dev).unwrap()
+                    * Tensor::new(5_f32, dev).unwrap().broadcast_as(6).unwrap())
+                .unwrap()
+            },
+        );
+        test_init(
+            |cx| cx.arange_options(0, 4, 1).cast(DType::F32) / 3.,
+            |dev| Tensor::new(vec![0_f32, 0.3333333333, 0.666666666, 0.99999999], dev).unwrap(),
+        );
+    }
 
-    //     let tensor = cx.arange_in_range(3, 8).retrieve();
-    //     cx.execute();
-
-    //     assert_eq!(tensor.data(), vec![3., 4., 5., 6., 7.]);
-    // }
-
-    // #[test]
-    // fn test_arange_step_simple() {
-    //     let mut cx = Graph::new();
-
-    //     let tensor = cx.arange_step(1.0, 5.0, 1.0).retrieve();
-    //     cx.execute();
-
-    //     assert_eq!(tensor.data(), vec![1.0, 2.0, 3.0, 4.0]);
-    // }
-
-    // #[test]
-    // fn test_arange_step_fractional() {
-    //     let mut cx = Graph::new();
-
-    //     let tensor = cx.arange_step(0.0, 1.0, 0.3).retrieve();
-    //     cx.execute();
-
-    //     // Should produce [0.0, 0.3, 0.6, 0.9] — note that 1.2 would be >= 1.0 so we stop before that.
-    //     let expected = &[0.0, 0.3, 0.6, 0.9];
-
-    //     // Floating point comparison with tolerance:
-    //     assert_eq!(tensor.data().len(), expected.len());
-    //     for (v, e) in tensor.data().iter().zip(expected.iter()) {
-    //         assert!((v - e).abs() < 1e-5, "Expected {e}, got {v}");
-    //     }
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "step must be positive")]
-    // fn test_arange_step_zero_step_panics() {
-    //     let mut cx = Graph::new();
-
-    //     // Should panic because step is zero
-    //     cx.arange_step(0.0, 5.0, 0.0);
-    // }
+    #[test]
+    fn test_gather() {
+        test_init(
+            |cx| {
+                cx.arange(13)
+                    .cast(DType::F32)
+                    .gather(cx.iota(Expression::from('z') * 2, 5))
+            },
+            |dev| Tensor::new(vec![0_f32, 2., 4., 6., 8.], dev).unwrap(),
+        );
+    }
 
     // #[test]
     // fn test_cumprod() {
@@ -214,31 +202,6 @@ mod tests {
     //     cx.execute();
 
     //     assert_close(&b.data(), &[3., 6., 30.]);
-    // }
-
-    // #[test]
-    // fn test_gather() {
-    //     let mut cx = Graph::new();
-
-    //     let matrix = cx.tensor((3, 2)).set(vec![1., 2., 3., 4., 5., 6.]);
-    //     let indexes = cx.tensor(2).set(vec![2., 0.]);
-    //     let result = matrix.gather(indexes).retrieve();
-
-    //     cx.execute();
-
-    //     assert_exact(&result.data(), &[5., 6., 1., 2.]);
-    // }
-
-    // #[test]
-    // fn test_dyn_arange() {
-    //     let mut cx = Graph::new();
-
-    //     let arange = cx.arange('a').retrieve();
-    //     cx.set_dyn_dim('a', 6);
-
-    //     cx.execute();
-
-    //     assert_exact(&arange.data(), &[0., 1., 2., 3., 4., 5.]);
     // }
 
     // #[test]

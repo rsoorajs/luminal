@@ -257,8 +257,9 @@ impl GraphTensor {
         let new_tensor = self.gather(self.graph().iota(index_expression, new_dims.clone()));
         // mask out padded elements
         let mut mask_expressions = vec![];
-        for (start, end) in padding {
-            mask_expressions.push(Expression::from('z').gte(start).lt(end));
+        for ((start, _), dim) in padding.into_iter().zip(self.dims()) {
+            mask_expressions
+                .push(Expression::from('z').gte(start) * Expression::from('z').lt(start + dim));
         }
         let mask_expression = flatten_strides(&new_dims, &mask_expressions);
         let mask = self.graph().iota(mask_expression, new_dims);
@@ -285,15 +286,35 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    // use dfdx::{
-    //     shapes::Rank2,
-    //     tensor::{Cpu, TensorFrom, TensorFromVec},
-    //     tensor_ops::{RealizeTo, TryConcatAlong},
-    // };
+    use crate::{hl_ops::unary::tests::test_unary, prelude::*};
+    use candle_core::IndexOp;
 
-    // crate::test_imports!();
+    #[test]
+    fn test_pad() {
+        test_unary(
+            23,
+            |a| a.pad((2, 6)) * 1.0,
+            |a| a.pad_with_zeros(0, 2, 6).unwrap(),
+        );
+    }
 
-    use crate::graph::Graph;
+    #[test]
+    fn test_slice_pad() {
+        test_unary(
+            17,
+            |a| a.slice(1..3).pad((3, 14)) * 1.0,
+            |a| a.i(1..3).unwrap().pad_with_zeros(0, 3, 14).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_transpose() {
+        test_unary(
+            (5, 10),
+            |a| a.transpose(0, 1) * 1.0,
+            |a| a.transpose(0, 1).unwrap(),
+        );
+    }
 
     #[test]
     fn test_unfold() {
@@ -327,17 +348,6 @@ mod tests {
 
     //         assert_eq!(out.dims(), &[2, 2, 1]);
     //         assert_exact(&out.data(), &[1., 2., 3., 4.]);
-    //     }
-
-    //     #[test]
-    //     #[should_panic(expected = "Shape is maxed out at 6 dimensions")]
-    //     fn test_unsqueeze_panics_when_shape_exceeds_max() {
-    //         let mut cx = Graph::new();
-
-    //         let inp = cx.tensor((2, 2, 2, 2, 2, 2)).set(vec![0.; 64]);
-    //         let _out = inp.unsqueeze(6).retrieve();
-
-    //         cx.execute();
     //     }
 
     //     #[test]

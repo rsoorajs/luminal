@@ -112,145 +112,58 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        prelude::*,
-        tests::{assert_close, random_vec},
-    };
-    use candle_core::{Device, Tensor};
+    use crate::hl_ops::binary::tests::test_binary;
 
     #[test]
     fn test_matrix_vector() {
-        let mut cx = Graph::new();
-        let a = cx.tensor(3);
-        let b = cx.tensor((3, 2));
-        let c = a.matmul(b).output();
-
-        cx.build_search_space::<NativeRuntime>();
-        let mut rt = cx.search(NativeRuntime::default(), 1);
-
-        let a_vec = random_vec(3);
-        let b_vec = random_vec(6);
-
-        rt.set_data(a.id, a_vec.clone().into());
-        rt.set_data(b.id, b_vec.clone().into());
-        rt.execute(&cx.dyn_map);
-
-        let device = Device::Cpu;
-        let ref_a = Tensor::from_vec(a_vec, (1, 3), &device).unwrap();
-        let ref_b = Tensor::from_vec(b_vec, (3, 2), &device).unwrap();
-        let ref_c = ref_a.matmul(&ref_b).unwrap().flatten_all().unwrap();
-
-        assert_close(rt.get_f32(c.id), &ref_c.to_vec1::<f32>().unwrap());
+        test_binary(
+            (1, 3),
+            (3, 2),
+            |a, b| a.matmul(b),
+            |a, b| a.matmul(&b).unwrap(),
+        );
     }
 
     #[test]
     fn test_matmul() {
-        let mut cx = Graph::new();
-        let a = cx.tensor((2, 3));
-        let b = cx.tensor((3, 3));
-        let c = a.matmul(b).output();
-
-        cx.build_search_space::<NativeRuntime>();
-        let mut rt = cx.search(NativeRuntime::default(), 1);
-
-        let a_data = random_vec(6);
-        let b_data = random_vec(9);
-
-        rt.set_data(a.id, a_data.clone().into());
-        rt.set_data(b.id, b_data.clone().into());
-        rt.execute(&cx.dyn_map);
-
-        let device = Device::Cpu;
-        let ref_a = Tensor::from_vec(a_data, (2, 3), &device).unwrap();
-        let ref_b = Tensor::from_vec(b_data, (3, 3), &device).unwrap();
-        let ref_c = ref_a.matmul(&ref_b).unwrap().flatten_all().unwrap();
-
-        assert_close(rt.get_f32(c.id), &ref_c.to_vec1::<f32>().unwrap());
+        test_binary(
+            (2, 3),
+            (3, 3),
+            |a, b| a.matmul(b),
+            |a, b| a.matmul(&b).unwrap(),
+        );
     }
 
     #[test]
     fn test_batch_matmul() {
-        let mut cx = Graph::new();
-        let a = cx.tensor((2, 3, 2));
-        let b = cx.tensor((2, 4));
-        let c = a.matmul(b).output();
-
-        cx.build_search_space::<NativeRuntime>();
-        let mut rt = cx.search(NativeRuntime::default(), 1);
-
-        let a_data = random_vec(12);
-        let b_data = random_vec(8);
-
-        rt.set_data(a.id, a_data.clone().into());
-        rt.set_data(b.id, b_data.clone().into());
-        rt.execute(&cx.dyn_map);
-
-        let device = Device::Cpu;
-        let ref_a = Tensor::from_vec(a_data, (2, 3, 2), &device).unwrap();
-        let ref_b = Tensor::from_vec(b_data, (2, 4), &device).unwrap();
-        let ref_c = ref_a
-            .reshape((6, 2))
-            .unwrap()
-            .matmul(&ref_b)
-            .unwrap()
-            .reshape((2, 3, 4))
-            .unwrap()
-            .flatten_all()
-            .unwrap();
-
-        assert_close(rt.get_f32(c.id), &ref_c.to_vec1::<f32>().unwrap());
+        test_binary(
+            (2, 3, 2),
+            (2, 4),
+            |a, b| a.matmul(b),
+            |a, b| {
+                a.reshape((6, 2))
+                    .unwrap()
+                    .matmul(&b)
+                    .unwrap()
+                    .reshape((2, 3, 4))
+                    .unwrap()
+            },
+        );
     }
 
     #[test]
     fn test_batch_batch_matmul() {
-        let mut cx = Graph::new();
-        let a = cx.tensor((1, 2, 3));
-        let b = cx.tensor((1, 2, 3));
-        let c = a.matmul(b.permute((0, 2, 1))).output();
-
-        cx.build_search_space::<NativeRuntime>();
-        let mut rt = cx.search(NativeRuntime::default(), 1);
-
-        let a_data = random_vec(6);
-        let b_data = random_vec(6);
-
-        rt.set_data(a.id, a_data.clone().into());
-        rt.set_data(b.id, b_data.clone().into());
-        rt.execute(&cx.dyn_map);
-
-        let device = Device::Cpu;
-        let ref_a = Tensor::from_vec(a_data, (1, 2, 3), &device).unwrap();
-        let ref_b = Tensor::from_vec(b_data, (1, 2, 3), &device)
-            .unwrap()
-            .permute((0, 2, 1))
-            .unwrap();
-        let ref_c = ref_a.matmul(&ref_b).unwrap().flatten_all().unwrap();
-
-        assert_close(rt.get_f32(c.id), &ref_c.to_vec1::<f32>().unwrap());
-    }
-
-    #[test]
-    fn test_batch_batch_matmul2() {
-        let mut cx = Graph::new();
-        let a = cx.tensor((1, 2, 2));
-        let b = cx.tensor((1, 2, 3));
-        let c = a.matmul(b).output();
-
-        cx.build_search_space::<NativeRuntime>();
-        let mut rt = cx.search(NativeRuntime::default(), 1);
-
-        let a_data = random_vec(4);
-        let b_data = random_vec(6);
-
-        rt.set_data(a.id, a_data.clone().into());
-        rt.set_data(b.id, b_data.clone().into());
-        rt.execute(&cx.dyn_map);
-
-        let device = Device::Cpu;
-        let ref_a = Tensor::from_vec(a_data, (1, 2, 2), &device).unwrap();
-        let ref_b = Tensor::from_vec(b_data, (1, 2, 3), &device).unwrap();
-        let ref_c = ref_a.matmul(&ref_b).unwrap().flatten_all().unwrap();
-
-        assert_close(rt.get_f32(c.id), &ref_c.to_vec1::<f32>().unwrap());
+        test_binary(
+            (1, 2, 3),
+            (1, 2, 3),
+            |a, b| a.matmul(b.permute((0, 2, 1))),
+            |a, b| a.matmul(&b.permute((0, 2, 1)).unwrap()).unwrap(),
+        );
+        test_binary(
+            (1, 2, 2),
+            (1, 2, 3),
+            |a, b| a.matmul(b),
+            |a, b| a.matmul(&b).unwrap(),
+        );
     }
 }

@@ -1069,18 +1069,20 @@ impl NativeOp for LessThan {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Gather {
-    shape: Vec<Expression>,
-    a_strides: Vec<Expression>,
-    b_strides: Vec<Expression>,
+    index_shape: Vec<Expression>,
+    data_shape: Vec<Expression>,
+    index_strides: Vec<Expression>,
+    data_strides: Vec<Expression>,
 }
 impl HLIROp for Gather {
     fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
-            "(Gather {} {} {} {} {})",
-            shape_to_egglog(&inputs[0].2.dims),
+            "(Gather {} {} {} {} {} {})",
             inputs[0].1,
+            shape_to_egglog(&inputs[0].2.dims),
             strides_to_egglog(&inputs[0].2.strides),
             inputs[1].1,
+            shape_to_egglog(&inputs[1].2.dims),
             strides_to_egglog(&inputs[1].2.strides),
         )
     }
@@ -1090,7 +1092,7 @@ impl EgglogOp for Gather {
     fn term(&self) -> (String, Vec<OpParam>) {
         (
             "Gather".to_string(),
-            vec![EList, Input, EList, Input, EList],
+            vec![Input, EList, EList, Input, EList, EList],
         )
     }
     fn cleanup(&self) -> bool {
@@ -1099,7 +1101,7 @@ impl EgglogOp for Gather {
     fn rewrites(&self) -> Vec<String> {
         vec![
             "(rule
-           ((= ?e (Gather ?shape ?indexes ?a ?data ?b)) (= ?dty (dtype ?data)))
+           ((= ?e (Gather ?indexes ?index_shape ?index_stride ?data ?data_shape ?data_stride)) (= ?dty (dtype ?data)))
            ((set (dtype ?e) ?dty))
         )"
             .to_string(),
@@ -1114,22 +1116,24 @@ impl EgglogOp for Gather {
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
-                shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                a_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                b_strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
+                index_shape: extract_expr_list(egraph, children[1], list_cache, expr_cache)
+                    .unwrap(),
+                index_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache)
+                    .unwrap(),
+                data_shape: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
+                data_strides: extract_expr_list(egraph, children[5], list_cache, expr_cache)
+                    .unwrap(),
             })),
-            vec![children[1], children[3]],
+            vec![children[0], children[3]],
         )
     }
 }
 impl NativeOp for Gather {
     fn execute(&self, inputs: Vec<&NativeData>, dyn_map: &FxHashMap<char, usize>) -> NativeData {
-        let (data, indexes) = (inputs[0], inputs[1]);
-        let (data_ind, indexes_ind) = (
-            StridedIterator::new(&self.shape, &self.a_strides, dyn_map),
-            StridedIterator::new(&self.shape, &self.b_strides, dyn_map),
-        );
-        let data_ind = data_ind.collect_vec();
+        let (indexes, data) = (inputs[0], inputs[1]);
+        let indexes_ind = StridedIterator::new(&self.index_shape, &self.index_strides, dyn_map);
+        let data_ind =
+            StridedIterator::new(&self.data_shape, &self.data_strides, dyn_map).collect_vec();
         let NativeData::Int(indexes) = indexes else {
             panic!("indexes must be int!")
         };
@@ -1382,6 +1386,7 @@ pub trait NativeOp: Debug + AsAny {
     fn execute(&self, inputs: Vec<&NativeData>, dyn_map: &FxHashMap<char, usize>) -> NativeData;
 }
 
+#[derive(Debug)]
 pub enum NativeData {
     F32(Vec<f32>),
     F16(Vec<f16>),
