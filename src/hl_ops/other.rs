@@ -177,6 +177,7 @@ mod tests {
         );
         test_init(
             |cx| cx.arange_options(0, 4, 1).cast(DType::F32) / 3.,
+            #[allow(clippy::excessive_precision)]
             |dev| Tensor::new(vec![0_f32, 0.3333333333, 0.666666666, 0.99999999], dev).unwrap(),
         );
     }

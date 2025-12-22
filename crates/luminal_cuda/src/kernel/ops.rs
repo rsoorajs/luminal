@@ -306,7 +306,7 @@ impl EgglogOp for KernelGather {
         vec!["
 (rule
     (
-        (= ?a (Gather ?out_shape ?indexes ?index_strides ?data ?data_strides))
+        (= ?a (Gather ?indexes ?out_shape ?index_strides ?data ?data_shape ?data_strides))
         (= ?dty (dtype ?data))
     )
     (
