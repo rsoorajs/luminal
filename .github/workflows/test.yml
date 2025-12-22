@@ -41,7 +41,8 @@ jobs:
               run: cargo fmt --all --check
     gpu_test:
         name: Cuda Unit Tests
-        runs-on: cuda_t4_runner_1
+        runs-on:
+            labels: cuda_t4_runner_1
         timeout-minutes: 30
 
         steps:
