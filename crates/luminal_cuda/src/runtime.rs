@@ -2,11 +2,13 @@ use crate::{
     block::{BlockOp, IntoBlockOp},
     kernel::KernelOp,
 };
-use cudarc::driver::{
-    CudaContext, CudaFunction, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr,
-    LaunchConfig, PushKernelArg, ValidAsZeroBits,
+use cudarc::{
+    driver::{
+        CudaContext, CudaFunction, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr,
+        LaunchConfig, PushKernelArg, ValidAsZeroBits,
+    },
+    nvrtc::{compile_ptx_with_opts, CompileOptions},
 };
-use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
 use luminal::op::Output;

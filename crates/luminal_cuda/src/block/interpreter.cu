@@ -1,4 +1,4 @@
-#include <device_atomic_functions.h>
+#include <device_atomic_functions.h> // need this for nanosleep
 enum OpCode {
   //%extra_op_codes%
 };

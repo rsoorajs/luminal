@@ -124,11 +124,11 @@
         (= ?n_elems (n_elements ?other))
     )
     (
-        (union ?e (ECons (MMul (MIter) ?n_elems) (RowMajor ?other)))
+        (union ?e (ECons ?n_elems (RowMajor ?other)))
     )
     :ruleset expr
 )
-(rewrite (RowMajor (ECons ?dim (ENil))) (ECons (MIter) (ENil)) :ruleset expr)
+(rewrite (RowMajor (ECons ?dim (ENil))) (ECons (MNum 1) (ENil)) :ruleset expr)
 
 (rewrite (MReplaceList (ECons ?expr ?list) ?from ?to) (ECons (MReplace ?expr ?from ?to) (MReplaceList ?list ?from ?to)) :ruleset expr)
 (rule
