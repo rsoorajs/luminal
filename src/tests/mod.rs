@@ -77,6 +77,26 @@ fn test_shapes() {
     assert_exact(rt.get_f32(b.id), &[1., 3., 2., 4.]);
 }
 
+#[test]
+fn test_top_k_filter() {
+    let mut cx = Graph::new();
+    let a = cx.tensor((2, 6));
+    let kth_largest = a.gather(a.topk_indexes(3, 1).slice((.., 2..3)).squeeze(1));
+    let mask = a.ge(kth_largest.expand_dim(1, 6));
+    let filtered = (a * mask).output();
+    cx.build_search_space::<NativeRuntime>();
+    let mut rt = cx.search(NativeRuntime::default(), 1);
+    rt.set_data(
+        a.id,
+        vec![1.0, 2.0, 3.0, 4.0, 5., 6., 1.0, 2.0, 3.0, 4.0, 5., 6.].into(),
+    );
+    rt.execute(&cx.dyn_map);
+    assert_eq!(
+        *rt.get_f32(filtered.id),
+        vec![0.0, 0.0, 0.0, 4.0, 5.0, 6.0, 0.0, 0.0, 0.0, 4.0, 5.0, 6.0]
+    );
+}
+
 /// Ensure two arrays are nearly equal
 pub fn assert_close(a_vec: &[f32], b_vec: &[f32]) {
     assert_close_precision(a_vec, b_vec, 1e-3);

@@ -233,7 +233,7 @@ impl GraphTensor {
         let mut padding = vec![(Expression::from(0), Expression::from(0)); n_dims];
         for &ax in &axes {
             let orig_length = self.dims()[ax];
-            padding[ax] = ((orig_length - 1).into(), 0.into());
+            padding[ax] = (orig_length - 1, 0.into());
             kernel[ax] = orig_length;
         }
         self = self.pad(padding);
@@ -437,9 +437,7 @@ pub(super) mod tests {
                 let data = a.flatten_all().unwrap().to_vec1::<f32>().unwrap();
                 let topk = data
                     .chunks_exact(9)
-                    .into_iter()
                     .flat_map(|c| topk_sorted_indices(c, 5))
-                    .into_iter()
                     .map(|i| i as f32)
                     .collect_vec();
                 Tensor::new(topk, a.device()).unwrap()

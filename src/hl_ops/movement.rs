@@ -87,6 +87,7 @@ impl GraphTensor {
     /// Given a tensor of non-repeating indexes along a dimension, generate an inverse permutation
     /// x = [3, 2, 4, 1, 5, 0]
     /// inv_perm(x) = [5, 3, 1, 0, 2, 4]
+    #[allow(clippy::needless_range_loop)]
     pub fn inverse_permutation(self, axis: usize) -> GraphTensor {
         // TODO: this is super inefficient because it requires materializing a large (n^2) one-hot tensor
         assert_eq!(self.dtype, DType::Int);
@@ -367,6 +368,7 @@ mod tests {
     #[test]
     fn test_unfold() {
         // Need all this code because candle doesnt do unfold
+        #[allow(clippy::too_many_arguments)]
         pub fn unfold_nd_f32(
             x: &[f32],
             shape: &[usize],
