@@ -47,7 +47,7 @@ jobs:
         steps:
             - uses: actions/checkout@v4
             - name: GPU sanity check
-              run: sudo apt-get update; sudo apt-get install -y cuda-nvrtc-12-8; sudo apt install tree; tree /usr/local -L 2
+              run: sudo apt-get update; sudo apt-get install -y cuda-nvrtc-12-8; sudo apt install tree; tree /usr/local/cuda-12.8 -L 3
             - name: GPU sanity check 1
               run: sudo apt install tree; ls /usr/local; ls /usr/local/lib; tree /usr/lib -L 2
             - name: Run CUDA crate tests
