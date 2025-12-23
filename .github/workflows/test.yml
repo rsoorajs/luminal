@@ -51,4 +51,4 @@ jobs:
             - name: GPU sanity check 1
               run: sudo apt install tree; ls /usr/local; ls /usr/local/lib; tree /usr/lib -L 2
             - name: Run CUDA crate tests
-              run: export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64; curl https://sh.rustup.rs -sSf | sh -s -- -y && source "$HOME/.cargo/env"; sudo apt-get update && sudo apt-get install -y protobuf-compiler; rustup update; cargo test -p luminal_cuda --verbose
+              run: export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH; curl https://sh.rustup.rs -sSf | sh -s -- -y && source "$HOME/.cargo/env"; sudo apt-get update && sudo apt-get install -y protobuf-compiler; rustup update; cargo test -p luminal_cuda --verbose
