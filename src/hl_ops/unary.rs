@@ -1,3 +1,5 @@
+use itertools::Itertools;
+
 use crate::{op, prelude::*};
 use std::ops::{Add, Mul, Neg};
 
@@ -135,20 +137,15 @@ impl GraphTensor {
         m - m.exp().sum(axes.to_axes()).log().expand(m.shape)
     }
 
-    // /// Get the indicies of the max elements along the last axis
-    // pub fn argmax(self) -> GraphTensor {
-    //     // Get one-hot along last dimension
-    //     let x_equal = self.eq(self.max(self.shape.len() - 1).expand(self.shape));
-    //     // Create index arange for last dimension
-    //     let r = self
-    //         .graph()
-    //         .constant(1.)
-    //         .expand(self.shape.dims.last().unwrap())
-    //         .cumsum_last_dim()
-    //         - 1.;
-    //     // Multiply one-hot by expanded index arange
-    //     (x_equal * r.expand(self.shape)).max(self.shape.len() - 1)
-    // }
+    /// Get the indicies of the max elements along an axis
+    pub fn argmax(self, axis: usize) -> GraphTensor {
+        // Get one-hot along last dimension
+        let x_equal = self.eq(self.max(axis).expand(self.shape));
+        // Create index arange for last dimension
+        let r = self.graph().arange(self.dims()[axis]).cast(self.dtype);
+        // Multiply one-hot by expanded index arange
+        (x_equal * r.expand(self.shape)).max(axis).cast(DType::Int)
+    }
 
     /// Take the absolute value
     pub fn abs(self) -> GraphTensor {
@@ -220,10 +217,58 @@ impl GraphTensor {
     pub fn topk_indexes(self, k: usize, axis: usize) -> GraphTensor {
         self.argsort_indexes(axis, true).slice_along(..k, axis)
     }
+
+    /// Apply a cumulative reduction operation along dimensions
+    ///
+    /// See `cumsum` or `cummax` for usage examples.
+    pub fn cumop(
+        mut self,
+        axes: impl ToAxes,
+        op: impl Fn(GraphTensor, &[usize]) -> GraphTensor,
+    ) -> Self {
+        let n_dims = self.shape.len();
+        let axes = axes.to_axes();
+        // Pad out length
+        let mut kernel = vec![1.into(); n_dims];
+        let mut padding = vec![(Expression::from(0), Expression::from(0)); n_dims];
+        for &ax in &axes {
+            let orig_length = self.dims()[ax];
+            padding[ax] = ((orig_length - 1).into(), 0.into());
+            kernel[ax] = orig_length;
+        }
+        self = self.pad(padding);
+        // Unfold
+        self = self.unfold(kernel, vec![1; n_dims], vec![1; n_dims]);
+        // Remove non-cumulative dimensions
+        for i in (0..n_dims).rev() {
+            if !axes.contains(&i) {
+                self = self.squeeze(n_dims + i);
+            }
+        }
+        // apply operation along cumulative dimensions
+        op(self, &(0..axes.len()).map(|ax| ax + n_dims).collect_vec())
+    }
+
+    /// Apply a cumulative sum along dimensions
+    pub fn cumsum(self, axes: impl ToAxes) -> Self {
+        self.cumop(axes, |t, axes| t.sum(axes))
+    }
+
+    /// Apply a cumulative max along dimensions
+    pub fn cummax(self, axes: impl ToAxes) -> Self {
+        self.cumop(axes, |t, axes| t.max(axes))
+    }
+
+    /// Apply a cumulative product along dimensions
+    pub fn cumprod(self, axes: impl ToAxes) -> Self {
+        self.cumop(axes, |t, axes| t.prod(axes))
+    }
 }
 
 #[cfg(test)]
 pub(super) mod tests {
+    use std::collections::BinaryHeap;
+
     use crate::{
         prelude::*,
         tests::{assert_close, random_vec},
@@ -231,6 +276,7 @@ pub(super) mod tests {
     use candle_core::{Device, Tensor};
     use candle_nn::ops::softmax;
     use itertools::Itertools;
+    use ordered_float::NotNan;
 
     pub fn test_unary(
         shape: impl ToShape,
@@ -324,6 +370,79 @@ pub(super) mod tests {
                     .unwrap()
                     .mul(&meaned)
                     .unwrap()
+            },
+        );
+    }
+    #[test]
+    fn test_cumsum() {
+        test_unary(27, |a| a.cumsum(0), |a| a.cumsum(0).unwrap());
+        test_unary((27, 63), |a| a.cumsum(1), |a| a.cumsum(1).unwrap());
+        test_unary((27, 63), |a| a.cumsum(0), |a| a.cumsum(0).unwrap());
+    }
+    #[test]
+    fn test_argmax() {
+        test_unary(
+            (9, 27),
+            |a| a.argmax(1).cast(DType::F32),
+            |a| {
+                a.argmax(1)
+                    .unwrap()
+                    .to_dtype(candle_core::DType::F32)
+                    .unwrap()
+            },
+        );
+        test_unary(
+            (9, 27),
+            |a| a.argmax(0).cast(DType::F32),
+            |a| {
+                a.argmax(0)
+                    .unwrap()
+                    .to_dtype(candle_core::DType::F32)
+                    .unwrap()
+            },
+        );
+    }
+    #[test]
+    fn test_topk() {
+        pub fn topk_sorted_indices(x: &[f32], k: usize) -> Vec<usize> {
+            if k == 0 {
+                return Vec::new();
+            }
+
+            let mut heap: BinaryHeap<std::cmp::Reverse<(NotNan<f32>, usize)>> =
+                BinaryHeap::with_capacity(k);
+
+            for (i, &v) in x.iter().enumerate() {
+                let v = NotNan::new(v).expect("NaN encountered in topk");
+                if heap.len() < k {
+                    heap.push(std::cmp::Reverse((v, i)));
+                } else if let Some(&std::cmp::Reverse((min_v, _))) = heap.peek() {
+                    if v > min_v {
+                        heap.pop();
+                        heap.push(std::cmp::Reverse((v, i)));
+                    }
+                }
+            }
+
+            let mut out: Vec<(NotNan<f32>, usize)> =
+                heap.into_iter().map(|std::cmp::Reverse(t)| t).collect();
+
+            out.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            out.into_iter().map(|(_, i)| i).collect()
+        }
+        test_unary(
+            (10, 9),
+            |a| a.topk_indexes(5, 1).cast(DType::F32) * 1.0,
+            |a| {
+                let data = a.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+                let topk = data
+                    .chunks_exact(9)
+                    .into_iter()
+                    .flat_map(|c| topk_sorted_indices(c, 5))
+                    .into_iter()
+                    .map(|i| i as f32)
+                    .collect_vec();
+                Tensor::new(topk, a.device()).unwrap()
             },
         );
     }

@@ -1,46 +1,5 @@
 use crate::{op::Constant, prelude::*};
 
-// impl GraphTensor {
-//     /// Cumulative sum last dimension
-//     pub fn cumsum_last_dim(mut self) -> Self {
-//         let axis = self.shape.len() - 1;
-//         if !self.shape.is_contiguous() {
-//             self = self.contiguous();
-//         }
-//         // Pad out length
-//         let orig_length = self.dims()[axis];
-//         self = self.pad_along(orig_length - 1, 0, axis).contiguous();
-
-//         // Pool
-//         self = self.pool_last_dim(orig_length, 1, 1);
-
-//         // Sum Reduce along new dimension
-//         self.sum(axis + 1)
-//     }
-
-//     /// Cumulative max last dimension
-//     pub fn cummax_last_dim(mut self) -> Self {
-//         let axis = self.shape.len() - 1;
-//         if !self.shape.is_contiguous() {
-//             self = self.contiguous();
-//         }
-//         // Pad out length
-//         let orig_length = self.dims()[axis];
-//         self.shape.padding[self.shape.indexes[axis]].0 = orig_length - 1;
-//         self = self.contiguous();
-
-//         // Pool
-//         self = self.pool_last_dim(orig_length, 1, 1);
-//         // Max Reduce along new dimension
-//         self.max(axis + 1)
-//     }
-
-//     /// Cumulative product last dimension
-//     pub fn cumprod_last_dim(self) -> Self {
-//         self.log().cumsum_last_dim().exp()
-//     }
-// }
-
 impl Graph {
     /// A scalar expression constant
     pub fn constant(&mut self, i: impl Into<Expression>) -> GraphTensor {
@@ -90,27 +49,25 @@ impl Graph {
         self.iota((Expression::from('z') * step) + start, (end - start) / step)
     }
 
-    // /// Lower left-hand triangle of 1s. Currently required to be square
-    // ///
-    // /// Same API as https://pytorch.org/docs/stable/generated/torch.tril
-    // pub fn tril(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
-    //     let size = size.into();
-    //     let horizontal = self.arange(size).expand_dim(0, size);
-    //     let vertical = self.arange(size).expand_dim(1, size);
+    /// Lower left-hand triangle of 1s. Currently required to be square
+    ///
+    /// Same API as https://pytorch.org/docs/stable/generated/torch.tril
+    pub fn tril(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
+        let size = size.into();
+        let horizontal = self.arange(size).expand_dim(0, size);
+        let vertical = self.arange(size).expand_dim(1, size);
+        (horizontal - (diagonal as f32 + 1.)).lt(vertical)
+    }
 
-    //     (horizontal - (diagonal as f32 + 1.)).lt(vertical)
-    // }
-
-    // /// Upper right-hand triangle of 1s
-    // ///
-    // /// Same API as https://pytorch.org/docs/stable/generated/torch.triu
-    // pub fn triu(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
-    //     let size = size.into();
-    //     let horizontal = self.arange(size).expand_dim(0, size).contiguous();
-    //     let vertical = self.arange(size).expand_dim(1, size).contiguous();
-
-    //     (horizontal - (diagonal as f32 - 1.)).gt(vertical)
-    // }
+    /// Upper right-hand triangle of 1s
+    ///
+    /// Same API as https://pytorch.org/docs/stable/generated/torch.triu
+    pub fn triu(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
+        let size = size.into();
+        let horizontal = self.arange(size).expand_dim(0, size);
+        let vertical = self.arange(size).expand_dim(1, size);
+        (horizontal - (diagonal as f32 - 1.)).gt(vertical)
+    }
 }
 
 impl GraphTensor {
@@ -194,70 +151,15 @@ mod tests {
         );
     }
 
-    // #[test]
-    // fn test_cumprod() {
-    //     let mut cx = Graph::new();
-
-    //     let a = cx.tensor(3).set(vec![3., 2., 5.]);
-    //     let b = a.cumprod_last_dim().retrieve();
-    //     cx.execute();
-
-    //     assert_close(&b.data(), &[3., 6., 30.]);
-    // }
-
-    // #[test]
-    // fn test_tril() {
-    //     let mut cx = Graph::new();
-
-    //     let triangle = cx.tril(5, 1).retrieve();
-
-    //     cx.execute();
-
-    //     assert_exact(
-    //         &triangle.data(),
-    //         &[
-    //             [1.00, 1.00, 0.00, 0.00, 0.00],
-    //             [1.00, 1.00, 1.00, 0.00, 0.00],
-    //             [1.00, 1.00, 1.00, 1.00, 0.00],
-    //             [1.00, 1.00, 1.00, 1.00, 1.00],
-    //             [1.00, 1.00, 1.00, 1.00, 1.00],
-    //         ]
-    //         .into_iter()
-    //         .flatten()
-    //         .collect::<Vec<_>>(),
-    //     );
-    // }
-
-    // #[test]
-    // fn test_triu() {
-    //     let mut cx = Graph::new();
-
-    //     let a = cx.triu(3, -1).retrieve();
-    //     let b = cx.triu(3, 0).retrieve();
-    //     let c = cx.triu(3, 1).retrieve();
-
-    //     cx.execute();
-
-    //     assert_exact(
-    //         &a.data(),
-    //         &[[1.00, 1.00, 1.00], [1.00, 1.00, 1.00], [0.00, 1.00, 1.00]]
-    //             .into_iter()
-    //             .flatten()
-    //             .collect::<Vec<_>>(),
-    //     );
-    //     assert_exact(
-    //         &b.data(),
-    //         &[[1.00, 1.00, 1.00], [0.00, 1.00, 1.00], [0.00, 0.00, 1.00]]
-    //             .into_iter()
-    //             .flatten()
-    //             .collect::<Vec<_>>(),
-    //     );
-    //     assert_exact(
-    //         &c.data(),
-    //         &[[0.00, 1.00, 1.00], [0.00, 0.00, 1.00], [0.00, 0.00, 0.00]]
-    //             .into_iter()
-    //             .flatten()
-    //             .collect::<Vec<_>>(),
-    //     );
-    // }
+    #[test]
+    fn test_triangle_mask() {
+        test_init(
+            |cx| cx.tril(10, 0).cast(DType::F32),
+            |dev| Tensor::tril2(10, candle_core::DType::F32, dev).unwrap(),
+        );
+        test_init(
+            |cx| cx.triu(43, 0).cast(DType::F32),
+            |dev| Tensor::triu2(43, candle_core::DType::F32, dev).unwrap(),
+        );
+    }
 }

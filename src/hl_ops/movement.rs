@@ -53,9 +53,19 @@ impl GraphTensor {
 
     /// add a new dimension of size 1 at the specified place
     pub fn unsqueeze(mut self, dim: usize) -> GraphTensor {
-        // Insert contiguous call
         assert!(self.shape.len() < 10, "Shape is maxed out at 10 dimensions");
         self.shape.expand_dim(dim, 1);
+        self
+    }
+
+    /// remove a dimension of size 1
+    pub fn squeeze(mut self, axis: usize) -> GraphTensor {
+        assert_eq!(
+            self.dims()[axis],
+            Expression::from(1),
+            "Only dimensions of size 1 can be squeezed!"
+        );
+        self.shape.remove_dim(axis);
         self
     }
 
@@ -78,18 +88,32 @@ impl GraphTensor {
     /// x = [3, 2, 4, 1, 5, 0]
     /// inv_perm(x) = [5, 3, 1, 0, 2, 4]
     pub fn inverse_permutation(self, axis: usize) -> GraphTensor {
-        // TODO: this is very inefficient because we need to do O(n^2) comparisons and allocations for the one-hot and then sum reduce. Need a better way!
-        let ax_size = self.dims()[axis];
-        let mut arange = self.graph().arange(ax_size);
+        // TODO: this is super inefficient because it requires materializing a large (n^2) one-hot tensor
+        assert_eq!(self.dtype, DType::Int);
+        let dims = self.dims();
+        let ax_size = dims[axis];
+        let mut dims2 = dims.clone();
+        dims2.insert(axis, ax_size);
+        // candidate: varies along candidate dim (axis), broadcast elsewhere.
+        let mut candidate = self.graph().arange(ax_size);
         for i in 0..axis {
-            arange = arange.expand_dim(i, self.dims()[i]);
+            candidate = candidate.expand_dim(i, dims2[i]);
         }
-        for i in axis + 1..self.dims().len() {
-            arange = arange.expand_dim(i, self.dims()[i]);
+        for i in axis + 1..dims2.len() {
+            candidate = candidate.expand_dim(i, dims2[i]);
         }
-        arange = arange.expand_dim(axis + 1, ax_size);
-        let one_hot = self.expand_dim(axis + 1, ax_size).eq(arange);
-        (one_hot * arange).sum(axis + 1)
+        // position: varies along position dim (axis+1), broadcast elsewhere.
+        let mut position = self.graph().arange(ax_size);
+        for i in 0..(axis + 1) {
+            position = position.expand_dim(i, dims2[i]);
+        }
+        for i in (axis + 2)..dims2.len() {
+            position = position.expand_dim(i, dims2[i]);
+        }
+        // one_hot[candidate, ..., position, ...] = (self[position, ...] == candidate)
+        let one_hot = self.expand_dim(axis, ax_size).eq(candidate);
+        // inv[candidate, ...] = Σ_pos one_hot * position
+        (one_hot * position).sum(axis + 1)
     }
 
     /// Extracts sliding local windows from an input tensor.
@@ -101,6 +125,7 @@ impl GraphTensor {
     ) -> GraphTensor {
         let (kernel, strides, dilation) =
             (kernel.to_shape(), strides.to_shape(), dilation.to_shape());
+
         assert_eq!(
             self.shape.len(),
             kernel.len(),
@@ -117,7 +142,7 @@ impl GraphTensor {
             "Dilation must be same number of dimensions as tensor!"
         );
 
-        // Compute input strides
+        // Compute input strides (row-major contiguous)
         let dims = self.dims();
         let n = dims.len();
         let mut in_strides = vec![Expression::from(1); n];
@@ -128,25 +153,27 @@ impl GraphTensor {
         }
 
         // Per-dim window counts
-        let mut win = Vec::with_capacity(dims.len());
-        for (((dim, kernel), stride), dilation) in
-            dims.into_iter().zip(&kernel).zip(&strides).zip(&dilation)
-        {
-            let effective_window = *dilation * (*kernel - 1) + 1;
-            win.push(((dim - effective_window) / stride) + 1);
+        let mut win = Vec::with_capacity(n);
+        for (((dim, k), s), d) in dims.iter().zip(&kernel).zip(&strides).zip(&dilation) {
+            let effective_window = *d * (*k - 1) + 1;
+            win.push(((*dim - effective_window) / s) + 1);
         }
 
-        // final_shape = [kernel..., win...]
-        let mut final_shape = kernel.clone();
-        final_shape.extend(win.into_iter().map(|e| e.simplify()));
+        // [win..., kernel...]
+        let mut final_shape: Vec<Expression> = win.into_iter().map(|e| e.simplify()).collect();
+        final_shape.extend(kernel.iter().copied());
 
-        // strides exprs over axes [k0..kN-1, w0..wN-1]
+        // Axis exprs must match final_shape axis order: first w axes, then k axes.
+        // idx = Σ_d (w_d * stride_d + k_d * dilation_d) * in_strides[d]
         let mut axis_exprs = Vec::with_capacity(2 * n);
-        for i in 0..n {
-            axis_exprs.push(Expression::from('z') * dilation[i] * in_strides[i]);
-        }
+
+        // w axes
         for i in 0..n {
             axis_exprs.push(Expression::from('z') * strides[i] * in_strides[i]);
+        }
+        // k axes
+        for i in 0..n {
+            axis_exprs.push(Expression::from('z') * dilation[i] * in_strides[i]);
         }
 
         let index_expression = flatten_strides(&final_shape, &axis_exprs).simplify();
@@ -266,6 +293,7 @@ impl GraphTensor {
         new_tensor * mask
     }
 
+    /// Pad along an existing dimension
     pub fn pad_along(
         self,
         left: impl Into<Expression>,
@@ -338,10 +366,170 @@ mod tests {
 
     #[test]
     fn test_unfold() {
-        let mut cx = Graph::new();
+        // Need all this code because candle doesnt do unfold
+        pub fn unfold_nd_f32(
+            x: &[f32],
+            shape: &[usize],
+            strides: &[usize],
+            kernel: &[usize],
+            step: &[usize],
+            dilation: &[usize],
+            pad_before: &[usize],
+            pad_after: &[usize],
+        ) -> Vec<f32> {
+            let n = shape.len();
+            assert!(n > 0);
+            assert_eq!(strides.len(), n);
+            assert_eq!(kernel.len(), n);
+            assert_eq!(step.len(), n);
+            assert_eq!(dilation.len(), n);
+            assert_eq!(pad_before.len(), n);
+            assert_eq!(pad_after.len(), n);
 
-        let inp = cx.tensor((5,));
-        let _pooled = inp.unfold((3,), (1,), (1,));
+            for d in 0..n {
+                assert!(kernel[d] > 0);
+                assert!(step[d] > 0);
+                assert!(dilation[d] > 0);
+                assert!(shape[d] > 0);
+            }
+
+            // Effective kernel size per dim: (K-1)*d + 1
+            let eff_kernel: Vec<usize> =
+                (0..n).map(|d| (kernel[d] - 1) * dilation[d] + 1).collect();
+
+            // Output spatial shape (number of windows) per dim
+            let mut out_shape = vec![0usize; n];
+            for d in 0..n {
+                let padded = shape[d] + pad_before[d] + pad_after[d];
+                if padded < eff_kernel[d] {
+                    return Vec::new();
+                }
+                out_shape[d] = (padded - eff_kernel[d]) / step[d] + 1;
+            }
+
+            let windows = prod(&out_shape);
+            let window_elems = prod(kernel);
+            let mut out = vec![0.0f32; windows * window_elems];
+
+            // Precompute helpers
+            let k_mul = row_major_multipliers(kernel);
+
+            // Current output window position (row-major)
+            let mut out_pos = vec![0usize; n];
+
+            for w in 0..windows {
+                if w > 0 {
+                    incr_row_major(&mut out_pos, &out_shape);
+                }
+
+                // Window start in padded coordinates
+                let start_padded: Vec<usize> = (0..n).map(|d| out_pos[d] * step[d]).collect();
+
+                let base_out = w * window_elems;
+
+                // Iterate kernel elements (flattened)
+                for ke in 0..window_elems {
+                    let k_idx = unravel_row_major(ke, kernel, &k_mul);
+
+                    let mut flat: isize = 0;
+                    let mut in_bounds = true;
+
+                    for d in 0..n {
+                        let p = start_padded[d] + k_idx[d] * dilation[d];
+                        let logical = p as isize - pad_before[d] as isize;
+
+                        if logical < 0 || logical >= shape[d] as isize {
+                            in_bounds = false;
+                            break;
+                        }
+                        flat += logical * strides[d] as isize;
+                    }
+
+                    let out_idx = base_out + ke;
+                    out[out_idx] = if in_bounds { x[flat as usize] } else { 0.0 };
+                }
+            }
+
+            out
+        }
+
+        // -------- helpers --------
+
+        fn prod(xs: &[usize]) -> usize {
+            xs.iter().copied().product()
+        }
+
+        fn row_major_multipliers(shape: &[usize]) -> Vec<usize> {
+            let n = shape.len();
+            let mut mul = vec![1usize; n];
+            let mut acc = 1usize;
+            for d in (0..n).rev() {
+                mul[d] = acc;
+                acc *= shape[d];
+            }
+            mul
+        }
+
+        fn unravel_row_major(mut idx: usize, shape: &[usize], mul: &[usize]) -> Vec<usize> {
+            let n = shape.len();
+            let mut coords = vec![0usize; n];
+            for d in 0..n {
+                coords[d] = idx / mul[d];
+                idx %= mul[d];
+            }
+            coords
+        }
+
+        fn incr_row_major(pos: &mut [usize], shape: &[usize]) {
+            for d in (0..pos.len()).rev() {
+                pos[d] += 1;
+                if pos[d] < shape[d] {
+                    return;
+                }
+                pos[d] = 0;
+            }
+        }
+
+        test_unary(
+            5,
+            |a| a.unfold(3, 1, 1),
+            |a| {
+                Tensor::new(
+                    unfold_nd_f32(
+                        &a.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                        a.dims(),
+                        a.stride(),
+                        &[3],
+                        &[1],
+                        &[1],
+                        &[0],
+                        &[0],
+                    ),
+                    a.device(),
+                )
+                .unwrap()
+            },
+        );
+        test_unary(
+            (8, 10),
+            |a| a.pad(((0, 2), (4, 4))).unfold((2, 3), (1, 2), (2, 1)),
+            |a| {
+                Tensor::new(
+                    unfold_nd_f32(
+                        &a.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                        a.dims(),
+                        a.stride(),
+                        &[2, 3],
+                        &[1, 2],
+                        &[2, 1],
+                        &[0, 4],
+                        &[2, 3],
+                    ),
+                    a.device(),
+                )
+                .unwrap()
+            },
+        );
     }
 
     #[test]

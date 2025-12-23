@@ -38,6 +38,7 @@ pretty-duration = "0.1.1"
 [dev-dependencies]
 candle-core = "0.9.1"
 candle-nn = "0.9.1"
+ordered-float = "5.1.0"
 
 [workspace]
 members = [
