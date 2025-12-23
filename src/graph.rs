@@ -357,26 +357,14 @@ fn hlir_to_egglog(graph: &Graph) -> (String, String) {
     (out.replace("(MVar \"z\")", "(MIter)"), root)
 }
 
-pub fn shape_to_egglog(shape: &[Expression]) -> String {
+pub fn elist_to_egglog(shape: &[Expression]) -> String {
     if shape.is_empty() {
         "(ENil)".to_string()
     } else {
         format!(
             "(ECons {} {})",
             shape[0].to_egglog(),
-            shape_to_egglog(&shape[1..])
-        )
-    }
-}
-
-pub fn strides_to_egglog(strides: &[Expression]) -> String {
-    if strides.is_empty() {
-        "(ENil)".to_string()
-    } else {
-        format!(
-            "(ECons {} {})",
-            strides[0].to_egglog(),
-            strides_to_egglog(&strides[1..])
+            elist_to_egglog(&shape[1..])
         )
     }
 }

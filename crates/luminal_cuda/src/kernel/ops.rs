@@ -11,7 +11,7 @@ use luminal::{
     prelude::ENodeId,
     shape::Expression,
     utils::{
-        flatten_strides, EgglogOp, LLIROp,
+        flatten_mul_strides, EgglogOp, LLIROp,
         OpParam::{self, *},
     },
 };
@@ -111,9 +111,9 @@ extern \"C\" {{
             vars.iter()
                 .map(|i| format!("__constant__ int const_{i}[1];"))
                 .join("\n"),
-            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.a_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.b_stride).to_kernel()
+            flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
+            flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
         );
         let ptx = compile_ptx(&kernel).unwrap();
         let module = ctx.load_module(ptx).unwrap();
@@ -231,9 +231,9 @@ extern \"C\" {{
             vars.iter()
                 .map(|i| format!("__constant__ int const_{i}[1];"))
                 .join("\n"),
-            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.a_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.b_stride).to_kernel()
+            flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
+            flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
         );
         let ptx = compile_ptx_with_opts(
             &kernel,
@@ -368,9 +368,9 @@ extern \"C\" {{
             vars.iter()
                 .map(|i| format!("__constant__ int const_{i}[1];"))
                 .join("\n"),
-            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.index_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.data_stride).to_kernel()
+            flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            flatten_mul_strides(&self.out_shape, &self.index_stride).to_kernel(),
+            flatten_mul_strides(&self.out_shape, &self.data_stride).to_kernel()
         );
         let ptx = compile_ptx_with_opts(
             &kernel,

@@ -415,10 +415,10 @@ impl HLIROp for Log2 {
     fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Log2 {} {} {} {})",
-            shape_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&inputs[0].2.dims),
             inputs[0].1,
-            strides_to_egglog(&inputs[0].2.strides),
-            strides_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&inputs[0].2.contiguous().strides)
         )
     }
 }
@@ -477,10 +477,10 @@ impl HLIROp for Exp2 {
     fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Exp2 {} {} {} {})",
-            shape_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&inputs[0].2.dims),
             inputs[0].1,
-            strides_to_egglog(&inputs[0].2.strides),
-            strides_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&inputs[0].2.contiguous().strides)
         )
     }
 }
@@ -539,10 +539,10 @@ impl HLIROp for Sin {
     fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Sin {} {} {} {})",
-            shape_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&inputs[0].2.dims),
             inputs[0].1,
-            strides_to_egglog(&inputs[0].2.strides),
-            strides_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&inputs[0].2.contiguous().strides)
         )
     }
 }
@@ -602,10 +602,10 @@ impl HLIROp for Recip {
     fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Recip {} {} {} {})",
-            shape_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&inputs[0].2.dims),
             inputs[0].1,
-            strides_to_egglog(&inputs[0].2.strides),
-            strides_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&inputs[0].2.contiguous().strides)
         )
     }
 }
@@ -665,10 +665,10 @@ impl HLIROp for Sqrt {
     fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Sqrt {} {} {} {})",
-            shape_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&inputs[0].2.dims),
             inputs[0].1,
-            strides_to_egglog(&inputs[0].2.strides),
-            strides_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&inputs[0].2.contiguous().strides)
         )
     }
 }
@@ -745,12 +745,12 @@ impl HLIROp for Add {
     fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Add {} {} {} {} {} {})",
-            shape_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&inputs[0].2.dims),
             inputs[0].1,
-            strides_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&inputs[0].2.strides),
             inputs[1].1,
-            strides_to_egglog(&inputs[1].2.strides),
-            strides_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&inputs[1].2.strides),
+            elist_to_egglog(&inputs[0].2.contiguous().strides)
         )
     }
 }
@@ -826,12 +826,12 @@ impl HLIROp for Mul {
     fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Mul {} {} {} {} {} {})",
-            shape_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&inputs[0].2.dims),
             inputs[0].1,
-            strides_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&inputs[0].2.strides),
             inputs[1].1,
-            strides_to_egglog(&inputs[1].2.strides),
-            strides_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&inputs[1].2.strides),
+            elist_to_egglog(&inputs[0].2.contiguous().strides)
         )
     }
 }
@@ -907,12 +907,12 @@ impl HLIROp for Mod {
     fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(Mod {} {} {} {} {} {})",
-            shape_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&inputs[0].2.dims),
             inputs[0].1,
-            strides_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&inputs[0].2.strides),
             inputs[1].1,
-            strides_to_egglog(&inputs[1].2.strides),
-            strides_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&inputs[1].2.strides),
+            elist_to_egglog(&inputs[0].2.contiguous().strides)
         )
     }
 }
@@ -988,12 +988,12 @@ impl HLIROp for LessThan {
     fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(LessThan {} {} {} {} {} {})",
-            shape_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&inputs[0].2.dims),
             inputs[0].1,
-            strides_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&inputs[0].2.strides),
             inputs[1].1,
-            strides_to_egglog(&inputs[1].2.strides),
-            strides_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&inputs[1].2.strides),
+            elist_to_egglog(&inputs[0].2.contiguous().strides)
         )
     }
 }
@@ -1079,11 +1079,11 @@ impl HLIROp for Gather {
         format!(
             "(Gather {} {} {} {} {} {})",
             inputs[0].1,
-            shape_to_egglog(&inputs[0].2.dims),
-            strides_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&inputs[0].2.strides),
             inputs[1].1,
-            shape_to_egglog(&inputs[1].2.dims),
-            strides_to_egglog(&inputs[1].2.strides),
+            elist_to_egglog(&inputs[1].2.dims),
+            elist_to_egglog(&inputs[1].2.strides),
         )
     }
 }
@@ -1182,12 +1182,12 @@ impl HLIROp for SumReduce {
         reduced_strides.remove(self.dim);
         format!(
             "(Sum {} {} {} {} {} {})",
-            shape_to_egglog(&reduced_shape.dims),
+            elist_to_egglog(&reduced_shape.dims),
             reduced_dim.to_egglog(),
             inputs[0].1,
-            strides_to_egglog(&reduced_strides),
+            elist_to_egglog(&reduced_strides),
             reduced_stride.to_egglog(),
-            strides_to_egglog(&reduced_shape.contiguous().strides)
+            elist_to_egglog(&reduced_shape.contiguous().strides)
         )
     }
 }
@@ -1234,38 +1234,24 @@ impl EgglogOp for SumReduce {
 impl NativeOp for SumReduce {
     fn execute(&self, inputs: Vec<&NativeData>, dyn_map: &FxHashMap<char, usize>) -> NativeData {
         let ind = StridedIterator::new(&self.shape, &self.strides, dyn_map);
+        let iter_stride = self.iter_stride.exec(dyn_map).unwrap();
+        let iters = self.iters.exec(dyn_map).unwrap();
         match inputs[0] {
             NativeData::F32(a) => NativeData::F32(
-                ind.map(|start| {
-                    (0..self.iters.exec(dyn_map).unwrap())
-                        .map(|i| a[start + self.iter_stride.exec_single_var(i)])
-                        .sum()
-                })
-                .collect(),
+                ind.map(|start| (0..iters).map(|i| a[start + i * iter_stride]).sum())
+                    .collect(),
             ),
             NativeData::F16(a) => NativeData::F16(
-                ind.map(|start| {
-                    (0..self.iters.exec(dyn_map).unwrap())
-                        .map(|i| a[start + self.iter_stride.exec_single_var(i)])
-                        .sum()
-                })
-                .collect(),
+                ind.map(|start| (0..iters).map(|i| a[start + i * iter_stride]).sum())
+                    .collect(),
             ),
             NativeData::Bf16(a) => NativeData::Bf16(
-                ind.map(|start| {
-                    (0..self.iters.exec(dyn_map).unwrap())
-                        .map(|i| a[start + self.iter_stride.exec_single_var(i)])
-                        .sum()
-                })
-                .collect(),
+                ind.map(|start| (0..iters).map(|i| a[start + i * iter_stride]).sum())
+                    .collect(),
             ),
             NativeData::Int(a) => NativeData::Int(
-                ind.map(|start| {
-                    (0..self.iters.exec(dyn_map).unwrap())
-                        .map(|i| a[start + self.iter_stride.exec_single_var(i)])
-                        .sum()
-                })
-                .collect(),
+                ind.map(|start| (0..iters).map(|i| a[start + i * iter_stride]).sum())
+                    .collect(),
             ),
         }
     }
@@ -1289,12 +1275,12 @@ impl HLIROp for MaxReduce {
         reduced_strides.remove(self.dim);
         format!(
             "(Max {} {} {} {} {} {})",
-            shape_to_egglog(&reduced_shape.dims),
+            elist_to_egglog(&reduced_shape.dims),
             reduced_dim.to_egglog(),
             inputs[0].1,
-            strides_to_egglog(&reduced_strides),
+            elist_to_egglog(&reduced_strides),
             reduced_stride.to_egglog(),
-            strides_to_egglog(&reduced_shape.contiguous().strides)
+            elist_to_egglog(&reduced_shape.contiguous().strides)
         )
     }
 }
@@ -1341,11 +1327,13 @@ impl EgglogOp for MaxReduce {
 impl NativeOp for MaxReduce {
     fn execute(&self, inputs: Vec<&NativeData>, dyn_map: &FxHashMap<char, usize>) -> NativeData {
         let ind = StridedIterator::new(&self.shape, &self.strides, dyn_map);
+        let iter_stride = self.iter_stride.exec(dyn_map).unwrap();
+        let iters = self.iters.exec(dyn_map).unwrap();
         match inputs[0] {
             NativeData::F32(a) => NativeData::F32(
                 ind.map(|start| {
-                    (0..self.iters.exec(dyn_map).unwrap())
-                        .map(|i| a[start + self.iter_stride.exec_single_var(i)])
+                    (0..iters)
+                        .map(|i| a[start + i * iter_stride])
                         .max_by(|a, b| a.total_cmp(b))
                         .unwrap_or_default()
                 })
@@ -1353,8 +1341,8 @@ impl NativeOp for MaxReduce {
             ),
             NativeData::F16(a) => NativeData::F16(
                 ind.map(|start| {
-                    (0..self.iters.exec(dyn_map).unwrap())
-                        .map(|i| a[start + self.iter_stride.exec_single_var(i)])
+                    (0..iters)
+                        .map(|i| a[start + i * iter_stride])
                         .max_by(|a, b| a.total_cmp(b))
                         .unwrap_or_default()
                 })
@@ -1362,8 +1350,8 @@ impl NativeOp for MaxReduce {
             ),
             NativeData::Bf16(a) => NativeData::Bf16(
                 ind.map(|start| {
-                    (0..self.iters.exec(dyn_map).unwrap())
-                        .map(|i| a[start + self.iter_stride.exec_single_var(i)])
+                    (0..iters)
+                        .map(|i| a[start + i * iter_stride])
                         .max_by(|a, b| a.total_cmp(b))
                         .unwrap_or_default()
                 })
@@ -1371,8 +1359,8 @@ impl NativeOp for MaxReduce {
             ),
             NativeData::Int(a) => NativeData::Int(
                 ind.map(|start| {
-                    (0..self.iters.exec(dyn_map).unwrap())
-                        .map(|i| a[start + self.iter_stride.exec_single_var(i)])
+                    (0..iters)
+                        .map(|i| a[start + i * iter_stride])
                         .max()
                         .unwrap_or_default()
                 })
@@ -1560,7 +1548,7 @@ impl NativeRuntime {
 
 struct StridedIterator {
     shape: Vec<usize>,
-    strides: Vec<Expression>,
+    strides: Vec<usize>,
     index: Vec<usize>,
     done: bool,
 }
@@ -1572,11 +1560,7 @@ impl StridedIterator {
             index: vec![0; shape.len()],
             strides: strides
                 .iter()
-                .map(|e| {
-                    let mut s = *e;
-                    s.resolve_vars(dyn_map);
-                    s.simplify()
-                })
+                .map(|e| e.exec(dyn_map).unwrap())
                 .collect_vec(),
             done: shape.contains(&0),
             shape,
@@ -1596,7 +1580,7 @@ impl Iterator for StridedIterator {
             .strides
             .iter()
             .zip(self.index.iter())
-            .map(|(s, &idx)| s.exec_single_var(idx))
+            .map(|(&s, &idx)| idx * s)
             .sum();
 
         for i in (0..self.shape.len()).rev() {

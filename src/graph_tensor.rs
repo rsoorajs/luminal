@@ -121,7 +121,7 @@ impl Debug for GraphTensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Print the shape
         let mut shape = self.shape;
-        shape.resolve_global_dyn_dims(&self.graph().dyn_map);
+        shape.resolve_dyn_dims(&self.graph().dyn_map);
         let shape = shape.shape_usize();
         writeln!(f, "Tensor with Shape: {shape:?}")
     }

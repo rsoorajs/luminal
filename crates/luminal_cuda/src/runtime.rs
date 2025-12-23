@@ -9,16 +9,19 @@ use cudarc::driver::{
 use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
-use luminal::prelude::{
-    petgraph::{
-        algo::{toposort, Cycle},
-        prelude::StableGraph,
-        visit::{EdgeRef, NodeIndexable},
-        Directed, Direction,
+use luminal::op::Output;
+use luminal::{
+    prelude::{
+        petgraph::{
+            algo::{toposort, Cycle},
+            prelude::StableGraph,
+            visit::{EdgeRef, NodeIndexable},
+            Directed, Direction,
+        },
+        Expression, Input, LLIRGraph, NodeIndex, Runtime,
     },
-    Expression, Input, LLIRGraph, NodeIndex, Runtime,
+    utils::flatten_z_strides,
 };
-use luminal::{op::Output, utils::flatten_strides};
 use prost::Message as _;
 use rustc_hash::{FxHashMap, FxHashSet};
 use safetensors::SafeTensors;
@@ -309,7 +312,7 @@ impl Runtime for CudaRuntime {
                         .chain(once(op.launch_range().iter().copied().product()))
                 })
                 .chain(producer_barrier_strides.iter().map(|(n, e)| {
-                    flatten_strides(
+                    flatten_z_strides(
                         &llir_graph[*n]
                             .to_dialect::<dyn BlockOp>()
                             .unwrap()
@@ -318,7 +321,7 @@ impl Runtime for CudaRuntime {
                     )
                 }))
                 .chain(consumer_barrier_strides.iter().map(|((n, _), e)| {
-                    flatten_strides(
+                    flatten_z_strides(
                         &llir_graph[*n]
                             .to_dialect::<dyn BlockOp>()
                             .unwrap()
@@ -359,19 +362,19 @@ impl Runtime for CudaRuntime {
                 let range = op.launch_range();
                 let in_dep_a_stride = consumer_barrier_strides
                     .get(&(node, 0))
-                    .map(|s| flatten_strides(&range, s))
+                    .map(|s| flatten_z_strides(&range, s))
                     .unwrap_or(0.into());
                 let in_dep_b_stride = consumer_barrier_strides
                     .get(&(node, 1))
-                    .map(|s| flatten_strides(&range, s))
+                    .map(|s| flatten_z_strides(&range, s))
                     .unwrap_or(0.into());
                 let in_dep_c_stride = consumer_barrier_strides
                     .get(&(node, 2))
-                    .map(|s| flatten_strides(&range, s))
+                    .map(|s| flatten_z_strides(&range, s))
                     .unwrap_or(0.into());
                 let out_dep_stride = producer_barrier_strides
                     .get(&node)
-                    .map(|s| flatten_strides(&range, s))
+                    .map(|s| flatten_z_strides(&range, s))
                     .unwrap_or(0.into());
                 node_to_task_index.insert(node, tasks.len());
                 tasks.push(Task {
@@ -718,7 +721,7 @@ fn compute_barrier_strides(
             if cs.iter().all(|i| *i) {
                 if cr.iter().all(|cr| *pr == *cr) {
                     *acc *= *pr;
-                    Some((prev * 'z', vec![prev * 'z'; cr.len()]))
+                    Some((prev, vec![prev; cr.len()]))
                 } else if let Some(Some(factor)) = cr.iter().try_fold(None, |acc, cr| {
                     // Multiple producers per consumer
                     if !(*pr % *cr).to_usize().map(|i| i == 0).unwrap_or_default() {

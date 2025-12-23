@@ -1,5 +1,5 @@
 use luminal::{
-    graph::{shape_to_egglog, strides_to_egglog, Graph},
+    graph::{elist_to_egglog, Graph},
     op::{DType, HLIROp},
     prelude::GraphTensor,
     shape::{Expression, ShapeTracker},
@@ -122,7 +122,7 @@ impl LlamaLayer {
         let q_rope = GraphTensor::from_id(
             cx.add_op(RopeFrontendOp {
                 range: vec![Expression::from(batch)],
-                stride: vec![Expression::from('z') * HIDDEN],
+                stride: vec![HIDDEN.into()],
                 row_width: Expression::from(HIDDEN),
             })
             .input(q.id, 0, q.shape)
@@ -135,7 +135,7 @@ impl LlamaLayer {
         let k_rope = GraphTensor::from_id(
             cx.add_op(RopeFrontendOp {
                 range: vec![Expression::from(batch)],
-                stride: vec![Expression::from('z') * (HIDDEN / KV_GROUPS)],
+                stride: vec![(HIDDEN / KV_GROUPS).into()],
                 row_width: Expression::from(HIDDEN / KV_GROUPS),
             })
             .input(k.id, 0, k.shape)
@@ -181,9 +181,9 @@ impl HLIROp for RopeFrontendOp {
     fn to_egglog(&self, inputs: &[(luminal::prelude::NodeIndex, String, ShapeTracker)]) -> String {
         format!(
             "(RowRope {} {} {} {} {})",
-            shape_to_egglog(&self.range),
+            elist_to_egglog(&self.range),
             inputs[0].1,
-            strides_to_egglog(&self.stride),
+            elist_to_egglog(&self.stride),
             self.row_width.to_egglog(),
             inputs[1].1,
         )
@@ -208,24 +208,24 @@ impl HLIROp for GQAAttentionFrontendOp {
         let n_kv_groups = n_heads / n_kv_heads;
         format!(
             "(GQAAttention {} {} {} {} {} {} {} {} {} {} {} {} {})",
-            shape_to_egglog(&[n_kv_heads.into(), n_kv_groups.into(), seq]),
+            elist_to_egglog(&[n_kv_heads.into(), n_kv_groups.into(), seq]),
             Expression::from(self.head_dim).to_egglog(),
             seq.to_egglog(),
             Expression::from(kv_row_width).to_egglog(),
             inputs[0].1,
-            strides_to_egglog(&[
-                Expression::from(self.head_dim * n_kv_groups) * 'z',
-                Expression::from(self.head_dim) * 'z',
-                Expression::from(hidden) * 'z'
+            elist_to_egglog(&[
+                Expression::from(self.head_dim * n_kv_groups),
+                Expression::from(self.head_dim),
+                Expression::from(hidden)
             ]),
             inputs[1].1,
-            strides_to_egglog(&[Expression::from(self.head_dim) * 'z', 0.into(), 0.into()]),
+            elist_to_egglog(&[Expression::from(self.head_dim), 0.into(), 0.into()]),
             inputs[2].1,
-            strides_to_egglog(&[Expression::from(self.head_dim) * 'z', 0.into(), 0.into()]),
-            strides_to_egglog(&[
-                Expression::from(self.head_dim * n_kv_groups) * 'z',
-                Expression::from(self.head_dim) * 'z',
-                Expression::from(hidden) * 'z'
+            elist_to_egglog(&[Expression::from(self.head_dim), 0.into(), 0.into()]),
+            elist_to_egglog(&[
+                Expression::from(self.head_dim * n_kv_groups),
+                Expression::from(self.head_dim),
+                Expression::from(hidden)
             ]),
             self.prev_seq.to_egglog(),
             self.layer,

@@ -208,7 +208,7 @@ impl Debug for OpParam {
     }
 }
 
-pub fn flatten_strides(range: &[Expression], strides: &[Expression]) -> Expression {
+pub fn flatten_z_strides(range: &[Expression], strides: &[Expression]) -> Expression {
     assert_eq!(range.len(), strides.len());
     let mut current_elem_size = Expression::from(1);
     let mut flat_stride = Expression::from(0);
@@ -221,7 +221,20 @@ pub fn flatten_strides(range: &[Expression], strides: &[Expression]) -> Expressi
     flat_stride.simplify()
 }
 
-pub fn flatten_strides_mask(range: &[Expression], strides: &[Expression]) -> Expression {
+pub fn flatten_mul_strides(range: &[Expression], strides: &[Expression]) -> Expression {
+    assert_eq!(range.len(), strides.len());
+    let mut current_elem_size = Expression::from(1);
+    let mut flat_stride = Expression::from(0);
+    for (dim, (range, stride)) in range.iter().zip(strides).enumerate().rev() {
+        let div = Expression::from('z') / current_elem_size;
+        let m = if dim > 0 { div % range } else { div };
+        flat_stride += m * stride;
+        current_elem_size *= range;
+    }
+    flat_stride.simplify()
+}
+
+pub fn flatten_z_strides_mask(range: &[Expression], strides: &[Expression]) -> Expression {
     assert_eq!(range.len(), strides.len());
     let mut current_elem_size = Expression::from(1);
     let mut flat_stride = Expression::from(1);

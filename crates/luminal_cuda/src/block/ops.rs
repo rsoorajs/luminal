@@ -8,7 +8,7 @@ use luminal::{
     prelude::ENodeId,
     shape::Expression,
     utils::{
-        flatten_strides, CStructBuilder, EgglogOp, LLIROp,
+        flatten_mul_strides, CStructBuilder, EgglogOp, LLIROp,
         OpParam::{self, *},
     },
 };
@@ -128,18 +128,18 @@ impl BlockOp for RowAdd {
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
         CStructBuilder::new()
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.b_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.out_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.out_stride)])
             .int(expressions[&self.row_width])
             .finish_struct()
     }
 
     fn expressions(&self) -> Vec<Expression> {
         vec![
-            flatten_strides(&self.range, &self.a_stride),
-            flatten_strides(&self.range, &self.b_stride),
-            flatten_strides(&self.range, &self.out_stride),
+            flatten_mul_strides(&self.range, &self.a_stride),
+            flatten_mul_strides(&self.range, &self.b_stride),
+            flatten_mul_strides(&self.range, &self.out_stride),
             self.row_width,
         ]
     }
@@ -270,17 +270,17 @@ impl BlockOp for RowSwishMul {
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
         CStructBuilder::new()
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.b_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&self.row_width])
             .finish_struct()
     }
 
     fn expressions(&self) -> Vec<Expression> {
         vec![
-            flatten_strides(&self.range, &self.a_stride),
-            flatten_strides(&self.range, &self.b_stride),
+            flatten_mul_strides(&self.range, &self.a_stride),
+            flatten_mul_strides(&self.range, &self.b_stride),
             self.row_width,
         ]
     }
@@ -491,14 +491,17 @@ impl BlockOp for RowRMSNorm {
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
         CStructBuilder::new()
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&self.row_width])
             .finish_struct()
     }
 
     fn expressions(&self) -> Vec<Expression> {
-        vec![flatten_strides(&self.range, &self.a_stride), self.row_width]
+        vec![
+            flatten_mul_strides(&self.range, &self.a_stride),
+            self.row_width,
+        ]
     }
 }
 
@@ -620,8 +623,8 @@ impl BlockOp for RowRope {
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
         CStructBuilder::new()
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&self.row_width])
             .int(expressions[&'z'.into()])
             .finish_struct()
@@ -629,7 +632,7 @@ impl BlockOp for RowRope {
 
     fn expressions(&self) -> Vec<Expression> {
         vec![
-            flatten_strides(&self.range, &self.a_stride),
+            flatten_mul_strides(&self.range, &self.a_stride),
             self.row_width,
             'z'.into(),
         ]
@@ -931,9 +934,9 @@ impl BlockOp for TileMatmul {
     ) -> Vec<u8> {
         assert_eq!(self.untiled_range.len(), 2);
         let mut m_pos_stride = vec![0.into(); self.range.len()];
-        m_pos_stride[self.range.len() - 2] = 'z'.into();
+        m_pos_stride[self.range.len() - 2] = 1.into();
         let mut n_pos_stride = vec![0.into(); self.range.len()];
-        n_pos_stride[self.range.len() - 1] = 'z'.into();
+        n_pos_stride[self.range.len() - 1] = 1.into();
         CStructBuilder::new()
             .ints(
                 &self
@@ -942,35 +945,35 @@ impl BlockOp for TileMatmul {
                     .map(|e| expressions[e])
                     .collect_vec(),
             )
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.b_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.out_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.out_stride)])
             .int(expressions[&self.iters])
             .int(expressions[&self.a_m_stride])
             .int(expressions[&self.b_n_stride])
             .int(expressions[&self.out_m_stride])
-            .int(expressions[&flatten_strides(&self.range, &m_pos_stride)])
-            .int(expressions[&flatten_strides(&self.range, &n_pos_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &m_pos_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &n_pos_stride)])
             .finish_struct()
     }
 
     fn expressions(&self) -> Vec<Expression> {
         let mut m_pos_stride = vec![0.into(); self.range.len()];
-        m_pos_stride[self.range.len() - 2] = 'z'.into();
+        m_pos_stride[self.range.len() - 2] = 1.into();
         let mut n_pos_stride = vec![0.into(); self.range.len()];
-        n_pos_stride[self.range.len() - 1] = 'z'.into();
+        n_pos_stride[self.range.len() - 1] = 1.into();
         vec![
             self.untiled_range[0],
             self.untiled_range[1],
-            flatten_strides(&self.range, &self.a_stride),
-            flatten_strides(&self.range, &self.b_stride),
-            flatten_strides(&self.range, &self.out_stride),
+            flatten_mul_strides(&self.range, &self.a_stride),
+            flatten_mul_strides(&self.range, &self.b_stride),
+            flatten_mul_strides(&self.range, &self.out_stride),
             self.iters,
             self.a_m_stride,
             self.b_n_stride,
             self.out_m_stride,
-            flatten_strides(&self.range, &m_pos_stride),
-            flatten_strides(&self.range, &n_pos_stride),
+            flatten_mul_strides(&self.range, &m_pos_stride),
+            flatten_mul_strides(&self.range, &n_pos_stride),
         ]
     }
 }
@@ -1268,47 +1271,47 @@ impl BlockOp for GQAAttention {
         };
         let (k_cache, v_cache) = &kv_cache[self.current_layer];
         let mut q_pos_stride = vec![0.into(); self.range.len()];
-        q_pos_stride[self.range.len() - 1] = 'z'.into();
+        q_pos_stride[self.range.len() - 1] = 1.into();
         let mut group_pos_stride = vec![0.into(); self.range.len()];
-        group_pos_stride[self.range.len() - 2] = 'z'.into();
+        group_pos_stride[self.range.len() - 2] = 1.into();
         let mut head_pos_stride = vec![0.into(); self.range.len()];
-        head_pos_stride[self.range.len() - 3] = 'z'.into();
+        head_pos_stride[self.range.len() - 3] = 1.into();
         CStructBuilder::new()
             .int(expressions[&self.head_dim])
             .int(expressions[&self.cur_seq])
             .int(expressions[&self.kv_row_stride])
-            .int(expressions[&flatten_strides(&self.range, &self.q_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.k_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.v_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.o_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.q_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.k_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.v_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.o_stride)])
             .ptr_mut_f32(k_cache.device_ptr(stream).0 as *mut f32)
             .ptr_mut_f32(v_cache.device_ptr(stream).0 as *mut f32)
             .int(expressions[&self.prev_seq])
-            .int(expressions[&flatten_strides(&self.range, &q_pos_stride)])
-            .int(expressions[&flatten_strides(&self.range, &group_pos_stride)])
-            .int(expressions[&flatten_strides(&self.range, &head_pos_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &q_pos_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &group_pos_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &head_pos_stride)])
             .finish_struct()
     }
 
     fn expressions(&self) -> Vec<Expression> {
         let mut q_pos_stride = vec![0.into(); self.range.len()];
-        q_pos_stride[self.range.len() - 1] = 'z'.into();
+        q_pos_stride[self.range.len() - 1] = 1.into();
         let mut group_pos_stride = vec![0.into(); self.range.len()];
-        group_pos_stride[self.range.len() - 2] = 'z'.into();
+        group_pos_stride[self.range.len() - 2] = 1.into();
         let mut head_pos_stride = vec![0.into(); self.range.len()];
-        head_pos_stride[self.range.len() - 3] = 'z'.into();
+        head_pos_stride[self.range.len() - 3] = 1.into();
         vec![
-            flatten_strides(&self.range, &self.q_stride),
-            flatten_strides(&self.range, &self.k_stride),
-            flatten_strides(&self.range, &self.v_stride),
-            flatten_strides(&self.range, &self.o_stride),
+            flatten_mul_strides(&self.range, &self.q_stride),
+            flatten_mul_strides(&self.range, &self.k_stride),
+            flatten_mul_strides(&self.range, &self.v_stride),
+            flatten_mul_strides(&self.range, &self.o_stride),
             self.head_dim,
             self.cur_seq,
             self.kv_row_stride,
             self.prev_seq,
-            flatten_strides(&self.range, &q_pos_stride),
-            flatten_strides(&self.range, &group_pos_stride),
-            flatten_strides(&self.range, &head_pos_stride),
+            flatten_mul_strides(&self.range, &q_pos_stride),
+            flatten_mul_strides(&self.range, &group_pos_stride),
+            flatten_mul_strides(&self.range, &head_pos_stride),
         ]
     }
 }
