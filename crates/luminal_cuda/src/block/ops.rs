@@ -49,9 +49,9 @@ impl EgglogOp for RowAdd {
                 (= ?sa (Add ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
                 (= ?row_width (nth_from_end ?shape 0))
                 ; assert the row is contiguous
-                (= (MIter) (nth_from_end ?a_stride 0))
-                (= (MIter) (nth_from_end ?b_stride 0))
-                (= (MIter) (nth_from_end ?out_stride 0))
+                (= (MNum 1) (nth_from_end ?a_stride 0))
+                (= (MNum 1) (nth_from_end ?b_stride 0))
+                (= (MNum 1) (nth_from_end ?out_stride 0))
                 ;(= (F32) (dtype ?a))
             )
             (
@@ -167,24 +167,24 @@ impl EgglogOp for RowSwishMul {
                 (= ?sigmoid (Sigmoid
                     (ECons ?batch (ECons ?width (ENil)))
                     ?self
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
                 ))
                 (= ?swish (Mul
                     (ECons ?batch (ECons ?width (ENil)))
                     ?self
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
                     ?sigmoid
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
                 ))
                 (= ?swishmul (Mul
                     (ECons ?batch (ECons ?width (ENil)))
                     ?swish
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
                     ?other
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
                 ))
                 ;(= (F32) (dtype ?self))
             )
@@ -192,9 +192,9 @@ impl EgglogOp for RowSwishMul {
                 (let ?rsm (RowSwishMul
                     (ECons ?batch (ENil))
                     ?self
-                    (ECons (MMul (MIter) ?width) (ENil))
+                    (ECons ?width (ENil))
                     ?other
-                    (ECons (MMul (MIter) ?width) (ENil))
+                    (ECons ?width (ENil))
                     ?width
                 ))
                 (union ?swishmul ?rsm)
@@ -312,52 +312,52 @@ impl EgglogOp for RowRMSNorm {
                         (ECons ?batch (ENil))
                         ?width
                         ?square
-                        (ECons (MMul (MIter) ?width) (ENil))
-                        (MIter)
-                        (ECons (MIter) (ENil))
+                        (ECons ?width (ENil))
+                        (MNum 1)
+                        (ECons (MNum 1) (ENil))
                     )
                 )
                 (= ?inv_div_factor
                     (Recip (ECons ?batch (ENil)) (Cast (Iota ?width (MNum 1)) (F32))
                                     (ECons (MNum 0) (ENil))  ; broadcast the constant
-                                    (ECons (MIter) (ENil)))) ; produce per-batch vector
+                                    (ECons (MNum 1) (ENil)))) ; produce per-batch vector
 
                 (= ?mean
                     (Mul (ECons ?batch (ENil))
-                                ?square_summed (ECons (MIter) (ENil))
-                                ?inv_div_factor (ECons (MIter) (ENil))
-                                (ECons (MIter) (ENil))))
+                                ?square_summed (ECons (MNum 1) (ENil))
+                                ?inv_div_factor (ECons (MNum 1) (ENil))
+                                (ECons (MNum 1) (ENil))))
                 (= ?eps_add
                     (Add
                         (ECons ?batch (ENil))
                         ?mean
-                        (ECons (MIter) (ENil))
+                        (ECons (MNum 1) (ENil))
                         (Constant ?eps)
                         (ECons (MNum 0) (ENil))
-                        (ECons (MIter) (ENil))
+                        (ECons (MNum 1) (ENil))
                     )
                 )
                 (= ?sqrt
                     (Sqrt
                         (ECons ?batch (ENil))
                         ?eps_add
-                        (ECons (MIter) (ENil))
-                        (ECons (MIter) (ENil))
+                        (ECons (MNum 1) (ENil))
+                        (ECons (MNum 1) (ENil))
                     )
                 )
                 (= ?recip
                     (Recip
                         (ECons ?batch (ENil))
                         ?sqrt
-                        (ECons (MIter) (ENil))
-                        (ECons (MIter) (ENil))
+                        (ECons (MNum 1) (ENil))
+                        (ECons (MNum 1) (ENil))
                     )
                 )
                 (= ?std_normed
                     (Mul
                         ?inp_range
                         ?recip
-                        (ECons (MIter) (ECons (MNum 0) (ENil)))
+                        (ECons (MNum 1) (ECons (MNum 0) (ENil)))
                         ?x
                         ?inp_stride
                         ?inp_stride
@@ -369,7 +369,7 @@ impl EgglogOp for RowRMSNorm {
                         ?std_normed
                         ?inp_stride
                         ?weight
-                        (ECons (MNum 0) (ECons (MIter) (ENil)))
+                        (ECons (MNum 0) (ECons (MNum 1) (ENil)))
                         ?inp_stride
                     )
                 )
@@ -380,7 +380,7 @@ impl EgglogOp for RowRMSNorm {
                     (RowRMSNorm
                         (ECons ?batch (ENil))
                         ?x
-                        (ECons (MMul (MIter) ?width) (ENil))
+                        (ECons ?width (ENil))
                         ?width
                         ?weight
                     )
@@ -673,10 +673,10 @@ impl EgglogOp for TileMatmul {
                 ; get tile sum
                 (= ?ts (TileSum ?sum_shape ?untiled_sum_shape ?iters ?cm ?sum_in_stride ?sum_in_m_stride ?sum_in_n_stride ?sum_in_k_stride ?sum_out_stride ?sum_out_m_stride ?sum_out_n_stride))
                 ; assert k stride on the intermediate is 1
-                (= ?out_k_stride (MIter))
-                (= ?sum_in_k_stride (MIter))
+                (= ?out_k_stride (MNum 1))
+                (= ?sum_in_k_stride (MNum 1))
                 ; assert matmul strides
-                (= ?b_n_stride (MIter))
+                (= ?b_n_stride (MNum 1))
                 ; get dimensions
                 (= ?t_n (nth_from_end ?mul_shape 1))
                 (= ?t_k (nth_from_end ?mul_shape 0))
@@ -706,14 +706,14 @@ impl EgglogOp for TileMatmul {
                                 ?sum_out_stride ?sum_out_m_stride ?sum_out_n_stride))
 
                 ; assert k stride on the intermediate is 1 (contiguous)
-                (= ?out_k_stride (MIter))
-                (= ?sum_in_k_stride (MIter))
+                (= ?out_k_stride (MNum 1))
+                (= ?sum_in_k_stride (MNum 1))
 
                 ; A row-major (contiguous in its last dim k)
-                (= ?a_k_stride (MIter))
+                (= ?a_k_stride (MNum 1))
 
                 ; B col-major (contiguous in its first dim k)
-                (= ?b_k_stride (MIter))
+                (= ?b_k_stride (MNum 1))
 
                 ; get tile dims
                 (= ?t_n (nth_from_end ?mul_shape 1))
@@ -731,7 +731,7 @@ impl EgglogOp for TileMatmul {
                 ;  - C row-major tile strides: m -> t_n*32, n -> 1
                 (let ?tm (TileMatmul ?sum_shape ?untiled_sum_shape ?iters
                             ?a ?new_a_stride (MMul ?t_k (MNum 32)) (MNum 1)
-                            ?b ?new_b_stride (MReplace ?b_k_stride (MIter) (MNum 1)) (MMul ?t_k (MNum 32))
+                            ?b ?new_b_stride ?b_k_stride (MMul ?t_k (MNum 32))
                             ?sum_out_stride (MMul ?t_n (MNum 32)) (MNum 1)))
                 (union ?ts ?tm)
                 (set (dtype ?tm) (F32))
