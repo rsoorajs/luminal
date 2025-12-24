@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use cudarc::{
     driver::{CudaContext, CudaFunction, CudaSlice, CudaStream},
-    nvrtc::{compile_ptx, compile_ptx_with_opts, CompileOptions},
+    nvrtc::{compile_ptx, CompileOptions},
 };
 use itertools::Itertools;
 use luminal::{
@@ -235,19 +235,7 @@ extern \"C\" {{
             flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
         );
-        let ptx = compile_ptx_with_opts(
-            &kernel,
-            CompileOptions {
-                arch: Some("sm_90a"),
-                options: vec!["--std=c++17".to_string(), "-default-device".to_string()],
-                include_paths: vec![
-                    "/usr/local/cuda/include".to_string(),
-                    "/usr/include".to_string(),
-                ],
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let ptx = compile_ptx(&kernel).unwrap();
         let module = ctx.load_module(ptx).unwrap();
         let func = module.load_function("mul_k").unwrap();
         let constants = vars
@@ -372,19 +360,7 @@ extern \"C\" {{
             flatten_mul_strides(&self.out_shape, &self.index_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.data_stride).to_kernel()
         );
-        let ptx = compile_ptx_with_opts(
-            &kernel,
-            CompileOptions {
-                arch: Some("sm_90a"),
-                options: vec!["--std=c++17".to_string(), "-default-device".to_string()],
-                include_paths: vec![
-                    "/usr/local/cuda/include".to_string(),
-                    "/usr/include".to_string(),
-                ],
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let ptx = compile_ptx(&kernel).unwrap();
         let module = ctx.load_module(ptx).unwrap();
         let func = module.load_function("gather").unwrap();
         let constants = vars
@@ -482,19 +458,7 @@ extern \"C\" {{
                 .join("\n"),
             self.expr.to_kernel(),
         );
-        let ptx = compile_ptx_with_opts(
-            &kernel,
-            CompileOptions {
-                arch: Some("sm_90a"),
-                options: vec!["--std=c++17".to_string(), "-default-device".to_string()],
-                include_paths: vec![
-                    "/usr/local/cuda/include".to_string(),
-                    "/usr/include".to_string(),
-                ],
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let ptx = compile_ptx(&kernel).unwrap();
         let module = ctx.load_module(ptx).unwrap();
         let func = module.load_function("iota_k").unwrap();
         let constants = vars
