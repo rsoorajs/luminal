@@ -17,4 +17,7 @@ The integrated nature of these extensions makes viewing these files easy even on
 - `Graphviz Interactive Preview` by tintinweb 
 
 ## Example Provided 
-In the example program, as simple HLIR graph is created. 
+In the example program, as simple program is defined. 
+From this a HLIR graph is created and visualized. 
+A saturated EGraph is created and visualized. 
+Finally an LLIR graph is extracted and visualized. 

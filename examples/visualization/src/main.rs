@@ -1,41 +1,91 @@
 use std::fs;
 
 use luminal::{
-    prelude::*,
-    visualization::ToDot};
-use luminal_nn::Linear;
-use luminal_cuda::{
     self,
-    runtime::CudaRuntime,
-}; 
+    graph::{hlir_to_egglog, Graph, Runtime},
+    serialized_egraph::SerializedEGraph,
+    prelude::*,
+    visualization::{ToDot, ToHtml},
+};
+use luminal_cuda::runtime::{CudaRuntime, CustomState};
 
-
+use egglog::{EGraph, prelude::RustSpan, var};
+use egglog_ast::span::Span;
+use rustc_hash::FxHashMap;
 
 fn main() {
     // Create a new graph
     let mut cx = Graph::new();
 
-    // Create a linear layer with input size 4 and output size 5
-    let model = Linear::new(4, 5, false, &mut cx);
-
     // Create input tensor using constant values
-    // Since we can't use .set() anymore, we'll construct a tensor from operations
-    let a = cx.constant_float(1.0).expand((4,)) +
-            cx.arange(4).cast(DType::F32);
 
-    // Feed tensor through model
-    let _b = model.forward(a);
+    let (m, n, k) = (4096, 14336, 9192);
+
+    let a = cx.tensor((m, k));
+    let b = cx.tensor((k, n));
+
+    let _c = a.matmul(b);
 
     let ctx = luminal_cuda::cudarc::driver::CudaContext::new(0).unwrap();
     ctx.bind_to_thread().unwrap();
-    let stream = ctx.default_stream();
-    let mut custom_state = FxHashMap::default();
+    let _stream = ctx.default_stream();
+    let _custom_state: FxHashMap<String, CustomState> = FxHashMap::default();
 
+    println!("Visualizing HLIR");
     fs::write("HLIR.dot", cx.graph.to_dot().unwrap()).unwrap();
 
-    println!("Building E-Graph...");
+    println!("Building and Saturating EGraph");
     cx.build_search_space::<CudaRuntime>();
 
-    println!("Compiling...");
-    let mut runtime = cx.search(CudaRuntime::initialize((ctx, stream, custom_state)), 10_000);
+    let (program, root) = hlir_to_egglog(&cx);
+
+    let mut ops = <CudaRuntime as Runtime>::Ops::into_vec();
+    ops.extend(<luminal::op::Ops as IntoEgglogOp>::into_vec());
+
+    let mut egglog_obj: EGraph = egglog::EGraph::default();
+
+    // setup the rules and datatypes
+    egglog_obj
+        .parse_and_run_program(None, luminal::egglog_utils::BASE)
+        .unwrap();
+    egglog_obj
+        .parse_and_run_program(None, &luminal::egglog_utils::op_defs_string(&ops))
+        .unwrap();
+    egglog_obj
+        .parse_and_run_program(None, &luminal::egglog_utils::op_rewrites_string(&ops))
+        .unwrap();
+    egglog_obj
+        .parse_and_run_program(None, luminal::egglog_utils::BASE_CLEANUP)
+        .unwrap();
+    egglog_obj
+        .parse_and_run_program(None, &luminal::egglog_utils::op_cleanups_string(&ops))
+        .unwrap();
+
+    // load the program
+    egglog_obj.parse_and_run_program(None, &program).unwrap();
+
+    // run the graph
+    egglog_obj
+        .parse_and_run_program(None, luminal::egglog_utils::RUN_SCHEDULE)
+        .unwrap();
+
+    // EGraph Optimization Complete
+    println!("Visualizing EGraph"); 
+    // save the egraph visualizations
+    fs::write("egraph.html", egglog_obj.to_html().unwrap()).unwrap();
+    fs::write("egraph.dot", egglog_obj.to_dot().unwrap()).unwrap();
+
+    let (sort, value) = egglog_obj.eval_expr(&var!(root)).unwrap(); 
+    let s_egraph = SerializedEGraph::new(&egglog_obj, vec![(sort, value)]);
+    let llir_graphs = egglog_to_llir(
+            &s_egraph,
+            &ops,
+            100,
+    );
+    
+    let example_llir_graph = llir_graphs.last().unwrap(); 
+
+    println!("Visualizing LLIR Graph"); 
+    fs::write("LLIR.dot", example_llir_graph.to_dot().unwrap()).unwrap();
+
 }
