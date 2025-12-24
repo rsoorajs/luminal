@@ -12,7 +12,6 @@ luminal_cuda = { path = "../../crates/luminal_cuda" }
 itertools = "0.12.1"
 tokenizers = "0.15.2"
 tracing = "0.1.43"
-rustc-hash = "2.1.1"
 tracing-subscriber = {version="0.3", features=["env-filter"]}
 tracing-perfetto-sdk-layer = "0.13.0"
 tracing-perfetto-sdk-schema = "0.13.0"
