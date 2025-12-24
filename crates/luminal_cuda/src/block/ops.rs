@@ -9,7 +9,7 @@ use luminal::{
     shape::Expression,
     serialized_egraph::SerializedEGraph,
     utils::{
-        flatten_strides, CStructBuilder, EgglogOp, LLIROp,
+        flatten_mul_strides, CStructBuilder, EgglogOp, LLIROp,
         OpParam::{self, *},
     },
 };
@@ -50,9 +50,9 @@ impl EgglogOp for RowAdd {
                 (= ?sa (Add ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
                 (= ?row_width (nth_from_end ?shape 0))
                 ; assert the row is contiguous
-                (= (MIter) (nth_from_end ?a_stride 0))
-                (= (MIter) (nth_from_end ?b_stride 0))
-                (= (MIter) (nth_from_end ?out_stride 0))
+                (= (MNum 1) (nth_from_end ?a_stride 0))
+                (= (MNum 1) (nth_from_end ?b_stride 0))
+                (= (MNum 1) (nth_from_end ?out_stride 0))
                 ;(= (F32) (dtype ?a))
             )
             (
@@ -129,18 +129,18 @@ impl BlockOp for RowAdd {
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
         CStructBuilder::new()
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.b_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.out_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.out_stride)])
             .int(expressions[&self.row_width])
             .finish_struct()
     }
 
     fn expressions(&self) -> Vec<Expression> {
         vec![
-            flatten_strides(&self.range, &self.a_stride),
-            flatten_strides(&self.range, &self.b_stride),
-            flatten_strides(&self.range, &self.out_stride),
+            flatten_mul_strides(&self.range, &self.a_stride),
+            flatten_mul_strides(&self.range, &self.b_stride),
+            flatten_mul_strides(&self.range, &self.out_stride),
             self.row_width,
         ]
     }
@@ -168,24 +168,24 @@ impl EgglogOp for RowSwishMul {
                 (= ?sigmoid (Sigmoid
                     (ECons ?batch (ECons ?width (ENil)))
                     ?self
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
                 ))
                 (= ?swish (Mul
                     (ECons ?batch (ECons ?width (ENil)))
                     ?self
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
                     ?sigmoid
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
                 ))
                 (= ?swishmul (Mul
                     (ECons ?batch (ECons ?width (ENil)))
                     ?swish
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
                     ?other
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
-                    (ECons (MMul (MIter) ?width) (ECons (MIter) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
                 ))
                 ;(= (F32) (dtype ?self))
             )
@@ -193,9 +193,9 @@ impl EgglogOp for RowSwishMul {
                 (let ?rsm (RowSwishMul
                     (ECons ?batch (ENil))
                     ?self
-                    (ECons (MMul (MIter) ?width) (ENil))
+                    (ECons ?width (ENil))
                     ?other
-                    (ECons (MMul (MIter) ?width) (ENil))
+                    (ECons ?width (ENil))
                     ?width
                 ))
                 (union ?swishmul ?rsm)
@@ -271,17 +271,17 @@ impl BlockOp for RowSwishMul {
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
         CStructBuilder::new()
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.b_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&self.row_width])
             .finish_struct()
     }
 
     fn expressions(&self) -> Vec<Expression> {
         vec![
-            flatten_strides(&self.range, &self.a_stride),
-            flatten_strides(&self.range, &self.b_stride),
+            flatten_mul_strides(&self.range, &self.a_stride),
+            flatten_mul_strides(&self.range, &self.b_stride),
             self.row_width,
         ]
     }
@@ -313,52 +313,52 @@ impl EgglogOp for RowRMSNorm {
                         (ECons ?batch (ENil))
                         ?width
                         ?square
-                        (ECons (MMul (MIter) ?width) (ENil))
-                        (MIter)
-                        (ECons (MIter) (ENil))
+                        (ECons ?width (ENil))
+                        (MNum 1)
+                        (ECons (MNum 1) (ENil))
                     )
                 )
                 (= ?inv_div_factor
-                    (Recip (ECons ?batch (ENil)) (Iota ?width (MNum 1))
+                    (Recip (ECons ?batch (ENil)) (Cast (Iota ?width (MNum 1)) (F32))
                                     (ECons (MNum 0) (ENil))  ; broadcast the constant
-                                    (ECons (MIter) (ENil)))) ; produce per-batch vector
+                                    (ECons (MNum 1) (ENil)))) ; produce per-batch vector
 
                 (= ?mean
                     (Mul (ECons ?batch (ENil))
-                                ?square_summed (ECons (MIter) (ENil))
-                                ?inv_div_factor (ECons (MIter) (ENil))
-                                (ECons (MIter) (ENil))))
+                                ?square_summed (ECons (MNum 1) (ENil))
+                                ?inv_div_factor (ECons (MNum 1) (ENil))
+                                (ECons (MNum 1) (ENil))))
                 (= ?eps_add
                     (Add
                         (ECons ?batch (ENil))
                         ?mean
-                        (ECons (MIter) (ENil))
+                        (ECons (MNum 1) (ENil))
                         (Constant ?eps)
                         (ECons (MNum 0) (ENil))
-                        (ECons (MIter) (ENil))
+                        (ECons (MNum 1) (ENil))
                     )
                 )
                 (= ?sqrt
                     (Sqrt
                         (ECons ?batch (ENil))
                         ?eps_add
-                        (ECons (MIter) (ENil))
-                        (ECons (MIter) (ENil))
+                        (ECons (MNum 1) (ENil))
+                        (ECons (MNum 1) (ENil))
                     )
                 )
                 (= ?recip
                     (Recip
                         (ECons ?batch (ENil))
                         ?sqrt
-                        (ECons (MIter) (ENil))
-                        (ECons (MIter) (ENil))
+                        (ECons (MNum 1) (ENil))
+                        (ECons (MNum 1) (ENil))
                     )
                 )
                 (= ?std_normed
                     (Mul
                         ?inp_range
                         ?recip
-                        (ECons (MIter) (ECons (MNum 0) (ENil)))
+                        (ECons (MNum 1) (ECons (MNum 0) (ENil)))
                         ?x
                         ?inp_stride
                         ?inp_stride
@@ -370,7 +370,7 @@ impl EgglogOp for RowRMSNorm {
                         ?std_normed
                         ?inp_stride
                         ?weight
-                        (ECons (MNum 0) (ECons (MIter) (ENil)))
+                        (ECons (MNum 0) (ECons (MNum 1) (ENil)))
                         ?inp_stride
                     )
                 )
@@ -381,7 +381,7 @@ impl EgglogOp for RowRMSNorm {
                     (RowRMSNorm
                         (ECons ?batch (ENil))
                         ?x
-                        (ECons (MMul (MIter) ?width) (ENil))
+                        (ECons ?width (ENil))
                         ?width
                         ?weight
                     )
@@ -389,6 +389,7 @@ impl EgglogOp for RowRMSNorm {
                 (union ?final ?new)
                 (set (dtype ?new) (F32))
             )
+            :name \"row rms norm\"
         )"
         .to_string()]
     }
@@ -491,14 +492,17 @@ impl BlockOp for RowRMSNorm {
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
         CStructBuilder::new()
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&self.row_width])
             .finish_struct()
     }
 
     fn expressions(&self) -> Vec<Expression> {
-        vec![flatten_strides(&self.range, &self.a_stride), self.row_width]
+        vec![
+            flatten_mul_strides(&self.range, &self.a_stride),
+            self.row_width,
+        ]
     }
 }
 
@@ -620,8 +624,8 @@ impl BlockOp for RowRope {
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
         CStructBuilder::new()
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&self.row_width])
             .int(expressions[&'z'.into()])
             .finish_struct()
@@ -629,7 +633,7 @@ impl BlockOp for RowRope {
 
     fn expressions(&self) -> Vec<Expression> {
         vec![
-            flatten_strides(&self.range, &self.a_stride),
+            flatten_mul_strides(&self.range, &self.a_stride),
             self.row_width,
             'z'.into(),
         ]
@@ -670,10 +674,10 @@ impl EgglogOp for TileMatmul {
                 ; get tile sum
                 (= ?ts (TileSum ?sum_shape ?untiled_sum_shape ?iters ?cm ?sum_in_stride ?sum_in_m_stride ?sum_in_n_stride ?sum_in_k_stride ?sum_out_stride ?sum_out_m_stride ?sum_out_n_stride))
                 ; assert k stride on the intermediate is 1
-                (= ?out_k_stride (MIter))
-                (= ?sum_in_k_stride (MIter))
+                (= ?out_k_stride (MNum 1))
+                (= ?sum_in_k_stride (MNum 1))
                 ; assert matmul strides
-                (= ?b_n_stride (MIter))
+                (= ?b_n_stride (MNum 1))
                 ; get dimensions
                 (= ?t_n (nth_from_end ?mul_shape 1))
                 (= ?t_k (nth_from_end ?mul_shape 0))
@@ -703,14 +707,14 @@ impl EgglogOp for TileMatmul {
                                 ?sum_out_stride ?sum_out_m_stride ?sum_out_n_stride))
 
                 ; assert k stride on the intermediate is 1 (contiguous)
-                (= ?out_k_stride (MIter))
-                (= ?sum_in_k_stride (MIter))
+                (= ?out_k_stride (MNum 1))
+                (= ?sum_in_k_stride (MNum 1))
 
                 ; A row-major (contiguous in its last dim k)
-                (= ?a_k_stride (MIter))
+                (= ?a_k_stride (MNum 1))
 
                 ; B col-major (contiguous in its first dim k)
-                (= ?b_k_stride (MIter))
+                (= ?b_k_stride (MNum 1))
 
                 ; get tile dims
                 (= ?t_n (nth_from_end ?mul_shape 1))
@@ -728,7 +732,7 @@ impl EgglogOp for TileMatmul {
                 ;  - C row-major tile strides: m -> t_n*32, n -> 1
                 (let ?tm (TileMatmul ?sum_shape ?untiled_sum_shape ?iters
                             ?a ?new_a_stride (MMul ?t_k (MNum 32)) (MNum 1)
-                            ?b ?new_b_stride (MReplace ?b_k_stride (MIter) (MNum 1)) (MMul ?t_k (MNum 32))
+                            ?b ?new_b_stride ?b_k_stride (MMul ?t_k (MNum 32))
                             ?sum_out_stride (MMul ?t_n (MNum 32)) (MNum 1)))
                 (union ?ts ?tm)
                 (set (dtype ?tm) (F32))
@@ -931,9 +935,9 @@ impl BlockOp for TileMatmul {
     ) -> Vec<u8> {
         assert_eq!(self.untiled_range.len(), 2);
         let mut m_pos_stride = vec![0.into(); self.range.len()];
-        m_pos_stride[self.range.len() - 2] = 'z'.into();
+        m_pos_stride[self.range.len() - 2] = 1.into();
         let mut n_pos_stride = vec![0.into(); self.range.len()];
-        n_pos_stride[self.range.len() - 1] = 'z'.into();
+        n_pos_stride[self.range.len() - 1] = 1.into();
         CStructBuilder::new()
             .ints(
                 &self
@@ -942,35 +946,35 @@ impl BlockOp for TileMatmul {
                     .map(|e| expressions[e])
                     .collect_vec(),
             )
-            .int(expressions[&flatten_strides(&self.range, &self.a_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.b_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.out_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.out_stride)])
             .int(expressions[&self.iters])
             .int(expressions[&self.a_m_stride])
             .int(expressions[&self.b_n_stride])
             .int(expressions[&self.out_m_stride])
-            .int(expressions[&flatten_strides(&self.range, &m_pos_stride)])
-            .int(expressions[&flatten_strides(&self.range, &n_pos_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &m_pos_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &n_pos_stride)])
             .finish_struct()
     }
 
     fn expressions(&self) -> Vec<Expression> {
         let mut m_pos_stride = vec![0.into(); self.range.len()];
-        m_pos_stride[self.range.len() - 2] = 'z'.into();
+        m_pos_stride[self.range.len() - 2] = 1.into();
         let mut n_pos_stride = vec![0.into(); self.range.len()];
-        n_pos_stride[self.range.len() - 1] = 'z'.into();
+        n_pos_stride[self.range.len() - 1] = 1.into();
         vec![
             self.untiled_range[0],
             self.untiled_range[1],
-            flatten_strides(&self.range, &self.a_stride),
-            flatten_strides(&self.range, &self.b_stride),
-            flatten_strides(&self.range, &self.out_stride),
+            flatten_mul_strides(&self.range, &self.a_stride),
+            flatten_mul_strides(&self.range, &self.b_stride),
+            flatten_mul_strides(&self.range, &self.out_stride),
             self.iters,
             self.a_m_stride,
             self.b_n_stride,
             self.out_m_stride,
-            flatten_strides(&self.range, &m_pos_stride),
-            flatten_strides(&self.range, &n_pos_stride),
+            flatten_mul_strides(&self.range, &m_pos_stride),
+            flatten_mul_strides(&self.range, &n_pos_stride),
         ]
     }
 }
@@ -1268,47 +1272,47 @@ impl BlockOp for GQAAttention {
         };
         let (k_cache, v_cache) = &kv_cache[self.current_layer];
         let mut q_pos_stride = vec![0.into(); self.range.len()];
-        q_pos_stride[self.range.len() - 1] = 'z'.into();
+        q_pos_stride[self.range.len() - 1] = 1.into();
         let mut group_pos_stride = vec![0.into(); self.range.len()];
-        group_pos_stride[self.range.len() - 2] = 'z'.into();
+        group_pos_stride[self.range.len() - 2] = 1.into();
         let mut head_pos_stride = vec![0.into(); self.range.len()];
-        head_pos_stride[self.range.len() - 3] = 'z'.into();
+        head_pos_stride[self.range.len() - 3] = 1.into();
         CStructBuilder::new()
             .int(expressions[&self.head_dim])
             .int(expressions[&self.cur_seq])
             .int(expressions[&self.kv_row_stride])
-            .int(expressions[&flatten_strides(&self.range, &self.q_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.k_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.v_stride)])
-            .int(expressions[&flatten_strides(&self.range, &self.o_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.q_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.k_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.v_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.o_stride)])
             .ptr_mut_f32(k_cache.device_ptr(stream).0 as *mut f32)
             .ptr_mut_f32(v_cache.device_ptr(stream).0 as *mut f32)
             .int(expressions[&self.prev_seq])
-            .int(expressions[&flatten_strides(&self.range, &q_pos_stride)])
-            .int(expressions[&flatten_strides(&self.range, &group_pos_stride)])
-            .int(expressions[&flatten_strides(&self.range, &head_pos_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &q_pos_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &group_pos_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &head_pos_stride)])
             .finish_struct()
     }
 
     fn expressions(&self) -> Vec<Expression> {
         let mut q_pos_stride = vec![0.into(); self.range.len()];
-        q_pos_stride[self.range.len() - 1] = 'z'.into();
+        q_pos_stride[self.range.len() - 1] = 1.into();
         let mut group_pos_stride = vec![0.into(); self.range.len()];
-        group_pos_stride[self.range.len() - 2] = 'z'.into();
+        group_pos_stride[self.range.len() - 2] = 1.into();
         let mut head_pos_stride = vec![0.into(); self.range.len()];
-        head_pos_stride[self.range.len() - 3] = 'z'.into();
+        head_pos_stride[self.range.len() - 3] = 1.into();
         vec![
-            flatten_strides(&self.range, &self.q_stride),
-            flatten_strides(&self.range, &self.k_stride),
-            flatten_strides(&self.range, &self.v_stride),
-            flatten_strides(&self.range, &self.o_stride),
+            flatten_mul_strides(&self.range, &self.q_stride),
+            flatten_mul_strides(&self.range, &self.k_stride),
+            flatten_mul_strides(&self.range, &self.v_stride),
+            flatten_mul_strides(&self.range, &self.o_stride),
             self.head_dim,
             self.cur_seq,
             self.kv_row_stride,
             self.prev_seq,
-            flatten_strides(&self.range, &q_pos_stride),
-            flatten_strides(&self.range, &group_pos_stride),
-            flatten_strides(&self.range, &head_pos_stride),
+            flatten_mul_strides(&self.range, &q_pos_stride),
+            flatten_mul_strides(&self.range, &group_pos_stride),
+            flatten_mul_strides(&self.range, &head_pos_stride),
         ]
     }
 }

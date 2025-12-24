@@ -1,5 +1,3 @@
-use rand::{rng, Rng};
-
 use luminal::prelude::*;
 
 /// A simple unbiased linear layer
@@ -33,24 +31,6 @@ impl Linear {
             permute: true,
         }
     }
-
-    // pub fn init_rand(self) -> Self {
-    //     // Init weight as uniform(-1, 1)
-    //     let mut rng = rng();
-    //     self.weight.set(
-    //         (0..self.weight.shape.n_elements().to_usize().unwrap())
-    //             .map(|_| rng.random_range(-1_f32..1_f32))
-    //             .collect::<Vec<_>>(),
-    //     );
-    //     if let Some(bias) = self.bias {
-    //         bias.set(
-    //             (0..bias.shape.n_elements().to_usize().unwrap())
-    //                 .map(|_| rng.random_range(-1_f32..1_f32))
-    //                 .collect::<Vec<_>>(),
-    //         );
-    //     }
-    //     self
-    // }
 }
 
 impl Linear {

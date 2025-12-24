@@ -24,7 +24,7 @@ impl Add for GraphTensor {
         // );
         let new_id = self
             .graph()
-            .add_op(op::Add)
+            .add_op(op::Add::default())
             .input(self.id, 0, self.shape)
             .input(rhs.id, 0, rhs.shape)
             .finish();
@@ -40,8 +40,11 @@ impl Add<GraphTensor> for f32 {
     }
 }
 
-impl AddAssign for GraphTensor {
-    fn add_assign(&mut self, rhs: Self) {
+impl<T> AddAssign<T> for GraphTensor
+where
+    GraphTensor: Add<T, Output = GraphTensor>,
+{
+    fn add_assign(&mut self, rhs: T) {
         *self = *self + rhs;
     }
 }
@@ -62,8 +65,11 @@ impl Sub<GraphTensor> for f32 {
     }
 }
 
-impl SubAssign for GraphTensor {
-    fn sub_assign(&mut self, rhs: Self) {
+impl<T> SubAssign<T> for GraphTensor
+where
+    GraphTensor: Sub<T, Output = GraphTensor>,
+{
+    fn sub_assign(&mut self, rhs: T) {
         *self = *self - rhs;
     }
 }
@@ -79,7 +85,7 @@ impl Mul for GraphTensor {
         // );
         let new_id = self
             .graph()
-            .add_op(op::Mul)
+            .add_op(op::Mul::default())
             .input(self.id, 0, self.shape)
             .input(rhs.id, 0, rhs.shape)
             .finish();
@@ -95,8 +101,11 @@ impl Mul<GraphTensor> for f32 {
     }
 }
 
-impl MulAssign for GraphTensor {
-    fn mul_assign(&mut self, rhs: Self) {
+impl<T> MulAssign<T> for GraphTensor
+where
+    GraphTensor: Mul<T, Output = GraphTensor>,
+{
+    fn mul_assign(&mut self, rhs: T) {
         *self = *self * rhs;
     }
 }
@@ -119,8 +128,11 @@ impl Div<GraphTensor> for f32 {
     }
 }
 
-impl DivAssign for GraphTensor {
-    fn div_assign(&mut self, rhs: Self) {
+impl<T> DivAssign<T> for GraphTensor
+where
+    GraphTensor: Div<T, Output = GraphTensor>,
+{
+    fn div_assign(&mut self, rhs: T) {
         *self = *self / rhs;
     }
 }
@@ -132,7 +144,7 @@ impl Rem<GraphTensor> for GraphTensor {
         assert_eq!(self.dims(), rhs.dims(), "Dims must match to mod tensors.");
         let new_id = self
             .graph()
-            .add_op(op::Mod)
+            .add_op(op::Mod::default())
             .input(self.id, 0, self.shape)
             .input(rhs.id, 0, rhs.shape)
             .finish();
@@ -140,8 +152,11 @@ impl Rem<GraphTensor> for GraphTensor {
     }
 }
 
-impl RemAssign for GraphTensor {
-    fn rem_assign(&mut self, rhs: Self) {
+impl<T> RemAssign<T> for GraphTensor
+where
+    GraphTensor: Rem<T, Output = GraphTensor>,
+{
+    fn rem_assign(&mut self, rhs: T) {
         *self = *self % rhs;
     }
 }
@@ -207,7 +222,11 @@ impl<S: Into<Expression>> Div<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn div(self, rhs: S) -> Self::Output {
-        self / self.graph().constant(rhs).expand(self.shape)
+        self / self
+            .graph()
+            .constant(rhs)
+            .cast(self.dtype)
+            .expand(self.shape)
     }
 }
 
@@ -233,7 +252,7 @@ impl GraphTensor {
         assert_eq!(self.dims(), rhs.dims(), "Dims must match to lt tensors.");
         let new_id = self
             .graph()
-            .add_op(op::LessThan)
+            .add_op(op::LessThan::default())
             .input(self.id, 0, self.shape)
             .input(rhs.id, 0, rhs.shape)
             .finish();
@@ -309,43 +328,240 @@ impl F32Pow for f32 {
 }
 
 // #[cfg(test)]
-// mod tests {
-//     use super::F32Pow;
+#[cfg(test)]
+pub(super) mod tests {
+    use crate::{
+        prelude::*,
+        tests::{assert_close, random_vec},
+    };
+    use candle_core::{DType, Device, Tensor};
+    use itertools::Itertools;
 
-//     crate::test_imports!();
+    pub fn identity(v: Vec<f32>) -> Vec<f32> {
+        v
+    }
 
-//     #[test]
-//     fn test_clip() {
-//         let mut cx = Graph::new();
-//         let a = cx
-//             .tensor((3, 2))
-//             .set([[[-1.0], [-2.0], [3.0]], [[-1.5], [0.0], [5.0]]]);
-//         let result = a.clip(-1.5, 3.4).retrieve();
-//         let expected_result = cx
-//             .tensor((3, 2))
-//             .set([[[-1.0], [-1.5], [3.0]], [[-1.5], [0.0], [3.4]]])
-//             .retrieve();
-//         cx.execute();
+    pub fn shift_from_zero(v: Vec<f32>) -> Vec<f32> {
+        v.into_iter()
+            .map(|x| if x >= 0.0 { x + 1.0 } else { x - 1.0 })
+            .collect()
+    }
 
-//         assert_close(&result.data(), &expected_result.data());
-//     }
+    pub fn test_binary(
+        a_shape: impl ToShape,
+        b_shape: impl ToShape,
+        func: impl Fn(GraphTensor, GraphTensor) -> GraphTensor,
+        ref_func: impl Fn(Tensor, Tensor) -> Tensor,
+    ) {
+        test_binary_transforms(a_shape, b_shape, func, ref_func, identity, identity);
+    }
 
-//     #[test]
-//     fn test_pow() {
-//         let base = 2_f32;
-//         let mut cx = Graph::new();
-//         let a = cx
-//             .tensor((3, 2))
-//             .set([[[-1.0], [-2.0], [3.0]], [[1.0], [0.0], [5.0]]]);
+    pub fn test_binary_transforms(
+        a_shape: impl ToShape,
+        b_shape: impl ToShape,
+        func: impl Fn(GraphTensor, GraphTensor) -> GraphTensor,
+        ref_func: impl Fn(Tensor, Tensor) -> Tensor,
+        lhs_transform: impl Fn(Vec<f32>) -> Vec<f32>,
+        rhs_transform: impl Fn(Vec<f32>) -> Vec<f32>,
+    ) {
+        let a_shape = a_shape
+            .to_shape()
+            .into_iter()
+            .map(|e| e.to_usize().unwrap())
+            .collect_vec();
+        let b_shape = b_shape
+            .to_shape()
+            .into_iter()
+            .map(|e| e.to_usize().unwrap())
+            .collect_vec();
+        let mut cx = Graph::new();
+        let a = cx.tensor(a_shape.clone());
+        let b = cx.tensor(b_shape.clone());
+        let c = func(a, b).output();
 
-//         let expected_result = cx
-//             .tensor((3, 2))
-//             .set([[[0.5], [0.25], [8.0]], [[2.0], [1.0], [32.0]]])
-//             .retrieve();
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
 
-//         let result = base.pow(a).retrieve();
-//         cx.execute();
+        let lhs_values = lhs_transform(random_vec(a_shape.iter().copied().product()));
+        let rhs_values = rhs_transform(random_vec(b_shape.iter().copied().product()));
+        rt.set_data(a.id, lhs_values.clone().into());
+        rt.set_data(b.id, rhs_values.clone().into());
+        rt.execute(&cx.dyn_map);
 
-//         assert_close(&result.data(), &expected_result.data());
-//     }
-// }
+        // Reference
+        let device = Device::Cpu;
+        let ref_a = Tensor::from_vec(lhs_values, a_shape, &device).unwrap();
+        let ref_b = Tensor::from_vec(rhs_values, b_shape, &device).unwrap();
+        let ref_c = ref_func(ref_a, ref_b).flatten_all().unwrap();
+
+        assert_close(rt.get_f32(c.id), &ref_c.to_vec1::<f32>().unwrap())
+    }
+
+    #[test]
+    fn test_add() {
+        test_binary(27, 27, |a, b| a + b, |a, b| (&a + &b).unwrap());
+    }
+
+    #[test]
+    fn test_sub() {
+        test_binary(27, 27, |a, b| a - b, |a, b| (&a - &b).unwrap());
+    }
+
+    #[test]
+    fn test_mul() {
+        test_binary(27, 27, |a, b| a * b, |a, b| (&a * &b).unwrap());
+    }
+
+    #[test]
+    fn test_div() {
+        test_binary_transforms(
+            27,
+            27,
+            |a, b| a / b,
+            |a, b| (&a / &b).unwrap(),
+            identity,
+            shift_from_zero,
+        );
+    }
+
+    #[test]
+    fn test_maximum() {
+        test_binary(27, 27, |a, b| a.maximum(b), |a, b| a.maximum(&b).unwrap());
+    }
+
+    #[test]
+    fn test_minimum() {
+        test_binary(27, 27, |a, b| a.minimum(b), |a, b| a.minimum(&b).unwrap());
+    }
+
+    #[test]
+    fn test_mod() {
+        test_binary_transforms(
+            27,
+            27,
+            |a, b| a % b,
+            |a, b| {
+                let lhs = a.to_vec1::<f32>().unwrap();
+                let rhs = b.to_vec1::<f32>().unwrap();
+                let remainder: Vec<f32> = lhs.iter().zip(rhs.iter()).map(|(x, y)| x % y).collect();
+                Tensor::from_vec(remainder, 27, &Device::Cpu).unwrap()
+            },
+            identity,
+            shift_from_zero,
+        );
+    }
+
+    #[test]
+    fn test_lt() {
+        test_binary(
+            27,
+            27,
+            |a, b| a.lt(b),
+            |a, b| a.lt(&b).unwrap().to_dtype(DType::F32).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_gt() {
+        test_binary(
+            27,
+            27,
+            |a, b| a.gt(b),
+            |a, b| a.gt(&b).unwrap().to_dtype(DType::F32).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_le() {
+        test_binary(
+            27,
+            27,
+            |a, b| a.le(b),
+            |a, b| a.le(&b).unwrap().to_dtype(DType::F32).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_ge() {
+        test_binary(
+            27,
+            27,
+            |a, b| a.ge(b),
+            |a, b| a.ge(&b).unwrap().to_dtype(DType::F32).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_ne() {
+        test_binary(
+            27,
+            27,
+            |a, b| a.ne(b),
+            |a, b| a.ne(&b).unwrap().to_dtype(DType::F32).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_eq() {
+        test_binary(
+            27,
+            27,
+            |a, b| a.eq(b),
+            |a, b| a.eq(&b).unwrap().to_dtype(DType::F32).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_pow() {
+        test_binary_transforms(
+            27,
+            27,
+            |a, _| a.pow(2.5f32),
+            |a, _| a.powf(2.5f64).unwrap(),
+            shift_from_zero,
+            identity,
+        );
+    }
+
+    #[test]
+    fn test_clip() {
+        test_binary_transforms(
+            27,
+            27,
+            |a, _| a.clip(-0.25, 0.25),
+            |a, _| a.clamp(-0.25, 0.25).unwrap(),
+            identity,
+            identity,
+        );
+    }
+
+    #[test]
+    fn test_maximum_f32() {
+        test_binary_transforms(
+            27,
+            27,
+            |a, _| a.maximum_f32(0.1),
+            |a, _| {
+                a.maximum(&Tensor::new(vec![0.1f32; 27], &Device::Cpu).unwrap())
+                    .unwrap()
+            },
+            identity,
+            identity,
+        );
+    }
+
+    #[test]
+    fn test_minimum_f32() {
+        test_binary_transforms(
+            27,
+            27,
+            |a, _| a.minimum_f32(-0.1),
+            |a, _| {
+                a.minimum(&Tensor::new(vec![-0.1f32; 27], &Device::Cpu).unwrap())
+                    .unwrap()
+            },
+            identity,
+            identity,
+        );
+    }
+}

@@ -48,7 +48,7 @@ fn main() {
     let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
     let token_ids = cx.named_tensor("token_ids", 's').as_dtype(DType::Int);
     let model = model::Llama::init(&mut cx);
-    let _logits = model.forward(input, token_ids);
+    let logits = model.forward(input, token_ids).output();
 
     let ctx = luminal_cuda::cudarc::driver::CudaContext::new(0).unwrap();
     ctx.bind_to_thread().unwrap();
@@ -118,11 +118,11 @@ fn main() {
         }
 
         timings.extend(runtime.execute(&cx.dyn_map));
-        let outs = runtime.dtoh_outputs();
+        let logits_data = runtime.get_f32(logits.id);
 
         let sample_span = span!(Level::INFO, "sample");
         let _sample_entered = sample_span.enter();
-        sentence = vec![*sample(&outs[0], VOCAB_SIZE).last().unwrap()];
+        sentence = vec![*sample(&logits_data, VOCAB_SIZE).last().unwrap()];
         prev_seq += seq_len;
         print!("{}", tokenizer.decode(&sentence, true).unwrap());
         std::io::stdout().flush().unwrap();

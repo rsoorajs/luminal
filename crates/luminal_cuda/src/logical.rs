@@ -5,7 +5,7 @@ use luminal::utils::{
     OpParam::{self, *},
 };
 
-pub type Ops = (Exp, Sigmoid, CubeMul, TileSum, Softmax);
+pub type Ops = (Exp, Sigmoid, CubeMul, TileSum);
 
 #[derive(Default, Debug, Clone)]
 pub struct CubeMul;
@@ -199,7 +199,7 @@ impl EgglogOp for Sigmoid {
     fn rewrites(&self) -> Vec<String> {
         vec!["(rule
             (
-                (= ?neg_input (Mul ?input_range ?input ?input_stride (Iota (MNum -1) (MNum 1)) ?const_stride ?intermediate_stride))
+                (= ?neg_input (Mul ?input_range ?input ?input_stride (Constant -1.0) ?const_stride ?intermediate_stride))
                 (= ?exp (Exp ?input_range ?neg_input ?intermediate_stride ?exp_stride))
                 (= ?plus_one (Add ?input_range ?exp ?exp_stride (Constant 1.0) ?const_stride ?plus_one_stride))
                 (= ?sig_out (Recip ?input_range ?plus_one ?plus_one_stride ?out_stride))
@@ -210,50 +210,7 @@ impl EgglogOp for Sigmoid {
                 (union ?sig_out ?sig)
                 (set (dtype ?sig) ?dt)
             )
-        )".to_string()]
-    }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct Softmax;
-
-impl EgglogOp for Softmax {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        (
-            "Softmax".to_string(),
-            vec![EList, Expr, Input, EList, EList],
-        )
-    }
-
-    fn cleanup(&self) -> bool {
-        true
-    }
-
-    fn rewrites(&self) -> Vec<String> {
-        vec!["(rule
-          (
-            ; rowwise max
-            (= ?qk_max (Max ?batches ?row_width ?qk ?max_stride (MIter) ?max_stride_out))
-            ; broadcast -max
-            (= ?neg1 (MNum -1))
-            (= ?qk_max_neg_2d (Mul ?full_range ?qk_max ?broadcast_stride (Iota ?neg1 (MNum 1)) ?zero_stride ?full_stride))
-            (= (MNum 0) (nth_from_end ?broadcast_stride 0)) ; assert broadcasting
-            (= ?qk_sub (Add ?full_range ?qk ?full_stride ?qk_max_neg_2d ?full_stride ?full_stride))
-            ; exp
-            (= ?qk_sub_exp (Exp ?full_range ?qk_sub ?full_stride ?full_stride))
-            ; rowwise sum
-            (= ?sum (Sum ?batches ?row_width ?qk_sub_exp ?max_stride (MIter) ?max_stride_out))
-            ; 2D denom by broadcasting sum to [B,B], then recip producing [B,B]
-            (= ?denom_2d (Recip ?full_range ?sum ?broadcast_stride ?full_stride))
-            ; scores = exp / sum
-            (= ?scores (Mul ?full_range ?qk_sub_exp ?full_stride ?denom_2d ?full_stride ?full_stride))
-            (= (F32) (dtype ?qk))
-          )
-          (
-            (let ?sm (Softmax ?batches ?row_width ?qk ?max_stride ?max_stride))
-            (union ?scores ?sm)
-            (set (dtype ?sm) (F32))
-        )
+            :name \"sigmoid\"
         )".to_string()]
     }
 }

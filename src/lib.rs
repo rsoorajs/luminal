@@ -8,7 +8,8 @@ pub mod visualization;
 pub mod egglog_utils;
 pub mod serialized_egraph;
 
-// pub mod tests;
+#[cfg(test)]
+pub mod tests;
 
 pub mod prelude {
     pub use crate::graph::*;

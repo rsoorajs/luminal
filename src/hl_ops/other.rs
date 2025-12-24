@@ -1,46 +1,5 @@
 use crate::{op::Constant, prelude::*};
 
-// impl GraphTensor {
-//     /// Cumulative sum last dimension
-//     pub fn cumsum_last_dim(mut self) -> Self {
-//         let axis = self.shape.len() - 1;
-//         if !self.shape.is_contiguous() {
-//             self = self.contiguous();
-//         }
-//         // Pad out length
-//         let orig_length = self.dims()[axis];
-//         self = self.pad_along(orig_length - 1, 0, axis).contiguous();
-
-//         // Pool
-//         self = self.pool_last_dim(orig_length, 1, 1);
-
-//         // Sum Reduce along new dimension
-//         self.sum(axis + 1)
-//     }
-
-//     /// Cumulative max last dimension
-//     pub fn cummax_last_dim(mut self) -> Self {
-//         let axis = self.shape.len() - 1;
-//         if !self.shape.is_contiguous() {
-//             self = self.contiguous();
-//         }
-//         // Pad out length
-//         let orig_length = self.dims()[axis];
-//         self.shape.padding[self.shape.indexes[axis]].0 = orig_length - 1;
-//         self = self.contiguous();
-
-//         // Pool
-//         self = self.pool_last_dim(orig_length, 1, 1);
-//         // Max Reduce along new dimension
-//         self.max(axis + 1)
-//     }
-
-//     /// Cumulative product last dimension
-//     pub fn cumprod_last_dim(self) -> Self {
-//         self.log().cumsum_last_dim().exp()
-//     }
-// }
-
 impl Graph {
     /// A scalar expression constant
     pub fn constant(&mut self, i: impl Into<Expression>) -> GraphTensor {
@@ -79,8 +38,8 @@ impl Graph {
         self.iota('z', to)
     }
 
-    /// ARange from beg to end
-    pub fn arange_opt(
+    /// ARange from beginning to end
+    pub fn arange_options(
         &mut self,
         start: impl Into<Expression>,
         end: impl Into<Expression>,
@@ -90,31 +49,32 @@ impl Graph {
         self.iota((Expression::from('z') * step) + start, (end - start) / step)
     }
 
-    // /// Lower left-hand triangle of 1s. Currently required to be square
-    // ///
-    // /// Same API as https://pytorch.org/docs/stable/generated/torch.tril
-    // pub fn tril(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
-    //     let size = size.into();
-    //     let horizontal = self.arange(size).expand_dim(0, size);
-    //     let vertical = self.arange(size).expand_dim(1, size);
+    /// Lower left-hand triangle of 1s. Currently required to be square
+    ///
+    /// Same API as https://pytorch.org/docs/stable/generated/torch.tril
+    pub fn tril(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
+        let size = size.into();
+        let horizontal = self.arange(size).expand_dim(0, size);
+        let vertical = self.arange(size).expand_dim(1, size);
+        (horizontal - (diagonal as f32 + 1.)).lt(vertical)
+    }
 
-    //     (horizontal - (diagonal as f32 + 1.)).lt(vertical)
-    // }
-
-    // /// Upper right-hand triangle of 1s
-    // ///
-    // /// Same API as https://pytorch.org/docs/stable/generated/torch.triu
-    // pub fn triu(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
-    //     let size = size.into();
-    //     let horizontal = self.arange(size).expand_dim(0, size).contiguous();
-    //     let vertical = self.arange(size).expand_dim(1, size).contiguous();
-
-    //     (horizontal - (diagonal as f32 - 1.)).gt(vertical)
-    // }
+    /// Upper right-hand triangle of 1s
+    ///
+    /// Same API as https://pytorch.org/docs/stable/generated/torch.triu
+    pub fn triu(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
+        let size = size.into();
+        let horizontal = self.arange(size).expand_dim(0, size);
+        let vertical = self.arange(size).expand_dim(1, size);
+        (horizontal - (diagonal as f32 - 1.)).gt(vertical)
+    }
 }
 
 impl GraphTensor {
     pub fn cast(self, dtype: DType) -> GraphTensor {
+        if self.dtype == dtype {
+            return self;
+        }
         let id = self
             .graph()
             .add_op(Cast(dtype))
@@ -126,7 +86,7 @@ impl GraphTensor {
     /// Sets this tensor's dtype without doing a cast
     pub fn as_dtype(mut self, dtype: DType) -> GraphTensor {
         self.dtype = dtype;
-        if let Some(gmem) = self.graph().try_get_op_mut::<GMEM>(self.id) {
+        if let Some(gmem) = self.graph().try_get_op_mut::<Input>(self.id) {
             gmem.dtype = dtype;
         }
         self
@@ -135,162 +95,71 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    // crate::test_imports!();
-    // #[test]
-    // fn test_arange() {
-    //     let mut cx = Graph::new();
+    use crate::{prelude::*, tests::assert_close};
+    use candle_core::{Device, Tensor};
 
-    //     let arange = cx.arange(10).retrieve();
-    //     cx.execute();
+    pub fn test_init(
+        func: impl Fn(&mut Graph) -> GraphTensor,
+        ref_func: impl Fn(&Device) -> Tensor,
+    ) {
+        let mut cx = Graph::new();
+        let b = func(&mut cx).output();
 
-    //     assert_exact(&arange.data(), &[0., 1., 2., 3., 4., 5., 6., 7., 8., 9.]);
-    // }
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
 
-    // #[test]
-    // fn test_arange_from_zero() {
-    //     let mut cx = Graph::new();
+        rt.execute(&cx.dyn_map);
 
-    //     let tensor = cx.arange(5).retrieve();
-    //     cx.execute();
+        // Reference
+        let device = Device::Cpu;
+        let ref_b = ref_func(&device).flatten_all().unwrap();
 
-    //     assert_eq!(tensor.data(), vec![0., 1., 2., 3., 4.]);
-    // }
+        // need to assert close because some unaries (exp and log) are (good) approximations
+        assert_close(rt.get_f32(b.id), &ref_b.to_vec1::<f32>().unwrap())
+    }
 
-    // #[test]
-    // fn test_arange_in_range() {
-    //     let mut cx = Graph::new();
+    #[test]
+    fn test_arange() {
+        test_init(
+            |cx| cx.arange(13).cast(DType::F32) * 1.0,
+            |dev| Tensor::arange(0_f32, 13_f32, dev).unwrap(),
+        );
+        test_init(
+            |cx| cx.arange_options(-5, 25, 5).cast(DType::F32) * 1.0,
+            |dev| {
+                (Tensor::arange(-1_f32, 5_f32, dev).unwrap()
+                    * Tensor::new(5_f32, dev).unwrap().broadcast_as(6).unwrap())
+                .unwrap()
+            },
+        );
+        test_init(
+            |cx| cx.arange_options(0, 4, 1).cast(DType::F32) / 3.,
+            #[allow(clippy::excessive_precision)]
+            |dev| Tensor::new(vec![0_f32, 0.3333333333, 0.666666666, 0.99999999], dev).unwrap(),
+        );
+    }
 
-    //     let tensor = cx.arange_in_range(3, 8).retrieve();
-    //     cx.execute();
+    #[test]
+    fn test_gather() {
+        test_init(
+            |cx| {
+                cx.arange(13)
+                    .cast(DType::F32)
+                    .gather(cx.iota(Expression::from('z') * 2, 5))
+            },
+            |dev| Tensor::new(vec![0_f32, 2., 4., 6., 8.], dev).unwrap(),
+        );
+    }
 
-    //     assert_eq!(tensor.data(), vec![3., 4., 5., 6., 7.]);
-    // }
-
-    // #[test]
-    // fn test_arange_step_simple() {
-    //     let mut cx = Graph::new();
-
-    //     let tensor = cx.arange_step(1.0, 5.0, 1.0).retrieve();
-    //     cx.execute();
-
-    //     assert_eq!(tensor.data(), vec![1.0, 2.0, 3.0, 4.0]);
-    // }
-
-    // #[test]
-    // fn test_arange_step_fractional() {
-    //     let mut cx = Graph::new();
-
-    //     let tensor = cx.arange_step(0.0, 1.0, 0.3).retrieve();
-    //     cx.execute();
-
-    //     // Should produce [0.0, 0.3, 0.6, 0.9] — note that 1.2 would be >= 1.0 so we stop before that.
-    //     let expected = &[0.0, 0.3, 0.6, 0.9];
-
-    //     // Floating point comparison with tolerance:
-    //     assert_eq!(tensor.data().len(), expected.len());
-    //     for (v, e) in tensor.data().iter().zip(expected.iter()) {
-    //         assert!((v - e).abs() < 1e-5, "Expected {e}, got {v}");
-    //     }
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "step must be positive")]
-    // fn test_arange_step_zero_step_panics() {
-    //     let mut cx = Graph::new();
-
-    //     // Should panic because step is zero
-    //     cx.arange_step(0.0, 5.0, 0.0);
-    // }
-
-    // #[test]
-    // fn test_cumprod() {
-    //     let mut cx = Graph::new();
-
-    //     let a = cx.tensor(3).set(vec![3., 2., 5.]);
-    //     let b = a.cumprod_last_dim().retrieve();
-    //     cx.execute();
-
-    //     assert_close(&b.data(), &[3., 6., 30.]);
-    // }
-
-    // #[test]
-    // fn test_gather() {
-    //     let mut cx = Graph::new();
-
-    //     let matrix = cx.tensor((3, 2)).set(vec![1., 2., 3., 4., 5., 6.]);
-    //     let indexes = cx.tensor(2).set(vec![2., 0.]);
-    //     let result = matrix.gather(indexes).retrieve();
-
-    //     cx.execute();
-
-    //     assert_exact(&result.data(), &[5., 6., 1., 2.]);
-    // }
-
-    // #[test]
-    // fn test_dyn_arange() {
-    //     let mut cx = Graph::new();
-
-    //     let arange = cx.arange('a').retrieve();
-    //     cx.set_dyn_dim('a', 6);
-
-    //     cx.execute();
-
-    //     assert_exact(&arange.data(), &[0., 1., 2., 3., 4., 5.]);
-    // }
-
-    // #[test]
-    // fn test_tril() {
-    //     let mut cx = Graph::new();
-
-    //     let triangle = cx.tril(5, 1).retrieve();
-
-    //     cx.execute();
-
-    //     assert_exact(
-    //         &triangle.data(),
-    //         &[
-    //             [1.00, 1.00, 0.00, 0.00, 0.00],
-    //             [1.00, 1.00, 1.00, 0.00, 0.00],
-    //             [1.00, 1.00, 1.00, 1.00, 0.00],
-    //             [1.00, 1.00, 1.00, 1.00, 1.00],
-    //             [1.00, 1.00, 1.00, 1.00, 1.00],
-    //         ]
-    //         .into_iter()
-    //         .flatten()
-    //         .collect::<Vec<_>>(),
-    //     );
-    // }
-
-    // #[test]
-    // fn test_triu() {
-    //     let mut cx = Graph::new();
-
-    //     let a = cx.triu(3, -1).retrieve();
-    //     let b = cx.triu(3, 0).retrieve();
-    //     let c = cx.triu(3, 1).retrieve();
-
-    //     cx.execute();
-
-    //     assert_exact(
-    //         &a.data(),
-    //         &[[1.00, 1.00, 1.00], [1.00, 1.00, 1.00], [0.00, 1.00, 1.00]]
-    //             .into_iter()
-    //             .flatten()
-    //             .collect::<Vec<_>>(),
-    //     );
-    //     assert_exact(
-    //         &b.data(),
-    //         &[[1.00, 1.00, 1.00], [0.00, 1.00, 1.00], [0.00, 0.00, 1.00]]
-    //             .into_iter()
-    //             .flatten()
-    //             .collect::<Vec<_>>(),
-    //     );
-    //     assert_exact(
-    //         &c.data(),
-    //         &[[0.00, 1.00, 1.00], [0.00, 0.00, 1.00], [0.00, 0.00, 0.00]]
-    //             .into_iter()
-    //             .flatten()
-    //             .collect::<Vec<_>>(),
-    //     );
-    // }
+    #[test]
+    fn test_triangle_mask() {
+        test_init(
+            |cx| cx.tril(10, 0).cast(DType::F32),
+            |dev| Tensor::tril2(10, candle_core::DType::F32, dev).unwrap(),
+        );
+        test_init(
+            |cx| cx.triu(43, 0).cast(DType::F32),
+            |dev| Tensor::triu2(43, candle_core::DType::F32, dev).unwrap(),
+        );
+    }
 }

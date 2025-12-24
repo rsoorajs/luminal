@@ -1,4 +1,3 @@
-#include <device_atomic_functions.h>
 enum OpCode {
   //%extra_op_codes%
 };
@@ -21,8 +20,8 @@ struct Task {
   int in_dep_c_base;
   int out_dep_stride;
   int out_dep_base;
-  const float* source_ptrs[3];
-  float* out_ptr;
+  const float *source_ptrs[3];
+  float *out_ptr;
   Payload payload;
 };
 
@@ -47,9 +46,13 @@ __device__ __forceinline__ unsigned long long read_globaltimer() {
 
 //%extra_op_functions%
 
+__device__ __forceinline__ void nanosleep(unsigned int cycles) {
+  asm volatile("nanosleep.u32 %0;" ::"r"(cycles));
+}
+
 __device__ inline void mutex_lock(int *m) {
   while (atomicCAS(m, 0, 1) != 0) {
-    __nanosleep(64);
+    nanosleep(64);
   }
   __threadfence();
 }
@@ -149,11 +152,11 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
 
       // Wait on input dependencies
       while (atomicAdd(&ready[dep_a], 0) > 0)
-        __nanosleep(64);
+        nanosleep(64);
       while (atomicAdd(&ready[dep_b], 0) > 0)
-        __nanosleep(64);
+        nanosleep(64);
       while (atomicAdd(&ready[dep_c], 0) > 0)
-        __nanosleep(64);
+        nanosleep(64);
 
       __threadfence();
       record_event(timings, &recorded_event, t->op + 2); // Record op start

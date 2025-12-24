@@ -1,4 +1,4 @@
-use crate::{prelude::*, utils::flatten_strides};
+use crate::{prelude::*, utils::flatten_z_strides};
 
 impl GraphTensor {
     /// Swap dimensions of the tensor
@@ -53,9 +53,19 @@ impl GraphTensor {
 
     /// add a new dimension of size 1 at the specified place
     pub fn unsqueeze(mut self, dim: usize) -> GraphTensor {
-        // Insert contiguous call
         assert!(self.shape.len() < 10, "Shape is maxed out at 10 dimensions");
         self.shape.expand_dim(dim, 1);
+        self
+    }
+
+    /// remove a dimension of size 1
+    pub fn squeeze(mut self, axis: usize) -> GraphTensor {
+        assert_eq!(
+            self.dims()[axis],
+            Expression::from(1),
+            "Only dimensions of size 1 can be squeezed!"
+        );
+        self.shape.remove_dim(axis);
         self
     }
 
@@ -67,11 +77,44 @@ impl GraphTensor {
         );
         let id = self
             .graph()
-            .add_op(Gather)
+            .add_op(Gather::default())
             .input(indexes.id, 0, indexes.shape)
             .input(self.id, 0, self.shape)
             .finish();
         GraphTensor::from_id(id, indexes.shape.contiguous(), self.graph_ref, self.dtype)
+    }
+
+    /// Given a tensor of non-repeating indexes along a dimension, generate an inverse permutation
+    /// x = [3, 2, 4, 1, 5, 0]
+    /// inv_perm(x) = [5, 3, 1, 0, 2, 4]
+    #[allow(clippy::needless_range_loop)]
+    pub fn inverse_permutation(self, axis: usize) -> GraphTensor {
+        // TODO: this is super inefficient because it requires materializing a large (n^2) one-hot tensor
+        assert_eq!(self.dtype, DType::Int);
+        let dims = self.dims();
+        let ax_size = dims[axis];
+        let mut dims2 = dims.clone();
+        dims2.insert(axis, ax_size);
+        // candidate: varies along candidate dim (axis), broadcast elsewhere.
+        let mut candidate = self.graph().arange(ax_size);
+        for i in 0..axis {
+            candidate = candidate.expand_dim(i, dims2[i]);
+        }
+        for i in axis + 1..dims2.len() {
+            candidate = candidate.expand_dim(i, dims2[i]);
+        }
+        // position: varies along position dim (axis+1), broadcast elsewhere.
+        let mut position = self.graph().arange(ax_size);
+        for i in 0..(axis + 1) {
+            position = position.expand_dim(i, dims2[i]);
+        }
+        for i in (axis + 2)..dims2.len() {
+            position = position.expand_dim(i, dims2[i]);
+        }
+        // one_hot[candidate, ..., position, ...] = (self[position, ...] == candidate)
+        let one_hot = self.expand_dim(axis, ax_size).eq(candidate);
+        // inv[candidate, ...] = Σ_pos one_hot * position
+        (one_hot * position).sum(axis + 1)
     }
 
     /// Extracts sliding local windows from an input tensor.
@@ -83,6 +126,7 @@ impl GraphTensor {
     ) -> GraphTensor {
         let (kernel, strides, dilation) =
             (kernel.to_shape(), strides.to_shape(), dilation.to_shape());
+
         assert_eq!(
             self.shape.len(),
             kernel.len(),
@@ -99,7 +143,7 @@ impl GraphTensor {
             "Dilation must be same number of dimensions as tensor!"
         );
 
-        // Compute input strides
+        // Compute input strides (row-major contiguous)
         let dims = self.dims();
         let n = dims.len();
         let mut in_strides = vec![Expression::from(1); n];
@@ -110,28 +154,30 @@ impl GraphTensor {
         }
 
         // Per-dim window counts
-        let mut win = Vec::with_capacity(dims.len());
-        for (((dim, kernel), stride), dilation) in
-            dims.into_iter().zip(&kernel).zip(&strides).zip(&dilation)
-        {
-            let effective_window = *dilation * (*kernel - 1) + 1;
-            win.push(((dim - effective_window) / stride) + 1);
+        let mut win = Vec::with_capacity(n);
+        for (((dim, k), s), d) in dims.iter().zip(&kernel).zip(&strides).zip(&dilation) {
+            let effective_window = *d * (*k - 1) + 1;
+            win.push(((*dim - effective_window) / s) + 1);
         }
 
-        // final_shape = [kernel..., win...]
-        let mut final_shape = kernel.clone();
-        final_shape.extend(win.into_iter().map(|e| e.simplify()));
+        // [win..., kernel...]
+        let mut final_shape: Vec<Expression> = win.into_iter().map(|e| e.simplify()).collect();
+        final_shape.extend(kernel.iter().copied());
 
-        // strides exprs over axes [k0..kN-1, w0..wN-1]
+        // Axis exprs must match final_shape axis order: first w axes, then k axes.
+        // idx = Σ_d (w_d * stride_d + k_d * dilation_d) * in_strides[d]
         let mut axis_exprs = Vec::with_capacity(2 * n);
-        for i in 0..n {
-            axis_exprs.push(Expression::from('z') * dilation[i] * in_strides[i]);
-        }
+
+        // w axes
         for i in 0..n {
             axis_exprs.push(Expression::from('z') * strides[i] * in_strides[i]);
         }
+        // k axes
+        for i in 0..n {
+            axis_exprs.push(Expression::from('z') * dilation[i] * in_strides[i]);
+        }
 
-        let index_expression = flatten_strides(&final_shape, &axis_exprs).simplify();
+        let index_expression = flatten_z_strides(&final_shape, &axis_exprs).simplify();
         let iota = self.graph().iota(index_expression, final_shape);
         self.gather(iota)
     }
@@ -165,7 +211,7 @@ impl GraphTensor {
             }
             new_dims.reverse();
             index_expressions.reverse();
-            let index_expression = flatten_strides(&new_dims, &index_expressions);
+            let index_expression = flatten_z_strides(&new_dims, &index_expressions);
             let iota = self.graph().iota(index_expression, new_dims);
             self.gather(iota)
         } else {
@@ -226,7 +272,7 @@ impl GraphTensor {
         let mut index_expressions = vec![];
         let mut phys_size = Expression::from(1);
         let mut new_dims = vec![];
-        for (dim, (start, end)) in self.dims().into_iter().zip(&padding) {
+        for (dim, (start, end)) in self.dims().into_iter().zip(&padding).rev() {
             index_expressions
                 .push(((Expression::from('z') - *start).max(0).min(dim - 1)) * phys_size);
             phys_size *= dim;
@@ -234,19 +280,21 @@ impl GraphTensor {
         }
         new_dims.reverse();
         index_expressions.reverse();
-        let index_expression = flatten_strides(&new_dims, &index_expressions);
+        let index_expression = flatten_z_strides(&new_dims, &index_expressions);
         // get indexed tensor
         let new_tensor = self.gather(self.graph().iota(index_expression, new_dims.clone()));
         // mask out padded elements
         let mut mask_expressions = vec![];
-        for (start, end) in padding {
-            mask_expressions.push(Expression::from('z').gte(start).lt(end));
+        for ((start, _), dim) in padding.into_iter().zip(self.dims()) {
+            mask_expressions
+                .push(Expression::from('z').gte(start) * Expression::from('z').lt(start + dim));
         }
-        let mask_expression = flatten_strides(&new_dims, &mask_expressions);
+        let mask_expression = flatten_z_strides_mask(&new_dims, &mask_expressions);
         let mask = self.graph().iota(mask_expression, new_dims);
         new_tensor * mask
     }
 
+    /// Pad along an existing dimension
     pub fn pad_along(
         self,
         left: impl Into<Expression>,
@@ -267,214 +315,261 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    // use dfdx::{
-    //     shapes::Rank2,
-    //     tensor::{Cpu, TensorFrom, TensorFromVec},
-    //     tensor_ops::{RealizeTo, TryConcatAlong},
-    // };
+    use crate::{
+        hl_ops::{binary::tests::test_binary, unary::tests::test_unary},
+        prelude::*,
+    };
+    use candle_core::{IndexOp, Tensor};
 
-    // crate::test_imports!();
+    #[test]
+    fn test_pad() {
+        test_unary(
+            23,
+            |a| a.pad((2, 6)),
+            |a| a.pad_with_zeros(0, 2, 6).unwrap(),
+        );
+        test_unary(
+            (18, 72),
+            |a| a.pad(((4, 31), (2, 9))),
+            |a| {
+                a.pad_with_zeros(0, 4, 31)
+                    .unwrap()
+                    .pad_with_zeros(1, 2, 9)
+                    .unwrap()
+            },
+        );
+    }
 
-    use crate::graph::Graph;
+    #[test]
+    fn test_slice_pad() {
+        test_unary(
+            (17, 26),
+            |a| a.slice((1..3, 14..32)).pad(((3, 14), (5, 0))),
+            |a| {
+                a.i((1..3, 14..26)) // candle slice ranges can't go off end
+                    .unwrap()
+                    .pad_with_zeros(0, 3, 14)
+                    .unwrap()
+                    .pad_with_zeros(1, 5, 0)
+                    .unwrap()
+            },
+        );
+    }
+
+    #[test]
+    fn test_transpose() {
+        test_unary(
+            (5, 10),
+            |a| a.transpose(0, 1) * 1.0,
+            |a| a.transpose(0, 1).unwrap(),
+        );
+    }
 
     #[test]
     fn test_unfold() {
-        let mut cx = Graph::new();
+        // Need all this code because candle doesnt do unfold
+        #[allow(clippy::too_many_arguments)]
+        pub fn unfold_nd_f32(
+            x: &[f32],
+            shape: &[usize],
+            strides: &[usize],
+            kernel: &[usize],
+            step: &[usize],
+            dilation: &[usize],
+            pad_before: &[usize],
+            pad_after: &[usize],
+        ) -> Vec<f32> {
+            let n = shape.len();
+            assert!(n > 0);
+            assert_eq!(strides.len(), n);
+            assert_eq!(kernel.len(), n);
+            assert_eq!(step.len(), n);
+            assert_eq!(dilation.len(), n);
+            assert_eq!(pad_before.len(), n);
+            assert_eq!(pad_after.len(), n);
 
-        let inp = cx.tensor((5,));
-        let _pooled = inp.unfold((3,), (1,), (1,));
+            for d in 0..n {
+                assert!(kernel[d] > 0);
+                assert!(step[d] > 0);
+                assert!(dilation[d] > 0);
+                assert!(shape[d] > 0);
+            }
+
+            // Effective kernel size per dim: (K-1)*d + 1
+            let eff_kernel: Vec<usize> =
+                (0..n).map(|d| (kernel[d] - 1) * dilation[d] + 1).collect();
+
+            // Output spatial shape (number of windows) per dim
+            let mut out_shape = vec![0usize; n];
+            for d in 0..n {
+                let padded = shape[d] + pad_before[d] + pad_after[d];
+                if padded < eff_kernel[d] {
+                    return Vec::new();
+                }
+                out_shape[d] = (padded - eff_kernel[d]) / step[d] + 1;
+            }
+
+            let windows = prod(&out_shape);
+            let window_elems = prod(kernel);
+            let mut out = vec![0.0f32; windows * window_elems];
+
+            // Precompute helpers
+            let k_mul = row_major_multipliers(kernel);
+
+            // Current output window position (row-major)
+            let mut out_pos = vec![0usize; n];
+
+            for w in 0..windows {
+                if w > 0 {
+                    incr_row_major(&mut out_pos, &out_shape);
+                }
+
+                // Window start in padded coordinates
+                let start_padded: Vec<usize> = (0..n).map(|d| out_pos[d] * step[d]).collect();
+
+                let base_out = w * window_elems;
+
+                // Iterate kernel elements (flattened)
+                for ke in 0..window_elems {
+                    let k_idx = unravel_row_major(ke, kernel, &k_mul);
+
+                    let mut flat: isize = 0;
+                    let mut in_bounds = true;
+
+                    for d in 0..n {
+                        let p = start_padded[d] + k_idx[d] * dilation[d];
+                        let logical = p as isize - pad_before[d] as isize;
+
+                        if logical < 0 || logical >= shape[d] as isize {
+                            in_bounds = false;
+                            break;
+                        }
+                        flat += logical * strides[d] as isize;
+                    }
+
+                    let out_idx = base_out + ke;
+                    out[out_idx] = if in_bounds { x[flat as usize] } else { 0.0 };
+                }
+            }
+
+            out
+        }
+
+        // -------- helpers --------
+
+        fn prod(xs: &[usize]) -> usize {
+            xs.iter().copied().product()
+        }
+
+        fn row_major_multipliers(shape: &[usize]) -> Vec<usize> {
+            let n = shape.len();
+            let mut mul = vec![1usize; n];
+            let mut acc = 1usize;
+            for d in (0..n).rev() {
+                mul[d] = acc;
+                acc *= shape[d];
+            }
+            mul
+        }
+
+        fn unravel_row_major(mut idx: usize, shape: &[usize], mul: &[usize]) -> Vec<usize> {
+            let n = shape.len();
+            let mut coords = vec![0usize; n];
+            for d in 0..n {
+                coords[d] = idx / mul[d];
+                idx %= mul[d];
+            }
+            coords
+        }
+
+        fn incr_row_major(pos: &mut [usize], shape: &[usize]) {
+            for d in (0..pos.len()).rev() {
+                pos[d] += 1;
+                if pos[d] < shape[d] {
+                    return;
+                }
+                pos[d] = 0;
+            }
+        }
+
+        test_unary(
+            5,
+            |a| a.unfold(3, 1, 1),
+            |a| {
+                Tensor::new(
+                    unfold_nd_f32(
+                        &a.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                        a.dims(),
+                        a.stride(),
+                        &[3],
+                        &[1],
+                        &[1],
+                        &[0],
+                        &[0],
+                    ),
+                    a.device(),
+                )
+                .unwrap()
+            },
+        );
+        test_unary(
+            (8, 10),
+            |a| a.pad(((0, 2), (4, 4))).unfold((2, 3), (1, 2), (2, 1)),
+            |a| {
+                Tensor::new(
+                    unfold_nd_f32(
+                        &a.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+                        a.dims(),
+                        a.stride(),
+                        &[2, 3],
+                        &[1, 2],
+                        &[2, 1],
+                        &[0, 4],
+                        &[2, 3],
+                    ),
+                    a.device(),
+                )
+                .unwrap()
+            },
+        );
     }
 
-    //     #[test]
-    //     fn test_unsqueeze_in_middle() {
-    //         let mut cx = Graph::new();
+    #[test]
+    fn test_unsqueeze() {
+        let mut cx = Graph::new();
+        let inp = cx.tensor((2, 2, 3));
+        let out1 = inp.unsqueeze(1);
+        let out2 = inp.unsqueeze(3);
+        assert_eq!(out1.dims(), &[2, 1, 2, 3]);
+        assert_eq!(out2.dims(), &[2, 2, 3, 1]);
+    }
 
-    //         let inp = cx.tensor((2, 2)).set(vec![1., 2., 3., 4.]);
-    //         let out = inp.unsqueeze(1).retrieve();
-
-    //         cx.execute();
-
-    //         assert_eq!(out.dims(), &[2, 1, 2]);
-    //         assert_exact(&out.data(), &[1., 2., 3., 4.]);
-    //     }
-
-    //     #[test]
-    //     fn test_unsqueeze_at_end() {
-    //         let mut cx = Graph::new();
-
-    //         let inp = cx.tensor((2, 2)).set(vec![1., 2., 3., 4.]);
-    //         let out = inp.unsqueeze(2).retrieve();
-
-    //         cx.execute();
-
-    //         assert_eq!(out.dims(), &[2, 2, 1]);
-    //         assert_exact(&out.data(), &[1., 2., 3., 4.]);
-    //     }
-
-    //     #[test]
-    //     #[should_panic(expected = "Shape is maxed out at 6 dimensions")]
-    //     fn test_unsqueeze_panics_when_shape_exceeds_max() {
-    //         let mut cx = Graph::new();
-
-    //         let inp = cx.tensor((2, 2, 2, 2, 2, 2)).set(vec![0.; 64]);
-    //         let _out = inp.unsqueeze(6).retrieve();
-
-    //         cx.execute();
-    //     }
-
-    //     #[test]
-    //     fn test_transpose_simple_2d() {
-    //         let mut cx = Graph::new();
-
-    //         let inp1 = cx.tensor((4, 4)).set(vec![
-    //             1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16.,
-    //         ]);
-    //         // 3x3 kernel
-    //         let out1 = inp1
-    //             // Pool first dim first by moving it to end
-    //             .transpose(1, 0)
-    //             .retrieve();
-
-    //         cx.execute();
-
-    //         assert_exact(
-    //             &out1.data(),
-    //             &[
-    //                 1., 5., 9., 13., 2., 6., 10., 14., 3., 7., 11., 15., 4., 8., 12., 16.,
-    //             ],
-    //         );
-    //     }
-
-    //     #[test]
-    //     #[should_panic(expected = "transpose dimensions")]
-    //     fn test_transpose_out_of_bounds() {
-    //         let mut cx = Graph::new();
-
-    //         let inp1 = cx.tensor((4, 4)).set(vec![
-    //             1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16.,
-    //         ]);
-
-    //         // This should panic because dims 6 and 5 are out of bounds for a 2D tensor
-    //         let _out1 = inp1.transpose(6, 5);
-    //     }
-
-    //     // #[test]
-    //     // fn test_concat_1d() {
-    //     //     let mut cx = Graph::new();
-    //     //     let a = cx.tensor(4);
-    //     //     a.set(vec![1.4325, 2.492428, 3.127365, 3.54865]);
-    //     //     let b = cx.tensor(3);
-    //     //     b.set(vec![2.30434, 2.2343113, 1.4393]);
-    //     //     let c = a.concat_along(b, 0);
-    //     //     c.retrieve();
-    //     //     cx.execute();
-
-    //     //     let d_dev = Cpu::default();
-    //     //     let d_a = d_dev.tensor([1.4325, 2.492428, 3.127365, 3.54865]);
-    //     //     let d_b = d_dev.tensor([2.30434, 2.2343113, 1.4393]);
-    //     //     let d_c = (d_a.realize::<(usize,)>(), d_b.realize::<(usize,)>()).concat_along(DAxis::<0>);
-
-    //     //     assert_close(&c.data(), &d_c.as_vec());
-    //     // }
-
-    //     // #[test]
-    //     // fn test_concat_self() {
-    //     //     let mut cx = Graph::new();
-    //     //     let a = cx.tensor(4).set(vec![1.4325, 2.492428, 3.127365, 3.54865]);
-    //     //     let b = a.concat_along(a, 0).retrieve();
-    //     //     cx.execute();
-
-    //     //     let d_dev = Cpu::default();
-    //     //     let d_a = d_dev.tensor([1.4325, 2.492428, 3.127365, 3.54865]);
-    //     //     let d_b =
-    //     //         (d_a.clone().realize::<(usize,)>(), d_a.realize::<(usize,)>()).concat_along(DAxis::<0>);
-
-    //     //     assert_close(&b.data(), &d_b.as_vec());
-    //     // }
-
-    //     // #[test]
-    //     // fn test_concat_2d() {
-    //     //     let mut cx = Graph::new();
-    //     //     let a = cx.tensor((3, 2));
-    //     //     a.set(vec![1.4325, 2.492428, 3.127365, 33.2834, 4.18734, 23.854]);
-    //     //     let b = cx.tensor((3, 2));
-    //     //     b.set(vec![2.30434, 2.2343113, 1.4393, 482.4312, 8.1234, 54.2054]);
-    //     //     let c = a.concat_along(b, 1);
-    //     //     let d = a.concat_along(b, 0);
-    //     //     c.retrieve();
-    //     //     d.retrieve();
-    //     //     cx.execute();
-
-    //     //     let d_dev = Cpu::default();
-    //     //     let d_a = d_dev.tensor_from_vec(
-    //     //         vec![1.4325, 2.492428, 3.127365, 33.2834, 4.18734, 23.854],
-    //     //         (dfdx::shapes::Const::<3>, dfdx::shapes::Const::<2>),
-    //     //     );
-    //     //     let d_b = d_dev.tensor_from_vec(
-    //     //         vec![2.30434, 2.2343113, 1.4393, 482.4312, 8.1234, 54.2054],
-    //     //         (dfdx::shapes::Const::<3>, dfdx::shapes::Const::<2>),
-    //     //     );
-    //     //     let d_c = (
-    //     //         d_a.clone().realize::<(dfdx::shapes::Const<3>, usize)>(),
-    //     //         d_b.clone().realize::<(dfdx::shapes::Const<3>, usize)>(),
-    //     //     )
-    //     //         .concat_along(dfdx::shapes::Axis::<1>);
-    //     //     let d_d = (
-    //     //         d_a.realize::<(usize, dfdx::shapes::Const<2>)>(),
-    //     //         d_b.realize::<(usize, dfdx::shapes::Const<2>)>(),
-    //     //     )
-    //     //         .concat_along(dfdx::shapes::Axis::<0>);
-
-    //     //     assert_close(&c.data(), &d_c.as_vec());
-    //     //     assert_close(&d.data(), &d_d.as_vec());
-    //     // }
-
-    //     // #[test]
-    //     // fn test_pad_2d() {
-    //     //     let mut cx = Graph::new();
-    //     //     let a = cx
-    //     //         .tensor((3, 2))
-    //     //         .set(vec![1.4325, 2.492428, 3.127365, 33.2834, 4.18734, 23.854]);
-    //     //     let b = a.pad(((0, 0), (0, 2))).retrieve();
-    //     //     cx.execute();
-
-    //     //     let d_dev = Cpu::default();
-    //     //     let d_a = d_dev.tensor_from_vec(
-    //     //         vec![1.4325, 2.492428, 3.127365, 33.2834, 4.18734, 23.854],
-    //     //         (dfdx::shapes::Const::<3>, dfdx::shapes::Const::<2>),
-    //     //     );
-    //     //     let d_b = d_dev.tensor_from_vec(
-    //     //         vec![0., 0., 0., 0., 0., 0.],
-    //     //         (dfdx::shapes::Const::<3>, dfdx::shapes::Const::<2>),
-    //     //     );
-    //     //     let d_b = (
-    //     //         d_a.realize::<(dfdx::shapes::Const<3>, usize)>(),
-    //     //         d_b.realize::<(dfdx::shapes::Const<3>, usize)>(),
-    //     //     )
-    //     //         .concat_along(dfdx::shapes::Axis::<1>)
-    //     //         .realize::<Rank2<3, 4>>();
-
-    //     //     assert_close(&b.data(), &d_b.as_vec());
-    //     // }
-
-    //     // #[test]
-    //     // fn test_slice_2d() {
-    //     //     let mut cx = Graph::new();
-    //     //     let a = cx
-    //     //         .tensor((3, 2))
-    //     //         .set(vec![1.4325, 2.492428, 3.127365, 33.2834, 4.18734, 23.854]);
-    //     //     let b = a.slice((.., ..1)).retrieve();
-    //     //     cx.execute();
-
-    //     //     let d_dev = Cpu::default();
-    //     //     let d_a = d_dev.tensor_from_vec(
-    //     //         vec![1.4325, 2.492428, 3.127365, 33.2834, 4.18734, 23.854],
-    //     //         (dfdx::shapes::Const::<3>, dfdx::shapes::Const::<2>),
-    //     //     );
-    //     //     let d_b = d_a.slice((.., ..1)).realize::<Rank2<3, 1>>();
-
-    //     //     assert_close(&b.data(), &d_b.as_vec());
-    //     // }
+    #[test]
+    fn test_concat() {
+        test_binary(
+            17,
+            32,
+            |a, b| a.concat_along(b, 0),
+            |a, b| Tensor::cat(&[a, b], 0).unwrap(),
+        );
+        test_binary(
+            (10, 4),
+            (10, 6),
+            |a, b| a.concat_along(b, 1),
+            |a, b| Tensor::cat(&[a, b], 1).unwrap(),
+        );
+        test_binary(
+            (4, 10),
+            (6, 10),
+            |a, b| a.concat_along(b, 0),
+            |a, b| Tensor::cat(&[a, b], 0).unwrap(),
+        );
+        test_unary(
+            (4, 10),
+            |a| a.concat_along(a, 0),
+            |a| Tensor::cat(&[a.clone(), a], 0).unwrap(),
+        );
+    }
 
     //     // #[test]
     //     // fn test_cumsum() {

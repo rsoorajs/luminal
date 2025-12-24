@@ -19,7 +19,7 @@ impl ShapeTracker {
         let mut stride = Expression::from(1);
         for d in dims.to_shape().into_iter().rev() {
             s.dims.insert(0, d);
-            s.strides.insert(0, Expression::from('z') * stride);
+            s.strides.insert(0, stride);
             stride *= d;
         }
         s
@@ -145,7 +145,7 @@ impl ShapeTracker {
             // Get position in current dim
             dim_ind %= d;
             // Add to index expression
-            ind_expr += s.substitute('z', dim_ind);
+            ind_expr += dim_ind * s;
             // Keep track of element size for next dimension
             current_elem_size *= d;
         }
@@ -224,16 +224,7 @@ impl ShapeTracker {
     }
 
     /// Given a dyn dim map, resolve global dyn dims into known dims
-    pub fn resolve_global_dyn_dims(&mut self, dyn_dim_map: &FxHashMap<char, usize>) {
-        self.resolve_global_dyn_dims_stack(dyn_dim_map, &mut Vec::new());
-    }
-
-    /// Given a dyn dim map, resolve global dyn dims into known dims. This function requires a stack to work with
-    pub fn resolve_global_dyn_dims_stack(
-        &mut self,
-        dyn_dim_map: &FxHashMap<char, usize>,
-        stack: &mut Vec<i64>,
-    ) {
+    pub fn resolve_dyn_dims(&mut self, dyn_dim_map: &FxHashMap<char, usize>) {
         for d in self.dims.iter_mut().chain(&mut self.strides) {
             for t in d.terms.write().iter_mut() {
                 if let Term::Var(v) = *t
@@ -242,21 +233,20 @@ impl ShapeTracker {
                     *t = Term::Num(*val as i32);
                 }
             }
-            if let Some(i) = d.exec_stack(dyn_dim_map, stack) {
-                *d = i.into();
-            }
+            d.resolve_vars(dyn_dim_map);
         }
     }
 
     /// Merge two dimensions together
-    pub fn merge_dims(&mut self, axis1: usize, axis2: usize) {
-        let inner_stride = self.strides.remove(axis2);
-        let inner_dim = self.dims.remove(axis2);
-        self.dims[axis1] *= inner_dim;
-        self.strides[axis1] = (self.strides[axis1]
-            .substitute('z', Expression::from('z') / inner_dim)
-            + inner_stride.substitute('z', Expression::from('z') % inner_dim))
-        .simplify();
+    pub fn merge_dims(&mut self, _axis1: usize, _axis2: usize) {
+        todo!("Need CuTE-style nested dims for this!");
+        // let inner_stride = self.strides.remove(axis2);
+        // let inner_dim = self.dims.remove(axis2);
+        // self.dims[axis1] *= inner_dim;
+        // self.strides[axis1] = (self.strides[axis1]
+        //     .substitute('z', Expression::from('z') / inner_dim)
+        //     + inner_stride.substitute('z', Expression::from('z') % inner_dim))
+        // .simplify();
     }
 
     /// Split a dim into 2 dims, new dim is placed directly after original dim
@@ -286,15 +276,15 @@ mod tests {
         println!("Val: {:?}", tracker.valid_expression());
     }
 
-    #[test]
-    fn test_merge_dims() {
-        let mut tracker = ShapeTracker::new((10, 5, 3));
-        println!("Shape: {:?}", tracker.dims);
-        println!("Strides: {:?}", tracker.strides);
-        tracker.merge_dims(1, 2);
-        println!("Shape: {:?}", tracker.dims);
-        println!("Strides: {:?}", tracker.strides);
-    }
+    // #[test]
+    // fn test_merge_dims() {
+    //     let mut tracker = ShapeTracker::new((10, 5, 3));
+    //     println!("Shape: {:?}", tracker.dims);
+    //     println!("Strides: {:?}", tracker.strides);
+    //     tracker.merge_dims(1, 2);
+    //     println!("Shape: {:?}", tracker.dims);
+    //     println!("Strides: {:?}", tracker.strides);
+    // }
 
     // #[test]
     // fn test_symbolic_idx() {

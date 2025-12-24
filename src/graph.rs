@@ -5,6 +5,7 @@ use crate::{
     serialized_egraph::SerializedEGraph
 };
 use std::{
+    any::TypeId,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -33,6 +34,8 @@ pub struct Graph {
     egraph: Option<SerializedEGraph>,
     /// Available ops
     ops: Option<Vec<Arc<Box<dyn EgglogOp>>>>,
+    /// Marked output hlir nodes
+    pub(crate) outputs: FxHashSet<NodeIndex>,
 }
 
 /// A dependency between two nodes
@@ -88,12 +91,12 @@ impl Graph {
 
     /// Create a new tensor with shape S and a name. This name will show up on the graph when displayed
     pub fn named_tensor(&mut self, name: impl ToString, shape: impl ToShape) -> GraphTensor {
-        let id = self.graph.add_node(Box::new(GMEM {
+        let id = self.graph.add_node(Box::new(Input {
             node: 0,
             label: name.to_string(),
             dtype: DType::default(),
         }));
-        self.get_op_mut::<GMEM>(id).node = id.index();
+        self.get_op_mut::<Input>(id).node = id.index();
         GraphTensor {
             id,
             graph_ref: self,
@@ -130,7 +133,7 @@ impl Graph {
     /// # let mut cx = Graph::new();
     /// let a = cx.tensor(3);
     /// let b_id = cx
-    ///     .add_op(luminal::op::Mul)
+    ///     .add_op(luminal::op::Mul::default())
     ///     .input(a.id, 0, a.shape)
     ///     .finish();
     /// let b = GraphTensor::from_id(b_id, a.shape, a.graph(), a.dtype);
@@ -172,11 +175,19 @@ impl Graph {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn build_search_space<Rt: Runtime>(&mut self) {
+    pub fn build_search_space<Rt: Runtime + 'static>(&mut self) {
         let mut ops = Rt::Ops::into_vec();
         ops.extend(<crate::op::Ops as IntoEgglogOp>::into_vec());
         let (program, root) = hlir_to_egglog(self);
-        self.egraph = Some(run_egglog(&program, &root, &ops).unwrap());
+        self.egraph = Some(
+            run_egglog(
+                &program,
+                &root,
+                &ops,
+                TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>(), // need to ignore hlir op cleanups if we're on native runtime
+            )
+            .unwrap(),
+        );
         self.ops = Some(ops);
     }
 
@@ -203,7 +214,7 @@ impl Graph {
                         ""
                     }
                 )
-                .bright_blue()
+                .cyan()
             );
         }
         runtime.compile(llir_graphs.last().unwrap());
@@ -214,7 +225,7 @@ impl Graph {
                     "---- Search Took {} ----",
                     pretty_duration::pretty_duration(&start.elapsed(), None).bold()
                 )
-                .bright_blue()
+                .cyan()
             );
         }
         runtime
@@ -304,8 +315,8 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
     let mut names: HashMap<NodeIndex, String> = HashMap::new();
     let mut out = String::new();
 
-    for (next_id, n) in topo_order.into_iter().enumerate() {
-        let var = format!("t{next_id}");
+    let mut curr_id = 0;
+    for n in topo_order {
         let sources = graph
             .get_sources(n)
             .into_iter()
@@ -318,44 +329,44 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
             .map(|((n, _, sh), name)| (n, name, sh))
             .collect_vec();
         let code = graph[n].to_egglog(&sources);
-        out.push_str(&format!("(let {var} {code})\n"));
-        names.insert(n, var);
+        out.push_str(&format!("(let t{curr_id} {code})\n"));
+        names.insert(n, format!("t{curr_id}"));
+        curr_id += 1;
     }
 
-    let root = graph
-        .node_indices()
-        .find(|&idx| {
-            graph
-                .neighbors_directed(idx, Direction::Outgoing)
-                .next()
-                .is_none()
-        })
-        .and_then(|idx| names.get(&idx))
-        .cloned()
-        .unwrap_or_else(|| "t0".into());
+    // Mark outputs
+    for node in &graph.outputs {
+        out.push_str(&format!(
+            "(let t{curr_id} (Output {} {}))",
+            names[node],
+            node.index()
+        ));
+        names.insert(*node, format!("t{curr_id}"));
+        curr_id += 1;
+    }
+
+    // Join outputs using dummy op
+    let names = graph
+        .externals(Direction::Outgoing)
+        .map(|n| names.remove(&n).unwrap())
+        .collect_vec();
+    let mut root = names[0].clone();
+    for node in names.into_iter().skip(1) {
+        curr_id += 1;
+        out.push_str(&format!("(let t{curr_id} (OutputJoin {root} {node}))\n"));
+        root = format!("t{curr_id}");
+    }
     (out.replace("(MVar \"z\")", "(MIter)"), root)
 }
 
-pub fn shape_to_egglog(shape: &[Expression]) -> String {
+pub fn elist_to_egglog(shape: &[Expression]) -> String {
     if shape.is_empty() {
         "(ENil)".to_string()
     } else {
         format!(
             "(ECons {} {})",
             shape[0].to_egglog(),
-            shape_to_egglog(&shape[1..])
-        )
-    }
-}
-
-pub fn strides_to_egglog(strides: &[Expression]) -> String {
-    if strides.is_empty() {
-        "(ENil)".to_string()
-    } else {
-        format!(
-            "(ECons {} {})",
-            strides[0].to_egglog(),
-            strides_to_egglog(&strides[1..])
+            elist_to_egglog(&shape[1..])
         )
     }
 }
@@ -367,6 +378,7 @@ fn run_egglog(
     program: &str,
     root: &str,
     ops: &[Arc<Box<dyn EgglogOp>>],
+    cleanup: bool,
 ) -> Result<SerializedEGraph, egglog::Error> {
     let mut egraph = egglog::EGraph::default();
     let mut code = egglog_utils::EGGLOG_TEMPLATE.replace("{program}", program);
@@ -389,8 +401,7 @@ fn run_egglog(
     code = code.replace(
         "{cleanups}",
         &ops.iter()
-            .filter(|op| op.cleanup())
-            .filter(|op| op.term().0 != "GMEM")
+            .filter(|op| op.cleanup() && cleanup)
             .map(|o| {
                 let (name, body) = o.term();
                 let body_terms = (0..body.len()).map(|i| (b'a' + i as u8) as char).join(" ");
@@ -408,7 +419,7 @@ fn run_egglog(
     let commands = egraph.parser.get_program_from_string(None, &code)?;
     let start = std::time::Instant::now();
     let msgs = egraph.run_program(commands)?;
-    if std::env::var("EGGLOG")
+    if std::env::var("SEARCH")
         .map(|s| s == "1")
         .unwrap_or_default()
     {
@@ -536,11 +547,11 @@ pub fn extract_expr_list<'a>(
     if let Some(l) = list_cache.get(node) {
         return Some(l.clone());
     }
-    let expr = extract_expr(
-        egraph,
-        &egraph.eclasses[&egraph.enodes[node].1[0]].1[0],
-        expr_cache,
-    )?;
+    if egraph.enodes[node].0 == "ENil" {
+        return Some(vec![]);
+    }
+    let eclass = &egraph.enodes[node].1[0];
+    let expr = extract_expr(egraph, &egraph.eclasses[eclass].1[0], expr_cache)?;
     match egraph.enodes[&egraph.eclasses[&egraph.enodes[node].1[1]].1[0]]
         .0
         .as_str()
@@ -677,7 +688,7 @@ pub fn extract_expr<'a>(
                 Expression::from(name.chars().next().unwrap())
             }
             op => op
-                .parse::<usize>()
+                .parse::<i32>()
                 .map(Expression::from)
                 .or_else(|_| op.replace('"', "").parse::<char>().map(Expression::from))
                 .unwrap_or_else(|_| panic!("unsupported expression op '{op}'")),
@@ -751,6 +762,10 @@ pub fn egglog_to_llir(
                     }
                 })
                 .collect_vec();
+            if egraph.enodes[node].0.as_str() == "OutputJoin" {
+                // Handle output join
+                continue 'nodes;
+            }
             for phys_op in ops {
                 if egraph.enodes[node].0.as_str() == phys_op.term().0 {
                     // Extract this op

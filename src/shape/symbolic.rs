@@ -7,7 +7,7 @@ use std::{
     hash::Hash,
     ops::{
         Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, Div, DivAssign, Mul, MulAssign,
-        Rem, RemAssign, Sub, SubAssign,
+        Neg, Rem, RemAssign, Sub, SubAssign,
     },
     sync::OnceLock,
 };
@@ -177,6 +177,8 @@ impl Term {
             Term::Max => "MMax",
             Term::Min => "MMin",
             Term::CeilDiv => "MCeilDiv",
+            Term::Gte => "MGte",
+            Term::Lt => "MLt",
             _ => panic!("egglog doesn't implement {self:?}"),
         }
         .to_string()
@@ -370,7 +372,7 @@ impl Expression {
         if rhs == self || self == i32::MAX {
             return self;
         }
-        if self == 0 || rhs == i32::MAX {
+        if rhs == i32::MAX {
             return rhs;
         }
         if let (Some(a), Some(b)) = (self.as_num(), rhs.as_num()) {
@@ -560,6 +562,16 @@ impl Expression {
             .iter()
             .any(|t| matches!(t, Term::Var('-')))
     }
+
+    pub fn resolve_vars(&mut self, dyn_map: &FxHashMap<char, usize>) {
+        for term in self.terms.write().iter_mut() {
+            if let Term::Var(v) = *term
+                && let Some(val) = dyn_map.get(&v)
+            {
+                *term = Term::Num(*val as i32);
+            }
+        }
+    }
 }
 
 impl From<Term> for Expression {
@@ -711,6 +723,13 @@ impl BitOr<Expression> for i32 {
     type Output = Expression;
     fn bitor(self, rhs: Expression) -> Self::Output {
         rhs | self
+    }
+}
+
+impl Neg for Expression {
+    type Output = Expression;
+    fn neg(self) -> Self::Output {
+        self * -1
     }
 }
 
@@ -1285,7 +1304,8 @@ mod tests {
         let z = Expression::from('z');
         let w = Expression::from('w');
         let h = Expression::from('h');
-        let x = (z % (((((153 + h) / 8) + -31) * ((((w + 153) / 8) + -31) / 16)) * 64)).simplify();
+        let x = z % (((((153 + h) / 8) + -31) * ((((w + 153) / 8) + -31) / 16)) * 64);
+        let x = x.simplify();
         assert_eq!(x.len(), 15); // Should be 11 if we can re-enable mul-div-associative-rev
     }
 }

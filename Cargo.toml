@@ -14,7 +14,7 @@ rand = "0.9.2"
 urlencoding = "2.1.2"
 webbrowser = "1.0.0"
 dyn-clone = "1.0.12"
-half = "*"
+half = {version="2.7.1", features=["num-traits"]}
 tinyvec = { version = "1.6.0", features = ["serde"] }
 term_size = "0.3.2"
 colored = "2.0.4"
@@ -39,6 +39,11 @@ graphviz-rust = { version = "0.9", default-features = false}
 
 [workspace.package]
 edition = "2024"
+
+[dev-dependencies]
+candle-core = "0.9.1"
+candle-nn = "0.9.1"
+ordered-float = "5.1.0"
 
 [workspace]
 members = [

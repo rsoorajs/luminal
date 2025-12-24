@@ -1,66 +1,100 @@
-#[cfg(test)]
-mod dynamic;
-pub mod test_graphs;
-#[cfg(test)]
-mod test_prim;
-
 use std::fmt::Debug;
 
-#[cfg(test)]
 use crate::prelude::*;
+use candle_core::{Device, Tensor};
 use rand::{Rng, rng};
 
-// Integration and other tests
-
 #[test]
-fn main() {
+fn simple() {
     let mut cx = Graph::new();
-    let b = cx.tensor(3).set(vec![1.0, 2.0, 3.0]);
-    let c = cx.tensor(3).set(vec![1.0, 2.0, 3.0]);
-    let g = cx.tensor(3).set(vec![1.0, 2.0, 3.0]);
-    let e = cx.tensor(3).set(vec![1.0, 2.0, 3.0]);
+    let b = cx.tensor(3);
+    let c = cx.tensor(3);
+    let g = cx.tensor(3);
+    let e = cx.tensor(3);
 
-    let mut a = (b * c + g).retrieve();
-    let mut d = (b * c / e).exp2().log2().retrieve();
+    let a = (b * c + g).output();
+    let d = (b * c / e).sin().output();
 
-    cx.execute();
+    cx.build_search_space::<NativeRuntime>();
+    let mut rt = cx.search(NativeRuntime::default(), 1);
 
-    let unoptimized_a = a.data();
-    let unoptimized_d = d.data();
+    rt.set_data(b.id, vec![1.0, 2.0, 3.0].into());
+    rt.set_data(c.id, vec![1.0, 2.0, 3.0].into());
+    rt.set_data(g.id, vec![1.0, 2.0, 3.0].into());
+    rt.set_data(e.id, vec![1.0, 2.0, 3.0].into());
 
-    cx.compile(GenericCompiler::default(), (&mut a, &mut d));
+    rt.execute(&cx.dyn_map);
 
-    cx.execute();
-    assert_close(&unoptimized_a, &a.data());
-    assert_close(&unoptimized_d, &d.data());
+    // Reference
+    let device = Device::Cpu;
+    let ref_b = Tensor::new(vec![1_f32, 2_f32, 3_f32], &device).unwrap();
+    let ref_c = Tensor::new(vec![1_f32, 2_f32, 3_f32], &device).unwrap();
+    let ref_g = Tensor::new(vec![1_f32, 2_f32, 3_f32], &device).unwrap();
+    let ref_e = Tensor::new(vec![1_f32, 2_f32, 3_f32], &device).unwrap();
+
+    let ref_a = (ref_b.clone() * ref_c.clone() + ref_g).unwrap();
+    let ref_d = (ref_b * ref_c / ref_e).unwrap().sin().unwrap();
+
+    assert_eq!(*rt.get_f32(a.id), ref_a.to_vec1::<f32>().unwrap());
+    assert_eq!(*rt.get_f32(d.id), ref_d.to_vec1::<f32>().unwrap());
 }
 
 #[test]
 fn test_matmul() {
     let mut cx = Graph::new();
-    let b = cx.tensor((3, 1)).set(vec![1.0, 2.0, 3.0]);
-    let c = cx.tensor((1, 4)).set(vec![1.0, 2.0, 3.0, 3.0]);
+    let b = cx.tensor((3, 1));
+    let c = cx.tensor((1, 4));
 
-    let mut a = b.matmul(c).retrieve();
+    let a = b.matmul(c).output();
 
-    cx.execute();
+    cx.build_search_space::<NativeRuntime>();
+    let mut rt = cx.search(NativeRuntime::default(), 1);
+    rt.set_data(b.id, vec![1.0, 2.0, 3.0].into());
+    rt.set_data(c.id, vec![1.0, 2.0, 3.0, 3.0].into());
+    rt.execute(&cx.dyn_map);
 
-    let unoptimized_a = a.data();
-
-    cx.compile(GenericCompiler::default(), &mut a);
-    cx.execute();
-
-    assert_exact(&unoptimized_a, &a.data());
+    // Reference
+    let device = Device::Cpu;
+    let ref_b = Tensor::new(vec![vec![1_f32], vec![2_f32], vec![3_f32]], &device).unwrap();
+    let ref_c = Tensor::new(vec![vec![1_f32, 2_f32, 3_f32, 3_f32]], &device).unwrap();
+    let ref_a = ref_b.matmul(&ref_c).unwrap();
+    assert_eq!(
+        *rt.get_f32(a.id),
+        ref_a.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    );
 }
 
 #[test]
 fn test_shapes() {
     let mut cx = Graph::new();
-    let a = cx.tensor((2, 2)).set(vec![1., 2., 3., 4.]);
-    let b = a.permute((1, 0)).retrieve();
-    cx.execute();
+    let a = cx.tensor((2, 2));
+    let b = (a.permute((1, 0)) * 1.0).output();
+    cx.build_search_space::<NativeRuntime>();
+    let mut rt = cx.search(NativeRuntime::default(), 1);
+    rt.set_data(a.id, vec![1.0, 2.0, 3.0, 4.0].into());
+    rt.execute(&cx.dyn_map);
 
-    assert_exact(&b.data(), &[1., 3., 2., 4.]);
+    assert_exact(rt.get_f32(b.id), &[1., 3., 2., 4.]);
+}
+
+#[test]
+fn test_top_k_filter() {
+    let mut cx = Graph::new();
+    let a = cx.tensor((2, 6));
+    let kth_largest = a.gather(a.topk_indexes(3, 1).slice((.., 2..3)).squeeze(1));
+    let mask = a.ge(kth_largest.expand_dim(1, 6));
+    let filtered = (a * mask).output();
+    cx.build_search_space::<NativeRuntime>();
+    let mut rt = cx.search(NativeRuntime::default(), 1);
+    rt.set_data(
+        a.id,
+        vec![1.0, 2.0, 3.0, 4.0, 5., 6., 1.0, 2.0, 3.0, 4.0, 5., 6.].into(),
+    );
+    rt.execute(&cx.dyn_map);
+    assert_eq!(
+        *rt.get_f32(filtered.id),
+        vec![0.0, 0.0, 0.0, 4.0, 5.0, 6.0, 0.0, 0.0, 0.0, 4.0, 5.0, 6.0]
+    );
 }
 
 /// Ensure two arrays are nearly equal
@@ -116,23 +150,4 @@ pub fn random_vec(n: usize) -> Vec<f32> {
 
 pub fn random_vec_rng<R: Rng>(n: usize, rng: &mut R) -> Vec<f32> {
     (0..n).map(|_| rng.random_range(-0.5..0.5)).collect()
-}
-
-#[macro_export]
-macro_rules! test_imports {
-    () => {
-        #[allow(unused_imports)]
-        use dfdx::prelude::{
-            Axes as DAxes, Axes2 as DAxes2, Axes3 as DAxes3, Axes4 as DAxes4, Axes5 as DAxes5,
-            Axis as DAxis, Const as DConst, *,
-        };
-        #[allow(unused_imports)]
-        use $crate::{
-            prelude::*,
-            tests::{
-                assert_close, assert_close_precision, assert_exact, random_array, random_array_rng,
-                random_vec, random_vec_rng, test_graphs,
-            },
-        };
-    };
 }
