@@ -85,6 +85,8 @@ jobs:
                   echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
             - name: Update Rust
               run: rustup update
+            - name: Install uv
+              run: cargo install --locked uv
             - name: Download Llama
               working-directory: examples/llama
               run: uv run --script setup/setup.py
