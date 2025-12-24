@@ -60,7 +60,8 @@ jobs:
             - name: Install Rust
               run: |
                   curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-                  echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+                  echo "$HOME/.cargo/env" >> "$GITHUB_PATH"
+                  source "$HOME/.cargo/env"
                   rustup update
 
             - name: Run CUDA crate tests
