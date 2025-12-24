@@ -1176,12 +1176,7 @@ pub fn compile_interpreter(
     let ptx = compile_ptx_with_opts(
         &kernel,
         CompileOptions {
-            arch: Some("sm_90a"),
-            options: vec!["--std=c++17".to_string(), "-default-device".to_string()],
-            include_paths: vec![
-                "/usr/local/cuda/include".to_string(),
-                "/usr/include".to_string(),
-            ],
+            arch: Some("sm_89"),
             ..Default::default()
         },
     )
