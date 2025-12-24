@@ -2,6 +2,7 @@ mod model;
 
 use itertools::Itertools;
 use luminal::{
+    prelude::FxHashMap,
     graph::{Graph, Runtime},
     op::DType,
 };
@@ -10,7 +11,6 @@ use luminal_cuda::{
     runtime::{record_exec_timings_to_file, CudaRuntime, CustomState},
 };
 use model::*;
-use rustc_hash::*;
 use std::{fs::File, io::Write, time::Duration};
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
