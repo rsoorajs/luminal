@@ -92,4 +92,4 @@ jobs:
               run: uv run --script setup/setup.py
             - name: Run Llama
               working-directory: examples/llama
-              run: SEARCH=1 cargo test -p luminal_cuda --verbose
+              run: SEARCH=1 cargo run --release
