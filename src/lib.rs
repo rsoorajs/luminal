@@ -5,6 +5,8 @@ pub mod op;
 pub mod shape;
 pub mod utils;
 pub mod visualization;
+pub mod egglog_utils;
+pub mod serialized_egraph;
 
 // pub mod tests;
 
