@@ -10,7 +10,7 @@ env:
     CARGO_TERM_COLOR: always
 
 jobs:
-    unit_test:
+    core_unit_test:
         name: Core Unit Tests
         runs-on: ubuntu-latest
         timeout-minutes: 20
@@ -39,7 +39,7 @@ jobs:
             - uses: actions/checkout@v4
             - name: Format
               run: cargo fmt --all --check
-    gpu_test:
+    cuda_unit_test:
         name: Cuda Unit Tests
         runs-on: cuda_t4_runner
         timeout-minutes: 30
@@ -63,3 +63,31 @@ jobs:
               run: rustup update
             - name: Run CUDA crate tests
               run: cargo test -p luminal_cuda --verbose
+    cuda_llama:
+        name: Cuda Llama
+        runs-on: cuda_t4_runner
+        timeout-minutes: 30
+        env:
+            CUDA_HOME: /usr/local/cuda-12.8
+            LD_LIBRARY_PATH: /usr/local/cuda-12.8/lib64
+
+        steps:
+            - uses: actions/checkout@v4
+            - name: Install system deps
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y --no-install-recommends \
+                  protobuf-compiler \
+                  cuda-nvrtc-12-8
+            - name: Install Rust
+              run: |
+                  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+                  echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            - name: Update Rust
+              run: rustup update
+            - name: Download Llama
+              working-directory: examples/llama
+              run: uv run --script setup/setup.py
+            - name: Run Llama
+              working-directory: examples/llama
+              run: SEARCH=1 cargo test -p luminal_cuda --verbose
