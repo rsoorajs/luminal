@@ -18,7 +18,7 @@ impl SerializedEGraph {
     /// produces to a strict egraph, where the children of e-classes are e-nodes.
     pub fn new(egraph: &EGraph, root_eclasses: Vec<(ArcSort, Value)>) -> Self {
         let s = egraph.serialize(egglog::SerializeConfig {
-            root_eclasses: root_eclasses,
+            root_eclasses,
             max_functions: None,
             include_temporary_functions: false,
             max_calls_per_function: None,
