@@ -1,6 +1,8 @@
 use crate::{
-    prelude::*,
+    egglog_utils, 
+    prelude::*, 
     utils::{EgglogOp, IntoEgglogOp, LLIROp},
+    serialized_egraph::SerializedEGraph
 };
 use std::{
     ops::{Deref, DerefMut},
@@ -269,7 +271,7 @@ impl NewOp<'_> {
     }
 }
 
-fn hlir_to_egglog(graph: &Graph) -> (String, String) {
+pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
     use std::cmp::Reverse;
     use std::collections::{BinaryHeap, HashMap};
 
@@ -358,13 +360,7 @@ pub fn strides_to_egglog(strides: &[Expression]) -> String {
     }
 }
 
-#[derive(Debug)]
-pub struct SerializedEGraph {
-    pub enodes: FxHashMap<NodeId, (String, Vec<ClassId>)>,
-    pub eclasses: FxHashMap<ClassId, (String, Vec<NodeId>)>,
-    pub node_to_class: FxHashMap<NodeId, ClassId>,
-    pub roots: Vec<ClassId>,
-}
+
 
 #[tracing::instrument(skip_all)]
 fn run_egglog(
@@ -373,7 +369,7 @@ fn run_egglog(
     ops: &[Arc<Box<dyn EgglogOp>>],
 ) -> Result<SerializedEGraph, egglog::Error> {
     let mut egraph = egglog::EGraph::default();
-    let mut code = include_str!("egglog.egg").replace("{program}", program);
+    let mut code = egglog_utils::EGGLOG_TEMPLATE.replace("{program}", program);
     code = code.replace(
         "{ops}",
         &ops.iter()

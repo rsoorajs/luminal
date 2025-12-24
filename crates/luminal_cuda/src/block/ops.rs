@@ -4,9 +4,10 @@ use super::CustomState;
 use cudarc::driver::{CudaStream, DevicePtr};
 use itertools::Itertools;
 use luminal::{
-    graph::{extract_expr, extract_expr_list, SerializedEGraph},
+    graph::{extract_expr, extract_expr_list},
     prelude::ENodeId,
     shape::Expression,
+    serialized_egraph::SerializedEGraph,
     utils::{
         flatten_strides, CStructBuilder, EgglogOp, LLIROp,
         OpParam::{self, *},
