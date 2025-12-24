@@ -1025,7 +1025,7 @@ pub fn get_barrier_strides(
                     .launch_range()
             })
             .collect();
-        let (mut producer_strides, mut consumer_strides) = compute_barrier_strides(
+        let (producer_strides, consumer_strides) = compute_barrier_strides(
             prod_range.clone(),
             cons_range.clone(),
             consumers
