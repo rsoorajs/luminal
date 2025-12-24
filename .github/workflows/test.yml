@@ -61,6 +61,7 @@ jobs:
               run: |
                   curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
                   echo "$HOME/.cargo/env" >> "$GITHUB_PATH"
+                  echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
                   source "$HOME/.cargo/env"
                   rustup update
 
