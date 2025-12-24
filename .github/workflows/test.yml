@@ -86,7 +86,7 @@ jobs:
             - name: Update Rust
               run: rustup update
             - name: Install uv
-              run: cargo install --locked uv
+              run: curl -LsSf https://astral.sh/uv/install.sh | sh
             - name: Download Llama
               working-directory: examples/llama
               run: uv run --script setup/setup.py
