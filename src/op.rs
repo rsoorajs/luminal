@@ -5,11 +5,11 @@ use std::{
 
 use crate::{
     prelude::*,
+    serialized_egraph::SerializedEGraph,
     utils::{
         EgglogOp, LLIROp,
         OpParam::{self, *},
     },
-    serialized_egraph::SerializedEGraph,
 };
 
 use as_any::AsAny;

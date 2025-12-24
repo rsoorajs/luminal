@@ -3,13 +3,13 @@ use std::fs;
 use luminal::{
     self,
     graph::{hlir_to_egglog, Graph, Runtime},
-    serialized_egraph::SerializedEGraph,
     prelude::*,
+    serialized_egraph::SerializedEGraph,
     visualization::{ToDot, ToHtml},
 };
 use luminal_cuda::runtime::{CudaRuntime, CustomState};
 
-use egglog::{EGraph, prelude::RustSpan, var};
+use egglog::{prelude::RustSpan, var, EGraph};
 use egglog_ast::span::Span;
 use rustc_hash::FxHashMap;
 
@@ -70,22 +70,17 @@ fn main() {
         .unwrap();
 
     // EGraph Optimization Complete
-    println!("Visualizing EGraph"); 
+    println!("Visualizing EGraph");
     // save the egraph visualizations
     fs::write("egraph.html", egglog_obj.to_html().unwrap()).unwrap();
     fs::write("egraph.dot", egglog_obj.to_dot().unwrap()).unwrap();
 
-    let (sort, value) = egglog_obj.eval_expr(&var!(root)).unwrap(); 
+    let (sort, value) = egglog_obj.eval_expr(&var!(root)).unwrap();
     let s_egraph = SerializedEGraph::new(&egglog_obj, vec![(sort, value)]);
-    let llir_graphs = egglog_to_llir(
-            &s_egraph,
-            &ops,
-            100,
-    );
-    
-    let example_llir_graph = llir_graphs.last().unwrap(); 
+    let llir_graphs = egglog_to_llir(&s_egraph, &ops, 100);
 
-    println!("Visualizing LLIR Graph"); 
+    let example_llir_graph = llir_graphs.last().unwrap();
+
+    println!("Visualizing LLIR Graph");
     fs::write("LLIR.dot", example_llir_graph.to_dot().unwrap()).unwrap();
-
 }

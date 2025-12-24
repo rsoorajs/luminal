@@ -1,12 +1,12 @@
+pub mod egglog_utils;
 pub mod graph;
 pub mod graph_tensor;
 pub mod hl_ops;
 pub mod op;
+pub mod serialized_egraph;
 pub mod shape;
 pub mod utils;
 pub mod visualization;
-pub mod egglog_utils;
-pub mod serialized_egraph;
 
 #[cfg(test)]
 pub mod tests;

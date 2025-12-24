@@ -3,8 +3,8 @@ use crate::{
         ENodeId, NodeIndex,
         petgraph::{Directed, prelude::StableGraph},
     },
-    shape::Expression,
     serialized_egraph::SerializedEGraph,
+    shape::Expression,
 };
 use as_any::{AsAny, Downcast};
 use rustc_hash::FxHashMap;

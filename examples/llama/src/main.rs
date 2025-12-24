@@ -2,9 +2,9 @@ mod model;
 
 use itertools::Itertools;
 use luminal::{
-    prelude::FxHashMap,
     graph::{Graph, Runtime},
     op::DType,
+    prelude::FxHashMap,
 };
 use luminal_cuda::{
     block::IntoBlockOp,

@@ -6,8 +6,8 @@ use itertools::Itertools;
 use luminal::{
     graph::{extract_expr, extract_expr_list},
     prelude::ENodeId,
-    shape::Expression,
     serialized_egraph::SerializedEGraph,
+    shape::Expression,
     utils::{
         flatten_mul_strides, CStructBuilder, EgglogOp, LLIROp,
         OpParam::{self, *},

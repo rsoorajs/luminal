@@ -1,15 +1,10 @@
+use crate::utils::EgglogOp;
 use itertools::Itertools;
-use crate::{
-    utils::EgglogOp,
-}; 
-use std::{
-    str,
-    sync::Arc,
-}; 
+use std::{str, sync::Arc};
 
-pub const BASE: &str = include_str!("base.egg"); 
-pub const RUN_SCHEDULE: &str = include_str!("run_schedule.egg"); 
-pub const BASE_CLEANUP: &str = include_str!("base_cleanup.egg"); 
+pub const BASE: &str = include_str!("base.egg");
+pub const RUN_SCHEDULE: &str = include_str!("run_schedule.egg");
+pub const BASE_CLEANUP: &str = include_str!("base_cleanup.egg");
 pub const EGGLOG_TEMPLATE: &str = include_str!("egglog_template.egg");
 
 pub fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
@@ -20,7 +15,7 @@ pub fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     )
     (function dtype (IR) DType :merge new)
     ",
-    ops.iter()
+        ops.iter()
             .map(|o| {
                 let (name, body) = o.term();
                 format!(
@@ -29,20 +24,21 @@ pub fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
                 )
             })
             .collect::<Vec<_>>()
-            .join("\n"))
+            .join("\n")
+    )
 }
 
-
-pub fn op_rewrites_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String{
+pub fn op_rewrites_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     ops.iter().flat_map(|o| o.rewrites()).join("\n")
 }
 
 pub fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
-    format!("
+    format!(
+        "
     (ruleset cleanup)
     {}
     ",
-    ops.iter()
+        ops.iter()
             .filter(|op| op.cleanup())
             .map(|o| {
                 let (name, body) = o.term();
@@ -55,6 +51,6 @@ pub fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
             )"
                 )
             })
-            .join("\n"))
+            .join("\n")
+    )
 }
-

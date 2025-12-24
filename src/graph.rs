@@ -1,8 +1,8 @@
 use crate::{
-    egglog_utils, 
-    prelude::*, 
+    egglog_utils,
+    prelude::*,
+    serialized_egraph::SerializedEGraph,
     utils::{EgglogOp, IntoEgglogOp, LLIROp},
-    serialized_egraph::SerializedEGraph
 };
 use std::{
     any::TypeId,
@@ -370,8 +370,6 @@ pub fn elist_to_egglog(shape: &[Expression]) -> String {
         )
     }
 }
-
-
 
 #[tracing::instrument(skip_all)]
 fn run_egglog(

@@ -17,13 +17,17 @@ impl ToHtml for EGraph {
         let egraph_as_json = serde_json::to_string_pretty(
             &self.serialize(egglog::SerializeConfig::default()).egraph,
         )?;
-        Ok(include_str!("egraph_viz_template.html.jinja").replace("{{JSON_TEMPLATE}}", &egraph_as_json))
+        Ok(include_str!("egraph_viz_template.html.jinja")
+            .replace("{{JSON_TEMPLATE}}", &egraph_as_json))
     }
 }
 
 impl ToDot for EGraph {
     fn to_dot(&self) -> Result<String> {
-        Ok(self.serialize(egglog::SerializeConfig::default()).egraph.to_dot())
+        Ok(self
+            .serialize(egglog::SerializeConfig::default())
+            .egraph
+            .to_dot())
     }
 }
 
