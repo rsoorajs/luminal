@@ -1176,7 +1176,7 @@ pub fn compile_interpreter(
     let ptx = compile_ptx_with_opts(
         &kernel,
         CompileOptions {
-            arch: Some("sm_89"),
+            arch: Some("sm_75"),
             ..Default::default()
         },
     )
