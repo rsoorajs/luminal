@@ -1,10 +1,10 @@
-use crate::graph::SerializedEGraph;
 use crate::{
     prelude::{
         ENodeId, NodeIndex,
         petgraph::{Directed, prelude::StableGraph},
     },
     shape::Expression,
+    serialized_egraph::SerializedEGraph,
 };
 use as_any::{AsAny, Downcast};
 use rustc_hash::FxHashMap;

@@ -9,6 +9,7 @@ use crate::{
         EgglogOp, LLIROp,
         OpParam::{self, *},
     },
+    serialized_egraph::SerializedEGraph,
 };
 
 use rustc_hash::FxHashMap;
