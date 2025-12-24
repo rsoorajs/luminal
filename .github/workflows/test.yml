@@ -63,33 +63,33 @@ jobs:
               run: rustup update
             - name: Run CUDA crate tests
               run: cargo test -p luminal_cuda --verbose
-    cuda_llama:
-        name: Cuda Llama
-        runs-on: cuda_t4_runner
-        timeout-minutes: 30
-        env:
-            CUDA_HOME: /usr/local/cuda-12.8
-            LD_LIBRARY_PATH: /usr/local/cuda-12.8/lib64
+    # cuda_llama: # disabled because t4 doesn't have enough memory for full precision llama. re-enable when we can run on larger machines or use 8-bit precision
+    #     name: Cuda Llama
+    #     runs-on: cuda_t4_runner
+    #     timeout-minutes: 30
+    #     env:
+    #         CUDA_HOME: /usr/local/cuda-12.8
+    #         LD_LIBRARY_PATH: /usr/local/cuda-12.8/lib64
 
-        steps:
-            - uses: actions/checkout@v4
-            - name: Install system deps
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y --no-install-recommends \
-                  protobuf-compiler \
-                  cuda-nvrtc-12-8
-            - name: Install Rust
-              run: |
-                  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-                  echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            - name: Update Rust
-              run: rustup update
-            - name: Install uv
-              run: curl -LsSf https://astral.sh/uv/install.sh | sh
-            - name: Download Llama
-              working-directory: examples/llama
-              run: uv run --script setup/setup.py
-            - name: Run Llama
-              working-directory: examples/llama
-              run: SEARCH=1 cargo run --release
+    #     steps:
+    #         - uses: actions/checkout@v4
+    #         - name: Install system deps
+    #           run: |
+    #               sudo apt-get update
+    #               sudo apt-get install -y --no-install-recommends \
+    #               protobuf-compiler \
+    #               cuda-nvrtc-12-8
+    #         - name: Install Rust
+    #           run: |
+    #               curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+    #               echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+    #         - name: Update Rust
+    #           run: rustup update
+    #         - name: Install uv
+    #           run: curl -LsSf https://astral.sh/uv/install.sh | sh
+    #         - name: Download Llama
+    #           working-directory: examples/llama
+    #           run: uv run --script setup/setup.py
+    #         - name: Run Llama
+    #           working-directory: examples/llama
+    #           run: SEARCH=1 cargo run --release
