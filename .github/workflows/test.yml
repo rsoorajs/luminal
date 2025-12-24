@@ -49,21 +49,17 @@ jobs:
 
         steps:
             - uses: actions/checkout@v4
-
             - name: Install system deps
               run: |
                   sudo apt-get update
                   sudo apt-get install -y --no-install-recommends \
                   protobuf-compiler \
                   cuda-nvrtc-12-8
-
             - name: Install Rust
               run: |
                   curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-                  echo "$HOME/.cargo/env" >> "$GITHUB_PATH"
                   echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-                  source "$HOME/.cargo/env"
-                  rustup update
-
+            - name: Update Rust
+              run: rustup update
             - name: Run CUDA crate tests
               run: cargo test -p luminal_cuda --verbose
