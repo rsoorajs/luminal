@@ -1,11 +1,14 @@
 <img href="luminal.com" alt="Screenshot 2025-08-14 at 9 18 54 PM" src="https://github.com/user-attachments/assets/c5832634-55d5-45b7-ba65-6efe36afce4a" />
 
+<h3 align="center">
+Luminal is a high-performance general-purpose inference compiler.
+</h3>
+
 [![CI Status](https://img.shields.io/github/actions/workflow/status/jafioti/luminal/test.yml?style=for-the-badge&logo=github-actions&logoColor=white&branch=main)](https://github.com/jafioti/luminal/actions)
 [![Docs](https://img.shields.io/badge/Documentation-green?style=for-the-badge&color=0D9373)](https://docs.luminalai.com)
 [![Current Crates.io Version](https://img.shields.io/crates/v/luminal.svg?style=for-the-badge&logo=rust)](https://crates.io/crates/luminal)
 [![discord](https://dcbadge.limes.pink/api/server/APjuwHAbGy)](https://discord.gg/APjuwHAbGy)
 
-Luminal is a deep learning library that uses **search-based compilation** to achieve high performance.
 
 > [!IMPORTANT]  
 > The examples may be temporarily broken on the latest main. We're undergoing a large transition to "2.0", which introduces multi-level kernel search. This radically simplifies the compiler stack and allows us to discover complex optimizations entirely automatically while interfacing with high-performace kernel libraries.
@@ -14,21 +17,26 @@ Luminal is a deep learning library that uses **search-based compilation** to ach
 
 ```rust
 use luminal::prelude::*;
-
-// Setup graph and tensors
+// Create compute graph
 let mut cx = Graph::new();
-let a = cx.tensor((3, 1)).set([[1.0], [2.0], [3.0]]);
-let b = cx.tensor((1, 4)).set([[1.0, 2.0, 3.0, 4.0]]);
+let a = cx.tensor((3, 1));
+let b = cx.tensor((1, 4));
 
-// Do math...
-let mut c = a.matmul(b);
+let c = a.matmul(b).output();
 
-// Compile and run graph
-cx.compile(<(GenericCompiler, CPUCompiler)>::default(), &mut c);
-cx.execute();
+// Compile
+cx.build_search_space::<NativeRuntime>();
+let mut rt = cx.search(NativeRuntime::default(), 1);
 
-// Get result
-println!("Result: {:?}", c);
+// Set input tensors
+rt.set_data(a, vec![1.0, 2.0, 3.0].into());
+rt.set_data(b, vec![1.0, 2.0, 3.0, 3.0].into());
+
+// Run
+rt.execute(&cx.dyn_map);
+
+// Get output tensor
+println!("Result: {:?}", rt.get_f32(c));
 ```
 
 ## Getting Started
@@ -36,14 +44,13 @@ println!("Result: {:?}", c);
 **Llama 3 8B**
 
 - the below is a quick example of how you can run Llama 3 8B locally using Luminal
-    - to go indepth on this example check out [the documentation here](https://github.com/jafioti/luminal/tree/main/examples/llama/README.md)
 
 ```bash
 cd ./examples/llama
 # Download the model
-bash ./setup/setup.sh
+uv run --script setup/setup.py
 # Run the model
-cargo run --release --features cuda     # Nvidia
+cargo run --release
 ```
 
 ## Features
