@@ -1,9 +1,9 @@
-use crate::graph::SerializedEGraph;
 use crate::{
     prelude::{
         ENodeId, NodeIndex,
         petgraph::{Directed, prelude::StableGraph},
     },
+    serialized_egraph::SerializedEGraph,
     shape::Expression,
 };
 use as_any::{AsAny, Downcast};

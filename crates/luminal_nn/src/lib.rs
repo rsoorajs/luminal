@@ -1,3 +1,5 @@
+#![allow(unused_imports)]
+
 mod activation;
 pub use activation::*;
 mod convolution;

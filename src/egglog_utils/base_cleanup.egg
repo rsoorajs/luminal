@@ -1,0 +1,41 @@
+(ruleset base_cleanup)
+(rule
+    ((= ?m (MReplace ?a ?b ?c)))
+    ((delete (MReplace ?a ?b ?c)))
+    :ruleset base_cleanup
+)
+(rule
+    ((= ?m (MReplaceList ?a ?b ?c)))
+    ((delete (MReplaceList ?a ?b ?c)))
+    :ruleset base_cleanup
+)
+(rule
+    ((= ?m (ReplaceNthFromEnd ?a ?b ?c)))
+    ((delete (ReplaceNthFromEnd ?a ?b ?c)))
+    :ruleset base_cleanup
+)
+(rule
+    ((= ?m (RemoveNthFromEnd ?a ?b)))
+    ((delete (RemoveNthFromEnd ?a ?b)))
+    :ruleset base_cleanup
+)
+(rule
+    ((= ?m (len ?x)))
+    ((delete (len ?x)))
+    :ruleset base_cleanup
+)
+(rule
+    ((= ?m (nth_from_end ?x ?y)))
+    ((delete (nth_from_end ?x ?y)))
+    :ruleset base_cleanup
+)
+(rule
+    ((= ?m (n_elements ?x)))
+    ((delete (n_elements ?x)))
+    :ruleset base_cleanup
+)
+(rule
+    ((= ?m (RowMajor ?x)))
+    ((delete (RowMajor ?x)))
+    :ruleset base_cleanup
+)

@@ -6,9 +6,10 @@ use cudarc::{
 };
 use itertools::Itertools;
 use luminal::{
-    graph::{extract_dtype, extract_expr, extract_expr_list, SerializedEGraph},
+    graph::{extract_dtype, extract_expr, extract_expr_list},
     op::DType,
     prelude::ENodeId,
+    serialized_egraph::SerializedEGraph,
     shape::Expression,
     utils::{
         flatten_mul_strides, EgglogOp, LLIROp,

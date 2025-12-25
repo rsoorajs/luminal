@@ -5,6 +5,7 @@ use std::{
 
 use crate::{
     prelude::*,
+    serialized_egraph::SerializedEGraph,
     utils::{
         EgglogOp, LLIROp,
         OpParam::{self, *},

@@ -1,9 +1,12 @@
+pub mod egglog_utils;
 pub mod graph;
 pub mod graph_tensor;
 pub mod hl_ops;
 pub mod op;
+pub mod serialized_egraph;
 pub mod shape;
 pub mod utils;
+pub mod visualization;
 
 #[cfg(test)]
 pub mod tests;
@@ -20,6 +23,7 @@ pub mod prelude {
     pub use half::{bf16, f16};
     pub use petgraph;
     pub use petgraph::stable_graph::NodeIndex;
+    pub use rustc_hash::{FxHashMap, FxHashSet};
     pub use tinyvec;
 }
 
