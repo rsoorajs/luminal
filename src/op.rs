@@ -1486,7 +1486,8 @@ impl Runtime for NativeRuntime {
         self.graph = graph;
     }
 
-    fn set_data(&mut self, id: NodeIndex, data: Self::Data) {
+    fn set_data(&mut self, id: impl ToId, data: Self::Data) {
+        let id = id.to_id();
         let local_id = self
             .graph
             .node_indices()
@@ -1522,7 +1523,8 @@ impl Runtime for NativeRuntime {
 }
 
 impl NativeRuntime {
-    pub fn get_f32(&self, id: NodeIndex) -> &Vec<f32> {
+    pub fn get_f32(&self, id: impl ToId) -> &Vec<f32> {
+        let id = id.to_id();
         let output_id = self
             .graph
             .node_indices()

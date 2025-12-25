@@ -1,26 +1,24 @@
-use itertools::Itertools;
 use luminal::prelude::*;
-//use luminal_2::{
-// codegen::codegen, extract::search, run::run_graph, translate::translate_graph,
-// utils::build_search_space, GPUArch,
-//};
-use luminal_nn::Linear;
-use rand::{rng, Rng};
 
 fn main() {
-    let mut rng = rng();
-    let weight = (0..4 * 5).map(|_| rng.random()).collect_vec();
-    // Create a new graph
+    // Create compute graph
     let mut cx = Graph::new();
-    // Randomly initialize a linear layer with an input size of 4 and an output size of 5
-    let model = Linear::new(4, 5, false, &mut cx);
-    model.weight.set(weight.clone());
-    // Make an input tensor
-    let a = cx.tensor(4).set(vec![1., 2., 3., 4.]);
-    // Feed tensor through model
-    let b = model.forward(a).retrieve();
+    let a = cx.tensor((3, 1));
+    let b = cx.tensor((1, 4));
 
-    // Execute the graph
-    cx.execute_debug();
-    println!("B: {:?}", b.data());
+    let c = a.matmul(b).output();
+
+    // Compile
+    cx.build_search_space::<NativeRuntime>();
+    let mut rt = cx.search(NativeRuntime::default(), 1);
+
+    // Set input tensors
+    rt.set_data(a, vec![1.0, 2.0, 3.0].into());
+    rt.set_data(b, vec![1.0, 2.0, 3.0, 3.0].into());
+
+    // Run
+    rt.execute(&cx.dyn_map);
+
+    // Get output tensor
+    println!("Result: {:?}", rt.get_f32(c));
 }

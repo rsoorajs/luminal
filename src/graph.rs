@@ -239,7 +239,7 @@ pub trait Runtime {
     type ExecReturn;
     fn initialize(arg: Self::CompileArg) -> Self;
     fn compile(&mut self, llir_graph: &LLIRGraph);
-    fn set_data(&mut self, id: NodeIndex, data: Self::Data);
+    fn set_data(&mut self, id: impl ToId, data: Self::Data);
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn;
 }
 

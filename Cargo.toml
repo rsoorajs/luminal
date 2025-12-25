@@ -47,8 +47,7 @@ ordered-float = "5.1.0"
 
 [workspace]
 members = [
-    "examples/llama",
-    "examples/visualization",
+    "examples/*",
     "crates/luminal_nn",
     "crates/luminal_cuda",
     "crates/luminal_training",

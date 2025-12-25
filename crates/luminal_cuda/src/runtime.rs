@@ -11,7 +11,7 @@ use cudarc::{
 };
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
-use luminal::op::Output;
+use luminal::{op::Output, prelude::ToId};
 use luminal::{
     prelude::{
         petgraph::{
@@ -128,7 +128,8 @@ impl CudaRuntime {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn get_f32(&self, id: NodeIndex) -> Vec<f32> {
+    pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
+        let id = id.to_id();
         let output_id = self
             .llir_graph
             .node_indices()
@@ -591,7 +592,8 @@ impl Runtime for CudaRuntime {
         timings
     }
 
-    fn set_data(&mut self, id: NodeIndex, data: Self::Data) {
+    fn set_data(&mut self, id: impl ToId, data: Self::Data) {
+        let id = id.to_id();
         let id = self
             .llir_graph
             .node_indices()

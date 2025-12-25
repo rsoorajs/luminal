@@ -101,11 +101,11 @@ fn main() {
         cx.set_dyn_dim('p', prev_seq);
 
         runtime.set_data(
-            input.id,
+            input,
             Box::new(sentence.iter().map(|i| *i as i32).collect_vec()),
         );
         runtime.set_data(
-            token_ids.id,
+            token_ids,
             Box::new(
                 (prev_seq..seq_len + prev_seq)
                     .map(|i| i as i32)
@@ -118,7 +118,7 @@ fn main() {
         }
 
         timings.extend(runtime.execute(&cx.dyn_map));
-        let logits_data = runtime.get_f32(logits.id);
+        let logits_data = runtime.get_f32(logits);
 
         let sample_span = span!(Level::INFO, "sample");
         let _sample_entered = sample_span.enter();
