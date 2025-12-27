@@ -186,7 +186,11 @@ where
     for<'a> &'a T: Into<Expression>,
 {
     fn eq(&self, other: &T) -> bool {
-        *self.terms.read() == *other.into().terms.read()
+        let other = other.into();
+        if *self.terms.read() == *other.terms.read() {
+            return true;
+        }
+        egglog_equal(self, &other)
     }
 }
 
@@ -916,6 +920,36 @@ fn egglog_simplify(e: Expression) -> Expression {
     .unwrap_or(e)
 }
 
+fn egglog_equal(lhs: &Expression, rhs: &Expression) -> bool {
+    let lhs_expr = lhs.to_egglog();
+    let rhs_expr = rhs.to_egglog();
+    let mut program = String::new();
+    program.push_str(egglog_utils::BASE);
+    program.push('\n');
+    program.push_str(egglog_utils::BASE_CLEANUP);
+    program.push('\n');
+    program.push_str(&format!("(let expr_lhs {lhs_expr})\n"));
+    program.push_str(&format!("(let expr_rhs {rhs_expr})\n"));
+    program.push_str(egglog_utils::RUN_SCHEDULE);
+    program.push('\n');
+    program.push_str("(check (= expr_lhs expr_rhs))\n");
+
+    let mut egraph = egglog::EGraph::default();
+    let commands = egraph
+        .parser
+        .get_program_from_string(None, &program)
+        .expect("failed to parse egglog program");
+    match egraph.run_program(commands) {
+        Ok(_) => true,
+        Err(err) => {
+            if matches!(err, egglog::Error::CheckError(_, _)) {
+                return false;
+            }
+            panic!("failed to run egglog program: {err}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -957,6 +991,27 @@ mod tests {
         let w = Expression::from('w');
         let s = ((((w + 3) / 2) + 2) / 2).simplify();
         assert_eq!(s, (w + 7) / 4);
+    }
+
+    #[test]
+    fn test_egglog_equality_commutative_add() {
+        let a = Expression::from('a');
+        let b = Expression::from('b');
+        assert_eq!(a + b, b + a);
+    }
+
+    #[test]
+    fn test_egglog_equality_rewrite() {
+        let a = Expression::from('a');
+        let b = Expression::from('b');
+        let expr = a + (b - a);
+        assert_eq!(expr, b);
+    }
+
+    #[test]
+    fn test_egglog_equality_not_equal() {
+        let a = Expression::from('a');
+        assert_ne!(a + 1, a + 2);
     }
 
     #[test]
