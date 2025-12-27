@@ -59,9 +59,10 @@
     )
     (
         (union ?e (MNum ?prod))
-        (delete (MMul (MNum ?a) (MNum ?b)))
+        (subsume (MMul (MNum ?a) (MNum ?b)))
     )
-) ; why does this explode???
+    :ruleset expr
+)
 (rewrite (MDiv (MNum a) (MNum b)) (MNum (/ a b)) :when ((!= 0 b) (= 0 (% a b))) :ruleset expr)
 (rewrite (MCeilDiv (MNum a) (MNum b)) (MNum (/ a b)) :when ((!= 0 b) (= 0 (% a b))) :ruleset expr)
 (rewrite (MMax (MNum a) (MNum b)) (MNum (max a b)) :ruleset expr)

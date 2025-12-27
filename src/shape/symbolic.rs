@@ -186,11 +186,8 @@ where
     for<'a> &'a T: Into<Expression>,
 {
     fn eq(&self, other: &T) -> bool {
-        let other = other.into();
-        if *self.terms.read() == *other.terms.read() {
-            return true;
-        }
-        egglog_equal(self, &other)
+        // Equals-approximation. For proper equality checking, use .egglog_equals (more expensive)
+        *self.terms.read() == *other.into().terms.read()
     }
 }
 
@@ -309,6 +306,7 @@ impl Expression {
         symbols.pop().unwrap_or_default()
     }
     /// Simplify the expression to its minimal terms
+    #[tracing::instrument(skip_all)]
     pub fn simplify(self) -> Self {
         if self.terms.read().len() == 1 {
             return self;
@@ -508,6 +506,45 @@ impl Expression {
                 && let Some(val) = dyn_map.get(&v)
             {
                 *term = Term::Num(*val as i32);
+            }
+        }
+    }
+    /// Run proper equality check inside egglog
+    #[tracing::instrument(skip_all)]
+    pub fn egglog_equal(self, rhs: impl Into<Expression>) -> bool {
+        let lhs_expr = self.to_egglog();
+        let rhs_expr = rhs.into().to_egglog();
+        let mut program = String::new();
+        program.push_str(egglog_utils::BASE);
+        program.push('\n');
+        program.push_str(egglog_utils::BASE_CLEANUP);
+        program.push('\n');
+        program.push_str(&format!("(let expr_lhs {lhs_expr})\n"));
+        program.push_str(&format!("(let expr_rhs {rhs_expr})\n"));
+        program.push_str(
+            "(run-schedule
+                (saturate expr)
+                (saturate base_cleanup)
+                (saturate cleanup)
+            )",
+        );
+        program.push('\n');
+        program.push_str("(check (= expr_lhs expr_rhs))\n");
+
+        let mut egraph = egglog::EGraph::default();
+        let commands = egraph
+            .parser
+            .get_program_from_string(None, &program)
+            .expect("failed to parse egglog program");
+        let span = tracing::span!(tracing::Level::INFO, "to_egglog");
+        let _entered = span.enter();
+        match egraph.run_program(commands) {
+            Ok(_) => true,
+            Err(err) => {
+                if matches!(err, egglog::Error::CheckError(_, _)) {
+                    return false;
+                }
+                panic!("failed to run egglog program: {err}");
             }
         }
     }
@@ -890,6 +927,7 @@ impl<E: Into<Expression>> BitOrAssign<E> for Expression {
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn egglog_simplify(e: Expression) -> Expression {
     let expr = e.to_egglog();
     let mut program = String::new();
@@ -898,19 +936,20 @@ fn egglog_simplify(e: Expression) -> Expression {
     program.push_str(egglog_utils::BASE_CLEANUP);
     program.push('\n');
     program.push_str(&format!("(let expr_root {expr})\n"));
-    program.push_str(egglog_utils::RUN_SCHEDULE);
-
+    program.push_str(
+        "(run-schedule
+            (saturate expr)
+            (saturate base_cleanup)
+            (saturate cleanup)
+        )",
+    );
     let mut egraph = egglog::EGraph::default();
     let commands = egraph
         .parser
         .get_program_from_string(None, &program)
-        .expect("failed to parse egglog program");
-    egraph
-        .run_program(commands)
-        .expect("failed to run egglog program");
-    let (sort, value) = egraph
-        .eval_expr(&var!("expr_root"))
-        .expect("failed to evaluate egglog expression");
+        .unwrap();
+    egraph.run_program(commands).unwrap();
+    let (sort, value) = egraph.eval_expr(&var!("expr_root")).unwrap();
     let serialized = SerializedEGraph::new(&egraph, vec![(sort, value)]);
     extract_expr(
         &serialized,
@@ -918,36 +957,6 @@ fn egglog_simplify(e: Expression) -> Expression {
         &mut FxHashMap::default(),
     )
     .unwrap_or(e)
-}
-
-fn egglog_equal(lhs: &Expression, rhs: &Expression) -> bool {
-    let lhs_expr = lhs.to_egglog();
-    let rhs_expr = rhs.to_egglog();
-    let mut program = String::new();
-    program.push_str(egglog_utils::BASE);
-    program.push('\n');
-    program.push_str(egglog_utils::BASE_CLEANUP);
-    program.push('\n');
-    program.push_str(&format!("(let expr_lhs {lhs_expr})\n"));
-    program.push_str(&format!("(let expr_rhs {rhs_expr})\n"));
-    program.push_str(egglog_utils::RUN_SCHEDULE);
-    program.push('\n');
-    program.push_str("(check (= expr_lhs expr_rhs))\n");
-
-    let mut egraph = egglog::EGraph::default();
-    let commands = egraph
-        .parser
-        .get_program_from_string(None, &program)
-        .expect("failed to parse egglog program");
-    match egraph.run_program(commands) {
-        Ok(_) => true,
-        Err(err) => {
-            if matches!(err, egglog::Error::CheckError(_, _)) {
-                return false;
-            }
-            panic!("failed to run egglog program: {err}");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -994,24 +1003,12 @@ mod tests {
     }
 
     #[test]
-    fn test_egglog_equality_commutative_add() {
+    fn test_egglog_equality() {
         let a = Expression::from('a');
         let b = Expression::from('b');
-        assert_eq!(a + b, b + a);
-    }
-
-    #[test]
-    fn test_egglog_equality_rewrite() {
-        let a = Expression::from('a');
-        let b = Expression::from('b');
-        let expr = a + (b - a);
-        assert_eq!(expr, b);
-    }
-
-    #[test]
-    fn test_egglog_equality_not_equal() {
-        let a = Expression::from('a');
-        assert_ne!(a + 1, a + 2);
+        assert!((a + b).egglog_equal(b + a));
+        assert!((a + (b - a)).egglog_equal(b));
+        assert!(!(a + 1).egglog_equal(a + 2));
     }
 
     #[test]
