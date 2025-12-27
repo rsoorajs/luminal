@@ -379,7 +379,54 @@ fn run_egglog(
     cleanup: bool,
 ) -> Result<SerializedEGraph, egglog::Error> {
     let mut egraph = egglog::EGraph::default();
-    let code = egglog_utils::full_egglog(program, ops, cleanup);
+    let mut code = egglog_utils::EGGLOG_TEMPLATE.replace("{program}", program);
+
+    code = code.replace(
+        "{ops}",
+        &ops.iter()
+            .map(|o| {
+                let (name, body) = o.term();
+
+                format!(
+                    "({name} {})",
+                    body.into_iter().map(|j| format!("{j:?}")).join(" ")
+                )
+            })
+            .join("\n"),
+    );
+
+    code = code.replace(
+        "{rewrites}",
+        &ops.iter().map(|o| o.rewrites().join("\n")).join("\n"),
+    );
+
+    code = code.replace(
+        "{cleanups}",
+        &ops.iter()
+            .filter(|op| op.cleanup() && cleanup)
+            .map(|o| {
+                let (name, body) = o.term();
+
+                let body_terms = (0..body.len()).map(|i| (b'a' + i as u8) as char).join(" ");
+
+                format!(
+                    "(rule
+
+
+                        ((= ?m ({name} {body_terms})))
+
+
+                        ((delete ({name} {body_terms})))
+
+
+                        :ruleset cleanup
+
+
+                    )"
+                )
+            })
+            .join("\n"),
+    );
     let commands = egraph.parser.get_program_from_string(None, &code)?;
     let start = std::time::Instant::now();
     let msgs = egraph.run_program(commands)?;
