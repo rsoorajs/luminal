@@ -44,30 +44,9 @@ fn main() {
 
     let mut egglog_obj: EGraph = egglog::EGraph::default();
 
-    // setup the rules and datatypes
-    egglog_obj
-        .parse_and_run_program(None, luminal::egglog_utils::BASE)
-        .unwrap();
-    egglog_obj
-        .parse_and_run_program(None, &luminal::egglog_utils::op_defs_string(&ops))
-        .unwrap();
-    egglog_obj
-        .parse_and_run_program(None, &luminal::egglog_utils::op_rewrites_string(&ops))
-        .unwrap();
-    egglog_obj
-        .parse_and_run_program(None, luminal::egglog_utils::BASE_CLEANUP)
-        .unwrap();
-    egglog_obj
-        .parse_and_run_program(None, &luminal::egglog_utils::op_cleanups_string(&ops))
-        .unwrap();
-
-    // load the program
-    egglog_obj.parse_and_run_program(None, &program).unwrap();
-
     // run the graph
-    egglog_obj
-        .parse_and_run_program(None, luminal::egglog_utils::RUN_SCHEDULE)
-        .unwrap();
+    let code = luminal::egglog_utils::full_egglog(&program, &ops, true);
+    egglog_obj.parse_and_run_program(None, &code).unwrap();
 
     // EGraph Optimization Complete
     println!("Visualizing EGraph");

@@ -1,5 +1,7 @@
-; -------- SYMBOLIC ALGEBRA -------
 (ruleset expr)
+(ruleset cleanup)
+
+; -------- SYMBOLIC ALGEBRA -------
 (datatype*
     (Expression
         (MNum i64)
@@ -20,7 +22,6 @@
         (MLt  Expression Expression)
         (MFloorTo Expression Expression)
         (MReplace Expression Expression Expression)
-        (MAccum String)
     )
 
     ; eqsort list for vectors of Expression
@@ -79,6 +80,33 @@
          :when ((>= ?z ?y) (= 0 (% ?y ?z))) :ruleset expr)
 (rewrite (MMod (MMod ?x (MNum ?y)) (MNum ?z)) (MMod ?x (MNum ?z))
          :when ((>= ?y ?z) (= 0 (% ?z ?y))) :ruleset expr)
+(rewrite (MDiv (MDiv a b) c) (MDiv a (MMul b c)) :ruleset expr)
+(rewrite (MAdd (MDiv a b) c) (MDiv (MAdd a (MMul c b)) b) :ruleset expr)
+(rewrite (MAdd a (MSub b a)) b :ruleset expr)
+(rewrite (MAdd (MSub b a) a) b :ruleset expr)
+(rewrite (MSub a a) (MNum 0) :ruleset expr)
+(rewrite
+    (MAdd (MSub a (MNum ?b)) (MNum ?c))
+    (MSub a (MNum (- ?b ?c)))
+    :ruleset expr
+)
+(rewrite
+    (MAdd (MNum ?c) (MSub a (MNum ?b)))
+    (MSub a (MNum (- ?b ?c)))
+    :ruleset expr
+)
+(rewrite
+    (MSub (MAdd a (MNum ?b)) (MNum ?c))
+    (MAdd a (MNum (- ?b ?c)))
+    :ruleset expr
+)
+(rewrite
+    (MSub (MSub a (MNum ?b)) (MNum ?c))
+    (MSub a (MNum (+ ?b ?c)))
+    :ruleset expr
+)
+(rewrite (MAdd (MMul a b) (MMul a c)) (MMul a (MAdd b c)) :ruleset expr)
+(rewrite (MAdd a a) (MMul (MNum 2) a) :ruleset expr)
 
 ; ---- Replacement over expressions ----
 (rewrite (MReplace ?x ?y ?z) ?z :when ((= ?x ?y)) :ruleset expr)
@@ -92,7 +120,6 @@
 (rewrite (MReplace (MMax ?a ?b) ?x ?y) (MMax (MReplace ?a ?x ?y) (MReplace ?b ?x ?y)) :ruleset expr)
 (rewrite (MReplace (MFloorTo ?a ?b) ?x ?y) (MFloorTo (MReplace ?a ?x ?y) (MReplace ?b ?x ?y)) :ruleset expr)
 (rewrite (MReplace (MNum ?n) ?x ?y) (MNum ?n) :ruleset expr)
-(rewrite (MReplace (MAccum ?acc) ?x ?y) (MAccum ?acc) :ruleset expr)
 (rewrite (MReplace (MVar ?z) ?find ?replace) (MVar ?z) :when ((!= ?find (MVar ?z))) :ruleset expr)
 (rewrite (MReplace (MIter) ?find ?replace) (MIter) :when ((!= ?find (MIter))) :ruleset expr)
 

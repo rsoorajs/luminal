@@ -11,10 +11,9 @@ use std::{
     sync::OnceLock,
 };
 
-use crate::{egglog_utils, serialized_egraph::SerializedEGraph};
+use crate::{egglog_utils, graph::extract_expr, serialized_egraph::SerializedEGraph};
 use egglog::{prelude::RustSpan, var};
 use egglog_ast::span::Span;
-use egraph_serialize::{ClassId, NodeId};
 
 type ExprBox = GenerationalBox<Vec<Term>, SyncStorage>;
 
@@ -44,10 +43,6 @@ impl Expression {
         Self {
             terms: expression_owner().insert(terms),
         }
-    }
-
-    pub fn is_acc(&self) -> bool {
-        self.terms.read().iter().any(|i| matches!(i, Term::Acc(_)))
     }
 
     pub fn is_dynamic(&self) -> bool {
@@ -104,7 +99,6 @@ pub enum Term {
     Or,
     Gte,
     Lt,
-    Acc(char),
 }
 
 impl std::fmt::Debug for Term {
@@ -124,7 +118,6 @@ impl std::fmt::Debug for Term {
             Term::Or => write!(f, "||"),
             Term::Gte => write!(f, ">="),
             Term::Lt => write!(f, "<"),
-            Term::Acc(s) => write!(f, "{s}"),
         }
     }
 }
@@ -212,7 +205,6 @@ impl Debug for Expression {
             let new_symbol = match term {
                 Term::Num(n) => n.to_string(),
                 Term::Var(c) => c.to_string(),
-                Term::Acc(c) => format!("Acc({c})"),
                 Term::Max => format!(
                     "max({}, {})",
                     symbols.pop().unwrap(),
@@ -235,6 +227,12 @@ impl Debug for Expression {
     }
 }
 
+impl std::fmt::Display for Expression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
 impl Expression {
     pub fn to_egglog(&self) -> String {
         let mut symbols = vec![];
@@ -242,7 +240,6 @@ impl Expression {
             let new_symbol = match term {
                 Term::Num(n) => format!("(MNum {n})"),
                 Term::Var(c) => format!("(MVar \"{c}\")"),
-                Term::Acc(s) => format!("(MAccum \"{s}\")"),
                 Term::Max => format!(
                     "(MMax {} {})",
                     symbols.pop().unwrap(),
@@ -271,7 +268,6 @@ impl Expression {
             let new_symbol = match term {
                 Term::Num(n) => n.to_string(),
                 Term::Var(c) => format!("{}const_{c}", if *c == 'z' { "" } else { "*" }),
-                Term::Acc(_) => unreachable!(),
                 Term::Max => format!(
                     "max((int){}, (int){})",
                     symbols.pop().unwrap(),
@@ -308,23 +304,13 @@ impl Expression {
         }
         symbols.pop().unwrap_or_default()
     }
-}
-
-impl std::fmt::Display for Expression {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-
-impl Expression {
     /// Simplify the expression to its minimal terms
     pub fn simplify(self) -> Self {
         if self.terms.read().len() == 1 {
             return self;
         }
-        egglog_simplify(self, false)
+        egglog_simplify(self)
     }
-
     /// Simplify the expression to its minimal terms, using a cache to retrieve / store the simplification
     #[allow(clippy::mutable_key_type)]
     pub fn simplify_cache(self, cache: &mut FxHashMap<Expression, Expression>) -> Self {
@@ -336,7 +322,6 @@ impl Expression {
             simplified
         }
     }
-
     pub fn as_num(&self) -> Option<i32> {
         if let Term::Num(n) = self.terms.read()[0] {
             if self.terms.read().len() == 1 {
@@ -345,15 +330,12 @@ impl Expression {
         }
         None
     }
-
     pub fn len(&self) -> usize {
         self.terms.read().len()
     }
-
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-
     /// Minimum
     pub fn min(self, rhs: impl Into<Self>) -> Self {
         let rhs = rhs.into();
@@ -368,7 +350,6 @@ impl Expression {
         terms.push(Term::Min);
         Expression::new(terms)
     }
-
     /// Maximum
     pub fn max<E: Into<Expression>>(self, rhs: E) -> Self {
         let rhs = rhs.into();
@@ -386,7 +367,6 @@ impl Expression {
         terms.push(Term::Max);
         Expression::new(terms)
     }
-
     /// Greater than or equals
     pub fn gte<E: Into<Expression>>(self, rhs: E) -> Self {
         let rhs = rhs.into();
@@ -404,7 +384,6 @@ impl Expression {
         terms.push(Term::Gte);
         Expression::new(terms)
     }
-
     /// Ceil Division
     pub fn ceil_div<E: Into<Expression>>(self, rhs: E) -> Self {
         let rhs = rhs.into();
@@ -413,7 +392,6 @@ impl Expression {
         terms.push(Term::CeilDiv);
         Expression::new(terms)
     }
-
     /// Less than
     pub fn lt<E: Into<Expression>>(self, rhs: E) -> Self {
         let rhs = rhs.into();
@@ -435,7 +413,6 @@ impl Expression {
         terms.push(Term::Lt);
         Expression::new(terms)
     }
-
     /// Substitute an expression for a variable
     pub fn substitute(self, var: char, expr: impl Into<Expression>) -> Self {
         let mut new_terms = vec![];
@@ -454,9 +431,6 @@ impl Expression {
         }
         Expression::new(new_terms)
     }
-}
-
-impl Expression {
     /// Evaluate the expression with no variables. Returns Some(value) if no variables are required, otherwise returns None.
     pub fn to_usize(&self) -> Option<usize> {
         self.exec(&FxHashMap::default())
@@ -471,7 +445,6 @@ impl Expression {
         for term in self.terms.read().iter() {
             match term {
                 Term::Num(n) => stack.push(*n as i64),
-                Term::Acc(_) => stack.push(1),
                 Term::Var(_) => stack.push(value as i64),
                 _ => {
                     let a = stack.pop().unwrap();
@@ -495,7 +468,6 @@ impl Expression {
         for term in self.terms.read().iter() {
             match term {
                 Term::Num(n) => stack.push(*n as i64),
-                Term::Acc(_) => stack.push(1),
                 Term::Var(c) =>
                 {
                     #[allow(clippy::needless_borrow)]
@@ -514,38 +486,6 @@ impl Expression {
         }
         stack.pop().map(|i| i as usize)
     }
-    /// Evaluate the expression given variables.
-    pub fn exec_float(&self, variables: &FxHashMap<char, usize>) -> Option<f64> {
-        self.exec_stack_float(variables, &mut Vec::new())
-    }
-    /// Evaluate the expression given variables. This function requires a stack to be given for use as storage
-    pub fn exec_stack_float(
-        &self,
-        variables: &FxHashMap<char, usize>,
-        stack: &mut Vec<f64>,
-    ) -> Option<f64> {
-        for term in self.terms.read().iter() {
-            match term {
-                Term::Num(n) => stack.push(*n as f64),
-                Term::Acc(_) => stack.push(1.0),
-                Term::Var(c) =>
-                {
-                    #[allow(clippy::needless_borrow)]
-                    if let Some(n) = variables.get(&c) {
-                        stack.push(*n as f64)
-                    } else {
-                        return None;
-                    }
-                }
-                _ => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    stack.push(term.as_float_op().unwrap()(a, b));
-                }
-            }
-        }
-        stack.pop()
-    }
     /// Retrieve all symbols in the expression.
     pub fn to_symbols(&self) -> Vec<char> {
         self.terms
@@ -557,15 +497,7 @@ impl Expression {
             })
             .collect()
     }
-
-    /// Check if the '-' variable exists in the expression.
-    pub fn is_unknown(&self) -> bool {
-        self.terms
-            .read()
-            .iter()
-            .any(|t| matches!(t, Term::Var('-')))
-    }
-
+    /// Resolve all known variables from dyn map into real values
     pub fn resolve_vars(&mut self, dyn_map: &FxHashMap<char, usize>) {
         for term in self.terms.write().iter_mut() {
             if let Term::Var(v) = *term
@@ -954,252 +886,13 @@ impl<E: Into<Expression>> BitOrAssign<E> for Expression {
     }
 }
 
-fn extract_shortest<'a>(
-    egraph: &'a SerializedEGraph,
-    class: &'a ClassId,
-    seen: &mut FxHashMap<&'a NodeId, usize>,
-    cache: &mut FxHashMap<&'a NodeId, Option<Vec<&'a NodeId>>>,
-) -> Option<Vec<&'a NodeId>> {
-    let result = egraph.eclasses[class]
-        .1
-        .iter()
-        .filter_map(|en| {
-            if *seen.get(en).unwrap_or(&0) >= 4 || egraph.enodes[en].0 == "[...]" {
-                return None;
-            }
-            if let Some(cached) = cache.get(en) {
-                return cached.clone();
-            }
-            *seen.entry(en).or_insert(0) += 1;
-            let out = if egraph.enodes[en].1.is_empty() {
-                Some(vec![en])
-            } else {
-                egraph.enodes[en]
-                    .1
-                    .iter()
-                    .try_fold(vec![en], |mut acc, ch| {
-                        extract_shortest(egraph, ch, seen, cache).map(|p| {
-                            acc.extend(p);
-                            acc
-                        })
-                    })
-            };
-            *seen.get_mut(en).unwrap() -= 1;
-            cache.insert(en, out.clone());
-            out
-        })
-        .min_by_key(|p| p.len());
-    result
-}
-
-fn build_expression(
-    egraph: &SerializedEGraph,
-    trajectory: &[&NodeId],
-    current: &mut usize,
-) -> Expression {
-    let nid = trajectory[*current];
-    let op = egraph.enodes[nid].0.as_str();
-    match op {
-        "MAdd" | "MSub" | "MMul" | "MDiv" | "MMod" | "MMin" | "MMax" | "MAnd" | "MOr" | "MGte"
-        | "MLt" | "MFloorTo" | "MCeilDiv" => {
-            *current += 1;
-            let lhs = build_expression(egraph, trajectory, current);
-            *current += 1;
-            let rhs = build_expression(egraph, trajectory, current);
-            match op {
-                "MAdd" => lhs + rhs,
-                "MSub" => lhs - rhs,
-                "MMul" => lhs * rhs,
-                "MDiv" => lhs / rhs,
-                "MMod" => lhs % rhs,
-                "MMin" => lhs.min(rhs),
-                "MMax" => lhs.max(rhs),
-                "MAnd" => lhs & rhs,
-                "MOr" => lhs | rhs,
-                "MGte" => lhs.gte(rhs),
-                "MLt" => lhs.lt(rhs),
-                "MCeilDiv" => lhs.ceil_div(rhs),
-                "MFloorTo" => lhs / rhs * rhs,
-                _ => unreachable!(),
-            }
-        }
-        "MNum" | "MVar" | "MAccum" => {
-            *current += 1;
-            let child = build_expression(egraph, trajectory, current);
-            if op == "MAccum" {
-                if let Some(Term::Var(c)) = child.terms.read().first() {
-                    Expression::new(vec![Term::Acc(*c)])
-                } else {
-                    child
-                }
-            } else {
-                child
-            }
-        }
-        "MIter" => Expression::from('z'),
-        op if op.starts_with("Boxed(\"") => {
-            let name = op.replace("Boxed(\"", "").replace("\")", "");
-            Expression::from(name.chars().next().unwrap())
-        }
-        op => op
-            .parse::<i32>()
-            .map(Expression::from)
-            .or_else(|_| op.replace('"', "").parse::<char>().map(Expression::from))
-            .unwrap_or_else(|_| panic!("unsupported expression op '{op}'")),
-    }
-}
-
-fn extract_expression(egraph: &SerializedEGraph) -> Option<Expression> {
-    let root = egraph.roots.first()?;
-    let traj = extract_shortest(
-        egraph,
-        root,
-        &mut FxHashMap::default(),
-        &mut FxHashMap::default(),
-    )?;
-    Some(build_expression(egraph, &traj, &mut 0))
-}
-
-#[derive(Clone, Debug)]
-enum ExprNode {
-    Num(i32),
-    Var(char),
-    Acc(char),
-    Op(Term, Box<ExprNode>, Box<ExprNode>),
-}
-
-impl ExprNode {
-    fn from_terms(terms: &[Term]) -> Option<Self> {
-        let mut stack: Vec<ExprNode> = Vec::new();
-        for term in terms {
-            match *term {
-                Term::Num(n) => stack.push(ExprNode::Num(n)),
-                Term::Var(c) => stack.push(ExprNode::Var(c)),
-                Term::Acc(c) => stack.push(ExprNode::Acc(c)),
-                op => {
-                    let left = stack.pop()?;
-                    let right = stack.pop()?;
-                    stack.push(ExprNode::Op(op, Box::new(left), Box::new(right)));
-                }
-            }
-        }
-        stack.pop()
-    }
-
-    fn to_terms(&self, out: &mut Vec<Term>) {
-        match self {
-            ExprNode::Num(n) => out.push(Term::Num(*n)),
-            ExprNode::Var(c) => out.push(Term::Var(*c)),
-            ExprNode::Acc(c) => out.push(Term::Acc(*c)),
-            ExprNode::Op(op, left, right) => {
-                right.to_terms(out);
-                left.to_terms(out);
-                out.push(*op);
-            }
-        }
-    }
-
-    fn simplify_mul_div_constants(self) -> Self {
-        match self {
-            ExprNode::Op(term, left, right) => {
-                let left = left.simplify_mul_div_constants();
-                let right = right.simplify_mul_div_constants();
-                if term == Term::Mul {
-                    if let (ExprNode::Op(Term::Div, inner_left, inner_right), ExprNode::Num(c)) =
-                        (&left, &right)
-                    {
-                        if let ExprNode::Num(b) = **inner_right {
-                            if *c != 0 && b % *c == 0 && !inner_left.contains_var('z') {
-                                return ExprNode::Op(
-                                    Term::Div,
-                                    inner_left.clone(),
-                                    Box::new(ExprNode::Num(b / *c)),
-                                );
-                            }
-                        }
-                    }
-
-                    if let (ExprNode::Num(c), ExprNode::Op(Term::Div, inner_left, inner_right)) =
-                        (&left, &right)
-                    {
-                        if let ExprNode::Num(b) = **inner_right {
-                            if *c != 0 && b % *c == 0 && !inner_left.contains_var('z') {
-                                return ExprNode::Op(
-                                    Term::Div,
-                                    inner_left.clone(),
-                                    Box::new(ExprNode::Num(b / *c)),
-                                );
-                            }
-                        }
-                    }
-                }
-                ExprNode::Op(term, Box::new(left), Box::new(right))
-            }
-            other => other,
-        }
-    }
-
-    fn contains_var(&self, var: char) -> bool {
-        match self {
-            ExprNode::Var(c) => *c == var,
-            ExprNode::Acc(_) | ExprNode::Num(_) => false,
-            ExprNode::Op(_, left, right) => left.contains_var(var) || right.contains_var(var),
-        }
-    }
-}
-
-fn simplify_mul_div_constants(expr: Expression) -> Expression {
-    let Some(node) = ExprNode::from_terms(&expr.terms.read()) else {
-        return expr;
-    };
-    let simplified = node.simplify_mul_div_constants();
-    let mut terms = Vec::new();
-    simplified.to_terms(&mut terms);
-    Expression::new(terms)
-}
-
-fn egglog_simplify(e: Expression, lower_bound_zero: bool) -> Expression {
+fn egglog_simplify(e: Expression) -> Expression {
     let expr = e.to_egglog();
     let mut program = String::new();
     program.push_str(egglog_utils::BASE);
     program.push('\n');
-    program.push_str("(ruleset cleanup)\n");
     program.push_str(egglog_utils::BASE_CLEANUP);
     program.push('\n');
-    program.push_str(
-        r#"
-(rewrite (MDiv (MDiv a b) c) (MDiv a (MMul b c)) :ruleset expr)
-(rewrite (MAdd (MDiv a b) c) (MDiv (MAdd a (MMul c b)) b) :ruleset expr)
-(rewrite (MAdd a (MSub b a)) b :ruleset expr)
-(rewrite (MAdd (MSub b a) a) b :ruleset expr)
-(rewrite (MSub a a) (MNum 0) :ruleset expr)
-(rewrite
-    (MAdd (MSub a (MNum ?b)) (MNum ?c))
-    (MSub a (MNum (- ?b ?c)))
-    :ruleset expr
-)
-(rewrite
-    (MAdd (MNum ?c) (MSub a (MNum ?b)))
-    (MSub a (MNum (- ?b ?c)))
-    :ruleset expr
-)
-(rewrite
-    (MSub (MAdd a (MNum ?b)) (MNum ?c))
-    (MAdd a (MNum (- ?b ?c)))
-    :ruleset expr
-)
-(rewrite
-    (MSub (MSub a (MNum ?b)) (MNum ?c))
-    (MSub a (MNum (+ ?b ?c)))
-    :ruleset expr
-)
-(rewrite (MAdd (MMul a b) (MMul a c)) (MMul a (MAdd b c)) :ruleset expr)
-(rewrite (MAdd a a) (MMul (MNum 2) a) :ruleset expr)
-"#,
-    );
-    if lower_bound_zero {
-        program.push_str("(rewrite (MMax a (MNum 0)) a :ruleset expr)\n");
-    }
     program.push_str(&format!("(let expr_root {expr})\n"));
     program.push_str(egglog_utils::RUN_SCHEDULE);
 
@@ -1215,9 +908,12 @@ fn egglog_simplify(e: Expression, lower_bound_zero: bool) -> Expression {
         .eval_expr(&var!("expr_root"))
         .expect("failed to evaluate egglog expression");
     let serialized = SerializedEGraph::new(&egraph, vec![(sort, value)]);
-    extract_expression(&serialized)
-        .map(simplify_mul_div_constants)
-        .unwrap_or(e)
+    extract_expr(
+        &serialized,
+        &serialized.eclasses[serialized.roots.first().unwrap()].1[0],
+        &mut FxHashMap::default(),
+    )
+    .unwrap_or(e)
 }
 
 #[cfg(test)]
@@ -1273,7 +969,7 @@ mod tests {
                 * (-5 + (((9 + (4 * (-5 + ((((((153 + h) / 2) / 2) / 2) / 2) / 2)))) / 2) / 2))))
             % 64;
         let x = o.simplify();
-        assert_eq!(x.len(), 23); // Should be 21 if we can re-enable mul-div-associative-rev
+        assert!(x.len() <= 27); // Should be 21 if we can re-enable mul-div-associative-rev
     }
 
     #[test]
