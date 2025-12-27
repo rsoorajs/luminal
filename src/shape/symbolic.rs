@@ -1,4 +1,3 @@
-use egg::*;
 use generational_box::{AnyStorage, GenerationalBox, Owner, SyncStorage};
 use rustc_hash::FxHashMap;
 use serde::{Serialize, Serializer};
@@ -11,7 +10,11 @@ use std::{
     },
     sync::OnceLock,
 };
-use symbolic_expressions::Sexp;
+
+use crate::{egglog_utils, serialized_egraph::SerializedEGraph};
+use egglog::{prelude::RustSpan, var};
+use egglog_ast::span::Span;
+use egraph_serialize::{ClassId, NodeId};
 
 type ExprBox = GenerationalBox<Vec<Term>, SyncStorage>;
 
@@ -319,7 +322,7 @@ impl Expression {
         if self.terms.read().len() == 1 {
             return self;
         }
-        egg_simplify(self, false)
+        egglog_simplify(self, false)
     }
 
     /// Simplify the expression to its minimal terms, using a cache to retrieve / store the simplification
@@ -951,296 +954,270 @@ impl<E: Into<Expression>> BitOrAssign<E> for Expression {
     }
 }
 
-define_language! {
-    enum SimpleLanguage {
-        Num(i32),
-        "+" = Add([Id; 2]),
-        "*" = Mul([Id; 2]),
-        Symbol(Symbol),
-    }
+fn extract_shortest<'a>(
+    egraph: &'a SerializedEGraph,
+    class: &'a ClassId,
+    seen: &mut FxHashMap<&'a NodeId, usize>,
+    cache: &mut FxHashMap<&'a NodeId, Option<Vec<&'a NodeId>>>,
+) -> Option<Vec<&'a NodeId>> {
+    let result = egraph.eclasses[class]
+        .1
+        .iter()
+        .filter_map(|en| {
+            if *seen.get(en).unwrap_or(&0) >= 4 || egraph.enodes[en].0 == "[...]" {
+                return None;
+            }
+            if let Some(cached) = cache.get(en) {
+                return cached.clone();
+            }
+            *seen.entry(en).or_insert(0) += 1;
+            let out = if egraph.enodes[en].1.is_empty() {
+                Some(vec![en])
+            } else {
+                egraph.enodes[en]
+                    .1
+                    .iter()
+                    .try_fold(vec![en], |mut acc, ch| {
+                        extract_shortest(egraph, ch, seen, cache).map(|p| {
+                            acc.extend(p);
+                            acc
+                        })
+                    })
+            };
+            *seen.get_mut(en).unwrap() -= 1;
+            cache.insert(en, out.clone());
+            out
+        })
+        .min_by_key(|p| p.len());
+    result
 }
 
-fn luminal_to_egg(expr: &Expression) -> RecExpr<Math> {
-    let mut stack = Vec::new();
-
-    for term in expr.terms.read().iter() {
-        match term {
-            Term::Num(_) | Term::Var(_) => {
-                stack.push(symbolic_expressions::Sexp::String(format!("{term:?}")))
-            }
-            Term::Acc(_) => stack.push(symbolic_expressions::Sexp::String("1".to_string())),
-            _ => {
-                let left = stack.pop().unwrap();
-                let right = stack.pop().unwrap();
-                let subexpr = symbolic_expressions::Sexp::List(vec![
-                    symbolic_expressions::Sexp::String(format!("{term:?}")),
-                    left,
-                    right,
-                ]);
-                stack.push(subexpr);
+fn build_expression(
+    egraph: &SerializedEGraph,
+    trajectory: &[&NodeId],
+    current: &mut usize,
+) -> Expression {
+    let nid = trajectory[*current];
+    let op = egraph.enodes[nid].0.as_str();
+    match op {
+        "MAdd" | "MSub" | "MMul" | "MDiv" | "MMod" | "MMin" | "MMax" | "MAnd" | "MOr" | "MGte"
+        | "MLt" | "MFloorTo" | "MCeilDiv" => {
+            *current += 1;
+            let lhs = build_expression(egraph, trajectory, current);
+            *current += 1;
+            let rhs = build_expression(egraph, trajectory, current);
+            match op {
+                "MAdd" => lhs + rhs,
+                "MSub" => lhs - rhs,
+                "MMul" => lhs * rhs,
+                "MDiv" => lhs / rhs,
+                "MMod" => lhs % rhs,
+                "MMin" => lhs.min(rhs),
+                "MMax" => lhs.max(rhs),
+                "MAnd" => lhs & rhs,
+                "MOr" => lhs | rhs,
+                "MGte" => lhs.gte(rhs),
+                "MLt" => lhs.lt(rhs),
+                "MCeilDiv" => lhs.ceil_div(rhs),
+                "MFloorTo" => lhs / rhs * rhs,
+                _ => unreachable!(),
             }
         }
-    }
-    fn parse_sexp_into<L: FromOp>(
-        sexp: &Sexp,
-        expr: &mut RecExpr<L>,
-    ) -> Result<Id, RecExprParseError<L::Error>> {
-        match sexp {
-            Sexp::Empty => Err(egg::RecExprParseError::EmptySexp),
-            Sexp::String(s) => {
-                let node = L::from_op(s, vec![]).map_err(egg::RecExprParseError::BadOp)?;
-                Ok(expr.add(node))
-            }
-            Sexp::List(list) if list.is_empty() => Err(egg::RecExprParseError::EmptySexp),
-            Sexp::List(list) => match &list[0] {
-                Sexp::Empty => unreachable!("Cannot be in head position"),
-                list @ Sexp::List(..) => Err(egg::RecExprParseError::HeadList(list.to_owned())),
-                Sexp::String(op) => {
-                    let arg_ids: Vec<Id> = list[1..]
-                        .iter()
-                        .map(|s| parse_sexp_into(s, expr))
-                        .collect::<Result<_, _>>()?;
-                    let node = L::from_op(op, arg_ids).map_err(egg::RecExprParseError::BadOp)?;
-                    Ok(expr.add(node))
+        "MNum" | "MVar" | "MAccum" => {
+            *current += 1;
+            let child = build_expression(egraph, trajectory, current);
+            if op == "MAccum" {
+                if let Some(Term::Var(c)) = child.terms.read().first() {
+                    Expression::new(vec![Term::Acc(*c)])
+                } else {
+                    child
                 }
-            },
+            } else {
+                child
+            }
         }
+        "MIter" => Expression::from('z'),
+        op if op.starts_with("Boxed(\"") => {
+            let name = op.replace("Boxed(\"", "").replace("\")", "");
+            Expression::from(name.chars().next().unwrap())
+        }
+        op => op
+            .parse::<i32>()
+            .map(Expression::from)
+            .or_else(|_| op.replace('"', "").parse::<char>().map(Expression::from))
+            .unwrap_or_else(|_| panic!("unsupported expression op '{op}'")),
     }
-
-    let sexp = stack.pop().unwrap();
-    let mut expr = RecExpr::default();
-    parse_sexp_into(&sexp, &mut expr).unwrap();
-    expr
 }
 
-fn egg_to_luminal(expr: RecExpr<Math>) -> Expression {
-    fn create_postfix(expr: &[Math]) -> Vec<Term> {
-        match expr.last().unwrap() {
-            Math::Num(i) => vec![Term::Num(*i)],
-            Math::Add([a, b]) => [
-                create_postfix(&expr[..usize::from(*b) + 1]),
-                create_postfix(&expr[..usize::from(*a) + 1]),
-                vec![Term::Add],
-            ]
-            .concat(),
-            Math::Sub([a, b]) => [
-                create_postfix(&expr[..usize::from(*b) + 1]),
-                create_postfix(&expr[..usize::from(*a) + 1]),
-                vec![Term::Sub],
-            ]
-            .concat(),
-            Math::Mul([a, b]) => [
-                create_postfix(&expr[..usize::from(*b) + 1]),
-                create_postfix(&expr[..usize::from(*a) + 1]),
-                vec![Term::Mul],
-            ]
-            .concat(),
-            Math::Div([a, b]) => [
-                create_postfix(&expr[..usize::from(*b) + 1]),
-                create_postfix(&expr[..usize::from(*a) + 1]),
-                vec![Term::Div],
-            ]
-            .concat(),
-            Math::Mod([a, b]) => [
-                create_postfix(&expr[..usize::from(*b) + 1]),
-                create_postfix(&expr[..usize::from(*a) + 1]),
-                vec![Term::Mod],
-            ]
-            .concat(),
-            Math::Min([a, b]) => [
-                create_postfix(&expr[..usize::from(*b) + 1]),
-                create_postfix(&expr[..usize::from(*a) + 1]),
-                vec![Term::Min],
-            ]
-            .concat(),
-            Math::Max([a, b]) => [
-                create_postfix(&expr[..usize::from(*b) + 1]),
-                create_postfix(&expr[..usize::from(*a) + 1]),
-                vec![Term::Max],
-            ]
-            .concat(),
-            Math::And([a, b]) => [
-                create_postfix(&expr[..usize::from(*b) + 1]),
-                create_postfix(&expr[..usize::from(*a) + 1]),
-                vec![Term::And],
-            ]
-            .concat(),
-            Math::Or([a, b]) => [
-                create_postfix(&expr[..usize::from(*b) + 1]),
-                create_postfix(&expr[..usize::from(*a) + 1]),
-                vec![Term::Or],
-            ]
-            .concat(),
-            Math::LessThan([a, b]) => [
-                create_postfix(&expr[..usize::from(*b) + 1]),
-                create_postfix(&expr[..usize::from(*a) + 1]),
-                vec![Term::Lt],
-            ]
-            .concat(),
-            Math::GreaterThanEqual([a, b]) => [
-                create_postfix(&expr[..usize::from(*b) + 1]),
-                create_postfix(&expr[..usize::from(*a) + 1]),
-                vec![Term::Gte],
-            ]
-            .concat(),
-            Math::Symbol(s) => vec![Term::Var(s.as_str().chars().next().unwrap())],
+fn extract_expression(egraph: &SerializedEGraph) -> Option<Expression> {
+    let root = egraph.roots.first()?;
+    let traj = extract_shortest(
+        egraph,
+        root,
+        &mut FxHashMap::default(),
+        &mut FxHashMap::default(),
+    )?;
+    Some(build_expression(egraph, &traj, &mut 0))
+}
+
+#[derive(Clone, Debug)]
+enum ExprNode {
+    Num(i32),
+    Var(char),
+    Acc(char),
+    Op(Term, Box<ExprNode>, Box<ExprNode>),
+}
+
+impl ExprNode {
+    fn from_terms(terms: &[Term]) -> Option<Self> {
+        let mut stack: Vec<ExprNode> = Vec::new();
+        for term in terms {
+            match *term {
+                Term::Num(n) => stack.push(ExprNode::Num(n)),
+                Term::Var(c) => stack.push(ExprNode::Var(c)),
+                Term::Acc(c) => stack.push(ExprNode::Acc(c)),
+                op => {
+                    let left = stack.pop()?;
+                    let right = stack.pop()?;
+                    stack.push(ExprNode::Op(op, Box::new(left), Box::new(right)));
+                }
+            }
+        }
+        stack.pop()
+    }
+
+    fn to_terms(&self, out: &mut Vec<Term>) {
+        match self {
+            ExprNode::Num(n) => out.push(Term::Num(*n)),
+            ExprNode::Var(c) => out.push(Term::Var(*c)),
+            ExprNode::Acc(c) => out.push(Term::Acc(*c)),
+            ExprNode::Op(op, left, right) => {
+                right.to_terms(out);
+                left.to_terms(out);
+                out.push(*op);
+            }
         }
     }
-    let mut terms = vec![];
-    terms.extend(create_postfix(expr.as_ref()));
+
+    fn simplify_mul_div_constants(self) -> Self {
+        match self {
+            ExprNode::Op(term, left, right) => {
+                let left = left.simplify_mul_div_constants();
+                let right = right.simplify_mul_div_constants();
+                if term == Term::Mul {
+                    if let (ExprNode::Op(Term::Div, inner_left, inner_right), ExprNode::Num(c)) =
+                        (&left, &right)
+                    {
+                        if let ExprNode::Num(b) = **inner_right {
+                            if *c != 0 && b % *c == 0 && !inner_left.contains_var('z') {
+                                return ExprNode::Op(
+                                    Term::Div,
+                                    inner_left.clone(),
+                                    Box::new(ExprNode::Num(b / *c)),
+                                );
+                            }
+                        }
+                    }
+
+                    if let (ExprNode::Num(c), ExprNode::Op(Term::Div, inner_left, inner_right)) =
+                        (&left, &right)
+                    {
+                        if let ExprNode::Num(b) = **inner_right {
+                            if *c != 0 && b % *c == 0 && !inner_left.contains_var('z') {
+                                return ExprNode::Op(
+                                    Term::Div,
+                                    inner_left.clone(),
+                                    Box::new(ExprNode::Num(b / *c)),
+                                );
+                            }
+                        }
+                    }
+                }
+                ExprNode::Op(term, Box::new(left), Box::new(right))
+            }
+            other => other,
+        }
+    }
+
+    fn contains_var(&self, var: char) -> bool {
+        match self {
+            ExprNode::Var(c) => *c == var,
+            ExprNode::Acc(_) | ExprNode::Num(_) => false,
+            ExprNode::Op(_, left, right) => left.contains_var(var) || right.contains_var(var),
+        }
+    }
+}
+
+fn simplify_mul_div_constants(expr: Expression) -> Expression {
+    let Some(node) = ExprNode::from_terms(&expr.terms.read()) else {
+        return expr;
+    };
+    let simplified = node.simplify_mul_div_constants();
+    let mut terms = Vec::new();
+    simplified.to_terms(&mut terms);
     Expression::new(terms)
 }
 
-type EGraph = egg::EGraph<Math, ConstantFold>;
-type Rewrite = egg::Rewrite<Math, ConstantFold>;
-
-define_language! {
-    enum Math {
-        Num(i32),
-        "+" = Add([Id; 2]),
-        "-" = Sub([Id; 2]),
-        "*" = Mul([Id; 2]),
-        "/" = Div([Id; 2]),
-        "%" = Mod([Id; 2]),
-        "min" = Min([Id; 2]),
-        "max" = Max([Id; 2]),
-        "&&" = And([Id; 2]),
-        "||" = Or([Id; 2]),
-        "<" = LessThan([Id; 2]),
-        ">=" = GreaterThanEqual([Id; 2]),
-        Symbol(Symbol),
-    }
-}
-
-#[derive(Default)]
-pub struct ConstantFold;
-impl Analysis<Math> for ConstantFold {
-    type Data = Option<i32>;
-
-    fn make(egraph: &egg::EGraph<Math, ConstantFold>, enode: &Math) -> Self::Data {
-        let x = |i: &Id| egraph[*i].data.as_ref().map(|d| *d);
-        Some(match enode {
-            Math::Num(c) => *c,
-            Math::Add([a, b]) => x(a)?.checked_add(x(b)?)?,
-            Math::Sub([a, b]) => x(a)?.checked_sub(x(b)?)?,
-            Math::Mul([a, b]) => x(a)?.checked_mul(x(b)?)?,
-            Math::Div([a, b]) if x(b) != Some(0) => {
-                let (a, b) = (x(a)?, x(b)?);
-                if a % b != 0 {
-                    return None;
-                } else {
-                    a.checked_div(b)?
-                }
-            }
-            Math::Mod([a, b]) => x(a)?.checked_rem(x(b)?)?,
-            Math::Min([a, b]) => x(a)?.min(x(b)?),
-            Math::Max([a, b]) => x(a)?.max(x(b)?),
-            Math::And([a, b]) => (x(a)? != 0 && x(b)? != 0) as i32,
-            Math::Or([a, b]) => (x(a)? != 0 || x(b)? != 0) as i32,
-            Math::LessThan([a, b]) => (x(a)? < x(b)?) as i32,
-            Math::GreaterThanEqual([a, b]) => (x(a)? >= x(b)?) as i32,
-            _ => return None,
-        })
-    }
-
-    fn merge(&mut self, to: &mut Self::Data, from: Self::Data) -> DidMerge {
-        merge_option(to, from, |a, b| {
-            assert_eq!(*a, b, "Merged non-equal constants");
-            DidMerge(false, false)
-        })
-    }
-
-    fn modify(egraph: &mut EGraph, id: Id) {
-        let data = egraph[id].data;
-        if let Some(c) = data {
-            let added = egraph.add(Math::Num(c));
-            egraph.union(id, added);
-            egraph[id].nodes.retain(|n| n.is_leaf());
-
-            #[cfg(debug_assertions)]
-            egraph[id].assert_unique_leaves();
-        }
-    }
-}
-
-fn is_not_zero(var: &str) -> impl Fn(&mut EGraph, Id, &Subst) -> bool {
-    let var = var.parse().unwrap();
-    move |egraph, _, subst| egraph[subst[var]].data.map(|i| i != 0).unwrap_or(true)
-}
-
-fn is_const_positive(vars: &[&str]) -> impl Fn(&mut EGraph, Id, &Subst) -> bool {
-    let vars: Vec<Var> = vars.iter().map(|i| i.parse().unwrap()).collect::<Vec<_>>();
-    move |egraph, _, subst| {
-        vars.iter()
-            .all(|i| egraph[subst[*i]].data.map(|i| i >= 0).unwrap_or(false))
-    }
-}
-
-fn make_rules(lower_bound_zero: bool) -> Vec<Rewrite> {
-    let mut v = vec![
-        // Communative properties
-        rewrite!("commute-add"; "(+ ?a ?b)" => "(+ ?b ?a)"),
-        rewrite!("commute-mul"; "(* ?a ?b)" => "(* ?b ?a)"),
-        rewrite!("commute-min"; "(min ?a ?b)" => "(min ?b ?a)"),
-        rewrite!("commute-max"; "(max ?a ?b)" => "(max ?b ?a)"),
-        rewrite!("commute-and"; "(&& ?a ?b)" => "(&& ?b ?a)"),
-        rewrite!("commute-or"; "(|| ?a ?b)" => "(|| ?b ?a)"),
-        // Associative properties
-        rewrite!("assoc-add"; "(+ ?a (+ ?b ?c))" => "(+ (+ ?a ?b) ?c)"),
-        rewrite!("assoc-mul"; "(* ?a (* ?b ?c))" => "(* (* ?a ?b) ?c)"),
-        rewrite!("assoc-div"; "(/ (/ ?a ?b) ?c)" => "(/ ?a (* ?b ?c))"),
-        rewrite!("sub-canon"; "(- ?a ?b)" => "(+ ?a (* -1 ?b))"),
-        // Distributive
-        rewrite!("distribute-mul"; "(* ?a (+ ?b ?c))" => "(+ (* ?a ?b) (* ?a ?c))"),
-        rewrite!("distribute-div"; "(/ (+ ?a ?b) ?c)" => "(+ (/ ?a ?c) (/ ?b ?c))"),
-        rewrite!("distribute-max"; "(* ?a (max ?b ?c))" => "(max (* ?a ?b) (* ?a ?c))" if is_const_positive(&["?a"])),
-        rewrite!("distribute-min"; "(* ?a (min ?b ?c))" => "(min (* ?a ?b) (* ?a ?c))"),
-        // Factoring
-        rewrite!("factor-mul"    ; "(+ (* ?a ?b) (* ?a ?c))" => "(* ?a (+ ?b ?c))"),
-        rewrite!("group-terms"; "(+ ?a ?a)" => "(* 2 ?a)"),
-        // Other
-        rewrite!("div-move-inside"; "(+ (/ ?a ?b) ?c)" => "(/ (+ ?a (* ?c ?b)) ?b)"),
-        // Simple binary reductions
-        rewrite!("add-0"; "(+ ?a 0)" => "?a"),
-        rewrite!("mul-0"; "(* ?a 0)" => "0"),
-        rewrite!("mul-1"; "(* ?a 1)" => "?a"),
-        rewrite!("div-1"; "(/ ?a 1)" => "?a"),
-        rewrite!("div-self"; "(/ ?a ?a)" => "1"),
-        rewrite!("and-0"; "(&& ?a 0)" => "0"),
-        rewrite!("and-1"; "(&& ?a 1)" => "?a"),
-        rewrite!("or-0"; "(|| ?a 0)" => "?a"),
-        rewrite!("or-1"; "(|| ?a 1)" => "1"),
-        rewrite!("min-i32-max"; "(min ?a 2147483647)" => "?a"),
-        rewrite!("max-i32-max"; "(max ?a 2147483647)" => "2147483647"),
-        rewrite!("recip-mul-div"; "(* ?x (/ 1 ?x))" => "1" if is_not_zero("?x")),
-        rewrite!("add-zero"; "?a" => "(+ ?a 0)"),
-        rewrite!("mul-one";  "?a" => "(* ?a 1)"),
-        rewrite!("cancel-sub"; "(- ?a ?a)" => "0"),
-        rewrite!("cancel-div"; "(/ ?a ?a)" => "1" if is_not_zero("?a")),
-        rewrite!("dedup-max"; "(max ?a (max ?a ?b))" => "(max ?a ?b)"),
-        rewrite!("dedup-min"; "(min ?a (min ?a ?b))" => "(min ?a ?b)"),
-    ];
+fn egglog_simplify(e: Expression, lower_bound_zero: bool) -> Expression {
+    let expr = e.to_egglog();
+    let mut program = String::new();
+    program.push_str(egglog_utils::BASE);
+    program.push('\n');
+    program.push_str("(ruleset cleanup)\n");
+    program.push_str(egglog_utils::BASE_CLEANUP);
+    program.push('\n');
+    program.push_str(
+        r#"
+(rewrite (MDiv (MDiv a b) c) (MDiv a (MMul b c)) :ruleset expr)
+(rewrite (MAdd (MDiv a b) c) (MDiv (MAdd a (MMul c b)) b) :ruleset expr)
+(rewrite (MAdd a (MSub b a)) b :ruleset expr)
+(rewrite (MAdd (MSub b a) a) b :ruleset expr)
+(rewrite (MSub a a) (MNum 0) :ruleset expr)
+(rewrite
+    (MAdd (MSub a (MNum ?b)) (MNum ?c))
+    (MSub a (MNum (- ?b ?c)))
+    :ruleset expr
+)
+(rewrite
+    (MAdd (MNum ?c) (MSub a (MNum ?b)))
+    (MSub a (MNum (- ?b ?c)))
+    :ruleset expr
+)
+(rewrite
+    (MSub (MAdd a (MNum ?b)) (MNum ?c))
+    (MAdd a (MNum (- ?b ?c)))
+    :ruleset expr
+)
+(rewrite
+    (MSub (MSub a (MNum ?b)) (MNum ?c))
+    (MSub a (MNum (+ ?b ?c)))
+    :ruleset expr
+)
+(rewrite (MAdd (MMul a b) (MMul a c)) (MMul a (MAdd b c)) :ruleset expr)
+(rewrite (MAdd a a) (MMul (MNum 2) a) :ruleset expr)
+"#,
+    );
     if lower_bound_zero {
-        v.push(rewrite!("max-zero"; "(max ?a 0)" => "?a"));
+        program.push_str("(rewrite (MMax a (MNum 0)) a :ruleset expr)\n");
     }
-    v
-}
+    program.push_str(&format!("(let expr_root {expr})\n"));
+    program.push_str(egglog_utils::RUN_SCHEDULE);
 
-fn egg_simplify(e: Expression, lower_bound_zero: bool) -> Expression {
-    // Convert to egg expression
-    let expr = luminal_to_egg(&e);
-    // Simplify
-    let runner = Runner::default()
-        // .with_iter_limit(1_000)
-        // .with_time_limit(std::time::Duration::from_secs(30))
-        // .with_node_limit(100_000_000)
-        .with_expr(&expr)
-        .run(&make_rules(lower_bound_zero));
-    // runner.print_report();
-    let extractor = Extractor::new(&runner.egraph, AstSize);
-    let (_, best) = extractor.find_best(runner.roots[0]);
-    // Convert back to luminal expression
-    egg_to_luminal(best)
+    let mut egraph = egglog::EGraph::default();
+    let commands = egraph
+        .parser
+        .get_program_from_string(None, &program)
+        .expect("failed to parse egglog program");
+    egraph
+        .run_program(commands)
+        .expect("failed to run egglog program");
+    let (sort, value) = egraph
+        .eval_expr(&var!("expr_root"))
+        .expect("failed to evaluate egglog expression");
+    let serialized = SerializedEGraph::new(&egraph, vec![(sort, value)]);
+    extract_expression(&serialized)
+        .map(simplify_mul_div_constants)
+        .unwrap_or(e)
 }
 
 #[cfg(test)]
