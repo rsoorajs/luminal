@@ -57,17 +57,17 @@ fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
 pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> String {
     let mut code = BASE.to_string();
     code.push_str(&op_defs_string(ops));
-    code.push_str("\n");
+    code.push('\n');
     code.push_str(&op_rewrites_string(ops));
-    code.push_str("\n");
+    code.push('\n');
     if cleanup {
         code.push_str(&op_cleanups_string(ops));
-        code.push_str("\n");
+        code.push('\n');
     }
     code.push_str(BASE_CLEANUP);
-    code.push_str("\n");
+    code.push('\n');
     code.push_str(program);
-    code.push_str("\n");
+    code.push('\n');
     code.push_str(RUN_SCHEDULE);
     code
 }
