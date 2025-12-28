@@ -1,14 +1,16 @@
 use generational_box::{AnyStorage, GenerationalBox, Owner, SyncStorage};
+use lru::LruCache;
 use rustc_hash::FxHashMap;
 use serde::{Serialize, Serializer};
 use std::{
     fmt::Debug,
     hash::Hash,
+    num::NonZeroUsize,
     ops::{
         Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, Div, DivAssign, Mul, MulAssign,
         Neg, Rem, RemAssign, Sub, SubAssign,
     },
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
 };
 
 use crate::{egglog_utils, graph::extract_expr, serialized_egraph::SerializedEGraph};
@@ -18,10 +20,9 @@ use egglog_ast::span::Span;
 type ExprBox = GenerationalBox<Vec<Term>, SyncStorage>;
 
 static EXPR_OWNER: OnceLock<Owner<SyncStorage>> = OnceLock::new();
+static SIMPLIFY_CACHE: OnceLock<Mutex<LruCache<Expression, Expression>>> = OnceLock::new();
 
-pub fn expression_owner() -> &'static Owner<SyncStorage> {
-    EXPR_OWNER.get_or_init(SyncStorage::owner)
-}
+const MAX_CACHED_SIMPLIFICATIONS: usize = 100_000;
 
 #[derive(Copy, Clone)]
 pub struct Expression {
@@ -41,7 +42,7 @@ impl Serialize for Expression {
 impl Expression {
     pub fn new(terms: Vec<Term>) -> Self {
         Self {
-            terms: expression_owner().insert(terms),
+            terms: EXPR_OWNER.get_or_init(SyncStorage::owner).insert(terms),
         }
     }
 
@@ -312,17 +313,6 @@ impl Expression {
             return self;
         }
         egglog_simplify(self)
-    }
-    /// Simplify the expression to its minimal terms, using a cache to retrieve / store the simplification
-    #[allow(clippy::mutable_key_type)]
-    pub fn simplify_cache(self, cache: &mut FxHashMap<Expression, Expression>) -> Self {
-        if let Some(s) = cache.get(&self) {
-            *s
-        } else {
-            let simplified = self.simplify();
-            cache.insert(self, simplified);
-            simplified
-        }
     }
     pub fn as_num(&self) -> Option<i32> {
         if let Term::Num(n) = self.terms.read()[0] {
@@ -929,6 +919,15 @@ impl<E: Into<Expression>> BitOrAssign<E> for Expression {
 
 #[tracing::instrument(skip_all)]
 fn egglog_simplify(e: Expression) -> Expression {
+    let cache = SIMPLIFY_CACHE.get_or_init(|| {
+        Mutex::new(LruCache::<Expression, Expression>::new(
+            NonZeroUsize::new(MAX_CACHED_SIMPLIFICATIONS).unwrap(),
+        ))
+    });
+
+    if let Some(out) = cache.lock().unwrap().get(&e).copied() {
+        return out;
+    }
     let expr = e.to_egglog();
     let mut program = String::new();
     program.push_str(egglog_utils::BASE);
@@ -951,12 +950,14 @@ fn egglog_simplify(e: Expression) -> Expression {
     egraph.run_program(commands).unwrap();
     let (sort, value) = egraph.eval_expr(&var!("expr_root")).unwrap();
     let serialized = SerializedEGraph::new(&egraph, vec![(sort, value)]);
-    extract_expr(
+    let simplified = extract_expr(
         &serialized,
         &serialized.eclasses[serialized.roots.first().unwrap()].1[0],
         &mut FxHashMap::default(),
     )
-    .unwrap_or(e)
+    .unwrap_or(e);
+    cache.lock().unwrap().push(e, simplified);
+    simplified
 }
 
 #[cfg(test)]
