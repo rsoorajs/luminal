@@ -1033,4 +1033,25 @@ mod tests {
         let x = x.simplify();
         assert_eq!(x.len(), 15); // Should be 11 if we can re-enable mul-div-associative-rev
     }
+
+    #[test]
+    fn test_simplify_preserves_eval() {
+        let x = Expression::from('x');
+        let y = Expression::from('y');
+        let expr = ((x + 3) * 2) - (x * 2) + (y % 5);
+        let simplified = expr.simplify();
+        let env = [('x', 7), ('y', 11)].into_iter().collect();
+        assert_eq!(expr.exec(&env).unwrap(), simplified.exec(&env).unwrap());
+        let x = Expression::from('x');
+        let y = Expression::from('y');
+        let z = Expression::from('z');
+        let expr = (x + y) * (y - x);
+        let substituted = expr.substitute('x', z + 1).substitute('y', z - 1);
+        let simplified = substituted.simplify();
+        let env = [('z', 10)].into_iter().collect();
+        assert_eq!(
+            substituted.exec(&env).unwrap(),
+            simplified.exec(&env).unwrap()
+        );
+    }
 }

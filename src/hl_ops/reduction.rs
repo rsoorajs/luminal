@@ -59,10 +59,16 @@ impl GraphTensor {
 #[cfg(test)]
 mod tests {
     use crate::hl_ops::unary::tests::test_unary;
+    use candle_core::{Device, Tensor};
 
     #[test]
     fn test_sum() {
         test_unary((2, 3), |a| a.sum(1), |a| a.sum(1).unwrap());
+        test_unary(
+            (2, 3, 4),
+            |a| a.sum((0, 2)),
+            |a| a.sum(2).unwrap().sum(0).unwrap(),
+        );
     }
 
     #[test]
@@ -73,5 +79,23 @@ mod tests {
     #[test]
     fn test_mean() {
         test_unary((2, 3), |a| a.mean(1), |a| a.mean(1).unwrap());
+        test_unary(
+            (2, 3, 4),
+            |a| a.mean((0, 2)),
+            |a| a.sum(2).unwrap().sum(0).unwrap() / 8.0,
+        );
+    }
+
+    #[test]
+    fn test_prod() {
+        test_unary(
+            (2, 3),
+            |a| a.prod(1),
+            |a| {
+                let v = a.to_vec2::<f32>().unwrap();
+                let out: Vec<f32> = v.iter().map(|row| row.iter().product()).collect();
+                Tensor::from_vec(out, v.len(), &Device::Cpu).unwrap()
+            },
+        );
     }
 }
