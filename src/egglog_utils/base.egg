@@ -1,5 +1,7 @@
-; -------- SYMBOLIC ALGEBRA -------
 (ruleset expr)
+(ruleset cleanup)
+
+; -------- SYMBOLIC ALGEBRA -------
 (datatype*
     (Expression
         (MNum i64)
@@ -20,7 +22,6 @@
         (MLt  Expression Expression)
         (MFloorTo Expression Expression)
         (MReplace Expression Expression Expression)
-        (MAccum String)
     )
 
     ; eqsort list for vectors of Expression
@@ -42,7 +43,7 @@
 )
 
 ; ---- Algebraic rewrites ----
-(rewrite (MAdd a b) (MAdd b a) :ruleset expr)
+;(rewrite (MAdd a b) (MAdd b a) :ruleset expr) ; communativity leads to some explosions
 ;(rewrite (MMul a b) (MMul b a) :ruleset expr)
 
 (rewrite (MAdd (MAdd a b) c) (MAdd a (MAdd b c)) :ruleset expr)
@@ -58,9 +59,10 @@
     )
     (
         (union ?e (MNum ?prod))
-        (delete (MMul (MNum ?a) (MNum ?b)))
+        (subsume (MMul (MNum ?a) (MNum ?b)))
     )
-) ; why does this explode???
+    :ruleset expr
+)
 (rewrite (MDiv (MNum a) (MNum b)) (MNum (/ a b)) :when ((!= 0 b) (= 0 (% a b))) :ruleset expr)
 (rewrite (MCeilDiv (MNum a) (MNum b)) (MNum (/ a b)) :when ((!= 0 b) (= 0 (% a b))) :ruleset expr)
 (rewrite (MMax (MNum a) (MNum b)) (MNum (max a b)) :ruleset expr)
@@ -68,17 +70,44 @@
 (rewrite (MAnd (MNum a) (MNum b)) (MNum (& a b)) :ruleset expr)
 (rewrite (MFloat -1.0) (MNum -1) :ruleset expr)
 (rewrite (MNum -1) (MFloat -1.0) :ruleset expr)
-(rewrite (MDiv (MMul ?x (MNum ?a)) (MNum ?b)) (MMul ?x (MNum (/ ?a ?b))) :when ((< ?b ?a) (= (% ?a ?b) 0))) ; why does this explode???
+(rewrite (MDiv (MMul ?x (MNum ?a)) (MNum ?b)) (MMul ?x (MNum (/ ?a ?b))) :when ((< ?b ?a) (= (% ?a ?b) 0)) :ruleset expr) ; why does this explode???
 
 (rewrite (MAdd a (MNum 0)) a :ruleset expr)
 (rule ((= ?e (MMul ?a (MNum 1)))) ((union ?e ?a)) :ruleset expr)
-;(rewrite (MMul ?a (MNum 0)) (MNum 0) :ruleset expr) ; Why does this cause an infinite loop?
+(rule ((= ?e (MMul ?a (MNum 0)))) ((union ?e (MNum 0)) (subsume (MMul ?a (MNum 0)))) :ruleset expr)
 (rewrite (MDiv a (MNum 1)) a :ruleset expr)
 (rewrite (MMod (MMul ?x ?y) ?y) (MNum 0) :ruleset expr)
 (rewrite (MMod (MMod ?x (MNum ?y)) (MNum ?z)) (MMod ?x (MNum ?y))
          :when ((>= ?z ?y) (= 0 (% ?y ?z))) :ruleset expr)
 (rewrite (MMod (MMod ?x (MNum ?y)) (MNum ?z)) (MMod ?x (MNum ?z))
          :when ((>= ?y ?z) (= 0 (% ?z ?y))) :ruleset expr)
+(rewrite (MDiv (MDiv a b) c) (MDiv a (MMul b c)) :ruleset expr)
+(rewrite (MAdd (MDiv a b) c) (MDiv (MAdd a (MMul c b)) b) :ruleset expr)
+(rewrite (MAdd a (MSub b a)) b :ruleset expr)
+(rewrite (MAdd (MSub b a) a) b :ruleset expr)
+(rewrite (MSub a a) (MNum 0) :ruleset expr)
+(rewrite
+    (MAdd (MSub a (MNum ?b)) (MNum ?c))
+    (MSub a (MNum (- ?b ?c)))
+    :ruleset expr
+)
+(rewrite
+    (MAdd (MNum ?c) (MSub a (MNum ?b)))
+    (MSub a (MNum (- ?b ?c)))
+    :ruleset expr
+)
+(rewrite
+    (MSub (MAdd a (MNum ?b)) (MNum ?c))
+    (MAdd a (MNum (- ?b ?c)))
+    :ruleset expr
+)
+(rewrite
+    (MSub (MSub a (MNum ?b)) (MNum ?c))
+    (MSub a (MNum (+ ?b ?c)))
+    :ruleset expr
+)
+(rewrite (MAdd (MMul a b) (MMul a c)) (MMul a (MAdd b c)) :ruleset expr)
+(rewrite (MAdd a a) (MMul (MNum 2) a) :ruleset expr)
 
 ; ---- Replacement over expressions ----
 (rewrite (MReplace ?x ?y ?z) ?z :when ((= ?x ?y)) :ruleset expr)
@@ -92,7 +121,6 @@
 (rewrite (MReplace (MMax ?a ?b) ?x ?y) (MMax (MReplace ?a ?x ?y) (MReplace ?b ?x ?y)) :ruleset expr)
 (rewrite (MReplace (MFloorTo ?a ?b) ?x ?y) (MFloorTo (MReplace ?a ?x ?y) (MReplace ?b ?x ?y)) :ruleset expr)
 (rewrite (MReplace (MNum ?n) ?x ?y) (MNum ?n) :ruleset expr)
-(rewrite (MReplace (MAccum ?acc) ?x ?y) (MAccum ?acc) :ruleset expr)
 (rewrite (MReplace (MVar ?z) ?find ?replace) (MVar ?z) :when ((!= ?find (MVar ?z))) :ruleset expr)
 (rewrite (MReplace (MIter) ?find ?replace) (MIter) :when ((!= ?find (MIter))) :ruleset expr)
 
@@ -124,11 +152,11 @@
         (= ?n_elems (n_elements ?other))
     )
     (
-        (union ?e (ECons (MMul (MIter) ?n_elems) (RowMajor ?other)))
+        (union ?e (ECons ?n_elems (RowMajor ?other)))
     )
     :ruleset expr
 )
-(rewrite (RowMajor (ECons ?dim (ENil))) (ECons (MIter) (ENil)) :ruleset expr)
+(rewrite (RowMajor (ECons ?dim (ENil))) (ECons (MNum 1) (ENil)) :ruleset expr)
 
 (rewrite (MReplaceList (ECons ?expr ?list) ?from ?to) (ECons (MReplace ?expr ?from ?to) (MReplaceList ?list ?from ?to)) :ruleset expr)
 (rule

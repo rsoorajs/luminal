@@ -3,14 +3,14 @@ use itertools::Itertools;
 use std::{str, sync::Arc};
 
 pub const BASE: &str = include_str!("base.egg");
-pub const RUN_SCHEDULE: &str = include_str!("run_schedule.egg");
 pub const BASE_CLEANUP: &str = include_str!("base_cleanup.egg");
-pub const EGGLOG_TEMPLATE: &str = include_str!("egglog_template.egg");
+pub const RUN_SCHEDULE: &str = include_str!("run_schedule.egg");
 
-pub fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
+fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     format!(
         "
     (datatype IR
+    (OutputJoin IR IR)
     {}
     )
     (function dtype (IR) DType :merge new)
@@ -28,14 +28,13 @@ pub fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     )
 }
 
-pub fn op_rewrites_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
+fn op_rewrites_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     ops.iter().flat_map(|o| o.rewrites()).join("\n")
 }
 
-pub fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
+fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     format!(
         "
-    (ruleset cleanup)
     {}
     ",
         ops.iter()
@@ -53,4 +52,22 @@ pub fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
             })
             .join("\n")
     )
+}
+
+pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> String {
+    let mut code = BASE.to_string();
+    code.push_str(&op_defs_string(ops));
+    code.push('\n');
+    code.push_str(&op_rewrites_string(ops));
+    code.push('\n');
+    if cleanup {
+        code.push_str(&op_cleanups_string(ops));
+        code.push('\n');
+    }
+    code.push_str(BASE_CLEANUP);
+    code.push('\n');
+    code.push_str(program);
+    code.push('\n');
+    code.push_str(RUN_SCHEDULE);
+    code
 }
