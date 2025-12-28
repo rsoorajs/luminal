@@ -278,6 +278,45 @@ pub(super) mod tests {
     use itertools::Itertools;
     use ordered_float::NotNan;
 
+    fn cumsum_ref_2d(a: Tensor) -> Tensor {
+        let v = a.to_vec2::<f32>().unwrap();
+        let mut out = vec![vec![0.0; v[0].len()]; v.len()];
+        for (i, row) in v.iter().enumerate() {
+            let mut acc = 0.0;
+            for (j, val) in row.iter().enumerate() {
+                acc += val;
+                out[i][j] = acc;
+            }
+        }
+        Tensor::new(out, a.device()).unwrap()
+    }
+
+    fn cummax_ref_2d(a: Tensor) -> Tensor {
+        let v = a.to_vec2::<f32>().unwrap();
+        let mut out = vec![vec![0.0; v[0].len()]; v.len()];
+        for (i, row) in v.iter().enumerate() {
+            let mut acc = f32::NEG_INFINITY;
+            for (j, val) in row.iter().enumerate() {
+                acc = acc.max(*val);
+                out[i][j] = acc;
+            }
+        }
+        Tensor::new(out, a.device()).unwrap()
+    }
+
+    fn cumprod_ref_2d(a: Tensor) -> Tensor {
+        let v = a.to_vec2::<f32>().unwrap();
+        let mut out = vec![vec![0.0; v[0].len()]; v.len()];
+        for (i, row) in v.iter().enumerate() {
+            let mut acc = 1.0;
+            for (j, val) in row.iter().enumerate() {
+                acc *= val;
+                out[i][j] = acc;
+            }
+        }
+        Tensor::new(out, a.device()).unwrap()
+    }
+
     pub fn test_unary(
         shape: impl ToShape,
         func: fn(GraphTensor) -> GraphTensor,
@@ -346,6 +385,7 @@ pub(super) mod tests {
     #[test]
     fn test_softmax() {
         test_unary(27, |a| a.softmax(0), |a| softmax(&a, 0).unwrap());
+        test_unary((4, 5), |a| a.softmax(1), |a| softmax(&a, 1).unwrap());
     }
 
     #[test]
@@ -373,11 +413,15 @@ pub(super) mod tests {
             },
         );
     }
+
     #[test]
     fn test_cumsum() {
         test_unary(27, |a| a.cumsum(0), |a| a.cumsum(0).unwrap());
         test_unary((27, 63), |a| a.cumsum(1), |a| a.cumsum(1).unwrap());
         test_unary((27, 63), |a| a.cumsum(0), |a| a.cumsum(0).unwrap());
+        test_unary((2, 3), |a| a.cumsum(1), cumsum_ref_2d);
+        test_unary((2, 3), |a| a.cummax(1), cummax_ref_2d);
+        test_unary((2, 3), |a| a.cumprod(1), cumprod_ref_2d);
     }
     #[test]
     fn test_argmax() {

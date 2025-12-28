@@ -542,6 +542,12 @@ mod tests {
         let out2 = inp.unsqueeze(3);
         assert_eq!(out1.dims(), &[2, 1, 2, 3]);
         assert_eq!(out2.dims(), &[2, 2, 3, 1]);
+        test_unary(
+            (1, 3),
+            |a| a.expand((2, 3)),
+            |a| a.broadcast_as((2, 3)).unwrap(),
+        );
+        test_unary((2, 1, 3), |a| a.squeeze(1), |a| a.reshape((2, 3)).unwrap());
     }
 
     #[test]
@@ -569,6 +575,24 @@ mod tests {
             |a| a.concat_along(a, 0),
             |a| Tensor::cat(&[a.clone(), a], 0).unwrap(),
         );
+    }
+
+    #[test]
+    fn test_gather_and_inverse_permutation() {
+        let mut cx = Graph::new();
+        let data = cx.tensor((2, 3));
+        let indexes = cx.tensor(4).as_dtype(DType::Int);
+        let gathered = data.gather(indexes).output();
+        let perm = cx.tensor(6).as_dtype(DType::Int);
+        let inv = perm.inverse_permutation(0).output();
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
+        rt.set_data(data.id, vec![0., 1., 2., 3., 4., 5.].into());
+        rt.set_data(indexes.id, vec![5, 0, 3, 2].into());
+        rt.set_data(perm.id, vec![3, 2, 4, 1, 5, 0].into());
+        rt.execute(&cx.dyn_map);
+        assert_eq!(*rt.get_f32(gathered.id), vec![5., 0., 3., 2.]);
+        assert_eq!(*rt.get_f32(inv.id), vec![5., 3., 1., 0., 2., 4.]);
     }
 
     //     // #[test]
