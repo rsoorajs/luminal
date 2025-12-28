@@ -103,7 +103,7 @@ impl ConvND {
             let axis = batch_len + 1 + i;
             padding[axis] = (Expression::from(*pad), Expression::from(*pad));
         }
-        let padded = input.pad(padding);
+        let padded = input.pad(padding, 0.0);
 
         // Build unfold parameters with ones for non-spatial axes.
         let mut kernel_shape = vec![1; rank];

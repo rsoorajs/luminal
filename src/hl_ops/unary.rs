@@ -1,5 +1,3 @@
-use itertools::Itertools;
-
 use crate::{op, prelude::*};
 use std::ops::{Add, Mul, Neg};
 
@@ -224,44 +222,45 @@ impl GraphTensor {
     pub fn cumop(
         mut self,
         axes: impl ToAxes,
-        op: impl Fn(GraphTensor, &[usize]) -> GraphTensor,
+        op: impl Fn(GraphTensor, usize) -> GraphTensor,
+        pad_elem: f32,
     ) -> Self {
         let n_dims = self.shape.len();
-        let axes = axes.to_axes();
-        // Pad out length
-        let mut kernel = vec![1.into(); n_dims];
-        let mut padding = vec![(Expression::from(0), Expression::from(0)); n_dims];
-        for &ax in &axes {
-            let orig_length = self.dims()[ax];
-            padding[ax] = (orig_length - 1, 0.into());
-            kernel[ax] = orig_length;
-        }
-        self = self.pad(padding);
-        // Unfold
-        self = self.unfold(kernel, vec![1; n_dims], vec![1; n_dims]);
-        // Remove non-cumulative dimensions
-        for i in (0..n_dims).rev() {
-            if !axes.contains(&i) {
-                self = self.squeeze(n_dims + i);
+        for axis in axes.to_axes() {
+            // Pad out length
+            let mut kernel = vec![1.into(); n_dims];
+            let mut padding = vec![(Expression::from(0), Expression::from(0)); n_dims];
+            let orig_length = self.dims()[axis];
+            padding[axis] = (orig_length - 1, 0.into());
+            kernel[axis] = orig_length;
+            self = self.pad(padding, pad_elem);
+            // Unfold
+            self = self.unfold(kernel, vec![1; n_dims], vec![1; n_dims]);
+            // Remove non-cumulative dimensions
+            for i in (0..n_dims).rev() {
+                if i != axis {
+                    self = self.squeeze(n_dims + i);
+                }
             }
+            // apply operation along cumulative dimensions
+            self = op(self, n_dims);
         }
-        // apply operation along cumulative dimensions
-        op(self, &(0..axes.len()).map(|ax| ax + n_dims).collect_vec())
+        self
     }
 
     /// Apply a cumulative sum along dimensions
     pub fn cumsum(self, axes: impl ToAxes) -> Self {
-        self.cumop(axes, |t, axes| t.sum(axes))
+        self.cumop(axes, |t, axes| t.sum(axes), 0.)
     }
 
     /// Apply a cumulative max along dimensions
     pub fn cummax(self, axes: impl ToAxes) -> Self {
-        self.cumop(axes, |t, axes| t.max(axes))
+        self.cumop(axes, |t, axes| t.max(axes), f32::MIN)
     }
 
     /// Apply a cumulative product along dimensions
     pub fn cumprod(self, axes: impl ToAxes) -> Self {
-        self.cumop(axes, |t, axes| t.prod(axes))
+        self.cumop(axes, |t, axes| t.prod(axes), 1.)
     }
 }
 
@@ -277,19 +276,6 @@ pub(super) mod tests {
     use candle_nn::ops::softmax;
     use itertools::Itertools;
     use ordered_float::NotNan;
-
-    fn cumsum_ref_2d(a: Tensor) -> Tensor {
-        let v = a.to_vec2::<f32>().unwrap();
-        let mut out = vec![vec![0.0; v[0].len()]; v.len()];
-        for (i, row) in v.iter().enumerate() {
-            let mut acc = 0.0;
-            for (j, val) in row.iter().enumerate() {
-                acc += val;
-                out[i][j] = acc;
-            }
-        }
-        Tensor::new(out, a.device()).unwrap()
-    }
 
     fn cummax_ref_2d(a: Tensor) -> Tensor {
         let v = a.to_vec2::<f32>().unwrap();
@@ -415,14 +401,24 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn test_cumsum() {
+    fn test_cumulative() {
         test_unary(27, |a| a.cumsum(0), |a| a.cumsum(0).unwrap());
         test_unary((27, 63), |a| a.cumsum(1), |a| a.cumsum(1).unwrap());
         test_unary((27, 63), |a| a.cumsum(0), |a| a.cumsum(0).unwrap());
-        test_unary((2, 3), |a| a.cumsum(1), cumsum_ref_2d);
+        test_unary(
+            (2, 3),
+            |a| a.cumsum((0, 1)),
+            |a| a.cumsum(0).unwrap().cumsum(1).unwrap(),
+        );
+        test_unary(
+            (2, 3),
+            |a| a.cumsum((1, 0)),
+            |a| a.cumsum(1).unwrap().cumsum(0).unwrap(),
+        );
         test_unary((2, 3), |a| a.cummax(1), cummax_ref_2d);
         test_unary((2, 3), |a| a.cumprod(1), cumprod_ref_2d);
     }
+
     #[test]
     fn test_argmax() {
         test_unary(

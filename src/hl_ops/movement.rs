@@ -265,8 +265,8 @@ impl GraphTensor {
     //     self
     // }
 
-    /// Pad out dimensions of a tensor with 0
-    pub fn pad(self, padding: impl ToPad) -> GraphTensor {
+    /// Pad out dimensions of a tensor with an element
+    pub fn pad(self, padding: impl ToPad, elem: f32) -> GraphTensor {
         let mut padding = padding.to_pad_vec();
         padding.extend(vec![(0.into(), 0.into()); self.shape.len() - padding.len()]); // Make sure we have a padding per dim
         let mut index_expressions = vec![];
@@ -291,7 +291,12 @@ impl GraphTensor {
         }
         let mask_expression = flatten_z_strides_mask(&new_dims, &mask_expressions);
         let mask = self.graph().iota(mask_expression, new_dims);
-        new_tensor * mask
+        let masked = new_tensor * mask;
+        if elem == 0.0 {
+            masked
+        } else {
+            masked + ((1. - mask) * elem)
+        }
     }
 
     /// Pad along an existing dimension
@@ -300,16 +305,18 @@ impl GraphTensor {
         left: impl Into<Expression>,
         right: impl Into<Expression>,
         axis: usize,
+        elem: f32,
     ) -> GraphTensor {
         let mut p = vec![(Expression::from(0), Expression::from(0)); axis + 1];
         p[axis] = (left.into(), right.into());
-        self.pad(p)
+        self.pad(p, elem)
     }
 
     /// Concat along an existing dimension
     pub fn concat_along(self, rhs: GraphTensor, axis: usize) -> GraphTensor {
         // Pad and add
-        self.pad_along(0, rhs.dims()[axis], axis) + rhs.pad_along(self.dims()[axis], 0, axis)
+        self.pad_along(0, rhs.dims()[axis], axis, 0.)
+            + rhs.pad_along(self.dims()[axis], 0, axis, 0.)
     }
 }
 
@@ -325,12 +332,12 @@ mod tests {
     fn test_pad() {
         test_unary(
             23,
-            |a| a.pad((2, 6)),
+            |a| a.pad((2, 6), 0.),
             |a| a.pad_with_zeros(0, 2, 6).unwrap(),
         );
         test_unary(
             (18, 72),
-            |a| a.pad(((4, 31), (2, 9))),
+            |a| a.pad(((4, 31), (2, 9)), 0.),
             |a| {
                 a.pad_with_zeros(0, 4, 31)
                     .unwrap()
@@ -344,7 +351,7 @@ mod tests {
     fn test_slice_pad() {
         test_unary(
             (17, 26),
-            |a| a.slice((1..3, 14..32)).pad(((3, 14), (5, 0))),
+            |a| a.slice((1..3, 14..32)).pad(((3, 14), (5, 0)), 0.),
             |a| {
                 a.i((1..3, 14..26)) // candle slice ranges can't go off end
                     .unwrap()
@@ -514,7 +521,7 @@ mod tests {
         );
         test_unary(
             (8, 10),
-            |a| a.pad(((0, 2), (4, 4))).unfold((2, 3), (1, 2), (2, 1)),
+            |a| a.pad(((0, 2), (4, 4)), 0.).unfold((2, 3), (1, 2), (2, 1)),
             |a| {
                 Tensor::new(
                     unfold_nd_f32(
@@ -544,7 +551,7 @@ mod tests {
         assert_eq!(out2.dims(), &[2, 2, 3, 1]);
         test_unary(
             (1, 3),
-            |a| a.expand((2, 3)),
+            |a| a.squeeze(0).expand((2, 3)) * 1.,
             |a| a.broadcast_as((2, 3)).unwrap(),
         );
         test_unary((2, 1, 3), |a| a.squeeze(1), |a| a.reshape((2, 3)).unwrap());
@@ -584,7 +591,7 @@ mod tests {
         let indexes = cx.tensor(4).as_dtype(DType::Int);
         let gathered = data.gather(indexes).output();
         let perm = cx.tensor(6).as_dtype(DType::Int);
-        let inv = perm.inverse_permutation(0).output();
+        let inv = perm.inverse_permutation(0).cast(DType::F32).output();
         cx.build_search_space::<NativeRuntime>();
         let mut rt = cx.search(NativeRuntime::default(), 1);
         rt.set_data(data.id, vec![0., 1., 2., 3., 4., 5.].into());

@@ -400,12 +400,13 @@ pub(super) mod tests {
     #[test]
     fn test_add() {
         test_binary(27, 27, |a, b| a + b, |a, b| (&a + &b).unwrap());
-        test_binary((2, 1), (1, 3), |a, b| a + b, |a, b| (&a + &b).unwrap());
+        test_binary((2, 31), (2, 31), |a, b| a + b, |a, b| (&a + &b).unwrap());
     }
 
     #[test]
     fn test_sub() {
         test_binary(27, 27, |a, b| a - b, |a, b| (&a - &b).unwrap());
+        test_binary((2, 31), (2, 31), |a, b| a - b, |a, b| (&a - &b).unwrap());
     }
 
     #[test]
@@ -413,7 +414,7 @@ pub(super) mod tests {
         test_binary(27, 27, |a, b| a * b, |a, b| (&a * &b).unwrap());
         test_binary(
             (2, 1, 3),
-            (1, 4, 1),
+            (2, 1, 3),
             |a, b| a * b,
             |a, b| (&a * &b).unwrap(),
         );

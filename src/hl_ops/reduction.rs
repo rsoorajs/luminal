@@ -8,16 +8,24 @@ impl GraphTensor {
     pub fn sum(self, axes: impl ToAxes) -> GraphTensor {
         let (mut shape, mut id) = (self.shape, self.id);
         // Sum reduce each dimension
-        for dim in axes.to_axes().into_iter().rev() {
+        let mut axes = axes.to_axes();
+        for dim in 0..axes.len() {
             id = self
                 .graph()
                 .add_op(op::SumReduce {
-                    dim,
+                    dim: axes[dim],
                     ..Default::default()
                 })
                 .input(id, 0, shape)
                 .finish();
-            shape.remove_dim(dim);
+            shape.remove_dim(axes[dim]);
+            shape = shape.contiguous();
+            let axis = axes[dim];
+            for ax in &mut axes {
+                if *ax > axis {
+                    *ax -= 1;
+                }
+            }
         }
         GraphTensor::from_id(id, shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -26,16 +34,24 @@ impl GraphTensor {
     pub fn max(self, axes: impl ToAxes) -> GraphTensor {
         let (mut shape, mut id) = (self.shape, self.id);
         // Max reduce each dimension
-        for dim in axes.to_axes().into_iter().rev() {
+        let mut axes = axes.to_axes();
+        for dim in 0..axes.len() {
             id = self
                 .graph()
                 .add_op(op::MaxReduce {
-                    dim,
+                    dim: axes[dim],
                     ..Default::default()
                 })
                 .input(id, 0, shape)
                 .finish();
-            shape.remove_dim(dim);
+            shape.remove_dim(axes[dim]);
+            shape = shape.contiguous();
+            let axis = axes[dim];
+            for ax in &mut axes {
+                if *ax > axis {
+                    *ax -= 1;
+                }
+            }
         }
         GraphTensor::from_id(id, shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -64,11 +80,7 @@ mod tests {
     #[test]
     fn test_sum() {
         test_unary((2, 3), |a| a.sum(1), |a| a.sum(1).unwrap());
-        test_unary(
-            (2, 3, 4),
-            |a| a.sum((0, 2)),
-            |a| a.sum(2).unwrap().sum(0).unwrap(),
-        );
+        test_unary((2, 3, 4), |a| a.sum((0, 2)), |a| a.sum((0, 2)).unwrap());
     }
 
     #[test]
@@ -82,7 +94,7 @@ mod tests {
         test_unary(
             (2, 3, 4),
             |a| a.mean((0, 2)),
-            |a| a.sum(2).unwrap().sum(0).unwrap() / 8.0,
+            |a| (a.sum(2).unwrap().sum(0).unwrap() / 8.0).unwrap(),
         );
     }
 
