@@ -5,7 +5,6 @@ use std::{str, sync::Arc};
 pub const BASE: &str = include_str!("base.egg");
 pub const BASE_CLEANUP: &str = include_str!("base_cleanup.egg");
 pub const RUN_SCHEDULE: &str = include_str!("run_schedule.egg");
-pub const EGGLOG_TEMPLATE: &str = include_str!("egglog_template.egg");
 
 fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     format!(
