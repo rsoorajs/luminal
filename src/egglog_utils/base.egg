@@ -43,7 +43,7 @@
 )
 
 ; ---- Algebraic rewrites ----
-(rewrite (MAdd a b) (MAdd b a) :ruleset expr)
+;(rewrite (MAdd a b) (MAdd b a) :ruleset expr) ; communativity leads to some explosions
 ;(rewrite (MMul a b) (MMul b a) :ruleset expr)
 
 (rewrite (MAdd (MAdd a b) c) (MAdd a (MAdd b c)) :ruleset expr)
@@ -70,11 +70,11 @@
 (rewrite (MAnd (MNum a) (MNum b)) (MNum (& a b)) :ruleset expr)
 (rewrite (MFloat -1.0) (MNum -1) :ruleset expr)
 (rewrite (MNum -1) (MFloat -1.0) :ruleset expr)
-(rewrite (MDiv (MMul ?x (MNum ?a)) (MNum ?b)) (MMul ?x (MNum (/ ?a ?b))) :when ((< ?b ?a) (= (% ?a ?b) 0))) ; why does this explode???
+(rewrite (MDiv (MMul ?x (MNum ?a)) (MNum ?b)) (MMul ?x (MNum (/ ?a ?b))) :when ((< ?b ?a) (= (% ?a ?b) 0)) :ruleset expr) ; why does this explode???
 
 (rewrite (MAdd a (MNum 0)) a :ruleset expr)
 (rule ((= ?e (MMul ?a (MNum 1)))) ((union ?e ?a)) :ruleset expr)
-;(rewrite (MMul ?a (MNum 0)) (MNum 0) :ruleset expr) ; Why does this cause an infinite loop?
+(rule ((= ?e (MMul ?a (MNum 0)))) ((union ?e (MNum 0)) (subsume (MMul ?a (MNum 0)))) :ruleset expr)
 (rewrite (MDiv a (MNum 1)) a :ruleset expr)
 (rewrite (MMod (MMul ?x ?y) ?y) (MNum 0) :ruleset expr)
 (rewrite (MMod (MMod ?x (MNum ?y)) (MNum ?z)) (MMod ?x (MNum ?y))

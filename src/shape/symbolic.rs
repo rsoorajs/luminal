@@ -1006,7 +1006,6 @@ mod tests {
     fn test_egglog_equality() {
         let a = Expression::from('a');
         let b = Expression::from('b');
-        assert!((a + b).egglog_equal(b + a));
         assert!((a + (b - a)).egglog_equal(b));
         assert!(!(a + 1).egglog_equal(a + 2));
     }
