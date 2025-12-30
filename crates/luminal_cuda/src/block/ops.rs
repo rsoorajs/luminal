@@ -201,6 +201,7 @@ impl EgglogOp for RowSwishMul {
                 (union ?swishmul ?rsm)
                 (set (dtype ?rsm) (F32))
             )
+            :name \"row swish mul\"
         )"
         .to_string()]
     }
@@ -545,12 +546,258 @@ impl EgglogOp for RowRope {
     fn rewrites(&self) -> Vec<String> {
         vec!["(rule
            (
-                (= ?e (RowRope ?shape ?inp ?stride ?row_width ?out_stride))
+                (= ?e (RowRope ?shape ?inp ?stride ?row_width ?pos_ids))
                 (= (F32) (dtype ?inp))
             )
            ((set (dtype ?e) (F32)))
         )"
-        .to_string()]
+        .to_string(),
+        r#"
+            (rule
+              (
+                ;; Bind the head-count and hidden-dim directly from the places they appear.
+                ;; This matches graphs where these are literals (e.g. 32, 4096) *or* already-simplified expressions.
+                (= ?inp_strides (ECons (MNum 128) (ECons ?hidden_dim (ECons (MNum 2) (ECons (MNum 1) (ENil))))))
+
+                ;; -----------------------------
+                ;; inv_freq construction (exact literals as in dump)
+                ;; -----------------------------
+                (= ?freq_indices        (Iota (MMul (MIter) (MNum 2)) (MNum 64)))
+                (= ?c_inv_head_dim      (Constant 0.007812))
+                (= ?freq_scaled         (Mul (ECons (MNum 64) (ENil)) ?freq_indices
+                                             (ECons (MNum 1) (ENil)) ?c_inv_head_dim
+                                             (ECons (MNum 0) (ENil)) (ECons (MNum 1) (ENil))))
+                (= ?c_ln_theta          (Constant 13.122363))
+                (= ?log_arg             (Mul (ECons (MNum 64) (ENil)) ?freq_scaled
+                                             (ECons (MNum 1) (ENil)) ?c_ln_theta
+                                             (ECons (MNum 0) (ENil)) (ECons (MNum 1) (ENil))))
+                (= ?c_log2e             (Constant 1.442695))
+                (= ?exp2_arg            (Mul (ECons (MNum 64) (ENil)) ?log_arg
+                                             (ECons (MNum 1) (ENil)) ?c_log2e
+                                             (ECons (MNum 0) (ENil)) (ECons (MNum 1) (ENil))))
+                (= ?pow_theta           (Exp2 (ECons (MNum 64) (ENil)) ?exp2_arg
+                                              (ECons (MNum 1) (ENil)) (ECons (MNum 1) (ENil))))
+                (= ?inv_freq            (Recip (ECons (MNum 64) (ENil)) ?pow_theta
+                                               (ECons (MNum 1) (ENil)) (ECons (MNum 1) (ENil))))
+
+                ;; -----------------------------
+                ;; emb = pos_ids @ inv_freq
+                ;; -----------------------------
+                (= ?pos_f32             (Cast ?pos_ids (F32)))
+                (= ?pos_times_invfreq_bcast
+                   (Mul (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil))))
+                        ?pos_f32
+                        (ECons (MNum 1) (ECons (MNum 0) (ECons (MNum 0) (ENil))))
+                        ?inv_freq
+                        (ECons (MNum 0) (ECons (MNum 1) (ECons (MNum 0) (ENil))))
+                        (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil))))))
+                (= ?emb
+                   (Sum (ECons (MVar "s") (ECons (MNum 64) (ENil)))
+                        (MNum 1)
+                        ?pos_times_invfreq_bcast
+                        (ECons (MNum 64) (ECons (MNum 1) (ENil)))
+                        (MNum 1)
+                        (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+
+                ;; -----------------------------
+                ;; Gather odd lane (x1) from inp (structure preserved; 32 -> ?n_heads, 4096 -> ?hidden_dim)
+                ;; -----------------------------
+                (= ?odd_lane_index
+                   (Iota
+                     (MAdd
+                       (MAdd
+                         (MAdd
+                           (MNum 1)
+                           (MMul (MMod (MIter) (MNum 64)) (MNum 2)))
+                         (MMul (MMod (MDiv (MIter) (MNum 64)) (MVar "s")) (MNum 128)))
+                       (MMul (MDiv (MIter) (MMul (MNum 64) (MVar "s")))
+                             (MMul (MNum 128) (MVar "s"))))
+                     (MMul (MMul ?n_heads (MVar "s")) (MNum 64))))
+                (= ?odd_lane
+                   (Gather
+                     ?odd_lane_index
+                     (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                     (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
+                     ?inp
+                     (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
+                     ?inp_strides))
+
+                ;; -----------------------------
+                ;; cos(emb) = sin(-emb + pi/2), sin(emb)
+                ;; -----------------------------
+                (= ?c_neg1    (Constant -1.000000))
+                (= ?neg_emb   (Mul (ECons (MVar "s") (ECons (MNum 64) (ENil))) ?emb
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil))) ?c_neg1
+                                   (ECons (MNum 0) (ECons (MNum 0) (ENil)))
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                (= ?c_pihalf  (Constant 1.570796))
+                (= ?cos_phase (Add (ECons (MVar "s") (ECons (MNum 64) (ENil))) ?neg_emb
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil))) ?c_pihalf
+                                   (ECons (MNum 0) (ECons (MNum 0) (ENil)))
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                (= ?cos_emb   (Sin (ECons (MVar "s") (ECons (MNum 64) (ENil))) ?cos_phase
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil)))
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                (= ?sin_emb   (Sin (ECons (MVar "s") (ECons (MNum 64) (ENil))) ?emb
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil)))
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+
+                ;; -----------------------------
+                ;; even_lane_rot = x0*cos - x1*sin
+                ;; -----------------------------
+                (= ?x0_cos
+                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                        ?inp
+                        ?inp_strides
+                        ?cos_emb
+                        (ECons (MNum 0) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 0) (ENil)))))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                (= ?x1_sin
+                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                        ?odd_lane
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
+                        ?sin_emb
+                        (ECons (MNum 0) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 0) (ENil)))))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                (= ?c_neg1b (Constant -1.000000))
+                (= ?neg_x1_sin
+                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                        ?x1_sin
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
+                        ?c_neg1b
+                        (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ENil)))))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                (= ?even_lane_rot
+                   (Add (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                        ?x0_cos
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
+                        ?neg_x1_sin
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+
+                ;; -----------------------------
+                ;; odd_lane_rot = x0*sin + x1*cos
+                ;; -----------------------------
+                (= ?x0_sin
+                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                        ?inp
+                        ?inp_strides
+                        ?sin_emb
+                        (ECons (MNum 0) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 0) (ENil)))))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                (= ?x1_cos
+                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                        ?odd_lane
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
+                        ?cos_emb
+                        (ECons (MNum 0) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 0) (ENil)))))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                (= ?odd_lane_rot
+                   (Add (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                        ?x0_sin
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
+                        ?x1_cos
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+
+                ;; -----------------------------
+                ;; Scatter + masks (keep the same MMul nesting as original)
+                ;; -----------------------------
+                (= ?scatter_even_index
+                   (Iota
+                     (MAdd
+                       (MAdd
+                         (MAdd
+                           (MMin (MMod (MIter) (MNum 2)) (MNum 0))
+                           (MMod (MDiv (MIter) (MNum 2)) (MNum 64)))
+                         (MMul (MMod (MDiv (MIter) (MNum 128)) (MVar "s")) (MNum 64)))
+                       (MMul (MDiv (MIter) (MMul (MNum 128) (MVar "s"))) (MMul (MNum 64) (MVar "s"))))
+                     (MMul (MMul (MMul ?n_heads (MVar "s")) (MNum 64)) (MNum 2))))
+                (= ?scattered_even
+                   (Gather
+                     ?scatter_even_index
+                     (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
+                     (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
+                     ?even_lane_rot
+                     (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                     (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                (= ?even_mask
+                   (Iota (MLt (MMod (MIter) (MNum 2)) (MNum 1))
+                         (MMul (MMul (MMul ?n_heads (MVar "s")) (MNum 64)) (MNum 2))))
+                (= ?even_masked
+                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
+                        ?scattered_even
+                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
+                        ?even_mask
+                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
+                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))))
+
+                (= ?scatter_odd_index
+                   (Iota
+                     (MAdd
+                       (MAdd
+                         (MAdd
+                           (MMax (MSub (MMod (MIter) (MNum 2)) (MNum 1)) (MNum 0))
+                           (MMod (MDiv (MIter) (MNum 2)) (MNum 64)))
+                         (MMul (MMod (MDiv (MIter) (MNum 128)) (MVar "s")) (MNum 64)))
+                       (MMul (MDiv (MIter) (MMul (MNum 128) (MVar "s"))) (MMul (MNum 64) (MVar "s"))))
+                     (MMul (MMul (MMul ?n_heads (MVar "s")) (MNum 64)) (MNum 2))))
+                (= ?scattered_odd
+                   (Gather
+                     ?scatter_odd_index
+                     (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
+                     (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
+                     ?odd_lane_rot
+                     (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                     (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                (= ?odd_mask
+                   (Iota (MGte (MMod (MIter) (MNum 2)) (MNum 1))
+                         (MMul (MMul (MMul ?n_heads (MVar "s")) (MNum 64)) (MNum 2))))
+                (= ?odd_masked
+                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
+                        ?scattered_odd
+                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
+                        ?odd_mask
+                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
+                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))))
+
+                (= ?interleaved_rot
+                   (Add (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
+                        ?even_masked
+                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
+                        ?odd_masked
+                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
+                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))))
+
+                ;; Final identity mul "* 1.0" with output shape/strides (4096 -> ?hidden_dim)
+                (= ?c_one (Constant 1.000000))
+                (= ?rope_out
+                   (Mul (ECons (MVar "s") (ECons ?n_heads (ECons (MNum 128) (ENil))))
+                        ?interleaved_rot
+                        (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil))))
+                        ?c_one
+                        (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ENil))))
+                        (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil)))))
+              )
+              )
+              (
+                (union ?rope_out
+                  (RowRope
+                    (ECons (MVar "s") (ENil))
+                    ?inp
+                    (ECons ?hidden_dim (ENil))
+                    ?hidden_dim
+                    ?pos_ids))
+                (subsume (Mul (ECons (MVar "s") (ECons ?n_heads (ECons (MNum 128) (ENil))))
+                     ?interleaved_rot
+                     (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil))))
+                     ?c_one
+                     (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ENil))))
+                     (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil))))))
+              )
+              :name "row rope"
+            )
+        "#.to_string()]
     }
 }
 
@@ -737,6 +984,7 @@ impl EgglogOp for TileMatmul {
                 (union ?ts ?tm)
                 (set (dtype ?tm) (F32))
             )
+            :name \"cube mul\"
         )
         ".to_string()]
     }

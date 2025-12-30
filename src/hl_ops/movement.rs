@@ -273,8 +273,14 @@ impl GraphTensor {
         let mut phys_size = Expression::from(1);
         let mut new_dims = vec![];
         for (dim, (start, end)) in self.dims().into_iter().zip(&padding).rev() {
-            index_expressions
-                .push(((Expression::from('z') - *start).max(0).min(dim - 1)) * phys_size);
+            let mut ind = Expression::from('z');
+            if *start != 0 {
+                ind = (ind - *start).max(0);
+            }
+            if *end != 0 {
+                ind = ind.min(dim - 1);
+            }
+            index_expressions.push(ind * phys_size);
             phys_size *= dim;
             new_dims.push(dim + *start + *end);
         }
@@ -285,9 +291,15 @@ impl GraphTensor {
         let new_tensor = self.gather(self.graph().iota(index_expression, new_dims.clone()));
         // mask out padded elements
         let mut mask_expressions = vec![];
-        for ((start, _), dim) in padding.into_iter().zip(self.dims()) {
-            mask_expressions
-                .push(Expression::from('z').gte(start) * Expression::from('z').lt(start + dim));
+        for ((start, end), dim) in padding.into_iter().zip(self.dims()) {
+            let mut mask = Expression::from(1);
+            if start != 0 {
+                mask *= Expression::from('z').gte(start);
+            }
+            if end != 0 {
+                mask *= Expression::from('z').lt(start + dim);
+            }
+            mask_expressions.push(mask);
         }
         let mask_expression = flatten_z_strides_mask(&new_dims, &mask_expressions);
         let mask = self.graph().iota(mask_expression, new_dims);

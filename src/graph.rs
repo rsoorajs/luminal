@@ -382,20 +382,32 @@ fn run_egglog(
     let code = egglog_utils::full_egglog(program, ops, cleanup);
     let commands = egraph.parser.get_program_from_string(None, &code)?;
     let start = std::time::Instant::now();
+    if std::env::var("SEARCH")
+        .map(|s| s == "1")
+        .unwrap_or_default()
+    {
+        println!("{}", "Egglog running...".green());
+    }
     let msgs = egraph.run_program(commands)?;
     if std::env::var("SEARCH")
         .map(|s| s == "1")
         .unwrap_or_default()
     {
         println!("{}", "---- Egglog Rule Matches ----".green());
+        let run_report = egraph.get_overall_run_report();
         println!(
             "{}",
-            egraph
-                .get_overall_run_report()
+            run_report
                 .num_matches_per_rule
                 .iter()
                 .filter(|(k, _)| !k.contains("("))
-                .map(|(k, v)| format!("{k}: {v}"))
+                .map(|(k, v)| format!(
+                    "{k}: {v} ({})",
+                    pretty_duration::pretty_duration(
+                        &run_report.search_and_apply_time_per_rule[k],
+                        None
+                    )
+                ))
                 .join("\n")
                 .green()
         );

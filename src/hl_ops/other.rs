@@ -25,8 +25,11 @@ impl Graph {
     pub fn iota(&mut self, i: impl Into<Expression>, shape: impl ToShape) -> GraphTensor {
         let sh = shape.to_shape();
         GraphTensor::from_id(
-            self.add_op(Iota(i.into(), sh.iter().copied().product()))
-                .finish(),
+            self.add_op(Iota(
+                i.into().simplify(),
+                sh.iter().copied().product::<Expression>().simplify(),
+            ))
+            .finish(),
             ShapeTracker::new(sh),
             self,
             DType::Int,

@@ -17,70 +17,70 @@ pub const VOCAB_SIZE: usize = 128256;
 
 pub struct Llama {
     embedding: GraphTensor,
-    // layers: Vec<LlamaLayer>,
-    // lm_norm: LayerNorm,
-    // lm_head: GraphTensor,
+    layers: Vec<LlamaLayer>,
+    lm_norm: LayerNorm,
+    lm_head: GraphTensor,
 }
 
 impl Llama {
     pub fn init(cx: &mut Graph) -> Self {
-        // let mut w = vec![];
-        // for l in 0..LAYERS {
-        //     w.push(LlamaLayer {
-        //         up: cx.named_tensor(
-        //             &format!("model.layers.{l}.mlp.up_proj.weight"),
-        //             (INTERMEDIATE, HIDDEN),
-        //         ),
-        //         gate: cx.named_tensor(
-        //             &format!("model.layers.{l}.mlp.gate_proj.weight"),
-        //             (INTERMEDIATE, HIDDEN),
-        //         ),
-        //         down: cx.named_tensor(
-        //             &format!("model.layers.{l}.mlp.down_proj.weight"),
-        //             (HIDDEN, INTERMEDIATE),
-        //         ),
-        //         q_proj: cx.named_tensor(
-        //             &format!("model.layers.{l}.self_attn.q_proj.weight"),
-        //             (HIDDEN, HIDDEN),
-        //         ),
-        //         k_proj: cx.named_tensor(
-        //             &format!("model.layers.{l}.self_attn.k_proj.weight"),
-        //             (HIDDEN / KV_GROUPS, HIDDEN),
-        //         ),
-        //         v_proj: cx.named_tensor(
-        //             &format!("model.layers.{l}.self_attn.v_proj.weight"),
-        //             (HIDDEN / KV_GROUPS, HIDDEN),
-        //         ),
-        //         o_proj: cx.named_tensor(
-        //             &format!("model.layers.{l}.self_attn.o_proj.weight"),
-        //             (HIDDEN, HIDDEN),
-        //         ),
-        //         attn_rms: LayerNorm::new(
-        //             HIDDEN,
-        //             Some(&format!("model.layers.{l}.input_layernorm.weight")),
-        //             None,
-        //             false,
-        //             1e-5,
-        //             cx,
-        //         ),
-        //         mlp_rms: LayerNorm::new(
-        //             HIDDEN,
-        //             Some(&format!("model.layers.{l}.post_attention_layernorm.weight")),
-        //             None,
-        //             false,
-        //             1e-5,
-        //             cx,
-        //         ),
-        //         layer: l,
-        //     });
-        // }
-        // let lm_norm = LayerNorm::new(HIDDEN, Some("model.norm.weight"), None, false, 1e-5, cx);
-        // let lm_head = cx.named_tensor("lm_head.weight", (VOCAB_SIZE, HIDDEN));
+        let mut w = vec![];
+        for l in 0..LAYERS {
+            w.push(LlamaLayer {
+                up: cx.named_tensor(
+                    &format!("model.layers.{l}.mlp.up_proj.weight"),
+                    (INTERMEDIATE, HIDDEN),
+                ),
+                gate: cx.named_tensor(
+                    &format!("model.layers.{l}.mlp.gate_proj.weight"),
+                    (INTERMEDIATE, HIDDEN),
+                ),
+                down: cx.named_tensor(
+                    &format!("model.layers.{l}.mlp.down_proj.weight"),
+                    (HIDDEN, INTERMEDIATE),
+                ),
+                q_proj: cx.named_tensor(
+                    &format!("model.layers.{l}.self_attn.q_proj.weight"),
+                    (HIDDEN, HIDDEN),
+                ),
+                k_proj: cx.named_tensor(
+                    &format!("model.layers.{l}.self_attn.k_proj.weight"),
+                    (HIDDEN / KV_GROUPS, HIDDEN),
+                ),
+                v_proj: cx.named_tensor(
+                    &format!("model.layers.{l}.self_attn.v_proj.weight"),
+                    (HIDDEN / KV_GROUPS, HIDDEN),
+                ),
+                o_proj: cx.named_tensor(
+                    &format!("model.layers.{l}.self_attn.o_proj.weight"),
+                    (HIDDEN, HIDDEN),
+                ),
+                attn_rms: LayerNorm::new(
+                    HIDDEN,
+                    Some(&format!("model.layers.{l}.input_layernorm.weight")),
+                    None,
+                    false,
+                    1e-5,
+                    cx,
+                ),
+                mlp_rms: LayerNorm::new(
+                    HIDDEN,
+                    Some(&format!("model.layers.{l}.post_attention_layernorm.weight")),
+                    None,
+                    false,
+                    1e-5,
+                    cx,
+                ),
+                layer: l,
+            });
+        }
+        let lm_norm = LayerNorm::new(HIDDEN, Some("model.norm.weight"), None, false, 1e-5, cx);
+        let lm_head = cx.named_tensor("lm_head.weight", (VOCAB_SIZE, HIDDEN));
         Self {
             embedding: cx.named_tensor("model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN)),
-            // layers: w,
-            // lm_head,
-            // lm_norm,
+            layers: w,
+            lm_head,
+            lm_norm,
         }
     }
 
@@ -91,11 +91,10 @@ impl Llama {
             (token_ids * HIDDEN).expand_dim(1, HIDDEN)
                 + token_ids.graph().arange(HIDDEN).expand_dim(0, batch),
         );
-        apply_rotary_embeddings(x, pos_ids)
-        // for layer in &self.layers {
-        //     x = layer.forward(x, pos_ids);
-        // }
-        // self.lm_norm.forward(x).matmul(self.lm_head.transpose(0, 1))
+        for layer in &self.layers {
+            x = layer.forward(x, pos_ids);
+        }
+        self.lm_norm.forward(x).matmul(self.lm_head.transpose(0, 1))
     }
 }
 
@@ -112,10 +111,13 @@ struct LlamaLayer {
     layer: usize,
 }
 
-fn apply_rotary_embeddings(input: GraphTensor, pos_ids: GraphTensor) -> GraphTensor {
-    let (_n_heads, _seq, head_dim) = input.dims3();
+fn apply_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> GraphTensor {
+    let orig_shape = input.shape;
+    // Input: [seq, dim]
+    input = input.split_dims(1, HEAD_DIM).transpose(0, 1); // n_heads, seq, head_dim
+
     // Get freqs
-    let freqs = (input.graph().arange(head_dim / 2) * 2.0) / (head_dim.to_usize().unwrap() as f32);
+    let freqs = input.graph().arange_options(0, HEAD_DIM, 2) / HEAD_DIM as f32;
     let inv_freqs = 500_000_f32.pow(freqs).reciprocal();
     let emb = pos_ids
         .cast(DType::F32)
@@ -134,6 +136,8 @@ fn apply_rotary_embeddings(input: GraphTensor, pos_ids: GraphTensor) -> GraphTen
     // Combine back into output
     let mut s = x0_out.concat_along(x1_out, 3);
     s.shape = input.shape;
+    s = s.transpose(0, 1) * 1.0;
+    s.shape = orig_shape;
     s
 }
 
@@ -146,19 +150,7 @@ impl LlamaLayer {
         let k = x_attn.matmul(self.k_proj.transpose(0, 1));
         let v = x_attn.matmul(self.v_proj.transpose(0, 1));
         let q_rope = apply_rotary_embeddings(q, pos_ids);
-        let k_rope = GraphTensor::from_id(
-            cx.add_op(RopeFrontendOp {
-                range: vec![Expression::from(batch)],
-                stride: vec![(HIDDEN / KV_GROUPS).into()],
-                row_width: Expression::from(HIDDEN / KV_GROUPS),
-            })
-            .input(k.id, 0, k.shape)
-            .input(pos_ids.id, 0, pos_ids.shape)
-            .finish(),
-            k.shape,
-            cx,
-            DType::F32,
-        );
+        let k_rope = apply_rotary_embeddings(k, pos_ids);
 
         let attn_out = GraphTensor::from_id(
             cx.add_op(GQAAttentionFrontendOp {
@@ -181,26 +173,6 @@ impl LlamaLayer {
             + (x_mlp.matmul(self.gate.transpose(0, 1)).swish()
                 * x_mlp.matmul(self.up.transpose(0, 1)))
             .matmul(self.down.transpose(0, 1))
-    }
-}
-
-#[derive(Debug)]
-pub struct RopeFrontendOp {
-    pub range: Vec<Expression>,
-    pub stride: Vec<Expression>,
-    pub row_width: Expression,
-}
-
-impl HLIROp for RopeFrontendOp {
-    fn to_egglog(&self, inputs: &[(luminal::prelude::NodeIndex, String, ShapeTracker)]) -> String {
-        format!(
-            "(RowRope {} {} {} {} {})",
-            elist_to_egglog(&self.range),
-            inputs[0].1,
-            elist_to_egglog(&self.stride),
-            self.row_width.to_egglog(),
-            inputs[1].1,
-        )
     }
 }
 

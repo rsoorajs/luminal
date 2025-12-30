@@ -5,7 +5,6 @@ use luminal::{
     graph::{Graph, Runtime},
     op::DType,
     prelude::FxHashMap,
-    utils::display_graph,
 };
 use luminal_cuda::{
     block::IntoBlockOp,
@@ -50,7 +49,6 @@ fn main() {
     let token_ids = cx.named_tensor("token_ids", 's').as_dtype(DType::Int);
     let model = model::Llama::init(&mut cx);
     let logits = model.forward(input, token_ids).output();
-    display_graph(&cx.graph, None, "hlir.txt");
 
     let ctx = luminal_cuda::cudarc::driver::CudaContext::new(0).unwrap();
     ctx.bind_to_thread().unwrap();
@@ -80,7 +78,7 @@ fn main() {
     cx.build_search_space::<CudaRuntime>();
 
     println!("Compiling...");
-    let mut runtime = cx.search(CudaRuntime::initialize((ctx, stream, custom_state)), 10_000);
+    let mut runtime = cx.search(CudaRuntime::initialize((ctx, stream, custom_state)), 1);
 
     println!("Loading weights...");
     runtime.load_safetensors("setup/model_combined.safetensors");
