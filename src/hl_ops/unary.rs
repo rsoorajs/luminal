@@ -194,26 +194,24 @@ impl GraphTensor {
     }
 
     /// Compute the sorted indexes of this tensor along a certian axis
-    pub fn argsort_indexes(self, axis: usize, ascending: bool) -> GraphTensor {
-        // Compare all elements with all other elements by making a axis
+    pub fn argsort(self, axis: usize, descending: bool) -> GraphTensor {
+        // Compare all elements with all other elements by making an axis
         let ax_size = self.dims()[axis];
         let a = self.expand_dim(axis + 1, ax_size);
         let b = self.expand_dim(axis, ax_size) + 1e-9; // eps for stable sort
-        let mut ind = a.lt(b).sum(axis).cast(DType::Int);
-        if ascending {
-            ind = -ind + (ax_size - 1);
-        }
+        let mut ind = if descending { a.lt(b) } else { a.gt(b) };
+        ind = ind.sum(axis).cast(DType::Int);
         ind.inverse_permutation(axis)
     }
 
     /// Sort the tensor along a certian axis
-    pub fn argsort(self, axis: usize, ascending: bool) -> GraphTensor {
-        self.gather(self.argsort_indexes(axis, ascending))
+    pub fn sort(self, axis: usize, descending: bool) -> GraphTensor {
+        self.gather(self.argsort(axis, descending))
     }
 
     /// Sort and retrieve top-k **indexes**
     pub fn topk_indexes(self, k: usize, axis: usize) -> GraphTensor {
-        self.argsort_indexes(axis, true).slice_along(..k, axis)
+        self.argsort(axis, false).slice_along(..k, axis)
     }
 
     /// Apply a cumulative reduction operation along dimensions
