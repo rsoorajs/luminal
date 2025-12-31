@@ -157,9 +157,7 @@ impl CudaRuntime {
             .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
             .collect_vec()
     }
-}
 
-impl CudaRuntime {
     fn register_buffer(&mut self, llir_node: NodeIndex) {
         // Remap pointers in work queue
         if let Some(ExecutableKernel::Megakernel {

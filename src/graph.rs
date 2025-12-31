@@ -179,15 +179,12 @@ impl Graph {
         let mut ops = Rt::Ops::into_vec();
         ops.extend(<crate::op::Ops as IntoEgglogOp>::into_vec());
         let (program, root) = hlir_to_egglog(self);
-        self.egraph = Some(
-            run_egglog(
-                &program,
-                &root,
-                &ops,
-                TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>(), // need to ignore hlir op cleanups if we're on native runtime
-            )
-            .unwrap(),
-        );
+        self.egraph = Some(run_egglog(
+            &program,
+            &root,
+            &ops,
+            TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>(), // need to ignore hlir op cleanups if we're on native runtime
+        ));
         self.ops = Some(ops);
     }
 
@@ -377,12 +374,19 @@ fn run_egglog(
     root: &str,
     ops: &[Arc<Box<dyn EgglogOp>>],
     cleanup: bool,
-) -> Result<SerializedEGraph, egglog::Error> {
+) -> SerializedEGraph {
     let mut egraph = egglog::EGraph::default();
     let code = egglog_utils::full_egglog(program, ops, cleanup);
-    let commands = egraph.parser.get_program_from_string(None, &code)?;
     let start = std::time::Instant::now();
-    let msgs = egraph.run_program(commands)?;
+    for s in code {
+        let commands = match egraph.parser.get_program_from_string(None, &s) {
+            Ok(c) => c,
+            Err(e) => panic!("Failed to parse:\n{s}\nError: {e}"),
+        };
+        if let Err(e) = egraph.run_program(commands) {
+            panic!("Failed to run:\n{s}\nError: {e}");
+        }
+    }
     if std::env::var("SEARCH")
         .map(|s| s == "1")
         .unwrap_or_default()
@@ -409,7 +413,7 @@ fn run_egglog(
         );
     }
 
-    let (sort, value) = egraph.eval_expr(&var!(root))?;
+    let (sort, value) = egraph.eval_expr(&var!(root)).unwrap();
     let s = egraph.serialize(egglog::SerializeConfig {
         root_eclasses: vec![(sort, value)],
         max_functions: None,
@@ -490,16 +494,8 @@ fn run_egglog(
         egraph.roots.iter().all(|c| egraph.eclasses.contains_key(c)),
         "No valid graphs present in the e-graph!"
     );
-    if msgs.iter().any(|m| !m.to_string().is_empty()) {
-        println!("Messages:");
-        for m in msgs {
-            if !m.to_string().is_empty() {
-                println!("{m}");
-            }
-        }
-    }
 
-    Ok(egraph)
+    egraph
 }
 
 pub fn extract_expr_list<'a>(

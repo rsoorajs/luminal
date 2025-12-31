@@ -28,46 +28,41 @@ fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     )
 }
 
-fn op_rewrites_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
-    ops.iter().flat_map(|o| o.rewrites()).join("\n")
+fn op_rewrites_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> Vec<String> {
+    ops.iter().flat_map(|o| o.rewrites()).collect()
 }
 
-fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
-    format!(
-        "
-    {}
-    ",
-        ops.iter()
-            .filter(|op| op.cleanup())
-            .map(|o| {
-                let (name, body) = o.term();
-                let body_terms = (0..body.len()).map(|i| (b'a' + i as u8) as char).join(" ");
-                format!(
-                    "(rule
-                ((= ?m ({name} {body_terms})))
-                ((delete ({name} {body_terms})))
-                :ruleset cleanup
-            )"
-                )
-            })
-            .join("\n")
-    )
+fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> Vec<String> {
+    ops.iter()
+        .filter(|op| op.cleanup())
+        .map(|o| {
+            let (name, body) = o.term();
+            let body_terms = (0..body.len()).map(|i| (b'a' + i as u8) as char).join(" ");
+            format!(
+                "(rule
+    ((= ?m ({name} {body_terms})))
+    ((delete ({name} {body_terms})))
+    :ruleset cleanup
+)"
+            )
+        })
+        .collect()
 }
 
-pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> String {
-    let mut code = BASE.to_string();
-    code.push_str(&op_defs_string(ops));
-    code.push('\n');
-    code.push_str(&op_rewrites_string(ops));
-    code.push('\n');
-    if cleanup {
-        code.push_str(&op_cleanups_string(ops));
-        code.push('\n');
-    }
-    code.push_str(BASE_CLEANUP);
-    code.push('\n');
-    code.push_str(program);
-    code.push('\n');
-    code.push_str(RUN_SCHEDULE);
-    code
+pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> Vec<String> {
+    [
+        vec![BASE.to_string(), op_defs_string(ops)],
+        op_rewrites_string(ops),
+        if cleanup {
+            op_cleanups_string(ops)
+        } else {
+            vec![]
+        },
+        vec![
+            BASE_CLEANUP.to_string(),
+            program.to_string(),
+            RUN_SCHEDULE.to_string(),
+        ],
+    ]
+    .concat()
 }

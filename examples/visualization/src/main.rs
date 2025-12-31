@@ -45,7 +45,7 @@ fn main() {
     let mut egglog_obj: EGraph = egglog::EGraph::default();
 
     // run the graph
-    let code = luminal::egglog_utils::full_egglog(&program, &ops, true);
+    let code = luminal::egglog_utils::full_egglog(&program, &ops, true).join("\n");
     egglog_obj.parse_and_run_program(None, &code).unwrap();
 
     // EGraph Optimization Complete
