@@ -1,5 +1,6 @@
 (ruleset expr)
 (ruleset cleanup)
+(ruleset early)
 
 ; -------- SYMBOLIC ALGEBRA -------
 (datatype*

@@ -788,6 +788,7 @@ impl EgglogOp for RowRope {
                     (ECons ?hidden_dim (ENil))
                     ?hidden_dim
                     ?pos_ids))
+                ; we want to subsume all terms up to ?inp and ?pos_ids. don't know how to do this.
                 (subsume (Mul (ECons (MVar "s") (ECons ?n_heads (ECons (MNum 128) (ENil))))
                      ?interleaved_rot
                      (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil))))
@@ -796,6 +797,7 @@ impl EgglogOp for RowRope {
                      (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil))))))
               )
               :name "row rope"
+              :ruleset early
             )
         "#.to_string()]
     }
