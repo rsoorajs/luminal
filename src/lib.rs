@@ -20,6 +20,8 @@ pub mod prelude {
     pub use crate::op::*;
     pub use crate::shape::*;
     pub use crate::utils::*;
+    pub use egglog;
+    pub use egglog_ast;
     pub use egraph_serialize::NodeId as ENodeId;
     pub use half::{bf16, f16};
     pub use petgraph;

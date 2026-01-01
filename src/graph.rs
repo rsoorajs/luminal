@@ -32,9 +32,9 @@ pub struct Graph {
     /// Edge weights: (Input index, Output index, Input shape)
     pub graph: HLIRGraph,
     /// E-Graph search space
-    egraph: Option<SerializedEGraph>,
+    pub egraph: Option<SerializedEGraph>,
     /// Available ops
-    ops: Option<Vec<Arc<Box<dyn EgglogOp>>>>,
+    pub ops: Option<Vec<Arc<Box<dyn EgglogOp>>>>,
     /// Marked output hlir nodes
     pub(crate) outputs: FxHashSet<NodeIndex>,
 }

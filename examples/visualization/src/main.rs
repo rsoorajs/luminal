@@ -3,15 +3,15 @@ use std::fs;
 use luminal::{
     self,
     graph::{hlir_to_egglog, Graph, Runtime},
-    prelude::*,
+    prelude::{
+        egglog::{prelude::RustSpan, var},
+        egglog_ast::span::Span,
+        *,
+    },
     serialized_egraph::SerializedEGraph,
     visualization::{ToDot, ToHtml},
 };
-use luminal_cuda::runtime::{CudaRuntime, CustomState};
-
-use egglog::{prelude::RustSpan, var, EGraph};
-use egglog_ast::span::Span;
-use rustc_hash::FxHashMap;
+use luminal_cuda::runtime::CudaRuntime;
 
 fn main() {
     // Create a new graph
@@ -26,25 +26,17 @@ fn main() {
 
     let _c = a.matmul(b);
 
-    let ctx = luminal_cuda::cudarc::driver::CudaContext::new(0).unwrap();
-    ctx.bind_to_thread().unwrap();
-    let _stream = ctx.default_stream();
-    let _custom_state: FxHashMap<String, CustomState> = FxHashMap::default();
-
     println!("Visualizing HLIR");
     fs::write("HLIR.dot", cx.graph.to_dot().unwrap()).unwrap();
 
-    println!("Building and Saturating EGraph");
-    cx.build_search_space::<CudaRuntime>();
-
     let (program, root) = hlir_to_egglog(&cx);
 
-    let mut ops = <CudaRuntime as Runtime>::Ops::into_vec();
-    ops.extend(<luminal::op::Ops as IntoEgglogOp>::into_vec());
+    type Ops = (<CudaRuntime as Runtime>::Ops, luminal::op::Ops);
+    let ops = <Ops as IntoEgglogOp>::into_vec();
 
-    let mut egglog_obj: EGraph = egglog::EGraph::default();
-
-    // run the graph
+    // run e-graph saturation
+    println!("Building and Saturating E-Graph");
+    let mut egglog_obj = egglog::EGraph::default();
     let code = luminal::egglog_utils::full_egglog(&program, &ops, true).join("\n");
     egglog_obj.parse_and_run_program(None, &code).unwrap();
 
@@ -57,7 +49,6 @@ fn main() {
     let (sort, value) = egglog_obj.eval_expr(&var!(root)).unwrap();
     let s_egraph = SerializedEGraph::new(&egglog_obj, vec![(sort, value)]);
     let llir_graphs = egglog_to_llir(&s_egraph, &ops, 100);
-
     let example_llir_graph = llir_graphs.last().unwrap();
 
     println!("Visualizing LLIR Graph");
