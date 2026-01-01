@@ -5,23 +5,18 @@ use luminal::{
     graph::{Graph, Runtime},
     op::DType,
     prelude::FxHashMap,
-    trace::{self, TraceOptions},
 };
-use luminal_cuda::{
-    block::IntoBlockOp,
-    runtime::{record_exec_timings_to_file, CudaRuntime, CustomState},
-};
+use luminal_cuda::runtime::{CudaRuntime, CustomState};
 use model::*;
 use std::io::Write;
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
 
 fn main() {
-    // Set up tracing
-    let trace_session = trace::init(TraceOptions {
-        sink: trace::trace_file_path("trace.pftrace"),
-        env_filter: format!("{}=trace,luminal=trace", env!("CARGO_PKG_NAME")),
-    });
+    let trace_session = luminal::trace::new()
+        .perfetto("trace.pftrace")
+        .env_filter(format!("{}=trace,luminal=trace", env!("CARGO_PKG_NAME")))
+        .init();
 
     let max_seq_len = 4096;
     let gen_tokens = 5;
@@ -74,7 +69,6 @@ fn main() {
     print!("{input_sentence}");
     std::io::stdout().flush().unwrap();
 
-    let mut timings = vec![];
     let mut prev_seq = 0;
     for i in 0..gen_tokens {
         let span = if i == 0 {
@@ -105,7 +99,7 @@ fn main() {
             runtime.allocate_intermediate_buffers(&cx.dyn_map);
         }
 
-        timings.extend(runtime.execute(&cx.dyn_map));
+        runtime.execute(&cx.dyn_map);
         let logits_data = runtime.get_f32(logits);
 
         let sample_span = span!(Level::INFO, "sample");
@@ -117,14 +111,10 @@ fn main() {
     }
     println!();
 
-    trace_session.flush();
     trace_session.stop();
-    if let Some(path) = trace_session.perfetto_path() {
-        record_exec_timings_to_file(
-            &timings,
-            &<luminal_cuda::block::Ops as IntoBlockOp>::into_vec(),
-            path,
-        );
+    // Dump cuda trace to timeline
+    if let Some(path) = trace_session.perfetto_path {
+        runtime.record_cuda_perfetto_trace(path);
     }
 }
 

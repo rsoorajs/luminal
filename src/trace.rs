@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use tracing_appender::non_blocking::{self, WorkerGuard};
+use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_perfetto_sdk_layer::NativeLayer;
 use tracing_perfetto_sdk_schema::{
     DataSourceConfig, TraceConfig,
@@ -15,27 +15,71 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 pub enum TraceSink {
     PerfettoFile { path: PathBuf },
     Stdout,
-    Disabled,
+}
+
+/// Setup luminal default tracing. Any `tracing_subscriber`'s can also be used.
+pub fn new() -> TraceOptions {
+    TraceOptions {
+        perfetto_file: None,
+        env_filter: "luminal=trace".to_string(),
+    }
 }
 
 pub struct TraceOptions {
-    pub sink: TraceSink,
+    perfetto_file: Option<PathBuf>,
     pub env_filter: String,
 }
 
-impl Default for TraceOptions {
-    fn default() -> Self {
-        Self {
-            sink: TraceSink::Stdout,
-            env_filter: "luminal=trace".to_string(),
+impl TraceOptions {
+    pub fn perfetto(mut self, path: impl AsRef<Path>) -> Self {
+        self.perfetto_file = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn env_filter(mut self, env_filter: impl ToString) -> Self {
+        self.env_filter = env_filter.to_string();
+        self
+    }
+
+    pub fn init(self) -> TraceSession {
+        let filter = EnvFilter::builder()
+            .parse(self.env_filter)
+            .expect("Invalid tracing env filter");
+
+        if let Some(file_path) = self.perfetto_file {
+            let file = File::create(&file_path).expect("Failed to create trace file");
+            let (writer, guard) = tracing_appender::non_blocking(file);
+            let layer = NativeLayer::from_config(default_perfetto_config(), writer)
+                .build()
+                .expect("Failed to build perfetto layer");
+            let handle = layer.clone();
+            tracing_subscriber::registry()
+                .with(filter.clone())
+                .with(layer)
+                .init();
+            TraceSession {
+                perfetto_layer: Some(handle),
+                _guard: Some(guard),
+                perfetto_path: Some(file_path),
+            }
+        } else {
+            tracing_subscriber::registry()
+                .with(filter.clone())
+                .with(tracing_subscriber::fmt::layer())
+                .init();
+            TraceSession {
+                perfetto_layer: None,
+                _guard: None,
+                perfetto_path: None,
+            }
         }
     }
 }
 
 pub struct TraceSession {
-    perfetto_layer: Option<tracing_perfetto_sdk_layer::LayerHandle>,
-    guard: Option<WorkerGuard>,
-    perfetto_path: Option<PathBuf>,
+    perfetto_layer: Option<NativeLayer<NonBlocking>>,
+    _guard: Option<WorkerGuard>,
+    pub perfetto_path: Option<PathBuf>,
 }
 
 impl TraceSession {
@@ -46,62 +90,10 @@ impl TraceSession {
     }
 
     pub fn stop(&self) {
+        self.flush();
         if let Some(layer) = &self.perfetto_layer {
             let _ = layer.stop();
         }
-    }
-
-    pub fn perfetto_path(&self) -> Option<&Path> {
-        self.perfetto_path.as_deref()
-    }
-}
-
-pub fn init(options: TraceOptions) -> TraceSession {
-    let filter = EnvFilter::builder()
-        .parse(options.env_filter)
-        .expect("Invalid tracing env filter");
-
-    match options.sink {
-        TraceSink::PerfettoFile { path } => init_perfetto_file(&filter, path),
-        TraceSink::Stdout => init_stdout(&filter),
-        TraceSink::Disabled => {
-            tracing_subscriber::registry().with(filter).init();
-            TraceSession {
-                perfetto_layer: None,
-                guard: None,
-                perfetto_path: None,
-            }
-        }
-    }
-}
-
-fn init_perfetto_file(filter: &EnvFilter, path: PathBuf) -> TraceSession {
-    let file = File::create(&path).expect("Failed to create trace file");
-    let (writer, guard) = non_blocking(file);
-    let layer = NativeLayer::from_config(default_perfetto_config(), writer)
-        .build()
-        .expect("Failed to build perfetto layer");
-    let handle = layer.clone();
-    tracing_subscriber::registry()
-        .with(filter.clone())
-        .with(layer)
-        .init();
-    TraceSession {
-        perfetto_layer: Some(handle),
-        guard: Some(guard),
-        perfetto_path: Some(path),
-    }
-}
-
-fn init_stdout(filter: &EnvFilter) -> TraceSession {
-    tracing_subscriber::registry()
-        .with(filter.clone())
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-    TraceSession {
-        perfetto_layer: None,
-        guard: None,
-        perfetto_path: None,
     }
 }
 
