@@ -28,7 +28,7 @@ jobs:
         steps:
             - uses: actions/checkout@v4
             - name: Run clippy
-              run: rustup update; cargo clippy --all-targets -- -D warnings
+              run: sudo apt-get install protobuf-compiler; rustup update; cargo clippy --all-targets -- -D warnings
 
     fmt:
         name: Fmt

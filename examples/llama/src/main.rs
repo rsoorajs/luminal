@@ -8,33 +8,16 @@ use luminal::{
     op::DType,
     prelude::FxHashMap,
 };
-use luminal_cuda::{
-    block::IntoBlockOp,
-    runtime::{record_exec_timings_to_file, CudaRuntime, CustomState},
-};
+use luminal_cuda::runtime::{CudaRuntime, CustomState};
 use model::*;
-use std::{fs::File, io::Write, time::Duration};
+use std::io::Write;
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
-use tracing_appender::non_blocking;
-use tracing_perfetto_sdk_layer::NativeLayer;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 fn main() {
-    // Set up tracing
-    let file = File::create("trace.pftrace").unwrap();
-    let (writer, _guard) = non_blocking(file);
-    let layer = NativeLayer::from_config(trace_config(), writer)
-        .build()
-        .unwrap();
-    let filter = EnvFilter::builder()
-        .parse(format!("{}=trace,luminal=trace", env!("CARGO_PKG_NAME")))
-        .unwrap();
-    let layer_handle = layer.clone();
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(layer)
+    let trace_session = luminal::trace::new()
+        .perfetto("trace.pftrace")
+        .env_filter(format!("{}=trace,luminal=trace", env!("CARGO_PKG_NAME")))
         .init();
 
     let max_seq_len = 4096;
@@ -88,7 +71,6 @@ fn main() {
     print!("{input_sentence}");
     std::io::stdout().flush().unwrap();
 
-    let mut timings = vec![];
     let mut prev_seq = 0;
     let mut benchmarker = Benchmarker::new(756., 2_000.); // H100 specs
     for i in 0..gen_tokens {
@@ -121,7 +103,7 @@ fn main() {
         }
 
         benchmarker.start_iteration(seq_len, prev_seq);
-        timings.extend(runtime.execute(&cx.dyn_map));
+        runtime.execute(&cx.dyn_map);
         let logits_data = runtime.get_f32(logits);
 
         let sample_span = span!(Level::INFO, "sample");
@@ -134,18 +116,12 @@ fn main() {
     }
     println!();
 
+    trace_session.stop();
     benchmarker.report();
-
-    layer_handle
-        .flush(Duration::from_secs(5), Duration::from_secs(5))
-        .unwrap();
-    layer_handle.stop().unwrap();
-    drop(_guard);
-    record_exec_timings_to_file(
-        &timings,
-        &<luminal_cuda::block::Ops as IntoBlockOp>::into_vec(),
-        "trace.pftrace",
-    );
+    // Dump cuda trace to timeline
+    if let Some(path) = trace_session.perfetto_path {
+        runtime.record_cuda_perfetto_trace(path);
+    }
 }
 
 #[tracing::instrument(skip_all)]
@@ -163,21 +139,4 @@ fn sample(logits: &[f32], vocab_size: usize) -> Vec<u32> {
                 .0 as u32
         })
         .collect()
-}
-
-fn trace_config() -> tracing_perfetto_sdk_schema::TraceConfig {
-    tracing_perfetto_sdk_schema::TraceConfig {
-        buffers: vec![tracing_perfetto_sdk_schema::trace_config::BufferConfig {
-            size_kb: Some(4096),
-            ..Default::default()
-        }],
-        data_sources: vec![tracing_perfetto_sdk_schema::trace_config::DataSource {
-            config: Some(tracing_perfetto_sdk_schema::DataSourceConfig {
-                name: Some("rust_tracing".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }],
-        ..Default::default()
-    }
 }

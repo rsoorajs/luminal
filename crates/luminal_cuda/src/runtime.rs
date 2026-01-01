@@ -95,6 +95,7 @@ pub struct CudaRuntime {
     custom_state: FxHashMap<String, CustomState>,
     exec_graph: StableGraph<ExecutableKernel, (), Directed>,
     node_to_exec: FxHashMap<NodeIndex, NodeIndex>,
+    timings: Vec<(Vec<SMEvent>, u64)>,
 }
 
 impl CudaRuntime {
@@ -229,6 +230,65 @@ impl CudaRuntime {
             }
         }
     }
+
+    pub fn record_cuda_perfetto_trace(&self, file_path: impl AsRef<std::path::Path>) {
+        let ops = <crate::block::Ops as IntoBlockOp>::into_vec();
+        let data = std::fs::read(&file_path).unwrap();
+        let mut trace = tracing_perfetto_sdk_schema::Trace::decode(data.as_slice()).unwrap();
+
+        let host_start_times: Vec<(u64, u32)> = trace
+            .packet
+            .iter()
+            .filter_map(|p| match &p.data {
+                Some(tracing_perfetto_sdk_schema::trace_packet::Data::TrackEvent(TrackEvent {
+                    name_field: Some(tracing_perfetto_sdk_schema::track_event::NameField::Name(s)),
+                    r#type: ty,
+                    ..
+                })) if s == "megakernel"
+                    && *ty
+                        == Some(
+                            tracing_perfetto_sdk_schema::track_event::Type::SliceBegin as i32,
+                        ) =>
+                {
+                    Some((p.timestamp?, p.timestamp_clock_id?))
+                }
+                _ => None,
+            })
+            .sorted_by_key(|i| *i)
+            .collect_vec();
+        let mut extra_packets = Vec::new();
+        for (run, (device_timings, device_start_time)) in self.timings.iter().enumerate() {
+            let (host_time, host_clock_id) = host_start_times[run];
+            for (sm, sm_timings) in device_timings.chunks(1000).into_iter().enumerate() {
+                let mut builder = ManualTrackBuilder::new(sm as u32, host_time, host_clock_id);
+                for n_op in 0..sm_timings.len() - 1 {
+                    let op = sm_timings[n_op].event as usize;
+                    let op_label = if op == 0 {
+                        "Issue".to_string()
+                    } else if op == 1 {
+                        "Wait".to_string()
+                    } else {
+                        ops[op - 2].term().0
+                    };
+                    if sm_timings[n_op + 1].start == 0 {
+                        break;
+                    }
+                    builder.push_slice(
+                        &op_label,
+                        sm_timings[n_op].start - *device_start_time,
+                        sm_timings[n_op + 1].start - *device_start_time,
+                        host_time,
+                        host_clock_id,
+                    );
+                }
+                extra_packets.extend(builder.into_packets());
+            }
+        }
+        trace.packet.extend(extra_packets);
+        let mut buf = Vec::with_capacity(trace.encoded_len());
+        trace.encode(&mut buf).unwrap();
+        std::fs::write(file_path, buf).unwrap();
+    }
 }
 
 pub trait ToCudaBuffer {
@@ -263,7 +323,7 @@ impl Runtime for CudaRuntime {
         FxHashMap<String, CustomState>,
     );
     type Data = Box<dyn ToCudaBuffer>;
-    type ExecReturn = Vec<(Vec<SMEvent>, u64)>;
+    type ExecReturn = ();
 
     fn initialize((ctx, stream, custom_state): Self::CompileArg) -> Self {
         Self {
@@ -274,6 +334,7 @@ impl Runtime for CudaRuntime {
             custom_state: custom_state,
             exec_graph: StableGraph::default(),
             node_to_exec: FxHashMap::default(),
+            timings: vec![],
         }
     }
 
@@ -587,7 +648,7 @@ impl Runtime for CudaRuntime {
                 }
             }
         }
-        timings
+        self.timings.extend(timings);
     }
 
     fn set_data(&mut self, id: impl ToId, data: Self::Data) {
@@ -793,66 +854,6 @@ pub fn allocate_input_buffers(
         }
     }
     buffers
-}
-
-pub fn record_exec_timings_to_file(
-    timings: &Vec<(Vec<SMEvent>, u64)>,
-    ops: &Vec<Arc<Box<dyn BlockOp>>>,
-    file_path: &str,
-) {
-    let data = std::fs::read(file_path).unwrap();
-    let mut trace = tracing_perfetto_sdk_schema::Trace::decode(data.as_slice()).unwrap();
-
-    let host_start_times: Vec<(u64, u32)> = trace
-        .packet
-        .iter()
-        .filter_map(|p| match &p.data {
-            Some(tracing_perfetto_sdk_schema::trace_packet::Data::TrackEvent(TrackEvent {
-                name_field: Some(tracing_perfetto_sdk_schema::track_event::NameField::Name(s)),
-                r#type: ty,
-                ..
-            })) if s == "megakernel"
-                && *ty
-                    == Some(tracing_perfetto_sdk_schema::track_event::Type::SliceBegin as i32) =>
-            {
-                Some((p.timestamp?, p.timestamp_clock_id?))
-            }
-            _ => None,
-        })
-        .sorted_by_key(|i| *i)
-        .collect_vec();
-    let mut extra_packets = Vec::new();
-    for (run, (device_timings, device_start_time)) in timings.iter().enumerate() {
-        let (host_time, host_clock_id) = host_start_times[run];
-        for (sm, sm_timings) in device_timings.chunks(1000).into_iter().enumerate() {
-            let mut builder = ManualTrackBuilder::new(sm as u32, host_time, host_clock_id);
-            for n_op in 0..sm_timings.len() - 1 {
-                let op = sm_timings[n_op].event as usize;
-                let op_label = if op == 0 {
-                    "Issue".to_string()
-                } else if op == 1 {
-                    "Wait".to_string()
-                } else {
-                    ops[op - 2].term().0
-                };
-                if sm_timings[n_op + 1].start == 0 {
-                    break;
-                }
-                builder.push_slice(
-                    &op_label,
-                    sm_timings[n_op].start - *device_start_time,
-                    sm_timings[n_op + 1].start - *device_start_time,
-                    host_time,
-                    host_clock_id,
-                );
-            }
-            extra_packets.extend(builder.into_packets());
-        }
-    }
-    trace.packet.extend(extra_packets);
-    let mut buf = Vec::with_capacity(trace.encoded_len());
-    trace.encode(&mut buf).unwrap();
-    std::fs::write(file_path, buf).unwrap();
 }
 
 struct ManualTrackBuilder {

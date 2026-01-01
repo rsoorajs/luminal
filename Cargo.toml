@@ -31,6 +31,10 @@ egglog = "1.0.0"
 egglog-ast = "1.0.0"
 egraph-serialize = { version = "0.3.0", default-features = false, features = ["graphviz", "serde"]}
 tracing = "0.1.43"
+tracing-appender = "0.2.4"
+tracing-perfetto-sdk-layer = "0.13.0"
+tracing-perfetto-sdk-schema = "0.13.0"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 paste = "1.0.15"
 pretty-duration = "0.1.1"
 anyhow = "1.0"
