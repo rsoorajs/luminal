@@ -1,5 +1,7 @@
+mod benchmark;
 mod model;
 
+use benchmark::Benchmarker;
 use itertools::Itertools;
 use luminal::{
     graph::{Graph, Runtime},
@@ -19,7 +21,7 @@ fn main() {
         .init();
 
     let max_seq_len = 4096;
-    let gen_tokens = 5;
+    let gen_tokens: usize = 5;
     let input_sentence = "Hello, how are you";
 
     let tokenizer = Tokenizer::from_file("setup/tokenizer.json").expect("Failed to load tokenizer");
@@ -70,6 +72,7 @@ fn main() {
     std::io::stdout().flush().unwrap();
 
     let mut prev_seq = 0;
+    let mut benchmarker = Benchmarker::new(756., 2_000.); // H100 specs
     for i in 0..gen_tokens {
         let span = if i == 0 {
             span!(Level::INFO, "prefill")
@@ -98,7 +101,8 @@ fn main() {
             // Re-allocate intermediate buffers
             runtime.allocate_intermediate_buffers(&cx.dyn_map);
         }
-
+      
+        benchmarker.start_iteration(seq_len, prev_seq);
         runtime.execute(&cx.dyn_map);
         let logits_data = runtime.get_f32(logits);
 
@@ -108,10 +112,12 @@ fn main() {
         prev_seq += seq_len;
         print!("{}", tokenizer.decode(&sentence, true).unwrap());
         std::io::stdout().flush().unwrap();
+        benchmarker.end_iteration(i);
     }
     println!();
 
     trace_session.stop();
+    benchmarker.report();
     // Dump cuda trace to timeline
     if let Some(path) = trace_session.perfetto_path {
         runtime.record_cuda_perfetto_trace(path);
