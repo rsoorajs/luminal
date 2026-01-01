@@ -798,9 +798,9 @@ pub fn allocate_input_buffers(
 pub fn record_exec_timings_to_file(
     timings: &Vec<(Vec<SMEvent>, u64)>,
     ops: &Vec<Arc<Box<dyn BlockOp>>>,
-    file_path: &str,
+    file_path: impl AsRef<std::path::Path>,
 ) {
-    let data = std::fs::read(file_path).unwrap();
+    let data = std::fs::read(&file_path).unwrap();
     let mut trace = tracing_perfetto_sdk_schema::Trace::decode(data.as_slice()).unwrap();
 
     let host_start_times: Vec<(u64, u32)> = trace

@@ -17,6 +17,7 @@ use egraph_serialize::{ClassId, NodeId};
 use itertools::Itertools;
 use petgraph::{Direction, stable_graph::StableGraph, visit::EdgeRef};
 use rustc_hash::{FxHashMap, FxHashSet};
+use tracing::info;
 
 pub type LLIRGraph = StableGraph<LLIROp, (), petgraph::Directed>;
 pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, Dependency>;
@@ -198,6 +199,7 @@ impl Graph {
         let print = std::env::var("SEARCH")
             .map(|s| s == "1")
             .unwrap_or_default();
+        let limit_reached = llir_graphs.len() == limit;
         let start = std::time::Instant::now();
         if print {
             println!(
@@ -205,17 +207,21 @@ impl Graph {
                 format!(
                     "---- Searching through {}{} graphs ----",
                     llir_graphs.len().to_string().bold(),
-                    if llir_graphs.len() == limit {
-                        "[limit]"
-                    } else {
-                        ""
-                    }
+                    if limit_reached { "[limit]" } else { "" }
                 )
                 .cyan()
             );
         }
         runtime.compile(llir_graphs.last().unwrap());
         if print {
+            info!(
+                target: "luminal::search",
+                graphs = llir_graphs.len(),
+                limit,
+                limit_reached,
+                duration_ms = start.elapsed().as_millis() as u64,
+                "search completed"
+            );
             println!(
                 "{}",
                 format!(
@@ -392,17 +398,22 @@ fn run_egglog(
         .unwrap_or_default()
     {
         println!("{}", "---- Egglog Rule Matches ----".green());
-        println!(
-            "{}",
-            egraph
-                .get_overall_run_report()
-                .num_matches_per_rule
-                .iter()
-                .filter(|(k, _)| !k.contains("("))
-                .map(|(k, v)| format!("{k}: {v}"))
-                .join("\n")
-                .green()
-        );
+        let mut rule_lines = Vec::new();
+        for (rule, matches) in egraph
+            .get_overall_run_report()
+            .num_matches_per_rule
+            .iter()
+            .filter(|(k, _)| !k.contains("("))
+        {
+            info!(
+                target: "luminal::egglog",
+                rule = %rule,
+                matches = *matches,
+                "rule matches"
+            );
+            rule_lines.push(format!("{rule}: {matches}"));
+        }
+        println!("{}", rule_lines.join("\n").green());
         println!(
             "{}",
             format!(
@@ -410,6 +421,11 @@ fn run_egglog(
                 pretty_duration::pretty_duration(&start.elapsed(), None).bold()
             )
             .green()
+        );
+        info!(
+            target: "luminal::egglog",
+            duration_ms = start.elapsed().as_millis() as u64,
+            "egglog run completed"
         );
     }
 

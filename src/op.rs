@@ -17,6 +17,7 @@ use itertools::Itertools;
 use num_traits::Float;
 use petgraph::{Direction, algo::toposort, prelude::StableGraph, visit::EdgeRef};
 use rustc_hash::FxHashMap;
+use tracing::info_span;
 
 pub type Ops = (
     Input,
@@ -1510,6 +1511,8 @@ impl Runtime for NativeRuntime {
                 continue;
             }
 
+            let span = info_span!("native_op", op = %format!("{:?}", self.graph[node]));
+            let _entered = span.enter();
             let inputs = self
                 .graph
                 .edges_directed(node, Direction::Incoming)
