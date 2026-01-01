@@ -101,7 +101,7 @@ fn main() {
             // Re-allocate intermediate buffers
             runtime.allocate_intermediate_buffers(&cx.dyn_map);
         }
-      
+
         benchmarker.start_iteration(seq_len, prev_seq);
         runtime.execute(&cx.dyn_map);
         let logits_data = runtime.get_f32(logits);
