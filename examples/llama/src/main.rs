@@ -15,7 +15,7 @@ use tokenizers::Tokenizer;
 use tracing::{span, Level};
 
 fn main() {
-    let trace_session = luminal::trace::new()
+    let trace_session = luminal_tracing::subscriber()
         .perfetto("trace.pftrace")
         .env_filter(format!("{}=trace,luminal=trace", env!("CARGO_PKG_NAME")))
         .init();

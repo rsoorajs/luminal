@@ -12,22 +12,17 @@ use tracing_perfetto_sdk_schema::{
 };
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-pub enum TraceSink {
-    PerfettoFile { path: PathBuf },
-    Stdout,
+pub struct TraceOptions {
+    perfetto_file: Option<PathBuf>,
+    pub env_filter: String,
 }
 
-/// Setup luminal default tracing. Any `tracing_subscriber`'s can also be used.
-pub fn new() -> TraceOptions {
+/// This is a convenience tracing subscriber with some opinionated defaults.
+pub fn subscriber() -> TraceOptions {
     TraceOptions {
         perfetto_file: None,
         env_filter: "luminal=trace".to_string(),
     }
-}
-
-pub struct TraceOptions {
-    perfetto_file: Option<PathBuf>,
-    pub env_filter: String,
 }
 
 impl TraceOptions {
@@ -41,6 +36,7 @@ impl TraceOptions {
         self
     }
 
+    /// Install as the global tracing subscriber
     pub fn init(self) -> TraceSession {
         let filter = EnvFilter::builder()
             .parse(self.env_filter)
@@ -111,11 +107,5 @@ fn default_perfetto_config() -> TraceConfig {
             ..Default::default()
         }],
         ..Default::default()
-    }
-}
-
-pub fn trace_file_path(path: impl AsRef<Path>) -> TraceSink {
-    TraceSink::PerfettoFile {
-        path: path.as_ref().to_path_buf(),
     }
 }

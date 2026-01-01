@@ -5,7 +5,6 @@ pub mod hl_ops;
 pub mod op;
 pub mod serialized_egraph;
 pub mod shape;
-pub mod trace;
 pub mod utils;
 pub mod visualization;
 
