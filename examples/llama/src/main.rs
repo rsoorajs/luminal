@@ -1,5 +1,7 @@
+mod benchmark;
 mod model;
 
+use benchmark::Benchmarker;
 use itertools::Itertools;
 use luminal::{
     graph::{Graph, Runtime},
@@ -36,7 +38,7 @@ fn main() {
         .init();
 
     let max_seq_len = 4096;
-    let gen_tokens = 5;
+    let gen_tokens: usize = 5;
     let input_sentence = "Hello, how are you";
 
     let tokenizer = Tokenizer::from_file("setup/tokenizer.json").expect("Failed to load tokenizer");
@@ -88,6 +90,7 @@ fn main() {
 
     let mut timings = vec![];
     let mut prev_seq = 0;
+    let mut benchmarker = Benchmarker::new(756., 2_000.); // H100 specs
     for i in 0..gen_tokens {
         let span = if i == 0 {
             span!(Level::INFO, "prefill")
@@ -117,6 +120,7 @@ fn main() {
             runtime.allocate_intermediate_buffers(&cx.dyn_map);
         }
 
+        benchmarker.start_iteration(seq_len, prev_seq);
         timings.extend(runtime.execute(&cx.dyn_map));
         let logits_data = runtime.get_f32(logits);
 
@@ -126,8 +130,11 @@ fn main() {
         prev_seq += seq_len;
         print!("{}", tokenizer.decode(&sentence, true).unwrap());
         std::io::stdout().flush().unwrap();
+        benchmarker.end_iteration(i);
     }
     println!();
+
+    benchmarker.report();
 
     layer_handle
         .flush(Duration::from_secs(5), Duration::from_secs(5))
