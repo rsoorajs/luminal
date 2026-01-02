@@ -4,14 +4,14 @@ use crate::{
 };
 use cudarc::{
     driver::{
-        CudaContext, CudaFunction, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr,
-        LaunchConfig, PushKernelArg, ValidAsZeroBits,
+        CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut,
+        DeviceRepr, LaunchConfig, PushKernelArg, ValidAsZeroBits,
     },
     nvrtc::{compile_ptx_with_opts, CompileOptions},
 };
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
-use luminal::{op::Output, prelude::ToId};
+use luminal::{graph::Graph, op::Output, prelude::ToId};
 use luminal::{
     prelude::{
         petgraph::{
@@ -24,6 +24,7 @@ use luminal::{
     },
     utils::flatten_z_strides,
 };
+use memmap2::MmapOptions;
 use prost::Message as _;
 use rustc_hash::{FxHashMap, FxHashSet};
 use safetensors::SafeTensors;
@@ -31,11 +32,13 @@ use std::{
     collections::VecDeque,
     ffi::c_void,
     fmt::Debug,
+    fs::File,
     hash::{DefaultHasher, Hash, Hasher},
     io::Read,
     iter::once,
     ptr::{null, null_mut},
     sync::Arc,
+    time::Duration,
 };
 use tracing::{span, Level};
 use tracing_perfetto_sdk_schema::{
@@ -61,6 +64,7 @@ pub enum ExecutableKernel {
         n_barriers: Expression,
         work_queue: Vec<Task>,
         node_to_task_index: FxHashMap<NodeIndex, usize>,
+        module: Arc<CudaModule>,
     },
     Kernel {
         kernel: CudaFunction,
@@ -71,7 +75,31 @@ pub enum ExecutableKernel {
         inputs: Vec<NodeIndex>,
         output: NodeIndex,
         constants: FxHashMap<char, CudaSlice<u8>>,
+        module: Arc<CudaModule>,
     },
+}
+
+impl Drop for ExecutableKernel {
+    fn drop(&mut self) {
+        match self {
+            ExecutableKernel::Megakernel {
+                interpreter_constants,
+                ..
+            } => {
+                // Prevent Drop of CudaSlice<u8> (likely calls cuMemFree).
+                let m = std::mem::take(interpreter_constants);
+                for (_k, v) in m {
+                    std::mem::forget(v);
+                }
+            }
+            ExecutableKernel::Kernel { constants, .. } => {
+                let m = std::mem::take(constants);
+                for (_k, v) in m {
+                    std::mem::forget(v);
+                }
+            }
+        }
+    }
 }
 
 impl Debug for ExecutableKernel {
@@ -88,11 +116,12 @@ impl Debug for ExecutableKernel {
 }
 
 pub struct CudaRuntime {
+    pub hlir_buffers: FxHashMap<NodeIndex, CudaSlice<u8>>,
     pub buffers: FxHashMap<NodeIndex, CudaSlice<u8>>,
     pub llir_graph: luminal::graph::LLIRGraph,
     cuda_stream: Arc<CudaStream>,
     cuda_context: Arc<CudaContext>,
-    custom_state: FxHashMap<String, CustomState>,
+    pub custom_state: FxHashMap<String, CustomState>,
     exec_graph: StableGraph<ExecutableKernel, (), Directed>,
     node_to_exec: FxHashMap<NodeIndex, NodeIndex>,
     timings: Vec<(Vec<SMEvent>, u64)>,
@@ -100,26 +129,19 @@ pub struct CudaRuntime {
 
 impl CudaRuntime {
     #[tracing::instrument(skip_all)]
-    pub fn load_safetensors(&mut self, file_path: &str) {
-        let file = std::fs::read(file_path).unwrap();
-        let st = SafeTensors::deserialize(&file).unwrap();
-        for node in self.llir_graph.node_indices().collect_vec() {
-            if let Some(Input { label, .. }) = self.llir_graph[node].to_op::<Input>() {
+    pub fn load_safetensors(&mut self, cx: &Graph, file_path: &str) {
+        let f = File::open(file_path).unwrap();
+        let mmap = unsafe { MmapOptions::new().map(&f).unwrap() };
+        let st = SafeTensors::deserialize(&mmap).unwrap();
+        for node in cx.graph.node_indices() {
+            if let Some(Input { label, .. }) = cx.graph[node].as_any().downcast_ref::<Input>() {
                 if let Ok(tensor) = st.tensor(label) {
                     match tensor.dtype() {
-                        safetensors::Dtype::BF16 => {
-                            let data: Vec<f32> = tensor
-                                .data()
-                                .chunks_exact(2)
-                                .map(|chunk| {
-                                    half::bf16::from_le_bytes([chunk[0], chunk[1]]).to_f32()
-                                })
-                                .collect();
-                            self.buffers.insert(
-                                node,
-                                data.to_cuda_buffer(&self.cuda_context, &self.cuda_stream),
-                            );
-                            self.register_buffer(node);
+                        safetensors::Dtype::F32 => {
+                            let bytes = tensor.data();
+                            let f32s: &[f32] = bytemuck::cast_slice(bytes);
+                            let dev = f32s.to_cuda_buffer(&self.cuda_context, &self.cuda_stream);
+                            self.hlir_buffers.insert(node, dev);
                         }
                         dtype => unimplemented!("{dtype} loading not supported yet"),
                     }
@@ -305,6 +327,16 @@ impl ToCudaBuffer for Vec<f32> {
     }
 }
 
+impl ToCudaBuffer for &[f32] {
+    fn to_cuda_buffer(&self, _: &Arc<CudaContext>, stream: &Arc<CudaStream>) -> CudaSlice<u8> {
+        stream
+            .memcpy_stod(unsafe {
+                std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
+            })
+            .unwrap()
+    }
+}
+
 impl ToCudaBuffer for Vec<i32> {
     fn to_cuda_buffer(&self, _: &Arc<CudaContext>, stream: &Arc<CudaStream>) -> CudaSlice<u8> {
         stream
@@ -324,9 +356,11 @@ impl Runtime for CudaRuntime {
     );
     type Data = Box<dyn ToCudaBuffer>;
     type ExecReturn = ();
+    type ProfileMetric = Duration;
 
     fn initialize((ctx, stream, custom_state): Self::CompileArg) -> Self {
         Self {
+            hlir_buffers: FxHashMap::default(),
             buffers: FxHashMap::default(),
             cuda_stream: stream,
             cuda_context: ctx,
@@ -339,9 +373,18 @@ impl Runtime for CudaRuntime {
     }
 
     #[tracing::instrument(skip_all)]
-    fn compile(&mut self, llir_graph: &LLIRGraph) {
+    fn load_llir(&mut self, llir_graph: &LLIRGraph) {
+        self.exec_graph.clear();
+        // clear kv cache
+        for (_, s) in &mut self.custom_state {
+            if let CustomState::KVCache(layers) = s {
+                for (k, v) in layers {
+                    self.cuda_stream.memset_zeros(k).unwrap();
+                    self.cuda_stream.memset_zeros(v).unwrap();
+                }
+            }
+        }
         let block_ops = <crate::block::Ops as IntoBlockOp>::into_vec();
-
         let block_ops_in_graph = llir_graph
             .node_indices()
             .filter(|n| llir_graph[*n].to_dialect::<dyn BlockOp>().is_some())
@@ -395,7 +438,7 @@ impl Runtime for CudaRuntime {
                 .chain(once(0.into()))
                 .chain(once(1.into()))
                 .collect::<FxHashSet<_>>();
-            let (interpreter, expressions, interpreter_constants) = compile_interpreter(
+            let (interpreter, module, expressions, interpreter_constants) = compile_interpreter(
                 &self.cuda_context,
                 &self.cuda_stream,
                 &block_ops,
@@ -469,6 +512,7 @@ impl Runtime for CudaRuntime {
             }
             let exec_node = exec_graph.add_node(ExecutableKernel::Megakernel {
                 interpreter,
+                module,
                 interpreter_constants,
                 n_barriers,
                 work_queue: tasks,
@@ -481,8 +525,9 @@ impl Runtime for CudaRuntime {
         // Add kernels
         for kernel in llir_graph.node_indices() {
             if let Some(kernel_op) = llir_graph[kernel].to_dialect::<dyn KernelOp>() {
-                let (kernel_function, code, grid, tb, shared_mem, constants) =
+                let (kernel_function, module, code, grid, tb, shared_mem, constants) =
                     kernel_op.compile(&self.cuda_context, &self.cuda_stream);
+                self.cuda_stream.synchronize().unwrap();
                 let inputs = llir_graph
                     .edges_directed(kernel, Direction::Incoming)
                     .sorted_by_key(|e| e.id())
@@ -492,6 +537,7 @@ impl Runtime for CudaRuntime {
                     kernel,
                     exec_graph.add_node(ExecutableKernel::Kernel {
                         kernel: kernel_function,
+                        module,
                         code,
                         launch_grid: grid,
                         launch_threadblock: tb,
@@ -525,12 +571,48 @@ impl Runtime for CudaRuntime {
     }
 
     #[tracing::instrument(skip_all)]
+    fn profile(
+        &mut self,
+        llir_graph: &LLIRGraph,
+        dyn_map: &FxHashMap<char, usize>,
+    ) -> (Self::ProfileMetric, String) {
+        self.buffers.clear();
+        self.load_llir(llir_graph);
+        self.allocate_intermediate_buffers(dyn_map);
+        let start = std::time::Instant::now();
+        self.execute(dyn_map);
+        (
+            start.elapsed(),
+            pretty_duration::pretty_duration(&start.elapsed(), None),
+        )
+    }
+
+    #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
+        for (hlir_node, llir_node) in self
+            .llir_graph
+            .node_indices()
+            .filter_map(|n| {
+                if let Some(Input { node, .. }) = self.llir_graph[n].to_op::<Input>() {
+                    Some((*node, n))
+                } else {
+                    None
+                }
+            })
+            .collect_vec()
+        {
+            self.buffers.insert(
+                llir_node,
+                self.hlir_buffers[&NodeIndex::new(hlir_node)].clone(),
+            );
+            self.register_buffer(llir_node);
+        }
         let mut timings = vec![];
         for exec_node in toposort(&self.exec_graph, None).unwrap() {
             match &mut self.exec_graph[exec_node] {
                 ExecutableKernel::Kernel {
                     kernel,
+                    module: _,
                     code: _,
                     launch_grid,
                     launch_threadblock,
@@ -652,23 +734,10 @@ impl Runtime for CudaRuntime {
     }
 
     fn set_data(&mut self, id: impl ToId, data: Self::Data) {
-        let id = id.to_id();
-        let id = self
-            .llir_graph
-            .node_indices()
-            .find(|n| {
-                if let Some(Input { node, .. }) = self.llir_graph[*n].to_op::<Input>() {
-                    *node == id.index()
-                } else {
-                    false
-                }
-            })
-            .unwrap();
-        self.buffers.insert(
-            id,
+        self.hlir_buffers.insert(
+            id.to_id(),
             data.to_cuda_buffer(&self.cuda_context, &self.cuda_stream),
         );
-        self.register_buffer(id);
     }
 }
 
@@ -1100,6 +1169,7 @@ pub fn compile_interpreter(
     expressions: &FxHashSet<Expression>,
 ) -> (
     CudaFunction,
+    Arc<CudaModule>,
     FxHashMap<Expression, i32>,
     FxHashMap<char, CudaSlice<u8>>,
 ) {
@@ -1182,6 +1252,7 @@ pub fn compile_interpreter(
         },
     )
     .unwrap();
+    cuda_stream.synchronize().unwrap();
     let module = cuda_ctx.load_module(ptx).unwrap();
     let func = module.load_function("worker_kernel").unwrap();
     let constants = constants
@@ -1195,7 +1266,8 @@ pub fn compile_interpreter(
             )
         })
         .collect();
-    (func, expression_map, constants)
+    cuda_stream.synchronize().unwrap();
+    (func, module, expression_map, constants)
 }
 
 #[allow(unused)]

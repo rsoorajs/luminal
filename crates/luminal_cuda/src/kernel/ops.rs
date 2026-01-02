@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cudarc::{
-    driver::{CudaContext, CudaFunction, CudaSlice, CudaStream},
+    driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream},
     nvrtc::{compile_ptx, CompileOptions},
 };
 use itertools::Itertools;
@@ -85,6 +85,7 @@ impl KernelOp for KernelAdd {
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
+        Arc<CudaModule>,
         String,
         (Expression, Expression, Expression),
         (Expression, Expression, Expression),
@@ -125,6 +126,7 @@ extern \"C\" {{
             .collect();
         (
             func,
+            module,
             kernel,
             (
                 self.out_shape.iter().copied().product::<Expression>(),
@@ -205,6 +207,7 @@ impl KernelOp for KernelMul {
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
+        Arc<CudaModule>,
         String,
         (Expression, Expression, Expression),
         (Expression, Expression, Expression),
@@ -245,6 +248,7 @@ extern \"C\" {{
             .collect();
         (
             func,
+            module,
             kernel,
             (
                 self.out_shape.iter().copied().product::<Expression>(),
@@ -328,6 +332,7 @@ impl KernelOp for KernelGather {
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
+        Arc<CudaModule>,
         String,
         (Expression, Expression, Expression),
         (Expression, Expression, Expression),
@@ -370,6 +375,7 @@ extern \"C\" {{
             .collect();
         (
             func,
+            module,
             kernel,
             (self.out_shape.iter().copied().product(), 1.into(), 1.into()),
             (1.into(), 1.into(), 1.into()),
@@ -438,6 +444,7 @@ impl KernelOp for KernelIota {
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
+        Arc<CudaModule>,
         String,
         (Expression, Expression, Expression),
         (Expression, Expression, Expression),
@@ -468,6 +475,7 @@ extern \"C\" {{
             .collect();
         (
             func,
+            module,
             kernel,
             (self.range, 1.into(), 1.into()),
             (1.into(), 1.into(), 1.into()),

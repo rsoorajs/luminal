@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, CudaStream};
+use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream};
 use luminal::{shape::Expression, utils::EgglogOp};
 use rustc_hash::FxHashMap;
 
@@ -16,6 +16,7 @@ pub trait KernelOp: EgglogOp {
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
+        Arc<CudaModule>,
         String,
         (Expression, Expression, Expression),
         (Expression, Expression, Expression),

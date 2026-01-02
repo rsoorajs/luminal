@@ -1054,4 +1054,18 @@ mod tests {
             simplified.exec(&env).unwrap()
         );
     }
+
+    #[test]
+    fn test_no_explode() {
+        let r = Expression::new(vec![
+            Term::Num(1),
+            Term::Num(8),
+            Term::Num(32),
+            Term::Div,
+            Term::Num(27),
+            Term::Add,
+            Term::Add,
+        ]);
+        r.simplify();
+    }
 }

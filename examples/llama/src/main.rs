@@ -37,6 +37,8 @@ fn main() {
 
     let ctx = luminal_cuda::cudarc::driver::CudaContext::new(0).unwrap();
     ctx.bind_to_thread().unwrap();
+    ctx.set_flags(luminal_cuda::cudarc::driver::sys::CUctx_flags::CU_CTX_SCHED_BLOCKING_SYNC)
+        .unwrap();
     let stream = ctx.default_stream();
 
     println!("Allocating KV Cache...");
@@ -62,11 +64,16 @@ fn main() {
     println!("Building E-Graph...");
     cx.build_search_space::<CudaRuntime>();
 
-    println!("Compiling...");
-    let mut runtime = cx.search(CudaRuntime::initialize((ctx, stream, custom_state)), 10_000);
-
+    let mut runtime = CudaRuntime::initialize((ctx, stream.clone(), custom_state));
     println!("Loading weights...");
-    runtime.load_safetensors("setup/model_combined.safetensors");
+    runtime.load_safetensors(&cx, "setup/model_combined.safetensors");
+
+    println!("Compiling...");
+    cx.set_dyn_dim('s', 1);
+    cx.set_dyn_dim('p', 0);
+    runtime.set_data(input, Box::new(vec![1_i32]));
+    runtime.set_data(token_ids, Box::new(vec![0_i32]));
+    runtime = cx.search(runtime, 10);
 
     print!("{input_sentence}");
     std::io::stdout().flush().unwrap();
@@ -118,10 +125,10 @@ fn main() {
 
     trace_session.stop();
     benchmarker.report();
-    // Dump cuda trace to timeline
-    if let Some(path) = trace_session.perfetto_path {
-        runtime.record_cuda_perfetto_trace(path);
-    }
+    // // Dump cuda trace to timeline
+    // if let Some(path) = trace_session.perfetto_path {
+    //     runtime.record_cuda_perfetto_trace(path);
+    // }
 }
 
 #[tracing::instrument(skip_all)]
