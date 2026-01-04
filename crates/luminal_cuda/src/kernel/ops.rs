@@ -8,12 +8,9 @@ use cudarc::{
 use itertools::Itertools;
 use luminal::{
     graph::{extract_dtype, extract_expr, extract_expr_list},
+    op::OpParam::*,
+    op::*,
     prelude::*,
-    serialized_egraph::SerializedEGraph,
-    utils::{
-        flatten_mul_strides, EgglogOp, LLIROp,
-        OpParam::{self, *},
-    },
 };
 
 pub type Ops = (KernelAdd, KernelMul, KernelIota, KernelGather);

@@ -1,9 +1,4 @@
-use crate::{
-    egglog_utils,
-    prelude::*,
-    serialized_egraph::SerializedEGraph,
-    utils::{EgglogOp, IntoEgglogOp, LLIROp},
-};
+use crate::{egglog_utils, op::*, prelude::*};
 use std::{
     any::TypeId,
     fmt::Debug,
@@ -37,8 +32,6 @@ pub struct Graph {
     pub egraph: Option<SerializedEGraph>,
     /// Available ops
     pub ops: Option<Vec<Arc<Box<dyn EgglogOp>>>>,
-    /// Marked output hlir nodes
-    pub(crate) outputs: FxHashSet<NodeIndex>,
 }
 
 /// A dependency between two nodes
@@ -94,12 +87,12 @@ impl Graph {
 
     /// Create a new tensor with shape S and a name. This name will show up on the graph when displayed
     pub fn named_tensor(&mut self, name: impl ToString, shape: impl ToShape) -> GraphTensor {
-        let id = self.graph.add_node(Box::new(Input {
+        let id = self.graph.add_node(Box::new(crate::hlir::Input {
             node: 0,
             label: name.to_string(),
             dtype: DType::default(),
         }));
-        self.get_op_mut::<Input>(id).node = id.index();
+        self.get_op_mut::<crate::hlir::Input>(id).node = id.index();
         GraphTensor {
             id,
             graph_ref: self,
@@ -136,7 +129,7 @@ impl Graph {
     /// # let mut cx = Graph::new();
     /// let a = cx.tensor(3);
     /// let b_id = cx
-    ///     .add_op(luminal::op::Mul::default())
+    ///     .add_op(luminal::hlir::Mul::default())
     ///     .input(a.id, 0, a.shape)
     ///     .finish();
     /// let b = GraphTensor::from_id(b_id, a.shape, a.graph(), a.dtype);
@@ -180,7 +173,7 @@ impl Graph {
     #[tracing::instrument(skip_all)]
     pub fn build_search_space<Rt: Runtime + 'static>(&mut self) {
         let mut ops = Rt::Ops::into_vec();
-        ops.extend(<crate::op::Ops as IntoEgglogOp>::into_vec());
+        ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
         let (program, root) = hlir_to_egglog(self);
         self.egraph = Some(run_egglog(
             &program,
@@ -380,17 +373,6 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
         let code = graph[n].to_egglog(&sources);
         out.push_str(&format!("(let t{curr_id} {code})\n"));
         names.insert(n, format!("t{curr_id}"));
-        curr_id += 1;
-    }
-
-    // Mark outputs
-    for node in &graph.outputs {
-        out.push_str(&format!(
-            "(let t{curr_id} (Output {} {}))",
-            names[node],
-            node.index()
-        ));
-        names.insert(*node, format!("t{curr_id}"));
         curr_id += 1;
     }
 

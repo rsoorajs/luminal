@@ -1,24 +1,22 @@
 pub mod egglog_utils;
+pub mod frontend;
 pub mod graph;
-pub mod graph_tensor;
-pub mod hl_ops;
+pub mod hlir;
 pub mod op;
-pub mod serialized_egraph;
 pub mod shape;
-pub mod utils;
 pub mod visualization;
 
 #[cfg(test)]
 pub mod tests;
 
 pub mod prelude {
+    pub use crate::egglog_utils::SerializedEGraph;
+    pub use crate::frontend::binary::F32Pow;
+    pub use crate::frontend::*;
     pub use crate::graph::*;
-    pub use crate::graph_tensor::*;
-    pub use crate::hl_ops::binary::F32Pow;
-    pub use crate::hl_ops::*;
-    pub use crate::op::*;
+    pub use crate::hlir::NativeRuntime;
+    pub use crate::op::DType;
     pub use crate::shape::*;
-    pub use crate::utils::*;
     pub use egglog;
     pub use egglog_ast;
     pub use egraph_serialize::NodeId as ENodeId;

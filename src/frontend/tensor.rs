@@ -1,3 +1,5 @@
+use crate::hlir::*;
+use crate::op::*;
 use crate::prelude::*;
 use std::fmt::Debug;
 
@@ -58,7 +60,12 @@ impl GraphTensor {
 
     /// Mark this tensor as an output
     pub fn output(&self) -> GraphTensor {
-        self.graph().outputs.insert(self.id);
+        self.graph()
+            .add_op(Output {
+                node: self.id.index(),
+            })
+            .input(self.id, 0, self.shape)
+            .finish();
         *self
     }
 

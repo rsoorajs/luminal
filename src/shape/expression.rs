@@ -13,7 +13,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use crate::{egglog_utils, graph::extract_expr, serialized_egraph::SerializedEGraph};
+use crate::{egglog_utils, graph::extract_expr, prelude::*};
 use egglog::{prelude::RustSpan, var};
 use egglog_ast::span::Span;
 

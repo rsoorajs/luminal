@@ -1,7 +1,7 @@
-mod symbolic;
+mod expression;
 mod tracker;
 
-pub use symbolic::*;
+pub use expression::*;
 pub use tracker::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

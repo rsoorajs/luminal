@@ -11,23 +11,16 @@ use cudarc::{
 };
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
-use luminal::{
-    graph::Graph,
-    op::Output,
-    prelude::{FxHashMap, FxHashSet, ToId},
-};
-use luminal::{
-    prelude::{
-        petgraph::{
-            algo::{toposort, Cycle},
-            prelude::StableGraph,
-            visit::{EdgeRef, NodeIndexable},
-            Directed, Direction,
-        },
-        Expression, Input, LLIRGraph, NodeIndex, Runtime,
+use luminal::prelude::{
+    petgraph::{
+        algo::{toposort, Cycle},
+        prelude::StableGraph,
+        visit::{EdgeRef, NodeIndexable},
+        Directed, Direction,
     },
-    utils::flatten_z_strides,
+    *,
 };
+use luminal::{hlir::*, op::flatten_z_strides};
 use memmap2::MmapOptions;
 use prost::Message as _;
 use safetensors::SafeTensors;

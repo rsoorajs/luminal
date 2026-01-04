@@ -112,7 +112,7 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    use crate::hl_ops::binary::tests::test_binary;
+    use crate::frontend::binary::tests::test_binary;
 
     #[test]
     fn test_matrix_vector() {

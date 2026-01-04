@@ -5,12 +5,9 @@ use cudarc::driver::{CudaStream, DevicePtr};
 use itertools::Itertools;
 use luminal::{
     graph::{extract_expr, extract_expr_list},
+    op::OpParam::*,
+    op::*,
     prelude::*,
-    serialized_egraph::SerializedEGraph,
-    utils::{
-        flatten_mul_strides, EgglogOp, LLIROp,
-        OpParam::{self, *},
-    },
 };
 
 use crate::block::BlockOp;

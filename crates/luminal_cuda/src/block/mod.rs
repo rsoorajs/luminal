@@ -2,7 +2,7 @@ mod ops;
 pub use ops::*;
 
 use cudarc::driver::CudaStream;
-use luminal::{prelude::FxHashMap, shape::Expression, utils::EgglogOp};
+use luminal::{op::EgglogOp, prelude::FxHashMap, shape::Expression};
 use std::fmt::Debug;
 
 use crate::runtime::CustomState;

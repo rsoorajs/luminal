@@ -8,7 +8,7 @@ use luminal::prelude::*;
 pub mod ops;
 pub use ops::Ops;
 
-pub trait KernelOp: EgglogOp {
+pub trait KernelOp: luminal::op::EgglogOp {
     fn compile(
         &self,
         ctx: &Arc<CudaContext>,

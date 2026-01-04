@@ -2,13 +2,12 @@ use std::fs;
 
 use luminal::{
     self,
-    graph::{hlir_to_egglog, Graph, Runtime},
+    op::IntoEgglogOp,
     prelude::{
         egglog::{prelude::RustSpan, var},
         egglog_ast::span::Span,
         *,
     },
-    serialized_egraph::SerializedEGraph,
     visualization::{ToDot, ToHtml},
 };
 use luminal_cuda::runtime::CudaRuntime;
@@ -31,7 +30,7 @@ fn main() {
 
     let (program, root) = hlir_to_egglog(&cx);
 
-    type Ops = (<CudaRuntime as Runtime>::Ops, luminal::op::Ops);
+    type Ops = (<CudaRuntime as Runtime>::Ops, luminal::hlir::HLIROps);
     let ops = <Ops as IntoEgglogOp>::into_vec();
 
     // run e-graph saturation

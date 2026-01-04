@@ -1,4 +1,6 @@
-use crate::{prelude::*, utils::flatten_z_strides};
+use crate::hlir::*;
+use crate::op::*;
+use crate::prelude::*;
 
 impl GraphTensor {
     /// Swap dimensions of the tensor
@@ -323,7 +325,8 @@ impl GraphTensor {
 #[cfg(test)]
 mod tests {
     use crate::{
-        hl_ops::{binary::tests::test_binary, unary::tests::test_unary},
+        frontend::{binary::tests::test_binary, unary::tests::test_unary},
+        op::DType,
         prelude::*,
     };
     use candle_core::{IndexOp, Tensor};

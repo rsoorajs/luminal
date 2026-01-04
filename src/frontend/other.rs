@@ -1,4 +1,5 @@
-use crate::{op::Constant, prelude::*};
+use crate::hlir::*;
+use crate::prelude::*;
 
 impl Graph {
     /// A scalar expression constant
