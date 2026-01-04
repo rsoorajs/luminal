@@ -92,11 +92,15 @@ impl EgglogOp for RowAdd {
 
 impl BlockOp for RowAdd {
     fn launch_range(&self) -> Vec<Expression> {
-        self.range.clone()
+        if self.range.is_empty() {
+            vec![1.into()]
+        } else {
+            self.range.clone()
+        }
     }
 
     fn output_size(&self) -> Expression {
-        self.range.iter().copied().product::<Expression>() * self.row_width
+        self.range.iter().copied().product::<Expression>().max(1) * self.row_width
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
