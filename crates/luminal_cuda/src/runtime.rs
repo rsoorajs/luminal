@@ -584,6 +584,7 @@ impl Runtime for CudaRuntime {
         self.allocate_intermediate_buffers(dyn_map);
         let start = std::time::Instant::now();
         self.execute(dyn_map);
+        self.timings.clear();
         (
             start.elapsed(),
             pretty_duration::pretty_duration(&start.elapsed(), None),

@@ -71,9 +71,10 @@ fn main() {
     println!("Compiling...");
     cx.set_dyn_dim('s', 1);
     cx.set_dyn_dim('p', 0);
+    // inputs for search
     runtime.set_data(input, Box::new(vec![1_i32]));
     runtime.set_data(token_ids, Box::new(vec![0_i32]));
-    runtime = cx.search(runtime, 10);
+    runtime = cx.search(runtime, 5);
 
     print!("{input_sentence}");
     std::io::stdout().flush().unwrap();
@@ -125,10 +126,10 @@ fn main() {
 
     trace_session.stop();
     benchmarker.report();
-    // // Dump cuda trace to timeline
-    // if let Some(path) = trace_session.perfetto_path {
-    //     runtime.record_cuda_perfetto_trace(path);
-    // }
+    // Dump cuda trace to timeline
+    if let Some(path) = trace_session.perfetto_path {
+        runtime.record_cuda_perfetto_trace(path);
+    }
 }
 
 #[tracing::instrument(skip_all)]
