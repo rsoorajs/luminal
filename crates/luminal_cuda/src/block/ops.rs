@@ -5,15 +5,13 @@ use cudarc::driver::{CudaStream, DevicePtr};
 use itertools::Itertools;
 use luminal::{
     graph::{extract_expr, extract_expr_list},
-    prelude::ENodeId,
+    prelude::*,
     serialized_egraph::SerializedEGraph,
-    shape::Expression,
     utils::{
-        flatten_mul_strides, CStructBuilder, EgglogOp, LLIROp,
+        flatten_mul_strides, EgglogOp, LLIROp,
         OpParam::{self, *},
     },
 };
-use rustc_hash::FxHashMap;
 
 use crate::block::BlockOp;
 
@@ -128,7 +126,7 @@ impl BlockOp for RowAdd {
         _: &CudaStream,
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
-        CStructBuilder::new()
+        CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.out_stride)])
@@ -270,7 +268,7 @@ impl BlockOp for RowSwishMul {
         _: &CudaStream,
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
-        CStructBuilder::new()
+        CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
@@ -491,7 +489,7 @@ impl BlockOp for RowRMSNorm {
         _: &CudaStream,
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
-        CStructBuilder::new()
+        CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&self.row_width])
@@ -623,7 +621,7 @@ impl BlockOp for RowRope {
         _: &CudaStream,
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
-        CStructBuilder::new()
+        CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&self.row_width])
@@ -938,7 +936,7 @@ impl BlockOp for TileMatmul {
         m_pos_stride[self.range.len() - 2] = 1.into();
         let mut n_pos_stride = vec![0.into(); self.range.len()];
         n_pos_stride[self.range.len() - 1] = 1.into();
-        CStructBuilder::new()
+        CStruct::new()
             .ints(
                 &self
                     .untiled_range
@@ -1277,7 +1275,7 @@ impl BlockOp for GQAAttention {
         group_pos_stride[self.range.len() - 2] = 1.into();
         let mut head_pos_stride = vec![0.into(); self.range.len()];
         head_pos_stride[self.range.len() - 3] = 1.into();
-        CStructBuilder::new()
+        CStruct::new()
             .int(expressions[&self.head_dim])
             .int(expressions[&self.cur_seq])
             .int(expressions[&self.kv_row_stride])
@@ -1314,5 +1312,109 @@ impl BlockOp for GQAAttention {
             flatten_mul_strides(&self.range, &group_pos_stride),
             flatten_mul_strides(&self.range, &head_pos_stride),
         ]
+    }
+}
+
+#[derive(Debug)]
+pub struct CStruct {
+    buf: Vec<u8>,
+    max_align: usize,
+}
+
+impl Default for CStruct {
+    fn default() -> Self {
+        Self {
+            buf: Vec::new(),
+            max_align: 1,
+        }
+    }
+}
+
+impl CStruct {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn align_to(&mut self, align: usize) {
+        self.max_align = self.max_align.max(align);
+
+        let len = self.buf.len();
+        let rem = len % align;
+        if rem != 0 {
+            let pad = align - rem;
+            self.buf.extend(std::iter::repeat_n(0u8, pad));
+        }
+    }
+
+    pub fn int(mut self, v: i32) -> Self {
+        self.align_to(4);
+        self.buf.extend_from_slice(&v.to_ne_bytes());
+        self
+    }
+
+    pub fn ints(mut self, vs: &[i32]) -> Self {
+        self.align_to(4);
+        for &v in vs {
+            self.buf.extend_from_slice(&v.to_ne_bytes());
+        }
+        self
+    }
+
+    pub fn float(mut self, v: f32) -> Self {
+        self.align_to(4);
+        self.buf.extend_from_slice(&v.to_ne_bytes());
+        self
+    }
+
+    pub fn floats(mut self, vs: &[f32]) -> Self {
+        self.align_to(4);
+        for &v in vs {
+            self.buf.extend_from_slice(&v.to_ne_bytes());
+        }
+        self
+    }
+
+    pub fn bool(mut self, v: bool) -> Self {
+        self.align_to(1);
+        self.buf.push(if v { 1 } else { 0 });
+        self
+    }
+
+    pub fn ptr_const_f32(mut self, p: *const f32) -> Self {
+        let ptr_size = std::mem::size_of::<usize>(); // usually 8
+        let ptr_align = ptr_size;
+        self.align_to(ptr_align);
+
+        let addr = p as usize;
+        let bytes = addr.to_ne_bytes();
+
+        self.buf.extend_from_slice(&bytes[..ptr_size]);
+        self
+    }
+
+    pub fn ptr_mut_f32(self, p: *mut f32) -> Self {
+        self.ptr_const_f32(p as *const f32)
+    }
+
+    /// Pad the struct size to a multiple of max_align.
+    pub fn finish_struct(mut self) -> Vec<u8> {
+        let align = self.max_align;
+        if align > 1 {
+            let len = self.buf.len();
+            let rem = len % align;
+            if rem != 0 {
+                let pad = align - rem;
+                self.buf.extend(std::iter::repeat_n(0u8, pad));
+            }
+        }
+        self.buf
+    }
+
+    /// Insert a raw byte field (e.g., another struct).
+    /// `align` must be the alignment of the nested struct.
+    pub fn bytes(mut self, align: usize, data: &[u8]) -> Self {
+        self.align_to(align);
+        self.buf.extend_from_slice(data);
+        self
     }
 }

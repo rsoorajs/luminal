@@ -1,6 +1,5 @@
 use cudarc::driver::CudaContext;
 use luminal::prelude::*;
-use rustc_hash::FxHashMap;
 
 use crate::runtime::CudaRuntime;
 

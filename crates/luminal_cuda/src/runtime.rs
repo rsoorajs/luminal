@@ -11,7 +11,11 @@ use cudarc::{
 };
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
-use luminal::{graph::Graph, op::Output, prelude::ToId};
+use luminal::{
+    graph::Graph,
+    op::Output,
+    prelude::{FxHashMap, FxHashSet, ToId},
+};
 use luminal::{
     prelude::{
         petgraph::{
@@ -26,7 +30,6 @@ use luminal::{
 };
 use memmap2::MmapOptions;
 use prost::Message as _;
-use rustc_hash::{FxHashMap, FxHashSet};
 use safetensors::SafeTensors;
 use std::{
     collections::VecDeque,

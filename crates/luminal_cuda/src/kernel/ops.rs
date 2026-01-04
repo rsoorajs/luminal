@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::{cuda_dtype, kernel::KernelOp};
 use cudarc::{
     driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream},
     nvrtc::{compile_ptx, CompileOptions},
@@ -7,18 +8,13 @@ use cudarc::{
 use itertools::Itertools;
 use luminal::{
     graph::{extract_dtype, extract_expr, extract_expr_list},
-    op::DType,
-    prelude::ENodeId,
+    prelude::*,
     serialized_egraph::SerializedEGraph,
-    shape::Expression,
     utils::{
         flatten_mul_strides, EgglogOp, LLIROp,
         OpParam::{self, *},
     },
 };
-use rustc_hash::{FxHashMap, FxHashSet};
-
-use crate::{cuda_dtype, kernel::KernelOp};
 
 pub type Ops = (KernelAdd, KernelMul, KernelIota, KernelGather);
 

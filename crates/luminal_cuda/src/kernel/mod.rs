@@ -3,8 +3,7 @@
 use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream};
-use luminal::{shape::Expression, utils::EgglogOp};
-use rustc_hash::FxHashMap;
+use luminal::prelude::*;
 
 pub mod ops;
 pub use ops::Ops;
