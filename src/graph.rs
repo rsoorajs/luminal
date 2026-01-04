@@ -246,17 +246,14 @@ impl Graph {
             print!("\r\x1b[2K"); // clear line
             std::io::stdout().flush().unwrap();
             println!(
-                "   {:>6}  {}",
+                "   {:>6}  Graph {}: {}",
                 "Searched".green().bold(),
-                format!(
-                    "Graph {}: {}",
-                    i + 1,
-                    if new_best {
-                        display_metric.bold().green().to_string()
-                    } else {
-                        display_metric
-                    }
-                )
+                i + 1,
+                if new_best {
+                    display_metric.bold().green().to_string()
+                } else {
+                    display_metric
+                }
             );
         }
 
