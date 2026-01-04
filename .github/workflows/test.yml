@@ -16,7 +16,7 @@ jobs:
         timeout-minutes: 20
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
             - name: Run tests
               run: sudo apt-get install protobuf-compiler; rustup update; cargo test --workspace --exclude luminal_cuda --verbose
 
@@ -26,7 +26,7 @@ jobs:
         timeout-minutes: 20
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
             - name: Run clippy
               run: sudo apt-get install protobuf-compiler; rustup update; cargo clippy --all-targets -- -D warnings
 
@@ -36,7 +36,7 @@ jobs:
         timeout-minutes: 20
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
             - name: Format
               run: cargo fmt --all --check
     cuda_unit_test:
@@ -48,7 +48,7 @@ jobs:
             LD_LIBRARY_PATH: /usr/local/cuda-12.8/lib64
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
             - name: Install system deps
               run: |
                   sudo apt-get update
@@ -72,7 +72,7 @@ jobs:
     #         LD_LIBRARY_PATH: /usr/local/cuda-12.8/lib64
 
     #     steps:
-    #         - uses: actions/checkout@v4
+    #         - uses: actions/checkout@v6
     #         - name: Install system deps
     #           run: |
     #               sudo apt-get update
