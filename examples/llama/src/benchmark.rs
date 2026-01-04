@@ -7,7 +7,7 @@ pub struct Benchmarker {
     peak_tflops: f64,
     peak_gbps: f64,
     start_generation: Instant,
-    ttft: Option<Duration>,
+    ttft: Duration,
     decode_durations: Vec<Duration>,
     seq_lengths: Vec<(usize, usize)>,
     current_iter_start: Option<Instant>,
@@ -20,7 +20,7 @@ impl Benchmarker {
             peak_tflops,
             peak_gbps,
             start_generation: Instant::now(),
-            ttft: None,
+            ttft: Duration::default(),
             decode_durations: vec![],
             seq_lengths: vec![],
             current_iter_start: None,
@@ -38,7 +38,7 @@ impl Benchmarker {
         if let Some(start) = self.current_iter_start.take() {
             let duration = start.elapsed();
             if iteration == 0 {
-                self.ttft = Some(duration);
+                self.ttft = duration;
             } else {
                 self.decode_durations.push(duration);
             }
@@ -52,11 +52,6 @@ impl Benchmarker {
             .decode_durations
             .iter()
             .fold(Duration::ZERO, |acc, value| acc + *value);
-        let tpot = if self.decode_durations.is_empty() {
-            None
-        } else {
-            Some(decode_total / self.decode_durations.len() as u32)
-        };
 
         let (total_flops, total_bytes) = self
             .seq_lengths
@@ -68,37 +63,26 @@ impl Benchmarker {
 
         let achieved_tflops = total_flops as f64 / total_elapsed.as_secs_f64() / 1e12;
         let achieved_gbps = total_bytes as f64 / total_elapsed.as_secs_f64() / 1e9;
-        let mfu = if self.peak_tflops > 0.0 {
-            Some(achieved_tflops / self.peak_tflops)
-        } else {
-            None
-        };
-        let mbu = if self.peak_gbps > 0.0 {
-            Some(achieved_gbps / self.peak_gbps)
-        } else {
-            None
-        };
         println!("Benchmark results:");
-        if let Some(ttft) = self.ttft {
-            println!("  TTFT: {:.2} ms", ttft.as_secs_f64() * 1e3);
-        }
-        if let Some(tpot) = tpot {
-            println!("  TPOT: {:.2} ms", tpot.as_secs_f64() * 1e3);
+        println!("  TTFT: {:.2} ms", self.ttft.as_secs_f64() * 1e3);
+        if !self.decode_durations.is_empty() {
+            println!(
+                "  TPOT: {:.2} ms",
+                (decode_total / self.decode_durations.len() as u32).as_secs_f64() * 1e3
+            );
         }
         println!(
             "  Achieved: {:.2} TFLOP/s, {:.2} GB/s",
             achieved_tflops, achieved_gbps
         );
-        if let Some(mfu) = mfu {
-            println!("  MFU (est): {:.1}%", mfu * 100.0);
-        } else {
-            println!("  MFU (est): N/A (set LUMINAL_PEAK_TFLOPS)");
-        }
-        if let Some(mbu) = mbu {
-            println!("  MBU (est): {:.1}%", mbu * 100.0);
-        } else {
-            println!("  MBU (est): N/A (set LUMINAL_PEAK_BW_GBPS)");
-        }
+        println!(
+            "  MFU (est): {:.2}%",
+            (achieved_tflops / self.peak_tflops) * 100.0
+        );
+        println!(
+            "  MBU (est): {:.2}%",
+            (achieved_gbps / self.peak_gbps) * 100.0
+        );
     }
 }
 

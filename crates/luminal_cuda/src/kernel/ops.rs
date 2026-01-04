@@ -1,24 +1,20 @@
 use std::sync::Arc;
 
+use crate::{cuda_dtype, kernel::KernelOp};
 use cudarc::{
-    driver::{CudaContext, CudaFunction, CudaSlice, CudaStream},
+    driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream},
     nvrtc::{compile_ptx, CompileOptions},
 };
 use itertools::Itertools;
 use luminal::{
     graph::{extract_dtype, extract_expr, extract_expr_list},
-    op::DType,
-    prelude::ENodeId,
+    prelude::*,
     serialized_egraph::SerializedEGraph,
-    shape::Expression,
     utils::{
         flatten_mul_strides, EgglogOp, LLIROp,
         OpParam::{self, *},
     },
 };
-use rustc_hash::{FxHashMap, FxHashSet};
-
-use crate::{cuda_dtype, kernel::KernelOp};
 
 pub type Ops = (KernelAdd, KernelMul, KernelIota, KernelGather);
 
@@ -85,6 +81,7 @@ impl KernelOp for KernelAdd {
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
+        Arc<CudaModule>,
         String,
         (Expression, Expression, Expression),
         (Expression, Expression, Expression),
@@ -125,6 +122,7 @@ extern \"C\" {{
             .collect();
         (
             func,
+            module,
             kernel,
             (
                 self.out_shape.iter().copied().product::<Expression>(),
@@ -205,6 +203,7 @@ impl KernelOp for KernelMul {
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
+        Arc<CudaModule>,
         String,
         (Expression, Expression, Expression),
         (Expression, Expression, Expression),
@@ -245,6 +244,7 @@ extern \"C\" {{
             .collect();
         (
             func,
+            module,
             kernel,
             (
                 self.out_shape.iter().copied().product::<Expression>(),
@@ -328,6 +328,7 @@ impl KernelOp for KernelGather {
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
+        Arc<CudaModule>,
         String,
         (Expression, Expression, Expression),
         (Expression, Expression, Expression),
@@ -370,6 +371,7 @@ extern \"C\" {{
             .collect();
         (
             func,
+            module,
             kernel,
             (self.out_shape.iter().copied().product(), 1.into(), 1.into()),
             (1.into(), 1.into(), 1.into()),
@@ -438,6 +440,7 @@ impl KernelOp for KernelIota {
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
+        Arc<CudaModule>,
         String,
         (Expression, Expression, Expression),
         (Expression, Expression, Expression),
@@ -468,6 +471,7 @@ extern \"C\" {{
             .collect();
         (
             func,
+            module,
             kernel,
             (self.range, 1.into(), 1.into()),
             (1.into(), 1.into(), 1.into()),

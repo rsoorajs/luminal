@@ -1458,6 +1458,7 @@ impl Runtime for NativeRuntime {
     type CompileArg = ();
     type Data = NativeData;
     type ExecReturn = ();
+    type ProfileMetric = usize;
 
     fn initialize(_: Self::CompileArg) -> Self {
         Self {
@@ -1466,7 +1467,15 @@ impl Runtime for NativeRuntime {
         }
     }
 
-    fn compile(&mut self, llir_graph: &LLIRGraph) {
+    fn profile(
+        &mut self,
+        _: &LLIRGraph,
+        _: &FxHashMap<char, usize>,
+    ) -> (Self::ProfileMetric, String) {
+        (0, "0 ms".to_string())
+    }
+
+    fn load_llir(&mut self, llir_graph: &LLIRGraph) {
         // Extract nativeop graph
         let mut graph = StableGraph::new();
         for node in llir_graph.node_weights() {
