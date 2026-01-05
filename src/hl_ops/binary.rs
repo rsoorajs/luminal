@@ -336,6 +336,7 @@ pub(super) mod tests {
     };
     use candle_core::{DType, Device, Tensor};
     use itertools::Itertools;
+    use proptest::prelude::*;
 
     pub fn identity(v: Vec<f32>) -> Vec<f32> {
         v
@@ -397,49 +398,67 @@ pub(super) mod tests {
         assert_close(rt.get_f32(c.id), &ref_c.to_vec1::<f32>().unwrap())
     }
 
-    #[test]
-    fn test_add() {
-        test_binary(27, 27, |a, b| a + b, |a, b| (&a + &b).unwrap());
-        test_binary((2, 31), (2, 31), |a, b| a + b, |a, b| (&a + &b).unwrap());
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_add(x in 1..100, y in 1..5) {
+            test_binary(x, x, |a, b| a + b, |a, b| (&a + &b).unwrap());
+            test_binary((y, x), (y, x), |a, b| a + b, |a, b| (&a + &b).unwrap());
+        }
     }
 
-    #[test]
-    fn test_sub() {
-        test_binary(27, 27, |a, b| a - b, |a, b| (&a - &b).unwrap());
-        test_binary((2, 31), (2, 31), |a, b| a - b, |a, b| (&a - &b).unwrap());
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_sub(x in 1..100, y in 1..5) {
+            test_binary(x, x, |a, b| a - b, |a, b| (&a - &b).unwrap());
+            test_binary((y, x), (y, x), |a, b| a - b, |a, b| (&a - &b).unwrap());
+        }
     }
 
-    #[test]
-    fn test_mul() {
-        test_binary(27, 27, |a, b| a * b, |a, b| (&a * &b).unwrap());
-        test_binary(
-            (2, 1, 3),
-            (2, 1, 3),
-            |a, b| a * b,
-            |a, b| (&a * &b).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_mul(x in 1..100, y in 1..5) {
+            test_binary(x, x, |a, b| a * b, |a, b| (&a * &b).unwrap());
+            test_binary(
+                (2, y, x),
+                (2, y, x),
+                |a, b| a * b,
+                |a, b| (&a * &b).unwrap(),
+            );
+        }
     }
 
-    #[test]
-    fn test_div() {
-        test_binary_transforms(
-            27,
-            27,
-            |a, b| a / b,
-            |a, b| (&a / &b).unwrap(),
-            identity,
-            shift_from_zero,
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_div(x in 1..100) {
+            test_binary_transforms(
+                x,
+                x,
+                |a, b| a / b,
+                |a, b| (&a / &b).unwrap(),
+                identity,
+                shift_from_zero,
+            );
+        }
     }
 
-    #[test]
-    fn test_maximum() {
-        test_binary(27, 27, |a, b| a.maximum(b), |a, b| a.maximum(&b).unwrap());
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_maximum(x in 1..100) {
+            test_binary(x, x, |a, b| a.maximum(b), |a, b| a.maximum(&b).unwrap());
+        }
     }
 
-    #[test]
-    fn test_minimum() {
-        test_binary(27, 27, |a, b| a.minimum(b), |a, b| a.minimum(&b).unwrap());
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_minimum(x in 1..100) {
+            test_binary(x, x, |a, b| a.minimum(b), |a, b| a.minimum(&b).unwrap());
+        }
     }
 
     #[test]

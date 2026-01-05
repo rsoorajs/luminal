@@ -39,6 +39,7 @@ edition = "2024"
 candle-core = "0.9.1"
 candle-nn = "0.9.1"
 ordered-float = "5.1.0"
+proptest = "1.9.0"
 
 [workspace]
 members = [
