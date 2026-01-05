@@ -8,7 +8,10 @@ use luminal::{
     op::DType,
     prelude::FxHashMap,
 };
-use luminal_cuda::runtime::{CudaRuntime, CustomState};
+use luminal_cuda::{
+    cuda_bandwidth_gbps, cuda_compute_f32_tflops,
+    runtime::{CudaRuntime, CustomState},
+};
 use model::*;
 use std::io::Write;
 use tokenizers::Tokenizer;
@@ -64,7 +67,7 @@ fn main() {
     println!("Building E-Graph...");
     cx.build_search_space::<CudaRuntime>();
 
-    let mut runtime = CudaRuntime::initialize((ctx, stream.clone(), custom_state));
+    let mut runtime = CudaRuntime::initialize((ctx.clone(), stream.clone(), custom_state));
     println!("Loading weights...");
     runtime.load_safetensors(&cx, "setup/model_combined.safetensors");
     stream.synchronize().unwrap();
@@ -80,7 +83,7 @@ fn main() {
     std::io::stdout().flush().unwrap();
 
     let mut prev_seq = 0;
-    let mut benchmarker = Benchmarker::new(756., 2_000.); // H100 specs
+    let mut benchmarker = Benchmarker::new(); // H100 specs
     for i in 0..gen_tokens {
         let span = if i == 0 {
             span!(Level::INFO, "prefill")
@@ -125,7 +128,11 @@ fn main() {
     println!();
 
     trace_session.stop();
-    benchmarker.report();
+    if let (Some(flops), Some(bandwidth)) =
+        (cuda_compute_f32_tflops(&ctx), cuda_bandwidth_gbps(&ctx))
+    {
+        benchmarker.report(flops as f64, bandwidth as f64);
+    }
     // Dump cuda trace to timeline
     if let Some(path) = trace_session.perfetto_path {
         runtime.record_cuda_perfetto_trace(path);

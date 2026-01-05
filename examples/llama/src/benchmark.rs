@@ -4,8 +4,6 @@ use crate::model::{HEAD_DIM, HIDDEN, INTERMEDIATE, KV_GROUPS, LAYERS, VOCAB_SIZE
 
 /// Handles all benchmarking metrics and reporting for the LLM inference
 pub struct Benchmarker {
-    peak_tflops: f64,
-    peak_gbps: f64,
     start_generation: Instant,
     ttft: Duration,
     decode_durations: Vec<Duration>,
@@ -14,11 +12,8 @@ pub struct Benchmarker {
 }
 
 impl Benchmarker {
-    /// Create a new benchmarker with the specified capacity for decode iterations
-    pub fn new(peak_tflops: f64, peak_gbps: f64) -> Self {
+    pub fn new() -> Self {
         Self {
-            peak_tflops,
-            peak_gbps,
             start_generation: Instant::now(),
             ttft: Duration::default(),
             decode_durations: vec![],
@@ -46,7 +41,7 @@ impl Benchmarker {
     }
 
     /// Print the benchmark results to stdout
-    pub fn report(&self) {
+    pub fn report(&self, peak_tflops: f64, peak_gbps: f64) {
         let total_elapsed = self.start_generation.elapsed();
         let decode_total = self
             .decode_durations
@@ -77,12 +72,9 @@ impl Benchmarker {
         );
         println!(
             "  MFU (est): {:.2}%",
-            (achieved_tflops / self.peak_tflops) * 100.0
+            (achieved_tflops / peak_tflops) * 100.0
         );
-        println!(
-            "  MBU (est): {:.2}%",
-            (achieved_gbps / self.peak_gbps) * 100.0
-        );
+        println!("  MBU (est): {:.2}%", (achieved_gbps / peak_gbps) * 100.0);
     }
 }
 
