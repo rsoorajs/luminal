@@ -262,6 +262,7 @@ impl ShapeTracker {
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
+    use proptest::prelude::*;
     #[test]
     fn test_idx_expr() {
         let mut tracker = ShapeTracker::new([
@@ -276,75 +277,78 @@ mod tests {
         println!("Val: {:?}", tracker.valid_expression());
     }
 
-    #[test]
-    fn test_permute_and_expand() {
-        let mut tracker = ShapeTracker::new((2, 3, 4));
-        assert!(tracker.is_contiguous());
-        assert_eq!(
-            tracker.strides.as_slice(),
-            &[
-                Expression::from(12),
-                Expression::from(4),
-                Expression::from(1)
-            ]
-        );
-        tracker.permute(&[1, 2, 0]);
-        assert_eq!(
-            tracker.dims.as_slice(),
-            &[
-                Expression::from(3),
-                Expression::from(4),
-                Expression::from(2)
-            ]
-        );
-        assert_eq!(
-            tracker.strides.as_slice(),
-            &[
-                Expression::from(4),
-                Expression::from(1),
-                Expression::from(12)
-            ]
-        );
-        assert!(!tracker.is_contiguous());
-        tracker.expand_dim(1, 1);
-        assert_eq!(
-            tracker.dims.as_slice(),
-            &[
-                Expression::from(3),
-                Expression::from(1),
-                Expression::from(4),
-                Expression::from(2)
-            ]
-        );
-        assert_eq!(
-            tracker.strides.as_slice(),
-            &[
-                Expression::from(4),
-                Expression::from(0),
-                Expression::from(1),
-                Expression::from(12)
-            ]
-        );
-        let removed = tracker.remove_dim(1);
-        assert_eq!(removed, Expression::from(1));
-        assert_eq!(
-            tracker.dims.as_slice(),
-            &[
-                Expression::from(3),
-                Expression::from(4),
-                Expression::from(2)
-            ]
-        );
-        let mut tracker = ShapeTracker::new((1, 3));
-        tracker.expand((2, 3));
-        assert_eq!(
-            tracker.dims.as_slice(),
-            &[Expression::from(2), Expression::from(3)]
-        );
-        assert_eq!(
-            tracker.strides.as_slice(),
-            &[Expression::from(0), Expression::from(1)]
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_permute_and_expand(a in 1usize..10, b in 1usize..10, c in 1usize..10, expand_a in 2usize..10) {
+            let mut tracker = ShapeTracker::new((a, b, c));
+            assert!(tracker.is_contiguous());
+            assert_eq!(
+                tracker.strides.as_slice(),
+                &[
+                    Expression::from(b * c),
+                    Expression::from(c),
+                    Expression::from(1)
+                ]
+            );
+            tracker.permute(&[1, 2, 0]);
+            assert_eq!(
+                tracker.dims.as_slice(),
+                &[
+                    Expression::from(b),
+                    Expression::from(c),
+                    Expression::from(a)
+                ]
+            );
+            assert_eq!(
+                tracker.strides.as_slice(),
+                &[
+                    Expression::from(c),
+                    Expression::from(1),
+                    Expression::from(b * c)
+                ]
+            );
+            assert!(!tracker.is_contiguous());
+            tracker.expand_dim(1, 1);
+            assert_eq!(
+                tracker.dims.as_slice(),
+                &[
+                    Expression::from(b),
+                    Expression::from(1),
+                    Expression::from(c),
+                    Expression::from(a)
+                ]
+            );
+            assert_eq!(
+                tracker.strides.as_slice(),
+                &[
+                    Expression::from(c),
+                    Expression::from(0),
+                    Expression::from(1),
+                    Expression::from(b * c)
+                ]
+            );
+            let removed = tracker.remove_dim(1);
+            assert_eq!(removed, Expression::from(1));
+            assert_eq!(
+                tracker.dims.as_slice(),
+                &[
+                    Expression::from(b),
+                    Expression::from(c),
+                    Expression::from(a)
+                ]
+            );
+            let mut tracker = ShapeTracker::new((1, c));
+            tracker.expand((expand_a, c));
+            assert_eq!(
+                tracker.dims.as_slice(),
+                &[Expression::from(expand_a), Expression::from(c)]
+            );
+            assert_eq!(
+                tracker.strides.as_slice(),
+                &[Expression::from(0), Expression::from(1)]
+            );
+        }
     }
 
     // #[test]

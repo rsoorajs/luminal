@@ -125,15 +125,13 @@ impl ConvND {
         let unfolded_dims = unfolded.dims();
 
         // Capture output spatial dimensions from the unfolded view.
-        let output_dims: Vec<Expression> = unfolded_dims[batch_len + 1..batch_len + 1 + spatial]
-            .iter()
-            .copied()
-            .collect();
+        let output_dims: Vec<Expression> =
+            unfolded_dims[batch_len + 1..batch_len + 1 + spatial].to_vec();
 
         // Reorder to [batch..., out..., channels, kernel_spatial..., kernel_batch..., kernel_channel].
         let mut order2 = Vec::with_capacity(2 * rank);
         // window batch dims
-        order2.extend((0)..batch_len);
+        order2.extend(0..batch_len);
         // window spatial dims (outputs)
         order2.extend(batch_len + 1..batch_len + 1 + spatial);
         // window channel dim
@@ -277,7 +275,7 @@ mod tests {
             }
             None => output,
         };
-        Ok(output.flatten_all()?.to_vec1::<f32>()?)
+        output.flatten_all()?.to_vec1::<f32>()
     }
 
     fn candle_conv2d_output(
@@ -327,7 +325,7 @@ mod tests {
             }
             None => output,
         };
-        Ok(output.flatten_all()?.to_vec1::<f32>()?)
+        output.flatten_all()?.to_vec1::<f32>()
     }
 
     #[test]

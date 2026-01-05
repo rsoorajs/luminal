@@ -1,15 +1,13 @@
-use std::any::TypeId;
-
-use itertools::Itertools;
-use petgraph::{algo::toposort, visit::EdgeRef, Direction};
+use petgraph::{visit::EdgeRef, Direction};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use luminal::{
-    op::{Add, Exp2, LessThan, Log2, MaxReduce, Mod, Mul, Recip, Sin, Sqrt, SumReduce},
+    op::{MaxReduce, SumReduce},
     prelude::*,
 };
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Autograd(Vec<NodeIndex>, NodeIndex);
 
 impl Autograd {
@@ -19,6 +17,7 @@ impl Autograd {
 }
 
 // Run dfs with a starting stack and record all encountered nodes in a set
+#[allow(dead_code)]
 fn build_dfs_set(
     stack: &mut Vec<NodeIndex>,
     graph: &HLIRGraph,
@@ -173,6 +172,7 @@ fn build_dfs_set(
 //     }
 // }
 
+#[allow(dead_code)]
 fn add_grad(
     mut grad: GraphTensor,
     fwd: GraphTensor,
