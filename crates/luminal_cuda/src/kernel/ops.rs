@@ -68,12 +68,12 @@ impl EgglogOp for KernelMaxReduce {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
                 out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                iters: extract_expr(egraph, children[1], expr_cache).unwrap(),           // ← extract_expr
+                iters: extract_expr(egraph, children[1], expr_cache).unwrap(),
                 in_stride: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
-                iter_stride: extract_expr(egraph, children[4], expr_cache).unwrap(),     // ← extract_expr
+                iter_stride: extract_expr(egraph, children[4], expr_cache).unwrap(),
                 out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
-                dtype: extract_dtype(egraph, children[6]),                                // ← extract_dtype
-            }) as Box<dyn KernelOp>),                                                     // ← cast added
+                dtype: extract_dtype(egraph, children[6]),
+            }) as Box<dyn KernelOp>),
             vec![children[2]],
         )
     }
@@ -247,12 +247,12 @@ impl EgglogOp for KernelMeanReduce {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
                 out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                iters: extract_expr(egraph, children[1], expr_cache).unwrap(),           // ← extract_expr
+                iters: extract_expr(egraph, children[1], expr_cache).unwrap(),
                 in_stride: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
-                iter_stride: extract_expr(egraph, children[4], expr_cache).unwrap(),     // ← extract_expr
+                iter_stride: extract_expr(egraph, children[4], expr_cache).unwrap(),
                 out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
-                dtype: extract_dtype(egraph, children[6]),                                // ← extract_dtype
-            }) as Box<dyn KernelOp>),                                                     // ← cast added
+                dtype: extract_dtype(egraph, children[6]),
+            }) as Box<dyn KernelOp>),
             vec![children[2]],
         )
     }
@@ -421,12 +421,12 @@ impl EgglogOp for KernelSumReduce {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
                 out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                iters: extract_expr(egraph, children[1], expr_cache).unwrap(),           // ← extract_expr
+                iters: extract_expr(egraph, children[1], expr_cache).unwrap(),
                 in_stride: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
-                iter_stride: extract_expr(egraph, children[4], expr_cache).unwrap(),     // ← extract_expr
+                iter_stride: extract_expr(egraph, children[4], expr_cache).unwrap(),
                 out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
-                dtype: extract_dtype(egraph, children[6]),                                // ← extract_dtype
-            }) as Box<dyn KernelOp>),                                                     // ← cast added
+                dtype: extract_dtype(egraph, children[6]),
+            }) as Box<dyn KernelOp>),
             vec![children[2]],
         )
     }
