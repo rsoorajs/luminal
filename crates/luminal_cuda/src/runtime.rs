@@ -4,8 +4,8 @@ use crate::{
 };
 use cudarc::{
     driver::{
-        CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut,
-        DeviceRepr, LaunchConfig, PushKernelArg, ValidAsZeroBits,
+        CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr,
+        LaunchConfig, PushKernelArg, ValidAsZeroBits,
     },
     nvrtc::{compile_ptx_with_opts, CompileOptions},
 };
@@ -184,7 +184,7 @@ impl CudaRuntime {
             .collect_vec()
     }
 
-    fn register_buffer(&mut self, llir_node: NodeIndex) {
+    fn register_buffer(&mut self, llir_node: NodeIndex, ptr: u64) {
         // Remap pointers in work queue
         if let Some(ExecutableKernel::Megakernel {
             work_queue,
@@ -196,12 +196,7 @@ impl CudaRuntime {
             .and_then(|n| self.exec_graph.node_weight_mut(*n))
         {
             if self.llir_graph[llir_node].to_op::<Input>().is_none() {
-                work_queue[node_to_task_index[&llir_node]].out_ptr =
-                    self.buffers
-                        .get_mut(&llir_node)
-                        .unwrap()
-                        .device_ptr_mut(&self.cuda_stream)
-                        .0 as *mut f32;
+                work_queue[node_to_task_index[&llir_node]].out_ptr = ptr as *mut f32;
             }
         }
         for edge in self
@@ -224,8 +219,7 @@ impl CudaRuntime {
                 .get(&dest)
                 .and_then(|n| self.exec_graph.node_weight_mut(*n))
             {
-                work_queue[node_to_task_index[&dest]].source_ptrs[n_input] =
-                    self.buffers[&llir_node].device_ptr(&self.cuda_stream).0 as *const f32;
+                work_queue[node_to_task_index[&dest]].source_ptrs[n_input] = ptr as *const f32;
             }
         }
     }
@@ -243,7 +237,8 @@ impl CudaRuntime {
                         .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
                         .unwrap(),
                 );
-                self.register_buffer(node);
+                let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+                self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
                 self.buffers.insert(
                     node,
@@ -251,7 +246,8 @@ impl CudaRuntime {
                         .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
                         .unwrap(),
                 );
-                self.register_buffer(node);
+                let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+                self.register_buffer(node, ptr);
             }
         }
     }
@@ -593,6 +589,7 @@ impl Runtime for CudaRuntime {
 
     #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
+        let mut llir_to_hlir: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
         for (hlir_node, llir_node) in self
             .llir_graph
             .node_indices()
@@ -605,11 +602,11 @@ impl Runtime for CudaRuntime {
             })
             .collect_vec()
         {
-            self.buffers.insert(
-                llir_node,
-                self.hlir_buffers[&NodeIndex::new(hlir_node)].clone(),
-            );
-            self.register_buffer(llir_node);
+            llir_to_hlir.insert(llir_node, NodeIndex::new(hlir_node));
+            let ptr = self.hlir_buffers[&NodeIndex::new(hlir_node)]
+                .device_ptr(&self.cuda_stream)
+                .0;
+            self.register_buffer(llir_node, ptr);
         }
         let mut timings = vec![];
         for exec_node in toposort(&self.exec_graph, None).unwrap() {
@@ -650,7 +647,11 @@ impl Runtime for CudaRuntime {
                     let mut lb = self.cuda_stream.launch_builder(kernel);
                     lb.arg(&self.buffers[output]);
                     for inp in inputs {
-                        lb.arg(&self.buffers[inp]);
+                        if let Some(buf) = self.buffers.get(inp) {
+                            lb.arg(buf);
+                        } else {
+                            lb.arg(&self.hlir_buffers[&llir_to_hlir[inp]]);
+                        }
                     }
                     let span = span!(Level::INFO, "kernel");
                     let _entered = span.enter();

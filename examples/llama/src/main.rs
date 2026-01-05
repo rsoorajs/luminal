@@ -67,7 +67,7 @@ fn main() {
     let mut runtime = CudaRuntime::initialize((ctx, stream.clone(), custom_state));
     println!("Loading weights...");
     runtime.load_safetensors(&cx, "setup/model_combined.safetensors");
-
+    stream.synchronize().unwrap();
     println!("Compiling...");
     cx.set_dyn_dim('s', 1);
     cx.set_dyn_dim('p', 0);
