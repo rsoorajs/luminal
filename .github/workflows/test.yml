@@ -62,7 +62,7 @@ jobs:
             - name: Update Rust
               run: rustup update
             - name: Run CUDA crate tests
-              run: cargo test -p luminal_cuda --verbose
+              run: CUDARC_CUDA_VERSION=12080 cargo test -p luminal_cuda --verbose
     # cuda_llama: # disabled because t4 doesn't have enough memory for full precision llama. re-enable when we can run on larger machines or use 8-bit precision
     #     name: Cuda Llama
     #     runs-on: cuda_t4_runner
