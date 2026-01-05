@@ -28,31 +28,31 @@ impl Llama {
         for l in 0..LAYERS {
             w.push(LlamaLayer {
                 up: cx.named_tensor(
-                    &format!("model.layers.{l}.mlp.up_proj.weight"),
+                    format!("model.layers.{l}.mlp.up_proj.weight"),
                     (INTERMEDIATE, HIDDEN),
                 ),
                 gate: cx.named_tensor(
-                    &format!("model.layers.{l}.mlp.gate_proj.weight"),
+                    format!("model.layers.{l}.mlp.gate_proj.weight"),
                     (INTERMEDIATE, HIDDEN),
                 ),
                 down: cx.named_tensor(
-                    &format!("model.layers.{l}.mlp.down_proj.weight"),
+                    format!("model.layers.{l}.mlp.down_proj.weight"),
                     (HIDDEN, INTERMEDIATE),
                 ),
                 q_proj: cx.named_tensor(
-                    &format!("model.layers.{l}.self_attn.q_proj.weight"),
+                    format!("model.layers.{l}.self_attn.q_proj.weight"),
                     (HIDDEN, HIDDEN),
                 ),
                 k_proj: cx.named_tensor(
-                    &format!("model.layers.{l}.self_attn.k_proj.weight"),
+                    format!("model.layers.{l}.self_attn.k_proj.weight"),
                     (HIDDEN / KV_GROUPS, HIDDEN),
                 ),
                 v_proj: cx.named_tensor(
-                    &format!("model.layers.{l}.self_attn.v_proj.weight"),
+                    format!("model.layers.{l}.self_attn.v_proj.weight"),
                     (HIDDEN / KV_GROUPS, HIDDEN),
                 ),
                 o_proj: cx.named_tensor(
-                    &format!("model.layers.{l}.self_attn.o_proj.weight"),
+                    format!("model.layers.{l}.self_attn.o_proj.weight"),
                     (HIDDEN, HIDDEN),
                 ),
                 attn_rms: LayerNorm::new(
@@ -121,7 +121,7 @@ impl LlamaLayer {
         let v = x_attn.matmul(self.v_proj.transpose(0, 1));
         let q_rope = GraphTensor::from_id(
             cx.add_op(RopeFrontendOp {
-                range: vec![Expression::from(batch)],
+                range: vec![batch],
                 stride: vec![HIDDEN.into()],
                 row_width: Expression::from(HIDDEN),
             })
@@ -134,7 +134,7 @@ impl LlamaLayer {
         );
         let k_rope = GraphTensor::from_id(
             cx.add_op(RopeFrontendOp {
-                range: vec![Expression::from(batch)],
+                range: vec![batch],
                 stride: vec![(HIDDEN / KV_GROUPS).into()],
                 row_width: Expression::from(HIDDEN / KV_GROUPS),
             })

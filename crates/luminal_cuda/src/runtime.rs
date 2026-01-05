@@ -280,7 +280,7 @@ impl CudaRuntime {
         let mut extra_packets = Vec::new();
         for (run, (device_timings, device_start_time)) in self.timings.iter().enumerate() {
             let (host_time, host_clock_id) = host_start_times[run];
-            for (sm, sm_timings) in device_timings.chunks(1000).into_iter().enumerate() {
+            for (sm, sm_timings) in device_timings.chunks(1000).enumerate() {
                 let mut builder = ManualTrackBuilder::new(sm as u32, host_time, host_clock_id);
                 for n_op in 0..sm_timings.len() - 1 {
                     let op = sm_timings[n_op].event as usize;
@@ -364,7 +364,7 @@ impl Runtime for CudaRuntime {
             cuda_stream: stream,
             cuda_context: ctx,
             llir_graph: StableGraph::default(),
-            custom_state: custom_state,
+            custom_state,
             exec_graph: StableGraph::default(),
             node_to_exec: FxHashMap::default(),
             timings: vec![],
@@ -375,7 +375,7 @@ impl Runtime for CudaRuntime {
     fn load_llir(&mut self, llir_graph: &LLIRGraph) {
         self.exec_graph.clear();
         // clear kv cache
-        for (_, s) in &mut self.custom_state {
+        for s in self.custom_state.values_mut() {
             if let CustomState::KVCache(layers) = s {
                 for (k, v) in layers {
                     self.cuda_stream.memset_zeros(k).unwrap();
@@ -400,13 +400,14 @@ impl Runtime for CudaRuntime {
                 consumer_barrier_strides,
                 mut producer_barrier_bases,
                 n_barriers,
-            ) = get_barrier_strides(&llir_graph, &subgraph);
+            ) = get_barrier_strides(llir_graph, &subgraph);
             for node in llir_graph
                 .node_indices()
                 .filter(|n| llir_graph[*n].to_op::<Input>().is_some())
             {
                 producer_barrier_bases.insert(node, 0.into());
             }
+            #[allow(clippy::mutable_key_type)]
             let expressions = llir_graph
                 .node_weights()
                 .filter_map(|op| op.to_dialect::<dyn BlockOp>())
@@ -623,7 +624,7 @@ impl Runtime for CudaRuntime {
                     constants,
                 } => {
                     for (dyn_dim, val) in dyn_map {
-                        if let Some(global) = constants.get_mut(&dyn_dim) {
+                        if let Some(global) = constants.get_mut(dyn_dim) {
                             let mut view = global.as_view_mut();
                             let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
                             self.cuda_stream
@@ -693,7 +694,7 @@ impl Runtime for CudaRuntime {
 
                     // Set up dyn dims
                     for (dyn_dim, val) in dyn_map {
-                        if let Some(global) = interpreter_constants.get_mut(&dyn_dim) {
+                        if let Some(global) = interpreter_constants.get_mut(dyn_dim) {
                             let mut view = global.as_view_mut();
                             let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
                             self.cuda_stream
@@ -1073,25 +1074,29 @@ fn hash32<T: Hash>(val: T) -> u32 {
     (hash64(val) & 0xffff_ffff) as u32
 }
 
-#[tracing::instrument(skip_all)]
-pub fn get_barrier_strides(
-    graph: &LLIRGraph,
-    block_ops: &FxHashSet<NodeIndex>,
-) -> (
+type BarrierStrides = (
     FxHashMap<NodeIndex, Vec<Expression>>,
     FxHashMap<(NodeIndex, usize), Vec<Expression>>,
     FxHashMap<NodeIndex, Expression>,
     Expression,
-) {
+);
+
+type InterpreterCompileResult = (
+    CudaFunction,
+    Arc<CudaModule>,
+    FxHashMap<Expression, i32>,
+    FxHashMap<char, CudaSlice<u8>>,
+);
+
+#[tracing::instrument(skip_all)]
+pub fn get_barrier_strides(graph: &LLIRGraph, block_ops: &FxHashSet<NodeIndex>) -> BarrierStrides {
     // Resolve dependencies
     let mut producer_barrier_strides = FxHashMap::default();
     let mut consumer_barrier_strides = FxHashMap::default();
     for node in block_ops {
-        if graph
+        if !graph
             .neighbors_directed(*node, Direction::Outgoing)
-            .filter(|n| block_ops.contains(n))
-            .next()
-            .is_none()
+            .any(|n| block_ops.contains(&n))
         {
             producer_barrier_strides.insert(
                 *node,
@@ -1179,18 +1184,14 @@ pub fn get_barrier_strides(
     )
 }
 
+#[allow(clippy::mutable_key_type)]
 #[tracing::instrument(skip_all)]
 pub fn compile_interpreter(
     cuda_ctx: &Arc<CudaContext>,
     cuda_stream: &Arc<CudaStream>,
     ops: &Vec<Arc<Box<dyn BlockOp>>>,
     expressions: &FxHashSet<Expression>,
-) -> (
-    CudaFunction,
-    Arc<CudaModule>,
-    FxHashMap<Expression, i32>,
-    FxHashMap<char, CudaSlice<u8>>,
-) {
+) -> InterpreterCompileResult {
     // Compile the interpreter
     let mut kernel = include_str!("block/interpreter.cu").to_string();
     kernel = kernel.replace(

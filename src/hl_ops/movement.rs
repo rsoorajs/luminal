@@ -327,49 +327,79 @@ mod tests {
         prelude::*,
     };
     use candle_core::{IndexOp, Tensor};
+    use proptest::prelude::*;
 
-    #[test]
-    fn test_pad() {
-        test_unary(
-            23,
-            |a| a.pad((2, 6), 0.),
-            |a| a.pad_with_zeros(0, 2, 6).unwrap(),
-        );
-        test_unary(
-            (18, 72),
-            |a| a.pad(((4, 31), (2, 9)), 0.),
-            |a| {
-                a.pad_with_zeros(0, 4, 31)
-                    .unwrap()
-                    .pad_with_zeros(1, 2, 9)
-                    .unwrap()
-            },
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_pad_1d(len in 1usize..64, left in 0usize..6, right in 0usize..6) {
+            test_unary(
+                len,
+                |a| a.pad((left, right), 0.),
+                |a| a.pad_with_zeros(0, left, right).unwrap(),
+            );
+        }
     }
 
-    #[test]
-    fn test_slice_pad() {
-        test_unary(
-            (17, 26),
-            |a| a.slice((1..3, 14..32)).pad(((3, 14), (5, 0)), 0.),
-            |a| {
-                a.i((1..3, 14..26)) // candle slice ranges can't go off end
-                    .unwrap()
-                    .pad_with_zeros(0, 3, 14)
-                    .unwrap()
-                    .pad_with_zeros(1, 5, 0)
-                    .unwrap()
-            },
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_pad_2d(rows in 1usize..32, cols in 1usize..32, top in 0usize..6, bottom in 0usize..6, left in 0usize..6, right in 0usize..6) {
+            test_unary(
+                (rows, cols),
+                |a| a.pad(((top, bottom), (left, right)), 0.),
+                |a| {
+                    a.pad_with_zeros(0, top, bottom)
+                        .unwrap()
+                        .pad_with_zeros(1, left, right)
+                        .unwrap()
+                },
+            );
+        }
     }
 
-    #[test]
-    fn test_transpose() {
-        test_unary(
-            (5, 10),
-            |a| a.transpose(0, 1) * 1.0,
-            |a| a.transpose(0, 1).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_slice_pad(
+            rows in 3usize..32,
+            cols in 3usize..32,
+            start_row in 0usize..32,
+            end_row in 1usize..32,
+            start_col in 0usize..32,
+            end_col in 1usize..32,
+            pad_top in 0usize..6,
+            pad_bottom in 0usize..6,
+            pad_left in 0usize..6,
+            pad_right in 0usize..6,
+        ) {
+            prop_assume!(start_row < end_row && end_row <= rows);
+            prop_assume!(start_col < end_col && end_col <= cols);
+            test_unary(
+                (rows, cols),
+                |a| a.slice((start_row..end_row, start_col..end_col)).pad(((pad_top, pad_bottom), (pad_left, pad_right)), 0.),
+                |a| {
+                    a.i((start_row..end_row, start_col..end_col))
+                        .unwrap()
+                        .pad_with_zeros(0, pad_top, pad_bottom)
+                        .unwrap()
+                        .pad_with_zeros(1, pad_left, pad_right)
+                        .unwrap()
+                },
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_transpose(rows in 1usize..32, cols in 1usize..32) {
+            test_unary(
+                (rows, cols),
+                |a| a.transpose(0, 1) * 1.0,
+                |a| a.transpose(0, 1).unwrap(),
+            );
+        }
     }
 
     #[test]

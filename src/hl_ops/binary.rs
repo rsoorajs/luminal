@@ -461,61 +461,76 @@ pub(super) mod tests {
         }
     }
 
-    #[test]
-    fn test_mod() {
-        test_binary_transforms(
-            27,
-            27,
-            |a, b| a % b,
-            |a, b| {
-                let lhs = a.to_vec1::<f32>().unwrap();
-                let rhs = b.to_vec1::<f32>().unwrap();
-                let remainder: Vec<f32> = lhs.iter().zip(rhs.iter()).map(|(x, y)| x % y).collect();
-                Tensor::from_vec(remainder, 27, &Device::Cpu).unwrap()
-            },
-            identity,
-            shift_from_zero,
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_mod(size in 1usize..64) {
+            test_binary_transforms(
+                size,
+                size,
+                |a, b| a % b,
+                |a, b| {
+                    let lhs = a.to_vec1::<f32>().unwrap();
+                    let rhs = b.to_vec1::<f32>().unwrap();
+                    let remainder: Vec<f32> = lhs.iter().zip(rhs.iter()).map(|(x, y)| x % y).collect();
+                    Tensor::from_vec(remainder, size, &Device::Cpu).unwrap()
+                },
+                identity,
+                shift_from_zero,
+            );
+        }
     }
 
-    #[test]
-    fn test_lt() {
-        test_binary(
-            27,
-            27,
-            |a, b| a.lt(b),
-            |a, b| a.lt(&b).unwrap().to_dtype(DType::F32).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_lt(size in 1usize..64) {
+            test_binary(
+                size,
+                size,
+                |a, b| a.lt(b),
+                |a, b| a.lt(&b).unwrap().to_dtype(DType::F32).unwrap(),
+            );
+        }
     }
 
-    #[test]
-    fn test_gt() {
-        test_binary(
-            27,
-            27,
-            |a, b| a.gt(b),
-            |a, b| a.gt(&b).unwrap().to_dtype(DType::F32).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_gt(size in 1usize..64) {
+            test_binary(
+                size,
+                size,
+                |a, b| a.gt(b),
+                |a, b| a.gt(&b).unwrap().to_dtype(DType::F32).unwrap(),
+            );
+        }
     }
 
-    #[test]
-    fn test_le() {
-        test_binary(
-            27,
-            27,
-            |a, b| a.le(b),
-            |a, b| a.le(&b).unwrap().to_dtype(DType::F32).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_le(size in 1usize..64) {
+            test_binary(
+                size,
+                size,
+                |a, b| a.le(b),
+                |a, b| a.le(&b).unwrap().to_dtype(DType::F32).unwrap(),
+            );
+        }
     }
 
-    #[test]
-    fn test_ge() {
-        test_binary(
-            27,
-            27,
-            |a, b| a.ge(b),
-            |a, b| a.ge(&b).unwrap().to_dtype(DType::F32).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_ge(size in 1usize..64) {
+            test_binary(
+                size,
+                size,
+                |a, b| a.ge(b),
+                |a, b| a.ge(&b).unwrap().to_dtype(DType::F32).unwrap(),
+            );
+        }
     }
 
     #[test]
