@@ -27,6 +27,7 @@ pub mod prelude {
     pub use petgraph::stable_graph::NodeIndex;
     pub use rustc_hash::{FxHashMap, FxHashSet};
     pub use tinyvec;
+    pub use anyhow;  
 }
 
 pub use paste::paste;
