@@ -1,6 +1,7 @@
 use crate::{
     block::{BlockOp, IntoBlockOp},
     kernel::KernelOp,
+    host::HostOp,
 };
 use cudarc::{
     driver::{
@@ -59,7 +60,6 @@ pub enum CustomState {
     ),
 }
 
-#[derive(Clone)]
 pub enum ExecutableKernel {
     Megakernel {
         interpreter: CudaFunction,
@@ -79,6 +79,9 @@ pub enum ExecutableKernel {
         output: NodeIndex,
         constants: FxHashMap<char, CudaSlice<u8>>,
         module: Arc<CudaModule>,
+    },
+    HostOp {
+        internal: Box<dyn HostOp>,
     },
 }
 
@@ -101,6 +104,9 @@ impl Drop for ExecutableKernel {
                     std::mem::forget(v);
                 }
             }
+            ExecutableKernel::HostOp { .. } => {
+                // No special cleanup needed
+            }
         }
     }
 }
@@ -113,6 +119,7 @@ impl Debug for ExecutableKernel {
             match self {
                 Self::Megakernel { work_queue, .. } => format!("Megakernel ({})", work_queue.len()),
                 Self::Kernel { .. } => "Kernel".to_string(),
+                Self::HostOp { .. } => "HostOp".to_string(),
             }
         )
     }
@@ -745,6 +752,9 @@ impl Runtime for CudaRuntime {
                             .min()
                             .unwrap(),
                     ));
+                }
+                ExecutableKernel::HostOp { internal } => {
+                    internal.execute().unwrap();
                 }
             }
         }

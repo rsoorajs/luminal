@@ -1,0 +1,24 @@
+; THIS IS ALL WRONG
+; TileMatmul -> KernelMatmul (row major) [M,K] x [K,N] -> [M,N] 
+(rule
+    (
+    ;pub struct TileMatmul {
+    ;range: Vec<Expression>,
+    ;untiled_range: Vec<Expression>,
+    ;iters: Expression,
+    ;a_stride: Vec<Expression>,
+    ;a_m_stride: Expression,
+    ;b_stride: Vec<Expression>,
+    ;b_n_stride: Expression,
+    ;out_stride: Vec<Expression>,
+    ;out_m_stride: Expression,
+        ; get TileMatmul
+        (= ?tm (TileMatmul ?tm_range ?tm_untiled_range ?tm_iters ?a ?tm_a_stride ?tm_a_m_stride ?tm_a_n_stride ?b ?tm_b_stride ?tm_b_m_stride ?tm_b_n_stride ?tm_out_stride ?tm_out_m_stride ?tm_out_n_stride))
+        (= m (nth_from_end ?tm_untiled_range 1))
+        (= n (nth_from_end ?tm_untiled_range 0))
+    )
+    (   
+        ; make KernelMatmul
+        (union ?tm (HostMatmul ?a ?b m n ?tm_iters))
+    )
+)
