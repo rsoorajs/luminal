@@ -2,7 +2,7 @@ use cudarc::driver::CudaContext;
 use luminal::prelude::*;
 use proptest::prelude::*;
 
-use crate::runtime::{CudaRuntime};
+use crate::runtime::CudaRuntime;
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(5))]
@@ -32,13 +32,12 @@ proptest! {
     }
 }
 
-
 #[test]
 pub fn cuda_sum_reduce_test() {
     let mut cx = Graph::default();
     let input = cx.tensor((1000, 1000));
-    let sum_dim0 = input.sum(0).output();  // row sum
-    let sum_dim1 = input.sum(1).output();  // col sum
+    let sum_dim0 = input.sum(0).output(); // row sum
+    let sum_dim1 = input.sum(1).output(); // col sum
 
     let data: Vec<f32> = (0..1_000_000).map(|i| (i % 100) as f32 * 0.01).collect();
 
@@ -65,8 +64,18 @@ pub fn cuda_sum_reduce_test() {
     for i in 0..1000 {
         let rel_err_0 = (out_dim0[i] - expected_dim0[i]).abs() / expected_dim0[i].abs().max(1.0);
         let rel_err_1 = (out_dim1[i] - expected_dim1[i]).abs() / expected_dim1[i].abs().max(1.0);
-        assert!(rel_err_0 < 0.001, "dim0 mismatch at {i}: got {}, expected {}", out_dim0[i], expected_dim0[i]);
-        assert!(rel_err_1 < 0.001, "dim1 mismatch at {i}: got {}, expected {}", out_dim1[i], expected_dim1[i]);
+        assert!(
+            rel_err_0 < 0.001,
+            "dim0 mismatch at {i}: got {}, expected {}",
+            out_dim0[i],
+            expected_dim0[i]
+        );
+        assert!(
+            rel_err_1 < 0.001,
+            "dim1 mismatch at {i}: got {}, expected {}",
+            out_dim1[i],
+            expected_dim1[i]
+        );
     }
 }
 
@@ -74,16 +83,24 @@ pub fn cuda_sum_reduce_test() {
 pub fn cuda_max_reduce_test() {
     let mut cx = Graph::default();
     let input = cx.tensor((1000, 1000));
-    let max_dim0 = input.max(0).output();  // row max
-    let max_dim1 = input.max(1).output();  // col max
+    let max_dim0 = input.max(0).output(); // row max
+    let max_dim1 = input.max(1).output(); // col max
 
     let data: Vec<f32> = (0..1_000_000).map(|i| (i % 100) as f32 * 0.01).collect();
 
     let expected_dim0: Vec<f32> = (0..1000)
-        .map(|col| (0..1000).map(|row| data[row * 1000 + col]).fold(f32::NEG_INFINITY, f32::max))
+        .map(|col| {
+            (0..1000)
+                .map(|row| data[row * 1000 + col])
+                .fold(f32::NEG_INFINITY, f32::max)
+        })
         .collect();
     let expected_dim1: Vec<f32> = (0..1000)
-        .map(|row| (0..1000).map(|col| data[row * 1000 + col]).fold(f32::NEG_INFINITY, f32::max))
+        .map(|row| {
+            (0..1000)
+                .map(|col| data[row * 1000 + col])
+                .fold(f32::NEG_INFINITY, f32::max)
+        })
         .collect();
 
     let ctx = CudaContext::new(0).unwrap();
@@ -102,18 +119,27 @@ pub fn cuda_max_reduce_test() {
     for i in 0..1000 {
         let rel_err_0 = (out_dim0[i] - expected_dim0[i]).abs() / expected_dim0[i].abs().max(1.0);
         let rel_err_1 = (out_dim1[i] - expected_dim1[i]).abs() / expected_dim1[i].abs().max(1.0);
-        assert!(rel_err_0 < 0.001, "dim0 mismatch at {i}: got {}, expected {}", out_dim0[i], expected_dim0[i]);
-        assert!(rel_err_1 < 0.001, "dim1 mismatch at {i}: got {}, expected {}", out_dim1[i], expected_dim1[i]);
+        assert!(
+            rel_err_0 < 0.001,
+            "dim0 mismatch at {i}: got {}, expected {}",
+            out_dim0[i],
+            expected_dim0[i]
+        );
+        assert!(
+            rel_err_1 < 0.001,
+            "dim1 mismatch at {i}: got {}, expected {}",
+            out_dim1[i],
+            expected_dim1[i]
+        );
     }
 }
-
 
 #[test]
 pub fn cuda_mean_reduce_test() {
     let mut cx = Graph::default();
     let input = cx.tensor((1000, 1000));
-    let mean_dim0 = input.mean(0).output();  // mean along rows
-    let mean_dim1 = input.mean(1).output();  // mean along cols
+    let mean_dim0 = input.mean(0).output(); // mean along rows
+    let mean_dim1 = input.mean(1).output(); // mean along cols
 
     let data: Vec<f32> = (0..1_000_000).map(|i| (i % 100) as f32 * 0.01).collect();
 
@@ -140,7 +166,17 @@ pub fn cuda_mean_reduce_test() {
     for i in 0..1000 {
         let rel_err_0 = (out_dim0[i] - expected_dim0[i]).abs() / expected_dim0[i].abs().max(1.0);
         let rel_err_1 = (out_dim1[i] - expected_dim1[i]).abs() / expected_dim1[i].abs().max(1.0);
-        assert!(rel_err_0 < 0.001, "dim0 mismatch at {i}: got {}, expected {}", out_dim0[i], expected_dim0[i]);
-        assert!(rel_err_1 < 0.001, "dim1 mismatch at {i}: got {}, expected {}", out_dim1[i], expected_dim1[i]);
+        assert!(
+            rel_err_0 < 0.001,
+            "dim0 mismatch at {i}: got {}, expected {}",
+            out_dim0[i],
+            expected_dim0[i]
+        );
+        assert!(
+            rel_err_1 < 0.001,
+            "dim1 mismatch at {i}: got {}, expected {}",
+            out_dim1[i],
+            expected_dim1[i]
+        );
     }
 }

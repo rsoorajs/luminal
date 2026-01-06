@@ -17,8 +17,13 @@ use luminal::{
 };
 
 pub type Ops = (
-    KernelAdd, KernelMul, KernelIota, KernelGather,
-    KernelSumReduce, KernelMaxReduce, KernelMeanReduce,
+    KernelAdd,
+    KernelMul,
+    KernelIota,
+    KernelGather,
+    KernelSumReduce,
+    KernelMaxReduce,
+    KernelMeanReduce,
 );
 
 #[derive(Default, Debug, Clone)]
@@ -77,9 +82,7 @@ impl EgglogOp for KernelMaxReduce {
             vec![children[2]],
         )
     }
-
 }
-
 
 impl KernelOp for KernelMaxReduce {
     fn compile(
@@ -195,7 +198,6 @@ extern \"C\" {{
     }
 }
 
-
 #[derive(Default, Debug, Clone)]
 
 pub struct KernelMeanReduce {
@@ -256,9 +258,7 @@ impl EgglogOp for KernelMeanReduce {
             vec![children[2]],
         )
     }
-
 }
-
 
 impl KernelOp for KernelMeanReduce {
     fn compile(
@@ -373,7 +373,6 @@ extern \"C\" {{
     }
 }
 
-
 #[derive(Default, Debug, Clone)]
 
 pub struct KernelSumReduce {
@@ -430,9 +429,7 @@ impl EgglogOp for KernelSumReduce {
             vec![children[2]],
         )
     }
-
 }
-
 
 impl KernelOp for KernelSumReduce {
     fn compile(
@@ -546,7 +543,6 @@ extern \"C\" {{
         self.out_shape.iter().copied().product()
     }
 }
-
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelAdd {
