@@ -117,16 +117,13 @@ extern \"C\" {{
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
             .collect();
+        let out_size = self.out_shape.iter().copied().product::<Expression>();
         (
             func,
             module,
             kernel,
-            (
-                self.out_shape.iter().copied().product::<Expression>(),
-                1.into(),
-                1.into(),
-            ),
-            (1.into(), 1.into(), 1.into()),
+            (out_size.ceil_div(128), 1.into(), 1.into()),
+            (out_size.min(128), 1.into(), 1.into()),
             0.into(),
             constants,
         )
@@ -159,10 +156,10 @@ impl EgglogOp for KernelMul {
 (rule
     (
         (= ?a (Mul ?out_shape ?inp_a ?inp_a_strides ?inp_b ?inp_b_strides ?out_strides))
-        (= (dtype ?inp_a) (Int))
+        (= ?dty (dtype ?inp_a))
     )
     (
-        (union ?a (KernelMul ?out_shape ?inp_a ?inp_a_strides ?inp_b ?inp_b_strides ?out_strides (Int)))
+        (union ?a (KernelMul ?out_shape ?inp_a ?inp_a_strides ?inp_b ?inp_b_strides ?out_strides ?dty))
     )
     :name \"kernel mul\"
 )"
@@ -239,16 +236,13 @@ extern \"C\" {{
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
             .collect();
+        let out_size = self.out_shape.iter().copied().product::<Expression>();
         (
             func,
             module,
             kernel,
-            (
-                self.out_shape.iter().copied().product::<Expression>(),
-                1.into(),
-                1.into(),
-            ),
-            (1.into(), 1.into(), 1.into()),
+            (out_size.ceil_div(128), 1.into(), 1.into()),
+            (out_size.min(128), 1.into(), 1.into()),
             0.into(),
             constants,
         )

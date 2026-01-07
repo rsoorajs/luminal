@@ -4,10 +4,10 @@ use luminal::prelude::*;
 use crate::runtime::CudaRuntime;
 
 #[test]
-pub fn cuda_test() {
+pub fn add_mul_test() {
     let mut cx = Graph::default();
     let input = cx.tensor(5);
-    let output = (input + input).output();
+    let output = (input + input * input).output();
 
     let ctx = CudaContext::new(0).unwrap();
     ctx.bind_to_thread().unwrap();
@@ -19,5 +19,5 @@ pub fn cuda_test() {
     rt.allocate_intermediate_buffers(&cx.dyn_map);
     rt.execute(&cx.dyn_map);
     let out = rt.get_f32(output);
-    assert_eq!(out, vec![0., 2., 4., 6., 8.]);
+    assert_eq!(out, vec![0.0, 2.0, 6.0, 12.0, 20.0]);
 }
