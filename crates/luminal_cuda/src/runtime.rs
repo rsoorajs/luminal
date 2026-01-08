@@ -1,14 +1,14 @@
 use crate::{
     block::{BlockOp, IntoBlockOp},
-    kernel::KernelOp,
     host::HostOp,
+    kernel::KernelOp,
 };
 use cudarc::{
     driver::{
         CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr,
         LaunchConfig, PushKernelArg, ValidAsZeroBits,
     },
-    nvrtc::{CompileOptions, compile_ptx_with_opts},
+    nvrtc::{compile_ptx_with_opts, CompileOptions},
 };
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
@@ -365,9 +365,9 @@ impl ToCudaBuffer for Vec<i32> {
 
 impl Runtime for CudaRuntime {
     type Ops = (
-        crate::logical::Ops, 
-        crate::kernel::Ops, 
-        crate::block::Ops, 
+        crate::logical::Ops,
+        crate::kernel::Ops,
+        crate::block::Ops,
         crate::host::Ops,
     );
     type CompileArg = (
@@ -584,7 +584,7 @@ impl Runtime for CudaRuntime {
                         stream: Arc::clone(&self.cuda_stream),
                         inputs,
                         output: host_op_node_index,
-                        internal: Arc::clone(host_op)
+                        internal: Arc::clone(host_op),
                     }),
                 );
             }
@@ -685,7 +685,8 @@ impl Runtime for CudaRuntime {
                         ),
                         shared_mem_bytes: shared_mem.exec(dyn_map).unwrap() as u32,
                     };
-                    let mut lb: cudarc::driver::LaunchArgs<'_> = self.cuda_stream.launch_builder(kernel);
+                    let mut lb: cudarc::driver::LaunchArgs<'_> =
+                        self.cuda_stream.launch_builder(kernel);
                     lb.arg(&self.buffers[output]);
                     for inp in inputs {
                         if let Some(buf) = self.buffers.get(inp) {
@@ -787,18 +788,24 @@ impl Runtime for CudaRuntime {
                             .unwrap(),
                     ));
                 }
-                ExecutableKernel::HostOp { stream, inputs, output, internal } => {
-                    let mut host_op_buffers: Vec<CudaSlice<u8>> = vec![self.buffers[output].clone()];
-                    host_op_buffers.extend(inputs
-                        .iter()
-                        .map(|inp| {
-                            if let Some(buf) = self.buffers.get(inp) {
-                                buf.clone()
-                            } else {
-                                self.hlir_buffers[&llir_to_hlir[inp]].clone()
-                            }
-                        }));
-                    internal.execute(stream, &mut host_op_buffers, dyn_map).unwrap();
+                ExecutableKernel::HostOp {
+                    stream,
+                    inputs,
+                    output,
+                    internal,
+                } => {
+                    let mut host_op_buffers: Vec<CudaSlice<u8>> =
+                        vec![self.buffers[output].clone()];
+                    host_op_buffers.extend(inputs.iter().map(|inp| {
+                        if let Some(buf) = self.buffers.get(inp) {
+                            buf.clone()
+                        } else {
+                            self.hlir_buffers[&llir_to_hlir[inp]].clone()
+                        }
+                    }));
+                    internal
+                        .execute(stream, &mut host_op_buffers, dyn_map)
+                        .unwrap();
                     // Update self.buffers with the modified buffer to propagate event tracking
                     self.buffers.insert(*output, host_op_buffers[0].clone());
                 }
