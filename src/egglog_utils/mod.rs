@@ -56,7 +56,7 @@ pub fn early_egglog(
     ops: &[Arc<Box<dyn EgglogOp>>],
     cleanup: bool,
 ) -> String {
-    vec![
+    [
         BASE.to_string(),
         op_defs_string(ops),
         ops.iter().flat_map(|o| o.early_rewrites()).join("\n"),
@@ -80,7 +80,7 @@ pub fn early_egglog(
 }
 
 pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> String {
-    vec![
+    [
         BASE.to_string(),
         op_defs_string(ops),
         ops.iter().flat_map(|o| o.rewrites()).join("\n"),

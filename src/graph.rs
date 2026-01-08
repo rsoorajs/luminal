@@ -453,7 +453,7 @@ fn run_egglog(
     let CommandOutput::ExtractBest(termdag, _cost, term) = outputs.last().unwrap() else {
         panic!();
     };
-    let (program, root) = termdag_to_egglog(termdag, termdag.lookup(&term));
+    let (program, root) = termdag_to_egglog(termdag, termdag.lookup(term));
     let code = full_egglog(&program, ops, cleanup);
     let mut egraph = egglog::EGraph::default();
     let commands = egraph.parser.get_program_from_string(None, &code)?;
