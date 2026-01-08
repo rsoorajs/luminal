@@ -439,8 +439,10 @@ fn run_egglog(
             panic!("Failed to run:\n{s}\nError: {e}");
         }
     }
-    println!("{}", "---- Egglog Rule Matches ----".green());
-    let mut rule_lines = Vec::new();
+    info!(
+        target: "luminal::egglog",
+        "---- Egglog Rule Matches ----"
+    );
     for (rule, matches) in egraph
         .get_overall_run_report()
         .num_matches_per_rule
@@ -453,16 +455,12 @@ fn run_egglog(
             matches = *matches,
             "rule matches"
         );
-        rule_lines.push(format!("{rule}: {matches}"));
     }
-    println!("{}", rule_lines.join("\n").green());
-    println!(
-        "{}",
-        format!(
-            "---- Egglog Took {} ----",
-            pretty_duration::pretty_duration(&start.elapsed(), None).bold()
-        )
-        .green()
+    info!(
+        target: "luminal::egglog",
+        duration = %pretty_duration::pretty_duration(&start.elapsed(), None),
+        "---- Egglog Took {} ----",
+        pretty_duration::pretty_duration(&start.elapsed(), None)
     );
     info!(
         target: "luminal::egglog",
@@ -907,5 +905,11 @@ macro_rules! impl_into_ops {
         $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X);
         $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y);
         $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, A1);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, A1, B1);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, A1, B1, C1);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, A1, B1, C1, D1);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, A1, B1, C1, D1, E1);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, A1, B1, C1, D1, E1, F1);
     };
 }
