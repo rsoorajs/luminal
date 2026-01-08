@@ -66,7 +66,7 @@ fn main() {
 
     println!("Building E-Graph...");
     cx.build_search_space::<CudaRuntime>();
-  
+
     let mut runtime = CudaRuntime::initialize((ctx.clone(), stream.clone(), custom_state));
     println!("Loading weights...");
     runtime.load_safetensors(&cx, "setup/model_combined.safetensors");
