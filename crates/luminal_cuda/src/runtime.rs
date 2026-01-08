@@ -8,7 +8,7 @@ use cudarc::{
         CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr,
         LaunchConfig, PushKernelArg, ValidAsZeroBits,
     },
-    nvrtc::{compile_ptx_with_opts, CompileOptions},
+    nvrtc::{CompileOptions, compile_ptx_with_opts},
 };
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
@@ -81,7 +81,10 @@ pub enum ExecutableKernel {
         module: Arc<CudaModule>,
     },
     HostOp {
-        internal: Box<dyn HostOp>,
+        stream: Arc<CudaStream>,
+        inputs: Vec<NodeIndex>,
+        output: NodeIndex,
+        internal: Arc<Box<dyn HostOp>>,
     },
 }
 
@@ -105,7 +108,7 @@ impl Drop for ExecutableKernel {
                 }
             }
             ExecutableKernel::HostOp { .. } => {
-                // No special cleanup needed
+                // No special cleanup needed... maybe ???
             }
         }
     }
@@ -255,6 +258,13 @@ impl CudaRuntime {
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.register_buffer(node, ptr);
+            } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
+                self.buffers.insert(
+                    node,
+                    self.cuda_stream
+                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
+                        .unwrap(),
+                );
             }
         }
     }
@@ -354,7 +364,12 @@ impl ToCudaBuffer for Vec<i32> {
 }
 
 impl Runtime for CudaRuntime {
-    type Ops = (crate::logical::Ops, crate::kernel::Ops, crate::block::Ops);
+    type Ops = (
+        crate::logical::Ops, 
+        crate::kernel::Ops, 
+        crate::block::Ops, 
+        crate::host::Ops,
+    );
     type CompileArg = (
         Arc<CudaContext>,
         Arc<CudaStream>,
@@ -534,7 +549,7 @@ impl Runtime for CudaRuntime {
                 let (kernel_function, module, code, grid, tb, shared_mem, constants) =
                     kernel_op.compile(&self.cuda_context, &self.cuda_stream);
                 self.cuda_stream.synchronize().unwrap();
-                let inputs = llir_graph
+                let inputs: Vec<NodeIndex> = llir_graph
                     .edges_directed(kernel, Direction::Incoming)
                     .sorted_by_key(|e| e.id())
                     .map(|e| e.source())
@@ -551,6 +566,25 @@ impl Runtime for CudaRuntime {
                         output: kernel,
                         shared_mem,
                         constants,
+                    }),
+                );
+            }
+        }
+        // Add host ops
+        for host_op_node_index in llir_graph.node_indices() {
+            if let Some(host_op) = llir_graph[host_op_node_index].to_dialect::<dyn HostOp>() {
+                let inputs = llir_graph
+                    .edges_directed(host_op_node_index, Direction::Incoming)
+                    .sorted_by_key(|e| e.id())
+                    .map(|e| e.source())
+                    .collect_vec();
+                node_to_exec.insert(
+                    host_op_node_index,
+                    exec_graph.add_node(ExecutableKernel::HostOp {
+                        stream: Arc::clone(&self.cuda_stream),
+                        inputs,
+                        output: host_op_node_index,
+                        internal: Arc::clone(host_op)
                     }),
                 );
             }
@@ -651,7 +685,7 @@ impl Runtime for CudaRuntime {
                         ),
                         shared_mem_bytes: shared_mem.exec(dyn_map).unwrap() as u32,
                     };
-                    let mut lb = self.cuda_stream.launch_builder(kernel);
+                    let mut lb: cudarc::driver::LaunchArgs<'_> = self.cuda_stream.launch_builder(kernel);
                     lb.arg(&self.buffers[output]);
                     for inp in inputs {
                         if let Some(buf) = self.buffers.get(inp) {
@@ -753,8 +787,20 @@ impl Runtime for CudaRuntime {
                             .unwrap(),
                     ));
                 }
-                ExecutableKernel::HostOp { internal } => {
-                    internal.execute().unwrap();
+                ExecutableKernel::HostOp { stream, inputs, output, internal } => {
+                    let mut host_op_buffers: Vec<CudaSlice<u8>> = vec![self.buffers[output].clone()];
+                    host_op_buffers.extend(inputs
+                        .iter()
+                        .map(|inp| {
+                            if let Some(buf) = self.buffers.get(inp) {
+                                buf.clone()
+                            } else {
+                                self.hlir_buffers[&llir_to_hlir[inp]].clone()
+                            }
+                        }));
+                    internal.execute(stream, &mut host_op_buffers, dyn_map).unwrap();
+                    // Update self.buffers with the modified buffer to propagate event tracking
+                    self.buffers.insert(*output, host_op_buffers[0].clone());
                 }
             }
         }
