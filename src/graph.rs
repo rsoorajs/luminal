@@ -446,6 +446,7 @@ fn run_egglog(
     ops: &[Arc<Box<dyn EgglogOp>>],
     cleanup: bool,
 ) -> Result<SerializedEGraph, egglog::Error> {
+    let start = std::time::Instant::now();
     let code = egglog_utils::early_egglog(program, root, ops, cleanup);
     let mut egraph = egglog::EGraph::default();
     let commands = egraph.parser.get_program_from_string(None, &code)?;
@@ -457,7 +458,6 @@ fn run_egglog(
     let code = full_egglog(&program, ops, cleanup);
     let mut egraph = egglog::EGraph::default();
     let commands = egraph.parser.get_program_from_string(None, &code)?;
-    let start = std::time::Instant::now();
     println!("{}", "Egglog running...".green());
     let _outputs = egraph.run_program(commands)?;
     println!("{}", "---- Egglog Rule Matches ----".green());

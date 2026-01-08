@@ -137,7 +137,7 @@ fn apply_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> Grap
 
     // Combine back into output
     let mut s = x0_out.concat_along(x1_out, 3);
-    s.shape = input.shape;
+    s.shape = input.shape; // need to have a proper merge_dims!
     s = s.transpose(0, 1) * 1.0;
     s.shape = orig_shape;
     s
