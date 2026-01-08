@@ -281,12 +281,10 @@ impl Graph {
 pub trait Runtime {
     type Ops: IntoEgglogOp;
     type CompileArg;
-    type Data;
     type ExecReturn;
     type ProfileMetric: PartialOrd + Clone + Debug;
     fn initialize(arg: Self::CompileArg) -> Self;
     fn load_llir(&mut self, llir_graph: &LLIRGraph);
-    fn set_data(&mut self, id: impl ToId, data: Self::Data);
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn;
     fn profile(
         &mut self,

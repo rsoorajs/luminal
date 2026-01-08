@@ -661,9 +661,9 @@ mod tests {
         let inv = perm.inverse_permutation(0).cast(DType::F32).output();
         cx.build_search_space::<NativeRuntime>();
         let mut rt = cx.search(NativeRuntime::default(), 1);
-        rt.set_data(data.id, vec![0., 1., 2., 3., 4., 5.].into());
-        rt.set_data(indexes.id, vec![5, 0, 3, 2].into());
-        rt.set_data(perm.id, vec![3, 2, 4, 1, 5, 0].into());
+        rt.set_data(data.id, vec![0., 1., 2., 3., 4., 5.]);
+        rt.set_data(indexes.id, vec![5, 0, 3, 2]);
+        rt.set_data(perm.id, vec![3, 2, 4, 1, 5, 0]);
         rt.execute(&cx.dyn_map);
         assert_eq!(*rt.get_f32(gathered.id), vec![5., 0., 3., 2.]);
         assert_eq!(*rt.get_f32(inv.id), vec![5., 3., 1., 0., 2., 4.]);

@@ -1453,10 +1453,27 @@ pub struct NativeRuntime {
     pub graph: StableGraph<Arc<Box<dyn NativeOp>>, ()>,
 }
 
+impl NativeRuntime {
+    pub fn set_data(&mut self, id: impl ToId, data: impl Into<NativeData>) {
+        let id = id.to_id();
+        let local_id = self
+            .graph
+            .node_indices()
+            .find(|n| {
+                if let Some(Input { node, .. }) = (**self.graph[*n]).as_any().downcast_ref() {
+                    *node == id.index()
+                } else {
+                    false
+                }
+            })
+            .unwrap_or_else(|| panic!("{id:?} is not an Input node in the graph"));
+        self.buffers.insert(local_id, data.into());
+    }
+}
+
 impl Runtime for NativeRuntime {
     type Ops = ();
     type CompileArg = ();
-    type Data = NativeData;
     type ExecReturn = ();
     type ProfileMetric = usize;
 
@@ -1494,22 +1511,6 @@ impl Runtime for NativeRuntime {
         }
 
         self.graph = graph;
-    }
-
-    fn set_data(&mut self, id: impl ToId, data: Self::Data) {
-        let id = id.to_id();
-        let local_id = self
-            .graph
-            .node_indices()
-            .find(|n| {
-                if let Some(Input { node, .. }) = (**self.graph[*n]).as_any().downcast_ref() {
-                    *node == id.index()
-                } else {
-                    false
-                }
-            })
-            .unwrap_or_else(|| panic!("{id:?} is not an Input node in the graph"));
-        self.buffers.insert(local_id, data);
     }
 
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {

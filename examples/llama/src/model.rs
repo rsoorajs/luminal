@@ -111,7 +111,7 @@ struct LlamaLayer {
     layer: usize,
 }
 
-fn apply_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> GraphTensor {
+fn llama_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> GraphTensor {
     let orig_shape = input.shape;
     // Input: [seq, dim]
     input = input.split_dims(1, HEAD_DIM).transpose(0, 1); // n_heads, seq, head_dim
@@ -153,8 +153,8 @@ impl LlamaLayer {
         let q = x_attn.matmul(self.q_proj.t());
         let k = x_attn.matmul(self.k_proj.t());
         let v = x_attn.matmul(self.v_proj.t());
-        let q_rope = apply_rotary_embeddings(q, pos_ids);
-        let k_rope = apply_rotary_embeddings(k, pos_ids);
+        let q_rope = llama_rotary_embeddings(q, pos_ids);
+        let k_rope = llama_rotary_embeddings(k, pos_ids);
         let attn_out = GraphTensor::from_id(
             x.graph()
                 .add_op(GQAAttentionFrontendOp {
@@ -170,8 +170,7 @@ impl LlamaLayer {
             x.graph(),
             DType::F32,
         );
-        let attn_out = attn_out.matmul(self.o_proj.t());
-        x += attn_out;
+        x += attn_out.matmul(self.o_proj.t());
 
         let x_mlp = self.mlp_rms.forward(x);
         let mlp_out =

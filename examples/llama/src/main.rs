@@ -75,8 +75,8 @@ fn main() {
     cx.set_dyn_dim('s', 1);
     cx.set_dyn_dim('p', 0);
     // inputs for search
-    runtime.set_data(input, Box::new(vec![1_i32]));
-    runtime.set_data(token_ids, Box::new(vec![0_i32]));
+    runtime.set_data(input, vec![1_i32]);
+    runtime.set_data(token_ids, vec![0_i32]);
     runtime = cx.search(runtime, 5);
 
     print!("{input_sentence}");
@@ -96,17 +96,12 @@ fn main() {
         cx.set_dyn_dim('s', seq_len);
         cx.set_dyn_dim('p', prev_seq);
 
-        runtime.set_data(
-            input,
-            Box::new(sentence.iter().map(|i| *i as i32).collect_vec()),
-        );
+        runtime.set_data(input, sentence.iter().map(|i| *i as i32).collect_vec());
         runtime.set_data(
             token_ids,
-            Box::new(
-                (prev_seq..seq_len + prev_seq)
-                    .map(|i| i as i32)
-                    .collect_vec(),
-            ),
+            (prev_seq..seq_len + prev_seq)
+                .map(|i| i as i32)
+                .collect_vec(),
         );
         if i < 2 {
             // Re-allocate intermediate buffers

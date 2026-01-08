@@ -388,8 +388,8 @@ pub(super) mod tests {
 
         let lhs_values = lhs_transform(random_vec(a_shape.iter().copied().product()));
         let rhs_values = rhs_transform(random_vec(b_shape.iter().copied().product()));
-        rt.set_data(a.id, lhs_values.clone().into());
-        rt.set_data(b.id, rhs_values.clone().into());
+        rt.set_data(a.id, lhs_values.clone());
+        rt.set_data(b.id, rhs_values.clone());
         rt.execute(&cx.dyn_map);
 
         // Reference

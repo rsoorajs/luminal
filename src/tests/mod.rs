@@ -22,10 +22,10 @@ proptest! {
         cx.build_search_space::<NativeRuntime>();
         let mut rt = cx.search(NativeRuntime::default(), 1);
 
-        rt.set_data(b.id, vals.clone().into());
-        rt.set_data(c.id, vals.clone().into());
-        rt.set_data(g.id, vals.clone().into());
-        rt.set_data(e.id, vals.clone().into());
+        rt.set_data(b.id, vals.clone());
+        rt.set_data(c.id, vals.clone());
+        rt.set_data(g.id, vals.clone());
+        rt.set_data(e.id, vals.clone());
 
         rt.execute(&cx.dyn_map);
 
@@ -57,8 +57,8 @@ proptest! {
         let mut rt = cx.search(NativeRuntime::default(), 1);
         let lhs = lhs.into_iter().take(m * k).collect::<Vec<f32>>();
         let rhs = rhs.into_iter().take(k * n).collect::<Vec<f32>>();
-        rt.set_data(b.id, lhs.clone().into());
-        rt.set_data(c.id, rhs.clone().into());
+        rt.set_data(b.id, lhs.clone());
+        rt.set_data(c.id, rhs.clone());
         rt.execute(&cx.dyn_map);
 
         // Reference
@@ -79,7 +79,7 @@ proptest! {
         let b = (a.permute((1, 0)) * 1.0).output();
         cx.build_search_space::<NativeRuntime>();
         let mut rt = cx.search(NativeRuntime::default(), 1);
-        rt.set_data(a.id, values.clone().into());
+        rt.set_data(a.id, values.clone());
         rt.execute(&cx.dyn_map);
 
         assert_exact(rt.get_f32(b.id), &[values[0], values[2], values[1], values[3]]);
@@ -97,7 +97,7 @@ proptest! {
         cx.build_search_space::<NativeRuntime>();
         let mut rt = cx.search(NativeRuntime::default(), 1);
         let values = values.into_iter().take(rows * cols).collect::<Vec<f32>>();
-        rt.set_data(a.id, values.clone().into());
+        rt.set_data(a.id, values.clone());
         rt.execute(&cx.dyn_map);
 
         let mut expected = Vec::with_capacity(values.len());

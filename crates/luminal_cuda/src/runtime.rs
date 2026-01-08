@@ -153,6 +153,13 @@ impl CudaRuntime {
         }
     }
 
+    pub fn set_data(&mut self, id: impl ToId, data: impl ToCudaBuffer) {
+        self.hlir_buffers.insert(
+            id.to_id(),
+            data.to_cuda_buffer(&self.cuda_context, &self.cuda_stream),
+        );
+    }
+
     #[tracing::instrument(skip_all)]
     pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
         let id = id.to_id();
@@ -353,7 +360,6 @@ impl Runtime for CudaRuntime {
         Arc<CudaStream>,
         FxHashMap<String, CustomState>,
     );
-    type Data = Box<dyn ToCudaBuffer>;
     type ExecReturn = ();
     type ProfileMetric = Duration;
 
@@ -750,13 +756,6 @@ impl Runtime for CudaRuntime {
             }
         }
         self.timings.extend(timings);
-    }
-
-    fn set_data(&mut self, id: impl ToId, data: Self::Data) {
-        self.hlir_buffers.insert(
-            id.to_id(),
-            data.to_cuda_buffer(&self.cuda_context, &self.cuda_stream),
-        );
     }
 }
 

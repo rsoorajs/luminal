@@ -341,7 +341,7 @@ pub(super) mod tests {
         let mut rt = cx.search(NativeRuntime::default(), 1);
 
         let v = random_vec(shape.iter().copied().product());
-        rt.set_data(a.id, v.clone().into());
+        rt.set_data(a.id, v.clone());
         rt.execute(&cx.dyn_map);
 
         // Reference
