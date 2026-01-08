@@ -568,7 +568,7 @@ impl EgglogOp for RowRope {
                 ;; -----------------------------
                 ;; inv_freq construction (exact literals as in dump)
                 ;; -----------------------------
-                (= ?freq_indices        (Iota (MMul (MIter) (MNum 2)) (MNum 64)))
+                (= ?freq_indices        (Cast (Iota (MMul (MIter) (MNum 2)) (MNum 64)) (F32)))
                 (= ?c_inv_head_dim      (Constant 0.007812))
                 (= ?freq_scaled         (Mul (ECons (MNum 64) (ENil)) ?freq_indices
                                              (ECons (MNum 1) (ENil)) ?c_inv_head_dim

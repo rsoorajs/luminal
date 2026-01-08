@@ -9,18 +9,22 @@ impl GraphTensor {
         self
     }
 
+    /// Swap 2 dimensions. This is a view-only operation and does not materialize a new tensor
     pub fn transpose(self, dim0: usize, dim1: usize) -> GraphTensor {
         let num_dims = self.shape.len();
         assert!(
             dim0 < num_dims && dim1 < num_dims,
             "transpose dimensions ({dim0}, {dim1}) out of bounds for tensor with {num_dims} dimensions"
         );
-
-        // Create identity permutation, then swap the two specified dimensions
         let mut perm_axes: Vec<usize> = (0..num_dims).collect();
         perm_axes.swap(dim0, dim1);
-
         self.permute(perm_axes)
+    }
+
+    /// Transpose a 2D tensor
+    pub fn t(self) -> GraphTensor {
+        assert_eq!(self.shape.len(), 2, ".t() supports only 2D tensors");
+        self.transpose(0, 1)
     }
 
     /// Broadcast tensor along a new dimension

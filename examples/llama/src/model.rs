@@ -94,7 +94,7 @@ impl Llama {
         for layer in &self.layers {
             x = layer.forward(x, pos_ids);
         }
-        self.lm_norm.forward(x).matmul(self.lm_head.transpose(0, 1))
+        self.lm_norm.forward(x).matmul(self.lm_head.t())
     }
 }
 
@@ -117,7 +117,11 @@ fn apply_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> Grap
     input = input.split_dims(1, HEAD_DIM).transpose(0, 1); // n_heads, seq, head_dim
 
     // Get freqs
-    let freqs = input.graph().arange_options(0, HEAD_DIM, 2) / HEAD_DIM as f32;
+    let freqs = input
+        .graph()
+        .arange_options(0, HEAD_DIM, 2)
+        .cast(DType::F32)
+        / HEAD_DIM as f32;
     let inv_freqs = 500_000_f32.pow(freqs).reciprocal();
     let emb = pos_ids
         .cast(DType::F32)
@@ -144,37 +148,35 @@ fn apply_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> Grap
 }
 
 impl LlamaLayer {
-    pub fn forward(&self, input: GraphTensor, pos_ids: GraphTensor) -> GraphTensor {
-        let cx = input.graph();
-        let batch = input.dims()[0];
-        let x_attn = self.attn_rms.forward(input);
-        let q = x_attn.matmul(self.q_proj.transpose(0, 1));
-        let k = x_attn.matmul(self.k_proj.transpose(0, 1));
-        let v = x_attn.matmul(self.v_proj.transpose(0, 1));
+    pub fn forward(&self, mut x: GraphTensor, pos_ids: GraphTensor) -> GraphTensor {
+        let x_attn = self.attn_rms.forward(x);
+        let q = x_attn.matmul(self.q_proj.t());
+        let k = x_attn.matmul(self.k_proj.t());
+        let v = x_attn.matmul(self.v_proj.t());
         let q_rope = apply_rotary_embeddings(q, pos_ids);
         let k_rope = apply_rotary_embeddings(k, pos_ids);
-
         let attn_out = GraphTensor::from_id(
-            cx.add_op(GQAAttentionFrontendOp {
-                head_dim: HEAD_DIM,
-                prev_seq: 'p'.into(),
-                layer: self.layer,
-            })
-            .input(q_rope.id, 0, q_rope.shape)
-            .input(k_rope.id, 0, k_rope.shape)
-            .input(v.id, 0, v.shape)
-            .finish(),
-            ShapeTracker::new((batch, HIDDEN)),
-            cx,
+            x.graph()
+                .add_op(GQAAttentionFrontendOp {
+                    head_dim: HEAD_DIM,
+                    prev_seq: 'p'.into(),
+                    layer: self.layer,
+                })
+                .input(q_rope.id, 0, q_rope.shape)
+                .input(k_rope.id, 0, k_rope.shape)
+                .input(v.id, 0, v.shape)
+                .finish(),
+            x.shape,
+            x.graph(),
             DType::F32,
         );
-        let attn_out = attn_out.matmul(self.o_proj.transpose(0, 1));
-        let resid1 = input + attn_out;
-        let x_mlp = self.mlp_rms.forward(resid1);
-        resid1
-            + (x_mlp.matmul(self.gate.transpose(0, 1)).swish()
-                * x_mlp.matmul(self.up.transpose(0, 1)))
-            .matmul(self.down.transpose(0, 1))
+        let attn_out = attn_out.matmul(self.o_proj.t());
+        x += attn_out;
+
+        let x_mlp = self.mlp_rms.forward(x);
+        let mlp_out =
+            (x_mlp.matmul(self.gate.t()).swish() * x_mlp.matmul(self.up.t())).matmul(self.down.t());
+        x + mlp_out
     }
 }
 
