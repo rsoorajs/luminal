@@ -1,3 +1,5 @@
+use itertools::Itertools;
+
 use crate::{prelude::*, utils::flatten_z_strides};
 
 impl GraphTensor {
@@ -27,15 +29,34 @@ impl GraphTensor {
         self
     }
 
-    /// Broadcast tensor along new dimensions (with explicitly given dest shape)
-    pub fn expand(mut self, shape: impl ToShape) -> GraphTensor {
-        let s = shape.to_shape();
-        for (i, s) in s.into_iter().enumerate() {
-            if self.shape.len() <= i || self.shape.dims[i] != s {
-                self.shape.expand_dim(i, s);
-            }
+    /// Broadcast tensor along new dimensions on the right-hand-side. For instance, if the original tensor is [5, 2] and you call .expand([4, 2, 3]), the final  tensor will be [5, 2, 4, 2, 3]
+    pub fn expand_rhs(mut self, shape: impl ToShape) -> GraphTensor {
+        let orig_dims = self.shape.len();
+        for (i, s) in shape.to_shape().into_iter().enumerate() {
+            self.shape.expand_dim(orig_dims + i, s);
         }
+        self
+    }
 
+    /// Broadcast tensor along new dimensions on the left-hand-side. For instance, if the original tensor is [5, 2] and you call .expand([4, 2, 3]), the final  tensor will be [5, 2, 4, 2, 3]
+    pub fn expand_lhs(mut self, shape: impl ToShape) -> GraphTensor {
+        for (i, s) in shape.to_shape().into_iter().enumerate() {
+            self.shape.expand_dim(i, s);
+        }
+        self
+    }
+
+    pub fn expand_to_shape_on_axes(
+        mut self,
+        shape: impl ToShape,
+        axes: impl ToAxes,
+    ) -> GraphTensor {
+        let shape = shape.to_shape();
+        let axes = axes.to_axes();
+        assert_eq!(shape.len(), self.shape.len() + axes.len());
+        for axis in axes.into_iter().sorted() {
+            self = self.expand_dim(axis, shape[axis]);
+        }
         self
     }
 
@@ -273,8 +294,14 @@ impl GraphTensor {
         let mut phys_size = Expression::from(1);
         let mut new_dims = vec![];
         for (dim, (start, end)) in self.dims().into_iter().zip(&padding).rev() {
-            index_expressions
-                .push(((Expression::from('z') - *start).max(0).min(dim - 1)) * phys_size);
+            let mut ind = Expression::from('z');
+            if *start != 0 {
+                ind = (ind - *start).max(0);
+            }
+            if *end != 0 {
+                ind = ind.min(dim - 1);
+            }
+            index_expressions.push(ind * phys_size);
             phys_size *= dim;
             new_dims.push(dim + *start + *end);
         }
@@ -285,9 +312,15 @@ impl GraphTensor {
         let new_tensor = self.gather(self.graph().iota(index_expression, new_dims.clone()));
         // mask out padded elements
         let mut mask_expressions = vec![];
-        for ((start, _), dim) in padding.into_iter().zip(self.dims()) {
-            mask_expressions
-                .push(Expression::from('z').gte(start) * Expression::from('z').lt(start + dim));
+        for ((start, end), dim) in padding.into_iter().zip(self.dims()) {
+            let mut mask = Expression::from(1);
+            if start != 0 {
+                mask *= Expression::from('z').gte(start);
+            }
+            if end != 0 {
+                mask *= Expression::from('z').lt(start + dim);
+            }
+            mask_expressions.push(mask);
         }
         let mask_expression = flatten_z_strides_mask(&new_dims, &mask_expressions);
         let mask = self.graph().iota(mask_expression, new_dims);
@@ -581,7 +614,7 @@ mod tests {
         assert_eq!(out2.dims(), &[2, 2, 3, 1]);
         test_unary(
             (1, 3),
-            |a| a.squeeze(0).expand((2, 3)) * 1.,
+            |a| a.squeeze(0).expand_dim(0, 2) * 1.,
             |a| a.broadcast_as((2, 3)).unwrap(),
         );
         test_unary((2, 1, 3), |a| a.squeeze(1), |a| a.reshape((2, 3)).unwrap());

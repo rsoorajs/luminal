@@ -1,7 +1,7 @@
 use luminal::{
     graph::{elist_to_egglog, Graph},
     op::{DType, HLIROp},
-    prelude::GraphTensor,
+    prelude::{F32Pow, GraphTensor},
     shape::{Expression, ShapeTracker},
 };
 use luminal_nn::LayerNorm;
@@ -111,40 +111,48 @@ struct LlamaLayer {
     layer: usize,
 }
 
+fn apply_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> GraphTensor {
+    let orig_shape = input.shape;
+    // Input: [seq, dim]
+    input = input.split_dims(1, HEAD_DIM).transpose(0, 1); // n_heads, seq, head_dim
+
+    // Get freqs
+    let freqs = input.graph().arange_options(0, HEAD_DIM, 2) / HEAD_DIM as f32;
+    let inv_freqs = 500_000_f32.pow(freqs).reciprocal();
+    let emb = pos_ids
+        .cast(DType::F32)
+        .expand_dim(1, 1)
+        .matmul(inv_freqs.expand_dim(0, 1));
+
+    // Split input into evens and odds
+    let split = input.split_dims(2, 2);
+    let x0 = split.slice((.., .., .., ..1));
+    let x1 = split.slice((.., .., .., 1..));
+
+    // Apply sin and cos embeddings
+    let x0_out = x0 * emb.cos().expand_dim(0, x0.dims()[0]).expand_dim(3, 1)
+        - x1 * emb.sin().expand_dim(0, x1.dims()[0]).expand_dim(3, 1);
+    let x1_out = x0 * emb.sin().expand_dim(0, x0.dims()[0]).expand_dim(3, 1)
+        + x1 * emb.cos().expand_dim(0, x1.dims()[0]).expand_dim(3, 1);
+
+    // Combine back into output
+    let mut s = x0_out.concat_along(x1_out, 3);
+    s.shape = input.shape;
+    s = s.transpose(0, 1) * 1.0;
+    s.shape = orig_shape;
+    s
+}
+
 impl LlamaLayer {
-    pub fn forward(&self, input: GraphTensor, token_ids: GraphTensor) -> GraphTensor {
+    pub fn forward(&self, input: GraphTensor, pos_ids: GraphTensor) -> GraphTensor {
         let cx = input.graph();
         let batch = input.dims()[0];
         let x_attn = self.attn_rms.forward(input);
         let q = x_attn.matmul(self.q_proj.transpose(0, 1));
         let k = x_attn.matmul(self.k_proj.transpose(0, 1));
         let v = x_attn.matmul(self.v_proj.transpose(0, 1));
-        let q_rope = GraphTensor::from_id(
-            cx.add_op(RopeFrontendOp {
-                range: vec![batch],
-                stride: vec![HIDDEN.into()],
-                row_width: Expression::from(HIDDEN),
-            })
-            .input(q.id, 0, q.shape)
-            .input(token_ids.id, 0, token_ids.shape)
-            .finish(),
-            q.shape,
-            cx,
-            DType::F32,
-        );
-        let k_rope = GraphTensor::from_id(
-            cx.add_op(RopeFrontendOp {
-                range: vec![batch],
-                stride: vec![(HIDDEN / KV_GROUPS).into()],
-                row_width: Expression::from(HIDDEN / KV_GROUPS),
-            })
-            .input(k.id, 0, k.shape)
-            .input(token_ids.id, 0, token_ids.shape)
-            .finish(),
-            k.shape,
-            cx,
-            DType::F32,
-        );
+        let q_rope = apply_rotary_embeddings(q, pos_ids);
+        let k_rope = apply_rotary_embeddings(k, pos_ids);
 
         let attn_out = GraphTensor::from_id(
             cx.add_op(GQAAttentionFrontendOp {
@@ -167,26 +175,6 @@ impl LlamaLayer {
             + (x_mlp.matmul(self.gate.transpose(0, 1)).swish()
                 * x_mlp.matmul(self.up.transpose(0, 1)))
             .matmul(self.down.transpose(0, 1))
-    }
-}
-
-#[derive(Debug)]
-pub struct RopeFrontendOp {
-    pub range: Vec<Expression>,
-    pub stride: Vec<Expression>,
-    pub row_width: Expression,
-}
-
-impl HLIROp for RopeFrontendOp {
-    fn to_egglog(&self, inputs: &[(luminal::prelude::NodeIndex, String, ShapeTracker)]) -> String {
-        format!(
-            "(RowRope {} {} {} {} {})",
-            elist_to_egglog(&self.range),
-            inputs[0].1,
-            elist_to_egglog(&self.stride),
-            self.row_width.to_egglog(),
-            inputs[1].1,
-        )
     }
 }
 

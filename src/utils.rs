@@ -16,6 +16,9 @@ pub trait EgglogOp: Debug {
     fn rewrites(&self) -> Vec<String> {
         vec![]
     }
+    fn early_rewrites(&self) -> Vec<String> {
+        vec![]
+    }
     fn cleanup(&self) -> bool;
     #[allow(unused_variables)]
     fn extract<'a>(
