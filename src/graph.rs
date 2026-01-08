@@ -34,9 +34,9 @@ pub struct Graph {
     /// Edge weights: (Input index, Output index, Input shape)
     pub graph: HLIRGraph,
     /// E-Graph search space
-    pub egraph: Option<SerializedEGraph>,
+    egraph: Option<SerializedEGraph>,
     /// Available ops
-    pub ops: Option<Vec<Arc<Box<dyn EgglogOp>>>>,
+    ops: Option<Vec<Arc<Box<dyn EgglogOp>>>>,
     /// Marked output hlir nodes
     pub(crate) outputs: FxHashSet<NodeIndex>,
 }
@@ -182,12 +182,15 @@ impl Graph {
         let mut ops = Rt::Ops::into_vec();
         ops.extend(<crate::op::Ops as IntoEgglogOp>::into_vec());
         let (program, root) = hlir_to_egglog(self);
-        self.egraph = Some(run_egglog(
-            &program,
-            &root,
-            &ops,
-            TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>(), // need to ignore hlir op cleanups if we're on native runtime
-        ));
+        self.egraph = Some(
+            run_egglog(
+                &program,
+                &root,
+                &ops,
+                TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>(), // need to ignore hlir op cleanups if we're on native runtime
+            )
+            .unwrap(),
+        );
         self.ops = Some(ops);
     }
 
@@ -455,46 +458,26 @@ fn run_egglog(
     let mut egraph = egglog::EGraph::default();
     let commands = egraph.parser.get_program_from_string(None, &code)?;
     let start = std::time::Instant::now();
-    if std::env::var("SEARCH")
-        .map(|s| s == "1")
-        .unwrap_or_default()
-    {
-        println!("{}", "Egglog running...".green());
-    }
+    println!("{}", "Egglog running...".green());
     let _outputs = egraph.run_program(commands)?;
-    if std::env::var("SEARCH")
-        .map(|s| s == "1")
-        .unwrap_or_default()
-    {
-        println!("{}", "---- Egglog Rule Matches ----".green());
-        let run_report = egraph.get_overall_run_report();
-        println!(
-            "{}",
-            run_report
-                .num_matches_per_rule
-                .iter()
-                .filter(|(k, _)| !k.contains("("))
-                .map(|(k, v)| format!(
-                    "{k}: {v} ({})",
-                    pretty_duration::pretty_duration(
-                        &run_report.search_and_apply_time_per_rule[k],
-                        None
-                    )
-                ))
-                .join("\n")
-                .green()
-        );
-        println!(
-            "{}",
-            format!(
-                "---- Egglog Took {} ----",
-                pretty_duration::pretty_duration(&start.elapsed(), None).bold()
-            )
+    println!("{}", "---- Egglog Rule Matches ----".green());
+    let run_report = egraph.get_overall_run_report();
+    println!(
+        "{}",
+        run_report
+            .num_matches_per_rule
+            .iter()
+            .filter(|(k, _)| !k.contains("("))
+            .map(|(k, v)| format!(
+                "{k}: {v} ({})",
+                pretty_duration::pretty_duration(
+                    &run_report.search_and_apply_time_per_rule[k],
+                    None
+                )
+            ))
+            .join("\n")
             .green()
-        );
-        rule_lines.push(format!("{rule}: {matches}"));
-    }
-    println!("{}", rule_lines.join("\n").green());
+    );
     println!(
         "{}",
         format!(
@@ -503,13 +486,8 @@ fn run_egglog(
         )
         .green()
     );
-    info!(
-        target: "luminal::egglog",
-        duration_ms = start.elapsed().as_millis() as u64,
-        "egglog run completed"
-    );
 
-    let (sort, value) = egraph.eval_expr(&var!(root)).unwrap();
+    let (sort, value) = egraph.eval_expr(&var!(root))?;
     let s = egraph.serialize(egglog::SerializeConfig {
         root_eclasses: vec![(sort, value)],
         max_functions: None,
@@ -591,7 +569,7 @@ fn run_egglog(
         "No valid graphs present in the e-graph!"
     );
 
-    egraph
+    Ok(egraph)
 }
 
 pub fn extract_expr_list<'a>(
