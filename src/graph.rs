@@ -1,5 +1,5 @@
 use crate::{
-    egglog_utils,
+    egglog_utils::{self, full_egglog},
     prelude::*,
     serialized_egraph::SerializedEGraph,
     utils::{EgglogOp, IntoEgglogOp, LLIROp},
@@ -11,7 +11,7 @@ use std::{
 };
 
 use colored::Colorize;
-use egglog::{prelude::RustSpan, var};
+use egglog::{CommandOutput, prelude::RustSpan, var};
 use egglog_ast::span::Span;
 use egraph_serialize::{ClassId, NodeId};
 use itertools::Itertools;
@@ -371,6 +371,22 @@ pub fn elist_to_egglog(shape: &[Expression]) -> String {
     }
 }
 
+fn termdag_to_egglog(td: &egglog::TermDag, root: egglog::TermId) -> (String, String) {
+    let mut out = String::new();
+    for id in 0..td.size() {
+        let code = match td.get(id) {
+            egglog::Term::Lit(lit) => format!("{lit}"),
+            egglog::Term::Var(v) => v.clone(),
+            egglog::Term::App(head, args) => format!(
+                "({head} {})",
+                args.iter().map(|s| format!("t{s}")).join(" ")
+            ),
+        };
+        out.push_str(&format!("(let t{id} {code})\n"));
+    }
+    (out.replace("(MVar \"z\")", "(MIter)"), format!("t{root}"))
+}
+
 #[tracing::instrument(skip_all)]
 fn run_egglog(
     program: &str,
@@ -378,8 +394,16 @@ fn run_egglog(
     ops: &[Arc<Box<dyn EgglogOp>>],
     cleanup: bool,
 ) -> Result<SerializedEGraph, egglog::Error> {
+    let code = egglog_utils::early_egglog(program, root, ops, cleanup);
     let mut egraph = egglog::EGraph::default();
-    let code = egglog_utils::full_egglog(program, ops, cleanup);
+    let commands = egraph.parser.get_program_from_string(None, &code)?;
+    let outputs = egraph.run_program(commands)?;
+    let CommandOutput::ExtractBest(termdag, _cost, term) = outputs.last().unwrap() else {
+        panic!();
+    };
+    let (program, root) = termdag_to_egglog(termdag, termdag.lookup(&term));
+    let code = full_egglog(&program, ops, cleanup);
+    let mut egraph = egglog::EGraph::default();
     let commands = egraph.parser.get_program_from_string(None, &code)?;
     let start = std::time::Instant::now();
     if std::env::var("SEARCH")
@@ -388,7 +412,7 @@ fn run_egglog(
     {
         println!("{}", "Egglog running...".green());
     }
-    let msgs = egraph.run_program(commands)?;
+    let _outputs = egraph.run_program(commands)?;
     if std::env::var("SEARCH")
         .map(|s| s == "1")
         .unwrap_or_default()
@@ -502,14 +526,6 @@ fn run_egglog(
         egraph.roots.iter().all(|c| egraph.eclasses.contains_key(c)),
         "No valid graphs present in the e-graph!"
     );
-    if msgs.iter().any(|m| !m.to_string().is_empty()) {
-        println!("Messages:");
-        for m in msgs {
-            if !m.to_string().is_empty() {
-                println!("{m}");
-            }
-        }
-    }
 
     Ok(egraph)
 }

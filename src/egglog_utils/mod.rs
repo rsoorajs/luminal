@@ -28,10 +28,6 @@ fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     )
 }
 
-fn op_rewrites_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
-    ops.iter().flat_map(|o| o.rewrites()).join("\n")
-}
-
 fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     format!(
         "
@@ -54,20 +50,48 @@ fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     )
 }
 
+pub fn early_egglog(
+    program: &str,
+    root: &str,
+    ops: &[Arc<Box<dyn EgglogOp>>],
+    cleanup: bool,
+) -> String {
+    vec![
+        BASE.to_string(),
+        op_defs_string(ops),
+        ops.iter().flat_map(|o| o.early_rewrites()).join("\n"),
+        if cleanup {
+            op_cleanups_string(ops)
+        } else {
+            "".to_string()
+        },
+        BASE_CLEANUP.to_string(),
+        program.to_string(),
+        format!(
+            "(run-schedule
+                (saturate expr)
+                (run)
+                (saturate base_cleanup)
+            )
+            (extract {root})"
+        ),
+    ]
+    .join("\n")
+}
+
 pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> String {
-    let mut code = BASE.to_string();
-    code.push_str(&op_defs_string(ops));
-    code.push('\n');
-    code.push_str(&op_rewrites_string(ops));
-    code.push('\n');
-    if cleanup {
-        code.push_str(&op_cleanups_string(ops));
-        code.push('\n');
-    }
-    code.push_str(BASE_CLEANUP);
-    code.push('\n');
-    code.push_str(program);
-    code.push('\n');
-    code.push_str(RUN_SCHEDULE);
-    code
+    vec![
+        BASE.to_string(),
+        op_defs_string(ops),
+        ops.iter().flat_map(|o| o.rewrites()).join("\n"),
+        if cleanup {
+            op_cleanups_string(ops)
+        } else {
+            "".to_string()
+        },
+        BASE_CLEANUP.to_string(),
+        program.to_string(),
+        RUN_SCHEDULE.to_string(),
+    ]
+    .join("\n")
 }

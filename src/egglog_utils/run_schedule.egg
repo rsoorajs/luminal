@@ -1,5 +1,4 @@
 (run-schedule
-    (run early)
     (repeat 10
         (saturate expr)
         (run)

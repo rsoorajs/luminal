@@ -551,7 +551,11 @@ impl EgglogOp for RowRope {
             )
            ((set (dtype ?e) (F32)))
         )"
-        .to_string(),
+        .to_string()]
+    }
+
+    fn early_rewrites(&self) -> Vec<String> {
+        vec![
         r#"
             (rule
               (
@@ -789,7 +793,7 @@ impl EgglogOp for RowRope {
                     ?hidden_dim
                     ?pos_ids))
                 ; we want to subsume all terms up to ?inp and ?pos_ids. don't know how to do this.
-                (subsume (Mul (ECons (MVar "s") (ECons ?n_heads (ECons (MNum 128) (ENil))))
+                (delete (Mul (ECons (MVar "s") (ECons ?n_heads (ECons (MNum 128) (ENil))))
                      ?interleaved_rot
                      (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil))))
                      ?c_one
@@ -797,7 +801,6 @@ impl EgglogOp for RowRope {
                      (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil))))))
               )
               :name "row rope"
-              :ruleset early
             )
         "#.to_string()]
     }
