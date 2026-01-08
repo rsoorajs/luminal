@@ -130,8 +130,10 @@ fn apply_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> Grap
     let x1 = split.slice((.., .., .., 1..));
 
     // Apply sin and cos embeddings
-    let x0_out = x0 * emb.cos().expand(x0.shape) - x1 * emb.sin().expand(x1.shape);
-    let x1_out = x0 * emb.sin().expand(x0.shape) + x1 * emb.cos().expand(x1.shape);
+    let x0_out = x0 * emb.cos().expand_dim(0, x0.dims()[0]).expand_dim(3, 1)
+        - x1 * emb.sin().expand_dim(0, x1.dims()[0]).expand_dim(3, 1);
+    let x1_out = x0 * emb.sin().expand_dim(0, x0.dims()[0]).expand_dim(3, 1)
+        + x1 * emb.cos().expand_dim(0, x1.dims()[0]).expand_dim(3, 1);
 
     // Combine back into output
     let mut s = x0_out.concat_along(x1_out, 3);

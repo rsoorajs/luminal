@@ -178,8 +178,9 @@ impl ConvND {
         final_order.extend(batch_len..batch_len + spatial);
         out = out.permute(final_order);
 
-        if let Some(b) = self.bias {
-            out += b.expand(out.shape);
+        if let Some(_b) = self.bias {
+            todo!()
+            // out += b.expand(out.shape);
         }
 
         out

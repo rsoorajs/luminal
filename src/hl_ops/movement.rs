@@ -1,3 +1,5 @@
+use itertools::Itertools;
+
 use crate::{prelude::*, utils::flatten_z_strides};
 
 impl GraphTensor {
@@ -27,15 +29,34 @@ impl GraphTensor {
         self
     }
 
-    /// Broadcast tensor along new dimensions (with explicitly given dest shape)
-    pub fn expand(mut self, shape: impl ToShape) -> GraphTensor {
-        let s = shape.to_shape();
-        for (i, s) in s.into_iter().enumerate() {
-            if self.shape.len() <= i || self.shape.dims[i] != s {
-                self.shape.expand_dim(i, s);
-            }
+    /// Broadcast tensor along new dimensions on the right-hand-side. For instance, if the original tensor is [5, 2] and you call .expand([4, 2, 3]), the final  tensor will be [5, 2, 4, 2, 3]
+    pub fn expand_rhs(mut self, shape: impl ToShape) -> GraphTensor {
+        let orig_dims = self.shape.len();
+        for (i, s) in shape.to_shape().into_iter().enumerate() {
+            self.shape.expand_dim(orig_dims + i, s);
         }
+        self
+    }
 
+    /// Broadcast tensor along new dimensions on the left-hand-side. For instance, if the original tensor is [5, 2] and you call .expand([4, 2, 3]), the final  tensor will be [5, 2, 4, 2, 3]
+    pub fn expand_lhs(mut self, shape: impl ToShape) -> GraphTensor {
+        for (i, s) in shape.to_shape().into_iter().enumerate() {
+            self.shape.expand_dim(i, s);
+        }
+        self
+    }
+
+    pub fn expand_to_shape_on_axes(
+        mut self,
+        shape: impl ToShape,
+        axes: impl ToAxes,
+    ) -> GraphTensor {
+        let shape = shape.to_shape();
+        let axes = axes.to_axes();
+        assert_eq!(shape.len(), self.shape.len() + axes.len());
+        for axis in axes.into_iter().sorted() {
+            self = self.expand_dim(axis, shape[axis]);
+        }
         self
     }
 
@@ -593,7 +614,7 @@ mod tests {
         assert_eq!(out2.dims(), &[2, 2, 3, 1]);
         test_unary(
             (1, 3),
-            |a| a.squeeze(0).expand((2, 3)) * 1.,
+            |a| a.squeeze(0).expand_dim(0, 2) * 1.,
             |a| a.broadcast_as((2, 3)).unwrap(),
         );
         test_unary((2, 1, 3), |a| a.squeeze(1), |a| a.reshape((2, 3)).unwrap());

@@ -1,3 +1,5 @@
+use itertools::Itertools;
+
 use crate::{op, prelude::*};
 use std::ops::{Add, Mul, Neg};
 
@@ -95,17 +97,19 @@ impl GraphTensor {
         GraphTensor: Add<T, Output = GraphTensor>,
     {
         (self * self)
-            .mean(axes)
+            .mean(axes.to_axes())
             .add(epsilon)
             .sqrt()
             .reciprocal()
-            .expand(self.shape)
+            .expand_to_shape_on_axes(self.shape, axes)
             .mul(self)
     }
 
     /// Center so mean is 0.0
     pub fn mean_norm(self, axes: impl ToAxes) -> GraphTensor {
-        self - self.mean(axes).expand(self.shape)
+        self - self
+            .mean(axes.to_axes())
+            .expand_to_shape_on_axes(self.shape, axes)
     }
 
     /// Applies a layer norm along an axis
@@ -118,31 +122,48 @@ impl GraphTensor {
 
     /// Normalize the tensor along `axes` using an Lp norm.
     pub fn normalize(self, p: f32, axes: impl ToAxes, epsilon: f32) -> GraphTensor {
-        let norm = self.abs().pow(p).sum(axes).pow(1.0 / p);
-        self / norm.maximum_f32(epsilon).expand(self.shape)
+        let norm = self.abs().pow(p).sum(axes.to_axes()).pow(1.0 / p);
+        self / norm
+            .maximum_f32(epsilon)
+            .expand_to_shape_on_axes(self.shape, axes)
     }
 
     /// Applies a softmax function along an axis
     pub fn softmax(self, axes: impl ToAxes) -> GraphTensor {
-        let m = self - self.max(axes.to_axes()).expand(self.shape);
+        let m = self
+            - self
+                .max(axes.to_axes())
+                .expand_to_shape_on_axes(self.shape, axes.to_axes());
         let exp = m.exp();
-        exp / exp.sum(axes).expand(self.shape)
+        exp / exp
+            .sum(axes.to_axes())
+            .expand_to_shape_on_axes(self.shape, axes)
     }
 
     /// Applies a log softmax function along an axis
     pub fn log_softmax(self, axes: impl ToAxes) -> GraphTensor {
-        let m = self - self.max(axes.to_axes()).expand(self.shape);
-        m - m.exp().sum(axes.to_axes()).log().expand(m.shape)
+        let m = self
+            - self
+                .max(axes.to_axes())
+                .expand_to_shape_on_axes(self.shape, axes.to_axes());
+        m - m
+            .exp()
+            .sum(axes.to_axes())
+            .log()
+            .expand_to_shape_on_axes(m.shape, axes)
     }
 
     /// Get the indicies of the max elements along an axis
     pub fn argmax(self, axis: usize) -> GraphTensor {
         // Get one-hot along last dimension
-        let x_equal = self.eq(self.max(axis).expand(self.shape));
+        let x_equal = self
+            .eq(self.max(axis).expand_dim(axis, self.dims()[axis]))
+            .cast(DType::Int);
         // Create index arange for last dimension
-        let r = self.graph().arange(self.dims()[axis]).cast(self.dtype);
+        let r = self.graph().arange(self.dims()[axis]);
+        let axes = (0..self.shape.len()).filter(|i| *i != axis).collect_vec();
         // Multiply one-hot by expanded index arange
-        (x_equal * r.expand(self.shape)).max(axis).cast(DType::Int)
+        (x_equal * r.expand_to_shape_on_axes(self.shape, axes)).max(axis)
     }
 
     /// Take the absolute value
@@ -323,10 +344,13 @@ pub(super) mod tests {
         rt.set_data(a.id, v.clone().into());
         rt.execute(&cx.dyn_map);
 
+        println!("v: {:?}", v);
         // Reference
         let device = Device::Cpu;
         let ref_a = Tensor::new(v, &device).unwrap().reshape(shape).unwrap();
         let ref_b = ref_func(ref_a).flatten_all().unwrap();
+        println!("{:?}", rt.get_f32(b.id));
+        println!("{:?}", ref_b.to_vec1::<f32>().unwrap());
 
         // need to assert close because some unaries (exp and log) are (good) approximations
         assert_close(rt.get_f32(b.id), &ref_b.to_vec1::<f32>().unwrap())
@@ -334,6 +358,7 @@ pub(super) mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
+
         #[test]
         fn test_exp(size in 1usize..128) {
             test_unary(size, |a| a.exp(), |a| a.exp().unwrap());
@@ -430,49 +455,8 @@ pub(super) mod tests {
 
         #[test]
         fn test_argmax(rows in 1usize..16, cols in 1usize..16) {
-            fn test_argmax_axis(rows: usize, cols: usize, axis: usize) {
-                let mut cx = Graph::new();
-                let input = cx.tensor((rows, cols));
-                let output = input.argmax(axis).cast(DType::F32).output();
-                cx.build_search_space::<NativeRuntime>();
-                let mut rt = cx.search(NativeRuntime::default(), 1);
-                let values = random_vec(rows * cols);
-                rt.set_data(input.id, values.clone().into());
-                rt.execute(&cx.dyn_map);
-
-                let indices = rt.get_f32(output.id);
-                let tol = 1e-5_f32;
-                if axis == 1 {
-                    for (row_idx, &idx) in indices.iter().enumerate() {
-                        let idx = idx.round().clamp(0.0, (cols - 1) as f32) as usize;
-                        let row = &values[row_idx * cols..(row_idx + 1) * cols];
-                        let max = row
-                            .iter()
-                            .copied()
-                            .fold(f32::NEG_INFINITY, f32::max);
-                        assert!(
-                            (row[idx] - max).abs() <= tol,
-                            "argmax mismatch for row {row_idx}: got {idx}, max {max}"
-                        );
-                    }
-                } else {
-                    for (col_idx, &idx) in indices.iter().enumerate() {
-                        let idx = idx.round().clamp(0.0, (rows - 1) as f32) as usize;
-                        let mut max = f32::NEG_INFINITY;
-                        for row_idx in 0..rows {
-                            max = max.max(values[row_idx * cols + col_idx]);
-                        }
-                        let selected = values[idx * cols + col_idx];
-                        assert!(
-                            (selected - max).abs() <= tol,
-                            "argmax mismatch for col {col_idx}: got {idx}, max {max}"
-                        );
-                    }
-                }
-            }
-
-            test_argmax_axis(rows, cols, 1);
-            test_argmax_axis(rows, cols, 0);
+            test_unary((rows, cols), |a| a.argmax(0).cast(DType::F32), |a| a.argmax(0).unwrap().to_dtype(candle_core::DType::F32).unwrap());
+            test_unary((rows, cols), |a| a.argmax(1).cast(DType::F32), |a| a.argmax(1).unwrap().to_dtype(candle_core::DType::F32).unwrap());
         }
 
         #[test]
