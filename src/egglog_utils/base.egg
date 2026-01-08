@@ -47,7 +47,7 @@
 ;(rewrite (MAdd a b) (MAdd b a) :ruleset expr) ; communativity leads to some explosions
 ;(rewrite (MMul a b) (MMul b a) :ruleset expr)
 
-(rewrite (MAdd (MAdd a b) c) (MAdd a (MAdd b c)) :ruleset expr)
+;(rewrite (MAdd (MAdd a b) c) (MAdd a (MAdd b c)) :ruleset expr) ; explodes weirdly, see no_explode test in symbolic.rs
 ;(rewrite (MMul (MMul a b) c) (MMul a (MMul b c)) :ruleset expr)
 
 (rewrite (MAdd (MNum a) (MNum b)) (MNum (+ a b)) :ruleset expr)
@@ -71,7 +71,7 @@
 (rewrite (MAnd (MNum a) (MNum b)) (MNum (& a b)) :ruleset expr)
 (rewrite (MFloat -1.0) (MNum -1) :ruleset expr)
 (rewrite (MNum -1) (MFloat -1.0) :ruleset expr)
-(rewrite (MDiv (MMul ?x (MNum ?a)) (MNum ?b)) (MMul ?x (MNum (/ ?a ?b))) :when ((< ?b ?a) (= (% ?a ?b) 0)) :ruleset expr) ; why does this explode???
+;(rewrite (MDiv (MMul ?x (MNum ?a)) (MNum ?b)) (MMul ?x (MNum (/ ?a ?b))) :when ((< ?b ?a) (= (% ?a ?b) 0)) :ruleset expr) ; why does this explode???
 
 (rewrite (MAdd a (MNum 0)) a :ruleset expr)
 (rule ((= ?e (MMul ?a (MNum 1)))) ((union ?e ?a)) :ruleset expr)

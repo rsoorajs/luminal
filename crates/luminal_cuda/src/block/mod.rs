@@ -2,8 +2,7 @@ mod ops;
 pub use ops::*;
 
 use cudarc::driver::CudaStream;
-use luminal::{shape::Expression, utils::EgglogOp};
-use rustc_hash::FxHashMap;
+use luminal::{prelude::FxHashMap, shape::Expression, utils::EgglogOp};
 use std::fmt::Debug;
 
 use crate::runtime::CustomState;
@@ -22,6 +21,7 @@ pub trait BlockOp: Debug + as_any::AsAny + EgglogOp {
     fn cuda_op(&self) -> (String, String) {
         ("".to_string(), "".to_string())
     } // C dtype, C function
+    #[allow(clippy::mutable_key_type)]
     fn schedule_op(
         &self,
         custom_state: &mut FxHashMap<String, CustomState>,

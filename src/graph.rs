@@ -6,6 +6,8 @@ use crate::{
 };
 use std::{
     any::TypeId,
+    fmt::Debug,
+    io::Write,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -17,6 +19,7 @@ use egraph_serialize::{ClassId, NodeId};
 use itertools::Itertools;
 use petgraph::{Direction, stable_graph::StableGraph, visit::EdgeRef};
 use rustc_hash::{FxHashMap, FxHashSet};
+use tracing::info;
 
 pub type LLIRGraph = StableGraph<LLIROp, (), petgraph::Directed>;
 pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, Dependency>;
@@ -31,9 +34,9 @@ pub struct Graph {
     /// Edge weights: (Input index, Output index, Input shape)
     pub graph: HLIRGraph,
     /// E-Graph search space
-    egraph: Option<SerializedEGraph>,
+    pub egraph: Option<SerializedEGraph>,
     /// Available ops
-    ops: Option<Vec<Arc<Box<dyn EgglogOp>>>>,
+    pub ops: Option<Vec<Arc<Box<dyn EgglogOp>>>>,
     /// Marked output hlir nodes
     pub(crate) outputs: FxHashSet<NodeIndex>,
 }
@@ -179,15 +182,12 @@ impl Graph {
         let mut ops = Rt::Ops::into_vec();
         ops.extend(<crate::op::Ops as IntoEgglogOp>::into_vec());
         let (program, root) = hlir_to_egglog(self);
-        self.egraph = Some(
-            run_egglog(
-                &program,
-                &root,
-                &ops,
-                TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>(), // need to ignore hlir op cleanups if we're on native runtime
-            )
-            .unwrap(),
-        );
+        self.egraph = Some(run_egglog(
+            &program,
+            &root,
+            &ops,
+            TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>(), // need to ignore hlir op cleanups if we're on native runtime
+        ));
         self.ops = Some(ops);
     }
 
@@ -198,36 +198,79 @@ impl Graph {
             self.ops.as_ref().unwrap(),
             limit,
         );
-        let print = std::env::var("SEARCH")
-            .map(|s| s == "1")
-            .unwrap_or_default();
+        let n_graphs = llir_graphs.len();
         let start = std::time::Instant::now();
-        if print {
-            println!(
-                "{}",
+        let mut best_graph = StableGraph::default();
+        let mut best_metric: Option<R::ProfileMetric> = None;
+        let total = llir_graphs.len();
+        let bar_width = 24;
+
+        let progress_bar = |i| {
+            let head = ((i as f32 / total as f32) * bar_width as f32)
+                .clamp(0.0, bar_width as f32)
+                .floor() as usize;
+            let bar = if head == 0 {
+                format!("[>{}]", " ".repeat(bar_width - 1))
+            } else if head >= bar_width {
+                format!("[{}>]", "=".repeat(bar_width))
+            } else {
                 format!(
-                    "---- Searching through {}{} graphs ----",
-                    llir_graphs.len().to_string().bold(),
-                    if llir_graphs.len() == limit {
-                        "[limit]"
-                    } else {
-                        ""
-                    }
+                    "[{}>{}]",
+                    "=".repeat(head),
+                    " ".repeat(bar_width - head - 1)
                 )
-                .cyan()
+            };
+            print!(
+                "\r\x1b[2K  {:>6}  {bar} {i}/{total}",
+                "Searching".cyan().bold(),
+            );
+            std::io::stdout().flush().unwrap();
+        };
+
+        // Search loop
+        for (i, llir_graph) in llir_graphs.into_iter().enumerate() {
+            progress_bar(i + 1);
+            let (new_metric, display_metric) = runtime.profile(&llir_graph, &self.dyn_map);
+            let mut new_best = false;
+            if let Some(old_metric) = &best_metric {
+                if old_metric.gt(&new_metric) {
+                    best_metric = Some(new_metric);
+                    best_graph = llir_graph;
+                    new_best = true;
+                }
+            } else {
+                best_metric = Some(new_metric);
+                best_graph = llir_graph;
+                new_best = true;
+            }
+            print!("\r\x1b[2K"); // clear line
+            std::io::stdout().flush().unwrap();
+            println!(
+                "   {:>6}  Graph {}: {}",
+                "Searched".green().bold(),
+                i + 1,
+                if new_best {
+                    display_metric.bold().green().to_string()
+                } else {
+                    display_metric
+                }
             );
         }
-        runtime.compile(llir_graphs.last().unwrap());
-        if print {
-            println!(
-                "{}",
-                format!(
-                    "---- Search Took {} ----",
-                    pretty_duration::pretty_duration(&start.elapsed(), None).bold()
-                )
-                .cyan()
-            );
-        }
+
+        info!(
+            target: "luminal::search",
+            graphs = n_graphs,
+            limit,
+            limit_reached = n_graphs >= limit,
+            duration_ms = start.elapsed().as_millis() as u64,
+            "search completed"
+        );
+        println!(
+            "   {:>6}  {n_graphs} graphs in {}",
+            "Searched".green().bold(),
+            pretty_duration::pretty_duration(&start.elapsed(), None)
+        );
+        runtime.load_llir(&best_graph);
         runtime
     }
 }
@@ -237,10 +280,16 @@ pub trait Runtime {
     type CompileArg;
     type Data;
     type ExecReturn;
+    type ProfileMetric: PartialOrd + Clone + Debug;
     fn initialize(arg: Self::CompileArg) -> Self;
-    fn compile(&mut self, llir_graph: &LLIRGraph);
+    fn load_llir(&mut self, llir_graph: &LLIRGraph);
     fn set_data(&mut self, id: impl ToId, data: Self::Data);
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn;
+    fn profile(
+        &mut self,
+        llir_graph: &LLIRGraph,
+        dyn_map: &FxHashMap<char, usize>,
+    ) -> (Self::ProfileMetric, String);
 }
 
 impl Deref for Graph {
@@ -443,9 +492,24 @@ fn run_egglog(
             )
             .green()
         );
+        rule_lines.push(format!("{rule}: {matches}"));
     }
+    println!("{}", rule_lines.join("\n").green());
+    println!(
+        "{}",
+        format!(
+            "---- Egglog Took {} ----",
+            pretty_duration::pretty_duration(&start.elapsed(), None).bold()
+        )
+        .green()
+    );
+    info!(
+        target: "luminal::egglog",
+        duration_ms = start.elapsed().as_millis() as u64,
+        "egglog run completed"
+    );
 
-    let (sort, value) = egraph.eval_expr(&var!(root))?;
+    let (sort, value) = egraph.eval_expr(&var!(root)).unwrap();
     let s = egraph.serialize(egglog::SerializeConfig {
         root_eclasses: vec![(sort, value)],
         max_functions: None,
@@ -527,7 +591,7 @@ fn run_egglog(
         "No valid graphs present in the e-graph!"
     );
 
-    Ok(egraph)
+    egraph
 }
 
 pub fn extract_expr_list<'a>(

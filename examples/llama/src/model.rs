@@ -28,31 +28,31 @@ impl Llama {
         for l in 0..LAYERS {
             w.push(LlamaLayer {
                 up: cx.named_tensor(
-                    &format!("model.layers.{l}.mlp.up_proj.weight"),
+                    format!("model.layers.{l}.mlp.up_proj.weight"),
                     (INTERMEDIATE, HIDDEN),
                 ),
                 gate: cx.named_tensor(
-                    &format!("model.layers.{l}.mlp.gate_proj.weight"),
+                    format!("model.layers.{l}.mlp.gate_proj.weight"),
                     (INTERMEDIATE, HIDDEN),
                 ),
                 down: cx.named_tensor(
-                    &format!("model.layers.{l}.mlp.down_proj.weight"),
+                    format!("model.layers.{l}.mlp.down_proj.weight"),
                     (HIDDEN, INTERMEDIATE),
                 ),
                 q_proj: cx.named_tensor(
-                    &format!("model.layers.{l}.self_attn.q_proj.weight"),
+                    format!("model.layers.{l}.self_attn.q_proj.weight"),
                     (HIDDEN, HIDDEN),
                 ),
                 k_proj: cx.named_tensor(
-                    &format!("model.layers.{l}.self_attn.k_proj.weight"),
+                    format!("model.layers.{l}.self_attn.k_proj.weight"),
                     (HIDDEN / KV_GROUPS, HIDDEN),
                 ),
                 v_proj: cx.named_tensor(
-                    &format!("model.layers.{l}.self_attn.v_proj.weight"),
+                    format!("model.layers.{l}.self_attn.v_proj.weight"),
                     (HIDDEN / KV_GROUPS, HIDDEN),
                 ),
                 o_proj: cx.named_tensor(
-                    &format!("model.layers.{l}.self_attn.o_proj.weight"),
+                    format!("model.layers.{l}.self_attn.o_proj.weight"),
                     (HIDDEN, HIDDEN),
                 ),
                 attn_rms: LayerNorm::new(

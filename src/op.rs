@@ -17,6 +17,7 @@ use itertools::Itertools;
 use num_traits::Float;
 use petgraph::{Direction, algo::toposort, prelude::StableGraph, visit::EdgeRef};
 use rustc_hash::FxHashMap;
+use tracing::info_span;
 
 pub type Ops = (
     Input,
@@ -1457,6 +1458,7 @@ impl Runtime for NativeRuntime {
     type CompileArg = ();
     type Data = NativeData;
     type ExecReturn = ();
+    type ProfileMetric = usize;
 
     fn initialize(_: Self::CompileArg) -> Self {
         Self {
@@ -1465,7 +1467,15 @@ impl Runtime for NativeRuntime {
         }
     }
 
-    fn compile(&mut self, llir_graph: &LLIRGraph) {
+    fn profile(
+        &mut self,
+        _: &LLIRGraph,
+        _: &FxHashMap<char, usize>,
+    ) -> (Self::ProfileMetric, String) {
+        (0, "0 ms".to_string())
+    }
+
+    fn load_llir(&mut self, llir_graph: &LLIRGraph) {
         // Extract nativeop graph
         let mut graph = StableGraph::new();
         for node in llir_graph.node_weights() {
@@ -1510,6 +1520,8 @@ impl Runtime for NativeRuntime {
                 continue;
             }
 
+            let span = info_span!("native_op", op = %format!("{:?}", self.graph[node]));
+            let _entered = span.enter();
             let inputs = self
                 .graph
                 .edges_directed(node, Direction::Incoming)

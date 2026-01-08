@@ -16,7 +16,7 @@ jobs:
         timeout-minutes: 20
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
             - name: Run tests
               run: sudo apt-get install protobuf-compiler; rustup update; cargo test --workspace --exclude luminal_cuda --verbose
 
@@ -26,9 +26,9 @@ jobs:
         timeout-minutes: 20
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
             - name: Run clippy
-              run: rustup update; cargo clippy --all-targets -- -D warnings
+              run: sudo apt-get install protobuf-compiler; rustup update; cargo clippy --all-targets -- -D warnings
 
     fmt:
         name: Fmt
@@ -36,7 +36,7 @@ jobs:
         timeout-minutes: 20
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
             - name: Format
               run: cargo fmt --all --check
     cuda_unit_test:
@@ -48,7 +48,7 @@ jobs:
             LD_LIBRARY_PATH: /usr/local/cuda-12.8/lib64
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
             - name: Install system deps
               run: |
                   sudo apt-get update
@@ -62,7 +62,7 @@ jobs:
             - name: Update Rust
               run: rustup update
             - name: Run CUDA crate tests
-              run: cargo test -p luminal_cuda --verbose
+              run: CUDARC_CUDA_VERSION=12080 cargo test -p luminal_cuda --verbose
     # cuda_llama: # disabled because t4 doesn't have enough memory for full precision llama. re-enable when we can run on larger machines or use 8-bit precision
     #     name: Cuda Llama
     #     runs-on: cuda_t4_runner
@@ -72,7 +72,7 @@ jobs:
     #         LD_LIBRARY_PATH: /usr/local/cuda-12.8/lib64
 
     #     steps:
-    #         - uses: actions/checkout@v4
+    #         - uses: actions/checkout@v6
     #         - name: Install system deps
     #           run: |
     #               sudo apt-get update
