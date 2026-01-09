@@ -1,8 +1,8 @@
 use std::process::Command;
 
 fn main() {
-    // Only rerun this build script if the setup script itself changes
-    println!("cargo:rerun-if-changed=setup/setup.py");
+    // Only rerun this build script if anything in the setup directory changes
+    println!("cargo:rerun-if-changed=setup");
 
     // Run the setup script with uv
     let status = Command::new("uv")
