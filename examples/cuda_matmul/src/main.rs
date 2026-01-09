@@ -18,25 +18,18 @@ fn main() {
     let mut cx = Graph::new();
 
     let a = cx.tensor(('m', 'k'));
-    let b = cx.tensor(('k', 'n')); 
+    let b = cx.tensor(('k', 'n'));
 
     let c: GraphTensor = a.matmul(b).output();
-
-    let ctx = luminal_cuda::cudarc::driver::CudaContext::new(0).unwrap();
-    ctx.bind_to_thread().unwrap();
-    ctx.set_flags(luminal_cuda::cudarc::driver::sys::CUctx_flags::CU_CTX_SCHED_BLOCKING_SYNC)
-        .unwrap();
-    let stream = ctx.default_stream();
 
     // Compile
     cx.build_search_space::<CudaRuntime>();
     debug!("{:#?}", cx.ops);
 
-    let custom_state = FxHashMap::default();
-    let mut rt = CudaRuntime::initialize((ctx.clone(), stream.clone(), custom_state));
+    let mut rt = CudaRuntime::new().unwrap();
 
     cx.set_dyn_dim('m', 3 as usize);
-    cx.set_dyn_dim('n', 4 as usize); 
+    cx.set_dyn_dim('n', 4 as usize);
     cx.set_dyn_dim('k', 2 as usize);
 
     // Set input tensors
@@ -50,7 +43,7 @@ fn main() {
 
     // Run
     cx.set_dyn_dim('m', 3 as usize);
-    cx.set_dyn_dim('n', 4 as usize); 
+    cx.set_dyn_dim('n', 4 as usize);
     cx.set_dyn_dim('k', 2 as usize);
 
     rt.execute(&cx.dyn_map);
@@ -58,4 +51,3 @@ fn main() {
     // Get output tensor
     println!("Result: {:?}", rt.get_f32(c));
 }
-

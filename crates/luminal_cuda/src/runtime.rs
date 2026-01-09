@@ -141,6 +141,20 @@ pub struct CudaRuntime {
 }
 
 impl CudaRuntime {
+    /// Creates a new CudaRuntime with default configuration:
+    /// - Device 0
+    /// - Blocking sync scheduling
+    /// - Default stream
+    pub fn new() -> Result<Self, cudarc::driver::DriverError> {
+        let ctx = cudarc::driver::CudaContext::new(0)?;
+        ctx.bind_to_thread()?;
+        ctx.set_flags(cudarc::driver::sys::CUctx_flags::CU_CTX_SCHED_BLOCKING_SYNC)?;
+        let stream = ctx.default_stream();
+        let custom_state = FxHashMap::default();
+
+        Ok(Self::initialize((ctx, stream, custom_state)))
+    }
+
     #[tracing::instrument(skip_all)]
     pub fn load_safetensors(&mut self, cx: &Graph, file_path: &str) {
         let f = File::open(file_path).unwrap();

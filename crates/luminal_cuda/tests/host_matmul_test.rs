@@ -18,15 +18,7 @@ mod tests {
 
         cx.build_search_space::<CudaRuntime>();
 
-        let ctx = luminal_cuda::cudarc::driver::CudaContext::new(0).unwrap();
-        ctx.bind_to_thread().unwrap();
-        ctx.set_flags(luminal_cuda::cudarc::driver::sys::CUctx_flags::CU_CTX_SCHED_BLOCKING_SYNC)
-            .unwrap();
-        let stream = ctx.default_stream();
-
-        let custom_state = FxHashMap::default();
-
-        let mut rt = CudaRuntime::initialize((ctx.clone(), stream.clone(), custom_state));
+        let mut rt = CudaRuntime::new().unwrap();
 
         let example_m = 100;
         let example_n = 100;

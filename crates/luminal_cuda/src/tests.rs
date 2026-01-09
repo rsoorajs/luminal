@@ -1,4 +1,3 @@
-use cudarc::driver::CudaContext;
 use luminal::prelude::*;
 
 use crate::runtime::CudaRuntime;
@@ -9,11 +8,8 @@ pub fn cuda_test() {
     let input = cx.tensor(5);
     let output = (input + input).output();
 
-    let ctx = CudaContext::new(0).unwrap();
-    ctx.bind_to_thread().unwrap();
-    let stream = ctx.default_stream();
     cx.build_search_space::<CudaRuntime>();
-    let mut rt = CudaRuntime::initialize((ctx, stream, FxHashMap::default()));
+    let mut rt = CudaRuntime::new().unwrap();
     rt.set_data(input, Box::new(vec![0., 1., 2., 3., 4.]));
     rt = cx.search(rt, 10);
     rt.allocate_intermediate_buffers(&cx.dyn_map);
