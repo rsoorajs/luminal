@@ -1,19 +1,18 @@
-use env_logger::{self, Builder};
+use env_logger;
 use log::debug;
 use luminal::{prelude::*, visualization::ToDot};
 use luminal_cuda::runtime::CudaRuntime;
-use std::fs::{self, OpenOptions};
+use ndarray::Array2;
+use rand::Rng;
+use std::fs;
 
 fn main() {
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("app.log")
-        .unwrap();
+    env_logger::init();
 
-    Builder::from_default_env()
-        .target(env_logger::Target::Pipe(Box::new(log_file)))
-        .init();
+    let m = (2 as usize).pow(10);
+    let n = (2 as usize).pow(10);
+    let k = (2 as usize).pow(10);
+
     // Create compute graph
     let mut cx = Graph::new();
 
@@ -28,13 +27,22 @@ fn main() {
 
     let mut rt = CudaRuntime::new().unwrap();
 
-    cx.set_dyn_dim('m', 3 as usize);
-    cx.set_dyn_dim('n', 4 as usize);
-    cx.set_dyn_dim('k', 2 as usize);
+    cx.set_dyn_dim('m', m);
+    cx.set_dyn_dim('n', n);
+    cx.set_dyn_dim('k', k);
 
+    // Generate random input tensors based on dimensions
+    let mut rng = rand::rng();
+    let a_data: Vec<f32> = (0..(m * k)).map(|_| rng.random_range(0.0..10.0)).collect();
+    let b_data: Vec<f32> = (0..(k * n)).map(|_| rng.random_range(0.0..10.0)).collect();
+
+    let a_matrix = Array2::from_shape_vec((m, k), a_data.clone()).unwrap();
+    let b_matrix = Array2::from_shape_vec((k, n), b_data.clone()).unwrap();
+
+   
     // Set input tensors
-    rt.set_data(a, Box::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
-    rt.set_data(b, Box::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]));
+    rt.set_data(a, Box::new(a_data));
+    rt.set_data(b, Box::new(b_data));
 
     rt.allocate_intermediate_buffers(&cx.dyn_map);
 
@@ -42,12 +50,17 @@ fn main() {
     fs::write("llir.dot", (&rt.llir_graph).to_dot().unwrap()).unwrap();
 
     // Run
-    cx.set_dyn_dim('m', 3 as usize);
-    cx.set_dyn_dim('n', 4 as usize);
-    cx.set_dyn_dim('k', 2 as usize);
+    cx.set_dyn_dim('m', m);
+    cx.set_dyn_dim('n', n);
+    cx.set_dyn_dim('k', k);
 
     rt.execute(&cx.dyn_map);
 
     // Get output tensor
-    println!("Result: {:?}", rt.get_f32(c));
+    let result_data = rt.get_f32(c);
+    let result_matrix = Array2::from_shape_vec((m, n), result_data).unwrap();
+
+    debug!("Matrix A:\n{:.2}", a_matrix);
+    debug!("Matrix B:\n{:.2}", b_matrix);
+    debug!("Result:\n{:.2}", result_matrix);
 }
