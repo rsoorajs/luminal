@@ -10,8 +10,5 @@ luminal_tracing = {path = "../../crates/luminal_tracing"}
 tracing = "0.1.43"
 log = "*"
 env_logger = "0.11"
-
-[dev-dependencies]
-ndarray = "*"
-proptest = "*"
 rand = "*"
+ndarray = "*"
