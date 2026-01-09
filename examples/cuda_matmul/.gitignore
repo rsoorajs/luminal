@@ -13,11 +13,9 @@ Cargo.lock
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
-.log
+*.log
 
-.dot 
-.html
+*.dot 
+*.html
 
 proptest-regressions/
-
-.log
