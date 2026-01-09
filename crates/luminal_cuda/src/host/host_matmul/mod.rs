@@ -12,6 +12,7 @@ use luminal::{
     },
 };
 use std::sync::Arc;
+use tracing::{trace};
 
 use crate::{cudarc::driver::CudaSlice, host::HostOp};
 
@@ -47,11 +48,11 @@ impl EgglogOp for HostMatmul {
         let n_extract = extract_expr(egraph, children[3], expr_cache).unwrap();
         let k_extract = extract_expr(egraph, children[4], expr_cache).unwrap();
 
-        dbg!(m_extract);
-        dbg!(n_extract);
-        dbg!(k_extract);
-        dbg!(children[0]);
-        dbg!(children[1]);
+        trace!("{:?}", m_extract);
+        trace!("{:?}", n_extract);
+        trace!("{:?}", k_extract);
+        trace!("{:?}", children[0]);
+        trace!("{:?}", children[1]);
 
         (
             LLIROp::new::<dyn HostOp>(Box::new(Self {
@@ -77,10 +78,10 @@ impl HostOp for HostMatmul {
     ) -> anyhow::Result<()> {
         let blas = CudaBlas::new(stream.clone())?;
 
-        eprintln!();
-        dbg!(self.m);
-        dbg!(self.n);
-        dbg!(self.k);
+        trace!("\n");
+        trace!("{:?}", self.m);
+        trace!("{:?}", self.n);
+        trace!("{:?}", self.k);
 
         // GEMM parameters
         let m = self.m.exec(dyn_map).unwrap() as i32;
@@ -96,20 +97,20 @@ impl HostOp for HostMatmul {
         let (c_ptr, _c_guard) = inputs[0].device_ptr(stream);
 
         // Debug: Check buffer sizes
-        eprintln!("Buffer sizes (in bytes):");
-        eprintln!(
+        trace!("Buffer sizes (in bytes):");
+        trace!(
             "  A: {} (expected: {} floats = {} bytes)",
             inputs[1].len(),
             m * k,
             m * k * 4
         );
-        eprintln!(
+        trace!(
             "  B: {} (expected: {} floats = {} bytes)",
             inputs[2].len(),
             k * n,
             k * n * 4
         );
-        eprintln!(
+        trace!(
             "  C: {} (expected: {} floats = {} bytes)",
             inputs[0].len(),
             m * n,
@@ -117,7 +118,7 @@ impl HostOp for HostMatmul {
         );
 
         // Debug: Read data from GPU to verify buffers are valid
-        eprintln!("\nReading data from GPU buffers:");
+        trace!("\nReading data from GPU buffers:");
 
         // Copy from device to host and convert bytes to f32
         let a_bytes: Vec<u8> = stream.memcpy_dtov(&inputs[1])?;
@@ -132,15 +133,15 @@ impl HostOp for HostMatmul {
         let c_host: &[f32] =
             unsafe { std::slice::from_raw_parts(c_bytes.as_ptr() as *const f32, (m * n) as usize) };
 
-        eprintln!("  A data: {:?}", a_host);
-        eprintln!("  B data: {:?}", b_host);
-        eprintln!("  C data (initial): {:?}", c_host);
+        trace!("  A data: {:?}", a_host);
+        trace!("  B data: {:?}", b_host);
+        trace!("  C data (initial): {:?}", c_host);
 
         // Execute GEMM using raw cuBLAS API
         // cuBLAS expects column-major, but our matrices are row-major.
         // Use C^T = B^T * A^T (swap operands and dimensions)
-        eprintln!("\nCalling cuBLAS with (row-major conversion):");
-        eprintln!("  cublasSgemm_v2(handle, OP_N, OP_N, m={}, n={}, k={}, alpha={}, B, lda={}, A, ldb={}, beta={}, C, ldc={})",
+        trace!("\nCalling cuBLAS with (row-major conversion):");
+        trace!("  cublasSgemm_v2(handle, OP_N, OP_N, m={}, n={}, k={}, alpha={}, B, lda={}, A, ldb={}, beta={}, C, ldc={})",
                   n, m, k, alpha, n, k, beta, n);
 
         unsafe {
@@ -161,7 +162,7 @@ impl HostOp for HostMatmul {
                 n,                 // ldc: leading dimension = n
             );
 
-            eprintln!("  cuBLAS status: {:?}", status);
+            trace!("  cuBLAS status: {:?}", status);
 
             if status != cublasStatus_t::CUBLAS_STATUS_SUCCESS {
                 return Err(anyhow::anyhow!(
@@ -171,7 +172,7 @@ impl HostOp for HostMatmul {
             }
         }
 
-        eprintln!("\nSynchronizing stream...");
+        trace!("\nSynchronizing stream...");
         stream.synchronize()?;
 
         // Read back result to verify
@@ -179,8 +180,8 @@ impl HostOp for HostMatmul {
         let result: &[f32] = unsafe {
             std::slice::from_raw_parts(result_bytes.as_ptr() as *const f32, (m * n) as usize)
         };
-        eprintln!("Result C: {:?}", result);
-        eprintln!("HostMatmul completed successfully!");
+        trace!("Result C: {:?}", result);
+        trace!("HostMatmul completed successfully!");
 
         Ok(())
     }
