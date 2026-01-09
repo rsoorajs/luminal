@@ -19,6 +19,7 @@ pub mod prelude {
     pub use crate::op::*;
     pub use crate::shape::*;
     pub use crate::utils::*;
+    pub use anyhow;
     pub use egglog;
     pub use egglog_ast;
     pub use egraph_serialize::NodeId as ENodeId;
@@ -27,7 +28,6 @@ pub mod prelude {
     pub use petgraph::stable_graph::NodeIndex;
     pub use rustc_hash::{FxHashMap, FxHashSet};
     pub use tinyvec;
-    pub use anyhow;  
 }
 
 pub use paste::paste;
