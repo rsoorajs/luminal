@@ -84,7 +84,6 @@ impl EgglogOp for KernelMaxReduce {
 impl KernelOp for KernelMaxReduce {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -171,7 +170,7 @@ extern \"C\" {{
         );
 
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("reduce_max_k").unwrap();
 
         let constants = vars
@@ -260,7 +259,6 @@ impl EgglogOp for KernelMeanReduce {
 impl KernelOp for KernelMeanReduce {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -346,7 +344,7 @@ extern \"C\" {{
         );
 
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("reduce_mean_k").unwrap();
 
         let constants = vars
@@ -431,7 +429,6 @@ impl EgglogOp for KernelSumReduce {
 impl KernelOp for KernelSumReduce {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -517,7 +514,7 @@ extern \"C\" {{
         );
 
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("reduce_sum_k").unwrap();
 
         let constants = vars
@@ -600,7 +597,6 @@ impl EgglogOp for KernelAdd {
 impl KernelOp for KernelAdd {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -637,7 +633,7 @@ extern \"C\" {{
             flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
         );
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("add_k").unwrap();
         let constants = vars
             .into_iter()
@@ -719,7 +715,6 @@ impl EgglogOp for KernelMul {
 impl KernelOp for KernelMul {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -756,7 +751,7 @@ extern \"C\" {{
             flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
         );
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("mul_k").unwrap();
         let constants = vars
             .into_iter()
@@ -841,7 +836,6 @@ impl EgglogOp for KernelGather {
 impl KernelOp for KernelGather {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -880,7 +874,7 @@ extern \"C\" {{
             flatten_mul_strides(&self.out_shape, &self.data_stride).to_kernel()
         );
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("gather").unwrap();
         let constants = vars
             .into_iter()
@@ -953,7 +947,6 @@ impl EgglogOp for KernelIota {
 impl KernelOp for KernelIota {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -980,7 +973,7 @@ extern \"C\" {{
             self.expr.to_kernel(),
         );
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("iota_k").unwrap();
         let constants = vars
             .into_iter()

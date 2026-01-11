@@ -1,6 +1,5 @@
 use std::fmt::Debug;
 
-use super::CustomState;
 use cudarc::driver::CudaStream;
 use itertools::Itertools;
 use luminal::{
@@ -118,12 +117,7 @@ impl BlockOp for RowAdd {
         (struct_body, function_body)
     }
 
-    fn schedule_op(
-        &self,
-        _: &mut FxHashMap<String, CustomState>,
-        _: &CudaStream,
-        expressions: &FxHashMap<Expression, i32>,
-    ) -> Vec<u8> {
+    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
         CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
@@ -265,12 +259,7 @@ impl BlockOp for RowSwishMul {
         (struct_body, function_body)
     }
 
-    fn schedule_op(
-        &self,
-        _: &mut FxHashMap<String, CustomState>,
-        _: &CudaStream,
-        expressions: &FxHashMap<Expression, i32>,
-    ) -> Vec<u8> {
+    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
         CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
@@ -490,12 +479,7 @@ impl BlockOp for RowRMSNorm {
         (struct_body, function_body)
     }
 
-    fn schedule_op(
-        &self,
-        _: &mut FxHashMap<String, CustomState>,
-        _: &CudaStream,
-        expressions: &FxHashMap<Expression, i32>,
-    ) -> Vec<u8> {
+    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
         CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
@@ -877,12 +861,7 @@ impl BlockOp for RowRope {
         (struct_body, function_body)
     }
 
-    fn schedule_op(
-        &self,
-        _: &mut FxHashMap<String, CustomState>,
-        _: &CudaStream,
-        expressions: &FxHashMap<Expression, i32>,
-    ) -> Vec<u8> {
+    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
         CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
@@ -1192,12 +1171,7 @@ impl BlockOp for TileMatmul {
         (struct_body, function_body)
     }
 
-    fn schedule_op(
-        &self,
-        _: &mut FxHashMap<String, CustomState>,
-        _: &CudaStream,
-        expressions: &FxHashMap<Expression, i32>,
-    ) -> Vec<u8> {
+    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
         assert_eq!(self.untiled_range.len(), 2);
         let mut m_pos_stride = vec![0.into(); self.range.len()];
         m_pos_stride[self.range.len() - 2] = 1.into();

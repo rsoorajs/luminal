@@ -1,16 +1,15 @@
 use luminal::{
-    graph::{elist_to_egglog, Graph},
-    op::{CustomOp, DType, HLIROp, LLIROp},
+    graph::Graph,
+    op::{CustomOp, DType, LLIROp},
     prelude::{F32Pow, FxHashMap, GraphTensor},
-    shape::{flatten_mul_strides, Expression, ShapeTracker},
+    shape::{flatten_mul_strides, Expression},
 };
 use luminal_cuda::{
     block::{BlockOp, CStruct},
-    cudarc::driver::{CudaStream, DevicePtr},
-    runtime::CustomState,
+    cudarc::driver::{CudaSlice, CudaStream, DevicePtr},
 };
 use luminal_nn::LayerNorm;
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 // Llama 7b hyperparams
 pub const LAYERS: usize = 32;
@@ -76,7 +75,6 @@ impl Llama {
                     1e-5,
                     cx,
                 ),
-                layer: l,
             });
         }
         let lm_norm = LayerNorm::new(HIDDEN, Some("model.norm.weight"), None, false, 1e-5, cx);
@@ -90,14 +88,24 @@ impl Llama {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn forward(&self, token_ids: GraphTensor, pos_ids: GraphTensor) -> GraphTensor {
+    pub fn forward(
+        &self,
+        token_ids: GraphTensor,
+        pos_ids: GraphTensor,
+        kv_cache: &KVCache,
+    ) -> GraphTensor {
         let batch = token_ids.dims1();
         let mut x = self.embedding.gather(
             (token_ids * HIDDEN).expand_dim(1, HIDDEN)
                 + token_ids.graph().arange(HIDDEN).expand_dim(0, batch),
         );
-        for layer in &self.layers {
-            x = layer.forward(x, pos_ids);
+        for (layer, (k_cache, v_cache)) in self.layers.iter().zip(&kv_cache.layers) {
+            x = layer.forward(
+                x,
+                pos_ids,
+                k_cache.device_ptr(&v_cache.stream()).0,
+                v_cache.device_ptr(&k_cache.stream()).0,
+            );
         }
         self.lm_norm.forward(x).matmul(self.lm_head.t())
     }
@@ -113,7 +121,6 @@ struct LlamaLayer {
     o_proj: GraphTensor,
     attn_rms: LayerNorm,
     mlp_rms: LayerNorm,
-    layer: usize,
 }
 
 fn llama_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> GraphTensor {
@@ -153,7 +160,13 @@ fn llama_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> Grap
 }
 
 impl LlamaLayer {
-    pub fn forward(&self, mut x: GraphTensor, pos_ids: GraphTensor) -> GraphTensor {
+    pub fn forward(
+        &self,
+        mut x: GraphTensor,
+        pos_ids: GraphTensor,
+        k_cache: u64,
+        v_cache: u64,
+    ) -> GraphTensor {
         let x_attn = self.attn_rms.forward(x);
         let q = x_attn.matmul(self.q_proj.t());
         let k = x_attn.matmul(self.k_proj.t());
@@ -161,7 +174,7 @@ impl LlamaLayer {
         let q_rope = llama_rotary_embeddings(q, pos_ids);
         let k_rope = llama_rotary_embeddings(k, pos_ids);
         let attn_out = x.graph().custom_op(
-            GQAAttention::new(HEAD_DIM, 'p'.into(), self.layer, &[q_rope, k_rope, v]),
+            LlamaAttention::new(HEAD_DIM, 'p'.into(), k_cache, v_cache, &[q_rope, k_rope, v]),
             &[q_rope, k_rope, v],
             q_rope.shape,
             q_rope.dtype,
@@ -176,7 +189,38 @@ impl LlamaLayer {
 }
 
 #[derive(Debug, Clone)]
-pub struct GQAAttention {
+pub struct KVCache {
+    layers: Vec<(CudaSlice<u8>, CudaSlice<u8>)>,
+}
+
+impl KVCache {
+    pub fn new(stream: &Arc<CudaStream>, capacity: usize) -> Self {
+        Self {
+            layers: (0..LAYERS)
+                .map(|_| {
+                    (
+                        stream
+                            .alloc_zeros(KV_GROUPS * HEAD_DIM * capacity * size_of::<f32>())
+                            .unwrap(),
+                        stream
+                            .alloc_zeros(KV_GROUPS * HEAD_DIM * capacity * size_of::<f32>())
+                            .unwrap(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        for (k_cache, v_cache) in &mut self.layers {
+            v_cache.stream().memset_zeros(k_cache).unwrap();
+            k_cache.stream().memset_zeros(v_cache).unwrap();
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LlamaAttention {
     range: Vec<Expression>,
     head_dim: Expression,
     cur_seq: Expression,
@@ -186,14 +230,16 @@ pub struct GQAAttention {
     v_stride: Vec<Expression>,
     o_stride: Vec<Expression>,
     prev_seq: Expression,
-    current_layer: usize,
+    k_cache: u64,
+    v_cache: u64,
 }
 
-impl GQAAttention {
+impl LlamaAttention {
     fn new(
         head_dim: usize,
         prev_seq: Expression,
-        current_layer: usize,
+        k_cache: u64,
+        v_cache: u64,
         qkv: &[GraphTensor],
     ) -> Self {
         let seq = qkv[0].dims()[0];
@@ -221,20 +267,21 @@ impl GQAAttention {
                 Expression::from(hidden),
             ],
             prev_seq,
-            current_layer,
+            k_cache,
+            v_cache,
         }
     }
 }
 
-impl CustomOp for GQAAttention {
+impl CustomOp for LlamaAttention {
     fn to_llir_op(&self) -> luminal::op::LLIROp {
         LLIROp::new::<dyn BlockOp>(Box::new(self.clone()))
     }
 }
 
-impl BlockOp for GQAAttention {
+impl BlockOp for LlamaAttention {
     fn op_name(&self) -> &'static str {
-        "GQAAttention"
+        "LlamaAttention"
     }
 
     fn launch_range(&self) -> Vec<Expression> {
@@ -454,16 +501,7 @@ impl BlockOp for GQAAttention {
         (struct_body, function_body)
     }
 
-    fn schedule_op(
-        &self,
-        custom_state: &mut FxHashMap<String, CustomState>,
-        stream: &CudaStream,
-        expressions: &FxHashMap<Expression, i32>,
-    ) -> Vec<u8> {
-        let CustomState::KVCache(kv_cache) = &custom_state["kv_cache"] else {
-            unreachable!()
-        };
-        let (k_cache, v_cache) = &kv_cache[self.current_layer];
+    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
         let mut q_pos_stride = vec![0.into(); self.range.len()];
         q_pos_stride[self.range.len() - 1] = 1.into();
         let mut group_pos_stride = vec![0.into(); self.range.len()];
@@ -478,8 +516,8 @@ impl BlockOp for GQAAttention {
             .int(expressions[&flatten_mul_strides(&self.range, &self.k_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.v_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.o_stride)])
-            .ptr_mut_f32(k_cache.device_ptr(stream).0 as *mut f32)
-            .ptr_mut_f32(v_cache.device_ptr(stream).0 as *mut f32)
+            .ptr_mut_f32(self.k_cache as *mut f32)
+            .ptr_mut_f32(self.v_cache as *mut f32)
             .int(expressions[&self.prev_seq])
             .int(expressions[&flatten_mul_strides(&self.range, &q_pos_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &group_pos_stride)])
@@ -507,41 +545,5 @@ impl BlockOp for GQAAttention {
             flatten_mul_strides(&self.range, &group_pos_stride),
             flatten_mul_strides(&self.range, &head_pos_stride),
         ]
-    }
-}
-
-impl HLIROp for GQAAttention {
-    fn to_egglog(&self, inputs: &[(luminal::prelude::NodeIndex, String, ShapeTracker)]) -> String {
-        let seq = inputs[0].2.dims[0];
-        let hidden = inputs[0].2.dims[1].to_usize().unwrap();
-        let kv_hidden = inputs[1].2.dims[1].to_usize().unwrap();
-        let kv_row_width = inputs[1].2.dims[1].to_usize().unwrap();
-        let n_heads = hidden / self.head_dim;
-        let n_kv_heads = kv_hidden / self.head_dim;
-        let n_kv_groups = n_heads / n_kv_heads;
-        format!(
-            "(GQAAttention {} {} {} {} {} {} {} {} {} {} {} {} {})",
-            elist_to_egglog(&[n_kv_heads.into(), n_kv_groups.into(), seq]),
-            Expression::from(self.head_dim).to_egglog(),
-            seq.to_egglog(),
-            Expression::from(kv_row_width).to_egglog(),
-            inputs[0].1,
-            elist_to_egglog(&[
-                Expression::from(self.head_dim * n_kv_groups),
-                Expression::from(self.head_dim),
-                Expression::from(hidden)
-            ]),
-            inputs[1].1,
-            elist_to_egglog(&[Expression::from(self.head_dim), 0.into(), 0.into()]),
-            inputs[2].1,
-            elist_to_egglog(&[Expression::from(self.head_dim), 0.into(), 0.into()]),
-            elist_to_egglog(&[
-                Expression::from(self.head_dim * n_kv_groups),
-                Expression::from(self.head_dim),
-                Expression::from(hidden)
-            ]),
-            self.prev_seq.to_egglog(),
-            self.current_layer,
-        )
     }
 }

@@ -20,7 +20,7 @@ proptest! {
         ctx.bind_to_thread().unwrap();
         let stream = ctx.default_stream();
         cx.build_search_space::<CudaRuntime>();
-        let mut rt = CudaRuntime::initialize((ctx, stream, FxHashMap::default()));
+        let mut rt = CudaRuntime::initialize(stream);
         let input_values = values.into_iter().take(len).collect::<Vec<f32>>();
         rt.set_data(input, input_values.clone());
         rt = cx.search(rt, 10);
@@ -52,7 +52,7 @@ pub fn cuda_sum_reduce_test() {
     ctx.bind_to_thread().unwrap();
     let stream = ctx.default_stream();
     cx.build_search_space::<CudaRuntime>();
-    let mut rt = CudaRuntime::initialize((ctx, stream, FxHashMap::default()));
+    let mut rt = CudaRuntime::initialize(stream);
     rt.set_data(input, data);
     rt = cx.search(rt, 10);
     rt.allocate_intermediate_buffers(&cx.dyn_map);
@@ -107,7 +107,7 @@ pub fn cuda_max_reduce_test() {
     ctx.bind_to_thread().unwrap();
     let stream = ctx.default_stream();
     cx.build_search_space::<CudaRuntime>();
-    let mut rt = CudaRuntime::initialize((ctx, stream, FxHashMap::default()));
+    let mut rt = CudaRuntime::initialize(stream);
     rt.set_data(input, data);
     rt = cx.search(rt, 10);
     rt.allocate_intermediate_buffers(&cx.dyn_map);
@@ -154,7 +154,7 @@ pub fn cuda_mean_reduce_test() {
     ctx.bind_to_thread().unwrap();
     let stream = ctx.default_stream();
     cx.build_search_space::<CudaRuntime>();
-    let mut rt = CudaRuntime::initialize((ctx, stream, FxHashMap::default()));
+    let mut rt = CudaRuntime::initialize(stream);
     rt.set_data(input, data);
     rt = cx.search(rt, 10);
     rt.allocate_intermediate_buffers(&cx.dyn_map);

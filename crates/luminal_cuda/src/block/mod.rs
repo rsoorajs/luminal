@@ -5,8 +5,6 @@ use cudarc::driver::CudaStream;
 use luminal::{prelude::FxHashMap, shape::Expression};
 use std::fmt::Debug;
 
-use crate::runtime::CustomState;
-
 #[allow(unused_variables)]
 pub trait BlockOp: Debug + as_any::AsAny {
     fn op_name(&self) -> &'static str;
@@ -25,7 +23,6 @@ pub trait BlockOp: Debug + as_any::AsAny {
     #[allow(clippy::mutable_key_type)]
     fn schedule_op(
         &self,
-        custom_state: &mut FxHashMap<String, CustomState>,
         stream: &CudaStream,
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {

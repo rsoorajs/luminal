@@ -42,8 +42,8 @@ impl Graph {
         Graph::default()
     }
 
-    /// Set a dynamic dimension
-    pub fn set_dyn_dim(&mut self, dimension: char, val: usize) {
+    /// Set a runtime dimension
+    pub fn set_dim(&mut self, dimension: char, val: usize) {
         self.dyn_map.insert(dimension, val);
     }
 
