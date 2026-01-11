@@ -18,9 +18,9 @@ pub type Ops = (
     KernelMul,
     KernelIota,
     KernelGather,
-    // KernelSumReduce,
-    // KernelMaxReduce,
-    // KernelMeanReduce,
+    // KernelSumReduce, // for some reason this prevents llama example from working. fairly certian there's an underlying bug in search or extraction.
+    KernelMaxReduce,
+    KernelMeanReduce,
 );
 
 #[derive(Default, Debug, Clone)]
