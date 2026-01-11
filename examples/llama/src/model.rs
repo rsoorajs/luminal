@@ -2,7 +2,7 @@ use luminal::{
     graph::Graph,
     op::{CustomOp, DType, LLIROp},
     prelude::{F32Pow, FxHashMap, GraphTensor},
-    shape::{flatten_mul_strides, Expression},
+    shape::{flatten_mul_strides, Expression, ToShape},
 };
 use luminal_cuda::{
     block::{BlockOp, CStruct},
@@ -174,8 +174,8 @@ impl LlamaLayer {
         let q_rope = llama_rotary_embeddings(q, pos_ids);
         let k_rope = llama_rotary_embeddings(k, pos_ids);
         let attn_out = x.graph().custom_op(
-            LlamaAttention::new(HEAD_DIM, 'p'.into(), k_cache, v_cache, &[q_rope, k_rope, v]),
-            &[q_rope, k_rope, v],
+            LlamaAttention::new(k_cache, v_cache, q_rope.dims()[0], 'p'.into()),
+            (q_rope, k_rope, v),
             q_rope.shape,
             q_rope.dtype,
         );
@@ -235,37 +235,16 @@ pub struct LlamaAttention {
 }
 
 impl LlamaAttention {
-    fn new(
-        head_dim: usize,
-        prev_seq: Expression,
-        k_cache: u64,
-        v_cache: u64,
-        qkv: &[GraphTensor],
-    ) -> Self {
-        let seq = qkv[0].dims()[0];
-        let hidden = qkv[0].dims()[1].to_usize().unwrap();
-        let kv_hidden = qkv[1].dims()[1].to_usize().unwrap();
-        let kv_row_width = qkv[1].dims()[1].to_usize().unwrap();
-        let n_heads = hidden / head_dim;
-        let n_kv_heads = kv_hidden / head_dim;
-        let n_kv_groups = n_heads / n_kv_heads;
+    fn new(k_cache: u64, v_cache: u64, seq: Expression, prev_seq: Expression) -> Self {
         Self {
-            range: vec![n_kv_heads.into(), n_kv_groups.into(), seq],
-            head_dim: head_dim.into(),
+            range: (HIDDEN / HEAD_DIM / KV_GROUPS, KV_GROUPS, seq).to_shape(),
+            head_dim: HEAD_DIM.into(),
             cur_seq: seq,
-            kv_row_stride: kv_row_width.into(),
-            q_stride: vec![
-                Expression::from(head_dim * n_kv_groups),
-                Expression::from(head_dim),
-                Expression::from(hidden),
-            ],
-            k_stride: vec![Expression::from(head_dim), 0.into(), 0.into()],
-            v_stride: vec![Expression::from(head_dim), 0.into(), 0.into()],
-            o_stride: vec![
-                Expression::from(head_dim * n_kv_groups),
-                Expression::from(head_dim),
-                Expression::from(hidden),
-            ],
+            kv_row_stride: (HIDDEN / KV_GROUPS).into(),
+            q_stride: (HEAD_DIM * KV_GROUPS, HEAD_DIM, HIDDEN).to_shape(),
+            k_stride: (HEAD_DIM, 0, 0).to_shape(),
+            v_stride: (HEAD_DIM, 0, 0).to_shape(),
+            o_stride: (HEAD_DIM * KV_GROUPS, HEAD_DIM, HIDDEN).to_shape(),
             prev_seq,
             k_cache,
             v_cache,

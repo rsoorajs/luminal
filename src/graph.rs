@@ -134,7 +134,7 @@ impl Graph {
     pub fn custom_op(
         &mut self,
         op: impl CustomOp + 'static,
-        inputs: &[GraphTensor],
+        inputs: impl ToIds,
         shape: impl ToShape,
         dtype: DType,
     ) -> GraphTensor {
@@ -143,8 +143,8 @@ impl Graph {
             id: self.custom_ops.len() - 1,
             dtype,
         });
-        for input in inputs {
-            add = add.input(input.id, input.shape);
+        for input in inputs.to_ids() {
+            add = add.input(input, ShapeTracker::new(()));
         }
         GraphTensor::from_id(add.finish(), ShapeTracker::new(shape), self, dtype)
     }
