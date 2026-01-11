@@ -64,7 +64,7 @@ impl GraphTensor {
             .add_op(Output {
                 node: self.id.index(),
             })
-            .input(self.id, 0, self.shape)
+            .input(self.id, self.shape)
             .finish();
         *self
     }

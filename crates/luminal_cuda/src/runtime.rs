@@ -1,7 +1,4 @@
-use crate::{
-    block::{BlockOp, IntoBlockOp},
-    kernel::KernelOp,
-};
+use crate::{block::BlockOp, kernel::KernelOp};
 use cudarc::{
     driver::{
         CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut,
@@ -20,12 +17,12 @@ use luminal::prelude::{
     },
     *,
 };
-use luminal::{hlir::*, op::flatten_z_strides};
+use luminal::{hlir::*, shape::flatten_z_strides};
 use memmap2::MmapOptions;
 use prost::Message as _;
 use safetensors::SafeTensors;
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     ffi::c_void,
     fmt::Debug,
     fs::File,
@@ -130,7 +127,7 @@ impl CudaRuntime {
         let mmap = unsafe { MmapOptions::new().map(&f).unwrap() };
         let st = SafeTensors::deserialize(&mmap).unwrap();
         for node in cx.graph.node_indices() {
-            if let Some(Input { label, .. }) = cx.graph[node].as_any().downcast_ref::<Input>() {
+            if let Some(Input { label, .. }) = (*cx.graph[node]).as_any().downcast_ref::<Input>() {
                 if let Ok(tensor) = st.tensor(label) {
                     match tensor.dtype() {
                         safetensors::Dtype::F32 => {
@@ -250,7 +247,16 @@ impl CudaRuntime {
     }
 
     pub fn record_cuda_perfetto_trace(&self, file_path: impl AsRef<std::path::Path>) {
-        let ops = <crate::block::Ops as IntoBlockOp>::into_vec();
+        let ops = self
+            .llir_graph
+            .node_indices()
+            .filter_map(|n| self.llir_graph[n].to_dialect::<dyn BlockOp>())
+            .map(|bo| (bo.op_name(), bo.clone()))
+            .collect::<HashMap<_, _>>()
+            .into_iter()
+            .sorted_by_key(|(n, _)| *n)
+            .map(|(_, o)| o)
+            .collect_vec();
         let data = std::fs::read(&file_path).unwrap();
         let mut trace = tracing_perfetto_sdk_schema::Trace::decode(data.as_slice()).unwrap();
 
@@ -286,7 +292,7 @@ impl CudaRuntime {
                     } else if op == 1 {
                         "Wait".to_string()
                     } else {
-                        ops[op - 2].term().0
+                        ops[op - 2].op_name().to_string()
                     };
                     if sm_timings[n_op + 1].start == 0 {
                         break;
@@ -380,7 +386,15 @@ impl Runtime for CudaRuntime {
                 }
             }
         }
-        let block_ops = <crate::block::Ops as IntoBlockOp>::into_vec();
+        let block_ops = llir_graph
+            .node_indices()
+            .filter_map(|n| llir_graph[n].to_dialect::<dyn BlockOp>())
+            .map(|bo| (bo.op_name(), bo.clone()))
+            .collect::<HashMap<_, _>>()
+            .into_iter()
+            .sorted_by_key(|(n, _)| *n)
+            .map(|(_, o)| o)
+            .collect_vec();
         let block_ops_in_graph = llir_graph
             .node_indices()
             .filter(|n| llir_graph[*n].to_dialect::<dyn BlockOp>().is_some())
@@ -455,7 +469,7 @@ impl Runtime for CudaRuntime {
                 let op = llir_graph[node].to_dialect::<dyn BlockOp>().unwrap();
                 let op_code = block_ops
                     .iter()
-                    .position(|o| (**o).as_any().type_id() == (**op).as_any().type_id())
+                    .position(|o| o.op_name() == op.op_name())
                     .unwrap();
                 let mut payload =
                     op.schedule_op(&mut self.custom_state, &self.cuda_stream, &expressions);
@@ -1196,13 +1210,13 @@ pub fn compile_interpreter(
         "//%extra_op_codes%",
         &ops.iter()
             .enumerate()
-            .map(|(i, op)| format!("{}Op = {i}", op.term().0))
+            .map(|(i, op)| format!("{}Op = {i}", op.op_name()))
             .join(", "),
     );
     kernel = kernel.replace(
         "//%extra_op_structs%",
         &ops.iter()
-            .map(|op| format!("struct {}Payload {{{}}};", op.term().0, op.cuda_op().0))
+            .map(|op| format!("struct {}Payload {{{}}};", op.op_name(), op.cuda_op().0))
             .join("\n"),
     );
     kernel = kernel.replace(
@@ -1210,7 +1224,7 @@ pub fn compile_interpreter(
         &ops
             .iter()
             .map(|op| {
-                let (op_name, _) = op.term();
+                let op_name = op.op_name();
                 let (_, op_body) = op.cuda_op();
                 format!(
                     "__device__ void {op_name}_function({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t) {{
@@ -1224,13 +1238,13 @@ pub fn compile_interpreter(
         "//%extra_op_payloads%",
         &ops.iter()
             .map(|op| {
-                let op_name = op.term().0;
+                let op_name = op.op_name();
                 format!("{op_name}Payload {op_name};")
             })
             .join(" "),
     );
     kernel = kernel.replace("//%extra_op_calls%", &ops.iter().map(|op| {
-            let op_name = op.term().0;
+            let op_name = op.op_name();
             format!("case OpCode::{op_name}Op: {op_name}_function(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x); break;")
         }).join("\n"));
     let constants = expressions

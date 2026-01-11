@@ -47,7 +47,7 @@ fn main() {
 
     let (sort, value) = egglog_obj.eval_expr(&var!(root)).unwrap();
     let s_egraph = SerializedEGraph::new(&egglog_obj, vec![(sort, value)]);
-    let llir_graphs = egglog_to_llir(&s_egraph, &ops, 100);
+    let llir_graphs = egglog_to_llir(&s_egraph, &ops, &[], 100);
     let example_llir_graph = llir_graphs.last().unwrap();
 
     println!("Visualizing LLIR Graph");

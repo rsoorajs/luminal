@@ -15,7 +15,7 @@ impl GraphTensor {
         let new_id = self
             .graph()
             .add_op(crate::hlir::Log2::default())
-            .input(self.id, 0, self.shape)
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -25,7 +25,7 @@ impl GraphTensor {
         let new_id = self
             .graph()
             .add_op(crate::hlir::Exp2::default())
-            .input(self.id, 0, self.shape)
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -45,7 +45,7 @@ impl GraphTensor {
         let new_id = self
             .graph()
             .add_op(crate::hlir::Recip::default())
-            .input(self.id, 0, self.shape)
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -55,7 +55,7 @@ impl GraphTensor {
         let new_id = self
             .graph()
             .add_op(crate::hlir::Sin::default())
-            .input(self.id, 0, self.shape)
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -75,7 +75,7 @@ impl GraphTensor {
         let new_id = self
             .graph()
             .add_op(crate::hlir::Sqrt::default())
-            .input(self.id, 0, self.shape)
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -84,7 +84,7 @@ impl GraphTensor {
         let new_id = self
             .graph()
             .add_op(crate::hlir::GraphBreak)
-            .input(self.id, 0, self.shape)
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }

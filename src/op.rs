@@ -7,6 +7,27 @@ use crate::prelude::*;
 use as_any::{AsAny, Downcast};
 use rustc_hash::FxHashMap;
 
+pub trait Runtime {
+    type Ops: IntoEgglogOp;
+    type CompileArg;
+    type Data;
+    type ExecReturn;
+    type ProfileMetric: PartialOrd + Clone + Debug;
+    fn initialize(arg: Self::CompileArg) -> Self;
+    fn load_llir(&mut self, llir_graph: &LLIRGraph);
+    fn set_data(&mut self, id: impl ToId, data: Self::Data);
+    fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn;
+    fn profile(
+        &mut self,
+        llir_graph: &LLIRGraph,
+        dyn_map: &FxHashMap<char, usize>,
+    ) -> (Self::ProfileMetric, String);
+}
+
+pub trait CustomOp: Debug {
+    fn to_llir_op(&self) -> LLIROp;
+}
+
 /// Supported dtypes
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum DType {
@@ -115,6 +136,7 @@ pub enum OpParam {
     Float,
     Str,
     Dty,
+    IList,
 }
 
 impl Debug for OpParam {
@@ -127,45 +149,111 @@ impl Debug for OpParam {
             OpParam::Str => write!(f, "String"),
             OpParam::Dty => write!(f, "DType",),
             OpParam::Float => write!(f, "f64"),
+            OpParam::IList => write!(f, "IList"),
         }
     }
 }
 
-pub fn flatten_z_strides(range: &[Expression], strides: &[Expression]) -> Expression {
-    assert_eq!(range.len(), strides.len());
-    let mut current_elem_size = Expression::from(1);
-    let mut flat_stride = Expression::from(0);
-    for (dim, (range, stride)) in range.iter().zip(strides).enumerate().rev() {
-        let div = Expression::from('z') / current_elem_size;
-        let m = if dim > 0 { div % range } else { div };
-        flat_stride += stride.substitute('z', m);
-        current_elem_size *= range;
-    }
-    flat_stride.simplify()
+#[macro_export]
+macro_rules! __impl_tuple_into_dyn_arcbox_concat_arity {
+    ($tr:ident; $($T:ident),+ $(,)?) => {
+        $crate::paste!{
+        impl<$($T),+> [<Into $tr>] for ($($T,)+)
+        where
+            $(
+                $T: [<Into $tr>],
+            )+
+        {
+            #[inline]
+            fn append_into(
+                out: &mut ::std::vec::Vec<
+                    ::std::sync::Arc<::std::boxed::Box<dyn $tr + 'static>>
+                >
+            ) {
+                $(
+                    <$T as [<Into $tr>]>::append_into(out);
+                )+
+            }
+        }
+        }
+    };
 }
 
-pub fn flatten_mul_strides(range: &[Expression], strides: &[Expression]) -> Expression {
-    assert_eq!(range.len(), strides.len());
-    let mut current_elem_size = Expression::from(1);
-    let mut flat_stride = Expression::from(0);
-    for (dim, (range, stride)) in range.iter().zip(strides).enumerate().rev() {
-        let div = Expression::from('z') / current_elem_size;
-        let m = if dim > 0 { div % range } else { div };
-        flat_stride += m * stride;
-        current_elem_size *= range;
-    }
-    flat_stride.simplify()
-}
+#[macro_export]
+macro_rules! impl_into_ops {
+    ($tr:ident) => {
+        $crate::paste!{
+        pub trait [<Into $tr>] {
+            fn append_into(
+                out: &mut ::std::vec::Vec<
+                    ::std::sync::Arc<::std::boxed::Box<dyn $tr + 'static>>
+                >
+            );
 
-pub fn flatten_z_strides_mask(range: &[Expression], strides: &[Expression]) -> Expression {
-    assert_eq!(range.len(), strides.len());
-    let mut current_elem_size = Expression::from(1);
-    let mut flat_stride = Expression::from(1);
-    for (dim, (range, stride)) in range.iter().zip(strides).enumerate().rev() {
-        let div = Expression::from('z') / current_elem_size;
-        let m = if dim > 0 { div % range } else { div };
-        flat_stride *= stride.substitute('z', m);
-        current_elem_size *= range;
-    }
-    flat_stride.simplify()
+            #[inline]
+            fn into_vec() -> ::std::vec::Vec<
+                ::std::sync::Arc<::std::boxed::Box<dyn $tr + 'static>>
+            > {
+                let mut out = ::std::vec::Vec::new();
+                Self::append_into(&mut out);
+                out
+            }
+        }
+
+        // base
+        impl [<Into $tr>] for () {
+            #[inline]
+            fn append_into(
+                _out: &mut ::std::vec::Vec<
+                    ::std::sync::Arc<::std::boxed::Box<dyn $tr + 'static>>
+                >
+            ) {}
+        }
+
+        // leaf: any concrete op type
+        impl<T> [<Into $tr>] for T
+        where
+            T: $tr + ::std::default::Default + 'static,
+        {
+            #[inline]
+            fn append_into(
+                out: &mut ::std::vec::Vec<
+                    ::std::sync::Arc<::std::boxed::Box<dyn $tr + 'static>>
+                >
+            ) {
+                out.push(::std::sync::Arc::new(::std::boxed::Box::new(
+                    <T as ::std::default::Default>::default(),
+                )));
+            }
+        }
+        }
+
+        // tuple concatenation impls (extend arity list as needed)
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y);
+        $crate::__impl_tuple_into_dyn_arcbox_concat_arity!($tr; A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z);
+    };
 }

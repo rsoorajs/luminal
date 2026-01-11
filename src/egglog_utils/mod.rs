@@ -6,24 +6,31 @@ pub const BASE_CLEANUP: &str = include_str!("base_cleanup.egg");
 pub const RUN_SCHEDULE: &str = include_str!("run_schedule.egg");
 
 fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
+    let ops_str = ops
+        .iter()
+        .map(|o| {
+            let (name, body) = o.term();
+            format!(
+                "({name} {})",
+                body.into_iter().map(|j| format!("{j:?}")).join(" ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         "
-    (datatype IR
-    (OutputJoin IR IR)
-    {}
+    (datatype*
+        (IR
+            (OutputJoin IR IR)
+            {ops_str}
+        )
+        (IList
+            (ICons IR IList)
+            (INil)
+        )
     )
     (function dtype (IR) DType :merge new)
-    ",
-        ops.iter()
-            .map(|o| {
-                let (name, body) = o.term();
-                format!(
-                    "({name} {})",
-                    body.into_iter().map(|j| format!("{j:?}")).join(" ")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    "
     )
 }
 

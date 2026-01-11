@@ -14,6 +14,7 @@ use tracing::info_span;
 pub type HLIROps = (
     Input,
     Output,
+    CustomOpHLIR,
     Constant,
     Cast,
     Iota,
@@ -147,6 +148,49 @@ impl HLIROp for Output {
 }
 
 impl NativeOp for Output {
+    fn execute(&self, _: Vec<&NativeData>, _: &FxHashMap<char, usize>) -> NativeData {
+        unimplemented!()
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct CustomOpHLIR {
+    pub id: usize,
+    pub dtype: DType,
+}
+
+impl EgglogOp for CustomOpHLIR {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        ("CustomOpHLIR".to_string(), vec![IList, Int, Dty])
+    }
+
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            "(rule
+           ((= ?e (CustomOpHLIR ?a ?b ?dty)))
+           ((set (dtype ?e) ?dty))
+        )"
+            .to_string(),
+        ]
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+}
+
+impl HLIROp for CustomOpHLIR {
+    fn to_egglog(&self, inp: &[(NodeIndex, String, ShapeTracker)]) -> String {
+        format!(
+            "(CustomOpHLIR {} {} ({:?}))",
+            list_to_egglog(&inp.iter().map(|i| &i.1).collect_vec(), "ICons", "INil"),
+            self.id,
+            self.dtype
+        )
+    }
+}
+
+impl NativeOp for CustomOpHLIR {
     fn execute(&self, _: Vec<&NativeData>, _: &FxHashMap<char, usize>) -> NativeData {
         unimplemented!()
     }

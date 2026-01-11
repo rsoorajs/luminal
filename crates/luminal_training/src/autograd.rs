@@ -28,15 +28,10 @@ fn build_dfs_set(
     while let Some(n) = stack.pop() {
         if !set.contains(&n) {
             set.insert(n);
-            stack.extend(
-                graph
-                    .edges_directed(n, direction)
-                    .filter(|e| !e.weight().is_schedule())
-                    .map(|e| match direction {
-                        Direction::Incoming => e.source(),
-                        Direction::Outgoing => e.target(),
-                    }),
-            );
+            stack.extend(graph.edges_directed(n, direction).map(|e| match direction {
+                Direction::Incoming => e.source(),
+                Direction::Outgoing => e.target(),
+            }));
         }
     }
     set
@@ -196,7 +191,7 @@ fn add_grad(
                     dim: i,
                     ..Default::default()
                 })
-                .input(grad.id, 0, grad.shape)
+                .input(grad.id, grad.shape)
                 .finish();
             grad.shape.remove_dim(i);
             grad.shape = grad.shape.contiguous();
@@ -204,7 +199,7 @@ fn add_grad(
     }
 
     // Check to see if a reshape was done here. If so, we may need to assert grad shape is contiguous or insert a contiguous call
-    if let Some((_, _, mut pre_fwd_shape)) = graph.get_sources(fwd.id).first() {
+    if let Some((_, mut pre_fwd_shape)) = graph.get_sources(fwd.id).first() {
         if let Some(SumReduce { dim, .. }) = graph.try_get_op(fwd.id) {
             pre_fwd_shape.remove_dim(*dim);
         } else if let Some(MaxReduce { dim, .. }) = graph.try_get_op(fwd.id) {

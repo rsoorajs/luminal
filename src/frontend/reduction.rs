@@ -14,7 +14,7 @@ impl GraphTensor {
                     dim: axes[dim],
                     ..Default::default()
                 })
-                .input(id, 0, shape)
+                .input(id, shape)
                 .finish();
             shape.remove_dim(axes[dim]);
             shape = shape.contiguous();
@@ -40,7 +40,7 @@ impl GraphTensor {
                     dim: axes[dim],
                     ..Default::default()
                 })
-                .input(id, 0, shape)
+                .input(id, shape)
                 .finish();
             shape.remove_dim(axes[dim]);
             shape = shape.contiguous();

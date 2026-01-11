@@ -2,13 +2,14 @@ mod ops;
 pub use ops::*;
 
 use cudarc::driver::CudaStream;
-use luminal::{op::EgglogOp, prelude::FxHashMap, shape::Expression};
+use luminal::{prelude::FxHashMap, shape::Expression};
 use std::fmt::Debug;
 
 use crate::runtime::CustomState;
 
 #[allow(unused_variables)]
-pub trait BlockOp: Debug + as_any::AsAny + EgglogOp {
+pub trait BlockOp: Debug + as_any::AsAny {
+    fn op_name(&self) -> &'static str;
     fn launch_range(&self) -> Vec<Expression> {
         unimplemented!()
     }

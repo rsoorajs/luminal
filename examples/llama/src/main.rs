@@ -3,11 +3,7 @@ mod model;
 
 use benchmark::Benchmarker;
 use itertools::Itertools;
-use luminal::{
-    graph::{Graph, Runtime},
-    op::DType,
-    prelude::FxHashMap,
-};
+use luminal::prelude::*;
 use luminal_cuda::runtime::{CudaRuntime, CustomState};
 use model::*;
 use std::io::Write;
