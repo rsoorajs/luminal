@@ -36,7 +36,7 @@ fn main() {
     // run e-graph saturation
     println!("Building and Saturating E-Graph");
     let mut egglog_obj = egglog::EGraph::default();
-    let code = luminal::egglog_utils::full_egglog(&program, &ops, true).join("\n");
+    let code = luminal::egglog_utils::full_egglog(&program, &ops, true);
     egglog_obj.parse_and_run_program(None, &code).unwrap();
 
     // EGraph Optimization Complete

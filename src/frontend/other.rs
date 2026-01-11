@@ -26,8 +26,11 @@ impl Graph {
     pub fn iota(&mut self, i: impl Into<Expression>, shape: impl ToShape) -> GraphTensor {
         let sh = shape.to_shape();
         GraphTensor::from_id(
-            self.add_op(Iota(i.into(), sh.iter().copied().product()))
-                .finish(),
+            self.add_op(Iota(
+                i.into().simplify(),
+                sh.iter().copied().product::<Expression>().simplify(),
+            ))
+            .finish(),
             ShapeTracker::new(sh),
             self,
             DType::Int,
@@ -98,6 +101,7 @@ impl GraphTensor {
 mod tests {
     use crate::{prelude::*, tests::assert_close};
     use candle_core::{Device, Tensor};
+    use proptest::prelude::*;
 
     pub fn test_init(
         func: impl Fn(&mut Graph) -> GraphTensor,
@@ -119,48 +123,65 @@ mod tests {
         assert_close(rt.get_f32(b.id), &ref_b.to_vec1::<f32>().unwrap())
     }
 
-    #[test]
-    fn test_arange() {
-        test_init(
-            |cx| cx.arange(13).cast(DType::F32) * 1.0,
-            |dev| Tensor::arange(0_f32, 13_f32, dev).unwrap(),
-        );
-        test_init(
-            |cx| cx.arange_options(-5, 25, 5).cast(DType::F32) * 1.0,
-            |dev| {
-                (Tensor::arange(-1_f32, 5_f32, dev).unwrap()
-                    * Tensor::new(5_f32, dev).unwrap().broadcast_as(6).unwrap())
-                .unwrap()
-            },
-        );
-        test_init(
-            |cx| cx.arange_options(0, 4, 1).cast(DType::F32) / 3.,
-            #[allow(clippy::excessive_precision)]
-            |dev| Tensor::new(vec![0_f32, 0.3333333333, 0.666666666, 0.99999999], dev).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_arange(end in 1i32..64) {
+            test_init(
+                |cx| cx.arange(end).cast(DType::F32) * 1.0,
+                |dev| Tensor::arange(0_f32, end as f32, dev).unwrap(),
+            );
+        }
     }
 
-    #[test]
-    fn test_gather() {
-        test_init(
-            |cx| {
-                cx.arange(13)
-                    .cast(DType::F32)
-                    .gather(cx.iota(Expression::from('z') * 2, 5))
-            },
-            |dev| Tensor::new(vec![0_f32, 2., 4., 6., 8.], dev).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_arange_options(start in -16i32..16, step in 1i32..6, count in 1i32..20) {
+            let end = start + step * count;
+            test_init(
+                |cx| cx.arange_options(start, end, step).cast(DType::F32) * 1.0,
+                |dev| {
+                    let values = (0..count)
+                        .map(|i| (start + step * i) as f32)
+                        .collect::<Vec<f32>>();
+                    Tensor::from_vec(values, count as usize, dev).unwrap()
+                },
+            );
+        }
     }
 
-    #[test]
-    fn test_triangle_mask() {
-        test_init(
-            |cx| cx.tril(10, 0).cast(DType::F32),
-            |dev| Tensor::tril2(10, candle_core::DType::F32, dev).unwrap(),
-        );
-        test_init(
-            |cx| cx.triu(43, 0).cast(DType::F32),
-            |dev| Tensor::triu2(43, candle_core::DType::F32, dev).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_gather(base_len in 5usize..64, count in 1usize..16) {
+            prop_assume!(base_len >= 2 * count - 1);
+            test_init(
+                |cx| {
+                    cx.arange(base_len as i32)
+                        .cast(DType::F32)
+                        .gather(cx.iota(Expression::from('z') * 2, count as i32))
+                },
+                |dev| {
+                    let values = (0..count).map(|i| (2 * i) as f32).collect::<Vec<f32>>();
+                    Tensor::new(values, dev).unwrap()
+                },
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_triangle_mask(size in 1usize..64) {
+            test_init(
+                |cx| cx.tril(size as i32, 0).cast(DType::F32),
+                |dev| Tensor::tril2(size, candle_core::DType::F32, dev).unwrap(),
+            );
+            test_init(
+                |cx| cx.triu(size as i32, 0).cast(DType::F32),
+                |dev| Tensor::triu2(size, candle_core::DType::F32, dev).unwrap(),
+            );
+        }
     }
 }

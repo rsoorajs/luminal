@@ -1,15 +1,10 @@
-use std::any::TypeId;
-
-use itertools::Itertools;
-use petgraph::{algo::toposort, visit::EdgeRef, Direction};
+use petgraph::{visit::EdgeRef, Direction};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use luminal::{
-    hlir::{Add, Exp2, LessThan, Log2, MaxReduce, Mod, Mul, Recip, Sin, Sqrt, SumReduce},
-    prelude::*,
-};
+use luminal::prelude::*;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Autograd(Vec<NodeIndex>, NodeIndex);
 
 impl Autograd {
@@ -19,6 +14,7 @@ impl Autograd {
 }
 
 // Run dfs with a starting stack and record all encountered nodes in a set
+#[allow(dead_code)]
 fn build_dfs_set(
     stack: &mut Vec<NodeIndex>,
     graph: &HLIRGraph,
@@ -168,6 +164,7 @@ fn build_dfs_set(
 //     }
 // }
 
+#[allow(dead_code)]
 fn add_grad(
     mut grad: GraphTensor,
     fwd: GraphTensor,
@@ -187,7 +184,7 @@ fn add_grad(
     for i in (0..fwd.shape.len()).rev() {
         if fwd.shape.strides[i] == 0 {
             grad.id = graph
-                .add_op(SumReduce {
+                .add_op(luminal::hlir::SumReduce {
                     dim: i,
                     ..Default::default()
                 })
@@ -200,9 +197,9 @@ fn add_grad(
 
     // Check to see if a reshape was done here. If so, we may need to assert grad shape is contiguous or insert a contiguous call
     if let Some((_, mut pre_fwd_shape)) = graph.get_sources(fwd.id).first() {
-        if let Some(SumReduce { dim, .. }) = graph.try_get_op(fwd.id) {
+        if let Some(luminal::hlir::SumReduce { dim, .. }) = graph.try_get_op(fwd.id) {
             pre_fwd_shape.remove_dim(*dim);
-        } else if let Some(MaxReduce { dim, .. }) = graph.try_get_op(fwd.id) {
+        } else if let Some(luminal::hlir::MaxReduce { dim, .. }) = graph.try_get_op(fwd.id) {
             pre_fwd_shape.remove_dim(*dim);
         }
         if grad.shape.dims != pre_fwd_shape.dims {

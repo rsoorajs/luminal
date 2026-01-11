@@ -10,12 +10,10 @@ use rustc_hash::FxHashMap;
 pub trait Runtime {
     type Ops: IntoEgglogOp;
     type CompileArg;
-    type Data;
     type ExecReturn;
     type ProfileMetric: PartialOrd + Clone + Debug;
     fn initialize(arg: Self::CompileArg) -> Self;
     fn load_llir(&mut self, llir_graph: &LLIRGraph);
-    fn set_data(&mut self, id: impl ToId, data: Self::Data);
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn;
     fn profile(
         &mut self,
@@ -23,6 +21,29 @@ pub trait Runtime {
         dyn_map: &FxHashMap<char, usize>,
     ) -> (Self::ProfileMetric, String);
 }
+
+pub trait EgglogOp: Debug {
+    fn term(&self) -> (String, Vec<OpParam>);
+    fn rewrites(&self) -> Vec<String> {
+        vec![]
+    }
+    fn early_rewrites(&self) -> Vec<String> {
+        vec![]
+    }
+    fn cleanup(&self) -> bool;
+    #[allow(unused_variables)]
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        panic!("Extraction not implemented for {self:?}!");
+    }
+}
+
+crate::impl_into_ops!(EgglogOp);
 
 pub trait CustomOp: Debug {
     fn to_llir_op(&self) -> LLIROp;
@@ -59,26 +80,6 @@ impl<T: HLIROp> HLIROp for Arc<Mutex<T>> {
         <T as HLIROp>::to_egglog(&self.lock().unwrap(), inputs)
     }
 }
-
-pub trait EgglogOp: Debug {
-    fn term(&self) -> (String, Vec<OpParam>);
-    fn rewrites(&self) -> Vec<String> {
-        vec![]
-    }
-    fn cleanup(&self) -> bool;
-    #[allow(unused_variables)]
-    fn extract<'a>(
-        &'a self,
-        egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a ENodeId>) {
-        panic!("Extraction not implemented for {self:?}!");
-    }
-}
-
-crate::impl_into_ops!(EgglogOp);
 
 #[derive(Debug, Clone)]
 pub struct LLIROp(Arc<Box<dyn DialectOpTrait>>);

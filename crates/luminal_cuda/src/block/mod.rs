@@ -22,6 +22,7 @@ pub trait BlockOp: Debug + as_any::AsAny {
     fn cuda_op(&self) -> (String, String) {
         ("".to_string(), "".to_string())
     } // C dtype, C function
+    #[allow(clippy::mutable_key_type)]
     fn schedule_op(
         &self,
         custom_state: &mut FxHashMap<String, CustomState>,

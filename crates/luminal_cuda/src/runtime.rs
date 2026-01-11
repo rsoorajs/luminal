@@ -1,8 +1,8 @@
 use crate::{block::BlockOp, kernel::KernelOp};
 use cudarc::{
     driver::{
-        CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut,
-        DeviceRepr, LaunchConfig, PushKernelArg, ValidAsZeroBits,
+        CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr,
+        LaunchConfig, PushKernelArg, ValidAsZeroBits,
     },
     nvrtc::{compile_ptx_with_opts, CompileOptions},
 };
@@ -143,6 +143,13 @@ impl CudaRuntime {
         }
     }
 
+    pub fn set_data(&mut self, id: impl ToId, data: impl ToCudaBuffer) {
+        self.hlir_buffers.insert(
+            id.to_id(),
+            data.to_cuda_buffer(&self.cuda_context, &self.cuda_stream),
+        );
+    }
+
     #[tracing::instrument(skip_all)]
     pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
         let id = id.to_id();
@@ -174,7 +181,7 @@ impl CudaRuntime {
             .collect_vec()
     }
 
-    fn register_buffer(&mut self, llir_node: NodeIndex) {
+    fn register_buffer(&mut self, llir_node: NodeIndex, ptr: u64) {
         // Remap pointers in work queue
         if let Some(ExecutableKernel::Megakernel {
             work_queue,
@@ -186,12 +193,7 @@ impl CudaRuntime {
             .and_then(|n| self.exec_graph.node_weight_mut(*n))
         {
             if self.llir_graph[llir_node].to_op::<Input>().is_none() {
-                work_queue[node_to_task_index[&llir_node]].out_ptr =
-                    self.buffers
-                        .get_mut(&llir_node)
-                        .unwrap()
-                        .device_ptr_mut(&self.cuda_stream)
-                        .0 as *mut f32;
+                work_queue[node_to_task_index[&llir_node]].out_ptr = ptr as *mut f32;
             }
         }
         for edge in self
@@ -214,8 +216,7 @@ impl CudaRuntime {
                 .get(&dest)
                 .and_then(|n| self.exec_graph.node_weight_mut(*n))
             {
-                work_queue[node_to_task_index[&dest]].source_ptrs[n_input] =
-                    self.buffers[&llir_node].device_ptr(&self.cuda_stream).0 as *const f32;
+                work_queue[node_to_task_index[&dest]].source_ptrs[n_input] = ptr as *const f32;
             }
         }
     }
@@ -233,7 +234,8 @@ impl CudaRuntime {
                         .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
                         .unwrap(),
                 );
-                self.register_buffer(node);
+                let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+                self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
                 self.buffers.insert(
                     node,
@@ -241,7 +243,8 @@ impl CudaRuntime {
                         .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
                         .unwrap(),
                 );
-                self.register_buffer(node);
+                let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+                self.register_buffer(node, ptr);
             }
         }
     }
@@ -283,7 +286,7 @@ impl CudaRuntime {
         let mut extra_packets = Vec::new();
         for (run, (device_timings, device_start_time)) in self.timings.iter().enumerate() {
             let (host_time, host_clock_id) = host_start_times[run];
-            for (sm, sm_timings) in device_timings.chunks(1000).into_iter().enumerate() {
+            for (sm, sm_timings) in device_timings.chunks(1000).enumerate() {
                 let mut builder = ManualTrackBuilder::new(sm as u32, host_time, host_clock_id);
                 for n_op in 0..sm_timings.len() - 1 {
                     let op = sm_timings[n_op].event as usize;
@@ -356,7 +359,6 @@ impl Runtime for CudaRuntime {
         Arc<CudaStream>,
         FxHashMap<String, CustomState>,
     );
-    type Data = Box<dyn ToCudaBuffer>;
     type ExecReturn = ();
     type ProfileMetric = Duration;
 
@@ -367,7 +369,7 @@ impl Runtime for CudaRuntime {
             cuda_stream: stream,
             cuda_context: ctx,
             llir_graph: StableGraph::default(),
-            custom_state: custom_state,
+            custom_state,
             exec_graph: StableGraph::default(),
             node_to_exec: FxHashMap::default(),
             timings: vec![],
@@ -378,7 +380,7 @@ impl Runtime for CudaRuntime {
     fn load_llir(&mut self, llir_graph: &LLIRGraph) {
         self.exec_graph.clear();
         // clear kv cache
-        for (_, s) in &mut self.custom_state {
+        for s in self.custom_state.values_mut() {
             if let CustomState::KVCache(layers) = s {
                 for (k, v) in layers {
                     self.cuda_stream.memset_zeros(k).unwrap();
@@ -411,13 +413,14 @@ impl Runtime for CudaRuntime {
                 consumer_barrier_strides,
                 mut producer_barrier_bases,
                 n_barriers,
-            ) = get_barrier_strides(&llir_graph, &subgraph);
+            ) = get_barrier_strides(llir_graph, &subgraph);
             for node in llir_graph
                 .node_indices()
                 .filter(|n| llir_graph[*n].to_op::<Input>().is_some())
             {
                 producer_barrier_bases.insert(node, 0.into());
             }
+            #[allow(clippy::mutable_key_type)]
             let expressions = llir_graph
                 .node_weights()
                 .filter_map(|op| op.to_dialect::<dyn BlockOp>())
@@ -600,6 +603,7 @@ impl Runtime for CudaRuntime {
 
     #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
+        let mut llir_to_hlir: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
         for (hlir_node, llir_node) in self
             .llir_graph
             .node_indices()
@@ -612,11 +616,11 @@ impl Runtime for CudaRuntime {
             })
             .collect_vec()
         {
-            self.buffers.insert(
-                llir_node,
-                self.hlir_buffers[&NodeIndex::new(hlir_node)].clone(),
-            );
-            self.register_buffer(llir_node);
+            llir_to_hlir.insert(llir_node, NodeIndex::new(hlir_node));
+            let ptr = self.hlir_buffers[&NodeIndex::new(hlir_node)]
+                .device_ptr(&self.cuda_stream)
+                .0;
+            self.register_buffer(llir_node, ptr);
         }
         let mut timings = vec![];
         for exec_node in toposort(&self.exec_graph, None).unwrap() {
@@ -633,7 +637,7 @@ impl Runtime for CudaRuntime {
                     constants,
                 } => {
                     for (dyn_dim, val) in dyn_map {
-                        if let Some(global) = constants.get_mut(&dyn_dim) {
+                        if let Some(global) = constants.get_mut(dyn_dim) {
                             let mut view = global.as_view_mut();
                             let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
                             self.cuda_stream
@@ -657,7 +661,11 @@ impl Runtime for CudaRuntime {
                     let mut lb = self.cuda_stream.launch_builder(kernel);
                     lb.arg(&self.buffers[output]);
                     for inp in inputs {
-                        lb.arg(&self.buffers[inp]);
+                        if let Some(buf) = self.buffers.get(inp) {
+                            lb.arg(buf);
+                        } else {
+                            lb.arg(&self.hlir_buffers[&llir_to_hlir[inp]]);
+                        }
                     }
                     let span = span!(Level::INFO, "kernel");
                     let _entered = span.enter();
@@ -699,7 +707,7 @@ impl Runtime for CudaRuntime {
 
                     // Set up dyn dims
                     for (dyn_dim, val) in dyn_map {
-                        if let Some(global) = interpreter_constants.get_mut(&dyn_dim) {
+                        if let Some(global) = interpreter_constants.get_mut(dyn_dim) {
                             let mut view = global.as_view_mut();
                             let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
                             self.cuda_stream
@@ -755,13 +763,6 @@ impl Runtime for CudaRuntime {
             }
         }
         self.timings.extend(timings);
-    }
-
-    fn set_data(&mut self, id: impl ToId, data: Self::Data) {
-        self.hlir_buffers.insert(
-            id.to_id(),
-            data.to_cuda_buffer(&self.cuda_context, &self.cuda_stream),
-        );
     }
 }
 
@@ -1079,25 +1080,29 @@ fn hash32<T: Hash>(val: T) -> u32 {
     (hash64(val) & 0xffff_ffff) as u32
 }
 
-#[tracing::instrument(skip_all)]
-pub fn get_barrier_strides(
-    graph: &LLIRGraph,
-    block_ops: &FxHashSet<NodeIndex>,
-) -> (
+type BarrierStrides = (
     FxHashMap<NodeIndex, Vec<Expression>>,
     FxHashMap<(NodeIndex, usize), Vec<Expression>>,
     FxHashMap<NodeIndex, Expression>,
     Expression,
-) {
+);
+
+type InterpreterCompileResult = (
+    CudaFunction,
+    Arc<CudaModule>,
+    FxHashMap<Expression, i32>,
+    FxHashMap<char, CudaSlice<u8>>,
+);
+
+#[tracing::instrument(skip_all)]
+pub fn get_barrier_strides(graph: &LLIRGraph, block_ops: &FxHashSet<NodeIndex>) -> BarrierStrides {
     // Resolve dependencies
     let mut producer_barrier_strides = FxHashMap::default();
     let mut consumer_barrier_strides = FxHashMap::default();
     for node in block_ops {
-        if graph
+        if !graph
             .neighbors_directed(*node, Direction::Outgoing)
-            .filter(|n| block_ops.contains(n))
-            .next()
-            .is_none()
+            .any(|n| block_ops.contains(&n))
         {
             producer_barrier_strides.insert(
                 *node,
@@ -1185,18 +1190,14 @@ pub fn get_barrier_strides(
     )
 }
 
+#[allow(clippy::mutable_key_type)]
 #[tracing::instrument(skip_all)]
 pub fn compile_interpreter(
     cuda_ctx: &Arc<CudaContext>,
     cuda_stream: &Arc<CudaStream>,
     ops: &Vec<Arc<Box<dyn BlockOp>>>,
     expressions: &FxHashSet<Expression>,
-) -> (
-    CudaFunction,
-    Arc<CudaModule>,
-    FxHashMap<Expression, i32>,
-    FxHashMap<char, CudaSlice<u8>>,
-) {
+) -> InterpreterCompileResult {
     // Compile the interpreter
     let mut kernel = include_str!("block/interpreter.cu").to_string();
     kernel = kernel.replace(

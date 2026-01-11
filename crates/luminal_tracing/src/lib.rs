@@ -14,14 +14,14 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 pub struct TraceOptions {
     perfetto_file: Option<PathBuf>,
-    pub env_filter: String,
+    pub env_filter: Option<String>,
 }
 
 /// This is a convenience tracing subscriber with some opinionated defaults.
 pub fn subscriber() -> TraceOptions {
     TraceOptions {
         perfetto_file: None,
-        env_filter: "luminal=trace".to_string(),
+        env_filter: None,
     }
 }
 
@@ -32,15 +32,17 @@ impl TraceOptions {
     }
 
     pub fn env_filter(mut self, env_filter: impl ToString) -> Self {
-        self.env_filter = env_filter.to_string();
+        self.env_filter = Some(env_filter.to_string());
         self
     }
 
     /// Install as the global tracing subscriber
     pub fn init(self) -> TraceSession {
-        let filter = EnvFilter::builder()
-            .parse(self.env_filter)
-            .expect("Invalid tracing env filter");
+        let filter = self.env_filter.map(|f| {
+            EnvFilter::builder()
+                .parse(f)
+                .expect("Invalid tracing env filter")
+        });
 
         if let Some(file_path) = self.perfetto_file {
             let file = File::create(&file_path).expect("Failed to create trace file");
@@ -49,20 +51,27 @@ impl TraceOptions {
                 .build()
                 .expect("Failed to build perfetto layer");
             let handle = layer.clone();
-            tracing_subscriber::registry()
-                .with(filter.clone())
-                .with(layer)
-                .init();
+            if let Some(f) = filter {
+                tracing_subscriber::registry().with(f).with(layer).init();
+            } else {
+                tracing_subscriber::registry().with(layer).init();
+            }
             TraceSession {
                 perfetto_layer: Some(handle),
                 _guard: Some(guard),
                 perfetto_path: Some(file_path),
             }
         } else {
-            tracing_subscriber::registry()
-                .with(filter.clone())
-                .with(tracing_subscriber::fmt::layer())
-                .init();
+            if let Some(f) = filter {
+                tracing_subscriber::registry()
+                    .with(f)
+                    .with(tracing_subscriber::fmt::layer())
+                    .init();
+            } else {
+                tracing_subscriber::registry()
+                    .with(tracing_subscriber::fmt::layer())
+                    .init();
+            }
             TraceSession {
                 perfetto_layer: None,
                 _guard: None,

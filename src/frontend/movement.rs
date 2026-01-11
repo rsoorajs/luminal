@@ -1,6 +1,6 @@
-use crate::hlir::*;
-use crate::op::*;
-use crate::prelude::*;
+use itertools::Itertools;
+
+use crate::{hlir::Gather, prelude::*};
 
 impl GraphTensor {
     /// Swap dimensions of the tensor
@@ -9,18 +9,22 @@ impl GraphTensor {
         self
     }
 
+    /// Swap 2 dimensions. This is a view-only operation and does not materialize a new tensor
     pub fn transpose(self, dim0: usize, dim1: usize) -> GraphTensor {
         let num_dims = self.shape.len();
         assert!(
             dim0 < num_dims && dim1 < num_dims,
             "transpose dimensions ({dim0}, {dim1}) out of bounds for tensor with {num_dims} dimensions"
         );
-
-        // Create identity permutation, then swap the two specified dimensions
         let mut perm_axes: Vec<usize> = (0..num_dims).collect();
         perm_axes.swap(dim0, dim1);
-
         self.permute(perm_axes)
+    }
+
+    /// Transpose a 2D tensor
+    pub fn t(self) -> GraphTensor {
+        assert_eq!(self.shape.len(), 2, ".t() supports only 2D tensors");
+        self.transpose(0, 1)
     }
 
     /// Broadcast tensor along a new dimension
@@ -29,15 +33,34 @@ impl GraphTensor {
         self
     }
 
-    /// Broadcast tensor along new dimensions (with explicitly given dest shape)
-    pub fn expand(mut self, shape: impl ToShape) -> GraphTensor {
-        let s = shape.to_shape();
-        for (i, s) in s.into_iter().enumerate() {
-            if self.shape.len() <= i || self.shape.dims[i] != s {
-                self.shape.expand_dim(i, s);
-            }
+    /// Broadcast tensor along new dimensions on the right-hand-side. For instance, if the original tensor is [5, 2] and you call .expand([4, 2, 3]), the final  tensor will be [5, 2, 4, 2, 3]
+    pub fn expand_rhs(mut self, shape: impl ToShape) -> GraphTensor {
+        let orig_dims = self.shape.len();
+        for (i, s) in shape.to_shape().into_iter().enumerate() {
+            self.shape.expand_dim(orig_dims + i, s);
         }
+        self
+    }
 
+    /// Broadcast tensor along new dimensions on the left-hand-side. For instance, if the original tensor is [5, 2] and you call .expand([4, 2, 3]), the final  tensor will be [5, 2, 4, 2, 3]
+    pub fn expand_lhs(mut self, shape: impl ToShape) -> GraphTensor {
+        for (i, s) in shape.to_shape().into_iter().enumerate() {
+            self.shape.expand_dim(i, s);
+        }
+        self
+    }
+
+    pub fn expand_to_shape_on_axes(
+        mut self,
+        shape: impl ToShape,
+        axes: impl ToAxes,
+    ) -> GraphTensor {
+        let shape = shape.to_shape();
+        let axes = axes.to_axes();
+        assert_eq!(shape.len(), self.shape.len() + axes.len());
+        for axis in axes.into_iter().sorted() {
+            self = self.expand_dim(axis, shape[axis]);
+        }
         self
     }
 
@@ -275,8 +298,14 @@ impl GraphTensor {
         let mut phys_size = Expression::from(1);
         let mut new_dims = vec![];
         for (dim, (start, end)) in self.dims().into_iter().zip(&padding).rev() {
-            index_expressions
-                .push(((Expression::from('z') - *start).max(0).min(dim - 1)) * phys_size);
+            let mut ind = Expression::from('z');
+            if *start != 0 {
+                ind = (ind - *start).max(0);
+            }
+            if *end != 0 {
+                ind = ind.min(dim - 1);
+            }
+            index_expressions.push(ind * phys_size);
             phys_size *= dim;
             new_dims.push(dim + *start + *end);
         }
@@ -287,9 +316,15 @@ impl GraphTensor {
         let new_tensor = self.gather(self.graph().iota(index_expression, new_dims.clone()));
         // mask out padded elements
         let mut mask_expressions = vec![];
-        for ((start, _), dim) in padding.into_iter().zip(self.dims()) {
-            mask_expressions
-                .push(Expression::from('z').gte(start) * Expression::from('z').lt(start + dim));
+        for ((start, end), dim) in padding.into_iter().zip(self.dims()) {
+            let mut mask = Expression::from(1);
+            if start != 0 {
+                mask *= Expression::from('z').gte(start);
+            }
+            if end != 0 {
+                mask *= Expression::from('z').lt(start + dim);
+            }
+            mask_expressions.push(mask);
         }
         let mask_expression = flatten_z_strides_mask(&new_dims, &mask_expressions);
         let mask = self.graph().iota(mask_expression, new_dims);
@@ -330,49 +365,79 @@ mod tests {
         prelude::*,
     };
     use candle_core::{IndexOp, Tensor};
+    use proptest::prelude::*;
 
-    #[test]
-    fn test_pad() {
-        test_unary(
-            23,
-            |a| a.pad((2, 6), 0.),
-            |a| a.pad_with_zeros(0, 2, 6).unwrap(),
-        );
-        test_unary(
-            (18, 72),
-            |a| a.pad(((4, 31), (2, 9)), 0.),
-            |a| {
-                a.pad_with_zeros(0, 4, 31)
-                    .unwrap()
-                    .pad_with_zeros(1, 2, 9)
-                    .unwrap()
-            },
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_pad_1d(len in 1usize..64, left in 0usize..6, right in 0usize..6) {
+            test_unary(
+                len,
+                |a| a.pad((left, right), 0.),
+                |a| a.pad_with_zeros(0, left, right).unwrap(),
+            );
+        }
     }
 
-    #[test]
-    fn test_slice_pad() {
-        test_unary(
-            (17, 26),
-            |a| a.slice((1..3, 14..32)).pad(((3, 14), (5, 0)), 0.),
-            |a| {
-                a.i((1..3, 14..26)) // candle slice ranges can't go off end
-                    .unwrap()
-                    .pad_with_zeros(0, 3, 14)
-                    .unwrap()
-                    .pad_with_zeros(1, 5, 0)
-                    .unwrap()
-            },
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_pad_2d(rows in 1usize..32, cols in 1usize..32, top in 0usize..6, bottom in 0usize..6, left in 0usize..6, right in 0usize..6) {
+            test_unary(
+                (rows, cols),
+                |a| a.pad(((top, bottom), (left, right)), 0.),
+                |a| {
+                    a.pad_with_zeros(0, top, bottom)
+                        .unwrap()
+                        .pad_with_zeros(1, left, right)
+                        .unwrap()
+                },
+            );
+        }
     }
 
-    #[test]
-    fn test_transpose() {
-        test_unary(
-            (5, 10),
-            |a| a.transpose(0, 1) * 1.0,
-            |a| a.transpose(0, 1).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_slice_pad(
+            rows in 3usize..32,
+            cols in 3usize..32,
+            start_row in 0usize..32,
+            end_row in 1usize..32,
+            start_col in 0usize..32,
+            end_col in 1usize..32,
+            pad_top in 0usize..6,
+            pad_bottom in 0usize..6,
+            pad_left in 0usize..6,
+            pad_right in 0usize..6,
+        ) {
+            prop_assume!(start_row < end_row && end_row <= rows);
+            prop_assume!(start_col < end_col && end_col <= cols);
+            test_unary(
+                (rows, cols),
+                |a| a.slice((start_row..end_row, start_col..end_col)).pad(((pad_top, pad_bottom), (pad_left, pad_right)), 0.),
+                |a| {
+                    a.i((start_row..end_row, start_col..end_col))
+                        .unwrap()
+                        .pad_with_zeros(0, pad_top, pad_bottom)
+                        .unwrap()
+                        .pad_with_zeros(1, pad_left, pad_right)
+                        .unwrap()
+                },
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_transpose(rows in 1usize..32, cols in 1usize..32) {
+            test_unary(
+                (rows, cols),
+                |a| a.transpose(0, 1) * 1.0,
+                |a| a.transpose(0, 1).unwrap(),
+            );
+        }
     }
 
     #[test]
@@ -554,7 +619,7 @@ mod tests {
         assert_eq!(out2.dims(), &[2, 2, 3, 1]);
         test_unary(
             (1, 3),
-            |a| a.squeeze(0).expand((2, 3)) * 1.,
+            |a| a.squeeze(0).expand_dim(0, 2) * 1.,
             |a| a.broadcast_as((2, 3)).unwrap(),
         );
         test_unary((2, 1, 3), |a| a.squeeze(1), |a| a.reshape((2, 3)).unwrap());
@@ -597,9 +662,9 @@ mod tests {
         let inv = perm.inverse_permutation(0).cast(DType::F32).output();
         cx.build_search_space::<NativeRuntime>();
         let mut rt = cx.search(NativeRuntime::default(), 1);
-        rt.set_data(data.id, vec![0., 1., 2., 3., 4., 5.].into());
-        rt.set_data(indexes.id, vec![5, 0, 3, 2].into());
-        rt.set_data(perm.id, vec![3, 2, 4, 1, 5, 0].into());
+        rt.set_data(data.id, vec![0., 1., 2., 3., 4., 5.]);
+        rt.set_data(indexes.id, vec![5, 0, 3, 2]);
+        rt.set_data(perm.id, vec![3, 2, 4, 1, 5, 0]);
         rt.execute(&cx.dyn_map);
         assert_eq!(*rt.get_f32(gathered.id), vec![5., 0., 3., 2.]);
         assert_eq!(*rt.get_f32(inv.id), vec![5., 3., 1., 0., 2., 4.]);

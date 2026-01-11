@@ -34,43 +34,72 @@ fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     )
 }
 
-fn op_rewrites_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> Vec<String> {
-    ops.iter().flat_map(|o| o.rewrites()).collect()
+fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
+    format!(
+        "
+    {}
+    ",
+        ops.iter()
+            .filter(|op| op.cleanup())
+            .map(|o| {
+                let (name, body) = o.term();
+                let body_terms = (0..body.len()).map(|i| (b'a' + i as u8) as char).join(" ");
+                format!(
+                    "(rule
+                ((= ?m ({name} {body_terms})))
+                ((delete ({name} {body_terms})))
+                :ruleset cleanup
+            )"
+                )
+            })
+            .join("\n")
+    )
 }
 
-fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> Vec<String> {
-    ops.iter()
-        .filter(|op| op.cleanup())
-        .map(|o| {
-            let (name, body) = o.term();
-            let body_terms = (0..body.len()).map(|i| (b'a' + i as u8) as char).join(" ");
-            format!(
-                "(rule
-    ((= ?m ({name} {body_terms})))
-    ((delete ({name} {body_terms})))
-    :ruleset cleanup
-)"
-            )
-        })
-        .collect()
-}
-
-pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> Vec<String> {
+pub fn early_egglog(
+    program: &str,
+    root: &str,
+    ops: &[Arc<Box<dyn EgglogOp>>],
+    cleanup: bool,
+) -> String {
     [
-        vec![BASE.to_string(), op_defs_string(ops)],
-        op_rewrites_string(ops),
+        BASE.to_string(),
+        op_defs_string(ops),
+        ops.iter().flat_map(|o| o.early_rewrites()).join("\n"),
         if cleanup {
             op_cleanups_string(ops)
         } else {
-            vec![]
+            "".to_string()
         },
-        vec![
-            BASE_CLEANUP.to_string(),
-            program.to_string(),
-            RUN_SCHEDULE.to_string(),
-        ],
+        BASE_CLEANUP.to_string(),
+        program.to_string(),
+        format!(
+            "(run-schedule
+                (saturate expr)
+                (run)
+                (saturate base_cleanup)
+            )
+            (extract {root})"
+        ),
     ]
-    .concat()
+    .join("\n")
+}
+
+pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> String {
+    [
+        BASE.to_string(),
+        op_defs_string(ops),
+        ops.iter().flat_map(|o| o.rewrites()).join("\n"),
+        if cleanup {
+            op_cleanups_string(ops)
+        } else {
+            "".to_string()
+        },
+        BASE_CLEANUP.to_string(),
+        program.to_string(),
+        RUN_SCHEDULE.to_string(),
+    ]
+    .join("\n")
 }
 
 use crate::{op::EgglogOp, prelude::FxHashMap};

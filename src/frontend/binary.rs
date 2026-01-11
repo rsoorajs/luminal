@@ -165,7 +165,7 @@ impl Add<f32> for GraphTensor {
     type Output = GraphTensor;
 
     fn add(self, rhs: f32) -> Self::Output {
-        self + self.graph().constant_float(rhs).expand(self.shape)
+        self + self.graph().constant_float(rhs).expand_rhs(self.shape)
     }
 }
 
@@ -173,7 +173,7 @@ impl<S: Into<Expression>> Add<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn add(self, rhs: S) -> Self::Output {
-        self + self.graph().constant(rhs).expand(self.shape)
+        self + self.graph().constant(rhs).expand_rhs(self.shape)
     }
 }
 
@@ -181,7 +181,7 @@ impl Sub<f32> for GraphTensor {
     type Output = GraphTensor;
 
     fn sub(self, rhs: f32) -> Self::Output {
-        self - self.graph().constant_float(rhs).expand(self.shape)
+        self - self.graph().constant_float(rhs).expand_rhs(self.shape)
     }
 }
 
@@ -189,7 +189,7 @@ impl<S: Into<Expression>> Sub<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn sub(self, rhs: S) -> Self::Output {
-        self - self.graph().constant(rhs).expand(self.shape)
+        self - self.graph().constant(rhs).expand_rhs(self.shape)
     }
 }
 
@@ -197,7 +197,7 @@ impl Mul<f32> for GraphTensor {
     type Output = GraphTensor;
 
     fn mul(self, rhs: f32) -> Self::Output {
-        self * self.graph().constant_float(rhs).expand(self.shape)
+        self * self.graph().constant_float(rhs).expand_rhs(self.shape)
     }
 }
 
@@ -205,7 +205,7 @@ impl<S: Into<Expression>> Mul<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn mul(self, rhs: S) -> Self::Output {
-        self * self.graph().constant(rhs).expand(self.shape)
+        self * self.graph().constant(rhs).expand_rhs(self.shape)
     }
 }
 
@@ -214,7 +214,10 @@ impl Div<f32> for GraphTensor {
     type Output = GraphTensor;
 
     fn div(self, rhs: f32) -> Self::Output {
-        self * self.graph().constant_float(rhs.recip()).expand(self.shape)
+        self * self
+            .graph()
+            .constant_float(rhs.recip())
+            .expand_rhs(self.shape)
     }
 }
 
@@ -226,7 +229,7 @@ impl<S: Into<Expression>> Div<S> for GraphTensor {
             .graph()
             .constant(rhs)
             .cast(self.dtype)
-            .expand(self.shape)
+            .expand_rhs(self.shape)
     }
 }
 
@@ -234,7 +237,7 @@ impl Rem<f32> for GraphTensor {
     type Output = GraphTensor;
 
     fn rem(self, rhs: f32) -> Self::Output {
-        self % self.graph().constant_float(rhs).expand(self.shape)
+        self % self.graph().constant_float(rhs).expand_rhs(self.shape)
     }
 }
 
@@ -242,7 +245,7 @@ impl<S: Into<Expression>> Rem<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn rem(self, rhs: S) -> Self::Output {
-        self % self.graph().constant(rhs).expand(self.shape)
+        self % self.graph().constant(rhs).expand_rhs(self.shape)
     }
 }
 
@@ -298,7 +301,7 @@ impl GraphTensor {
 
     /// Take the elementwise maximum of a tensor and a float
     pub fn maximum_f32(self, rhs: f32) -> GraphTensor {
-        self.maximum(self.graph().constant_float(rhs).expand(self.shape))
+        self.maximum(self.graph().constant_float(rhs).expand_rhs(self.shape))
     }
 
     /// Take the elementwise minimum of two tensors
@@ -336,6 +339,7 @@ pub(super) mod tests {
     };
     use candle_core::{DType, Device, Tensor};
     use itertools::Itertools;
+    use proptest::prelude::*;
 
     pub fn identity(v: Vec<f32>) -> Vec<f32> {
         v
@@ -384,8 +388,8 @@ pub(super) mod tests {
 
         let lhs_values = lhs_transform(random_vec(a_shape.iter().copied().product()));
         let rhs_values = rhs_transform(random_vec(b_shape.iter().copied().product()));
-        rt.set_data(a.id, lhs_values.clone().into());
-        rt.set_data(b.id, rhs_values.clone().into());
+        rt.set_data(a.id, lhs_values.clone());
+        rt.set_data(b.id, rhs_values.clone());
         rt.execute(&cx.dyn_map);
 
         // Reference
@@ -397,106 +401,139 @@ pub(super) mod tests {
         assert_close(rt.get_f32(c.id), &ref_c.to_vec1::<f32>().unwrap())
     }
 
-    #[test]
-    fn test_add() {
-        test_binary(27, 27, |a, b| a + b, |a, b| (&a + &b).unwrap());
-        test_binary((2, 31), (2, 31), |a, b| a + b, |a, b| (&a + &b).unwrap());
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_add(x in 1..100, y in 1..5) {
+            test_binary(x, x, |a, b| a + b, |a, b| (&a + &b).unwrap());
+            test_binary((y, x), (y, x), |a, b| a + b, |a, b| (&a + &b).unwrap());
+        }
     }
 
-    #[test]
-    fn test_sub() {
-        test_binary(27, 27, |a, b| a - b, |a, b| (&a - &b).unwrap());
-        test_binary((2, 31), (2, 31), |a, b| a - b, |a, b| (&a - &b).unwrap());
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_sub(x in 1..100, y in 1..5) {
+            test_binary(x, x, |a, b| a - b, |a, b| (&a - &b).unwrap());
+            test_binary((y, x), (y, x), |a, b| a - b, |a, b| (&a - &b).unwrap());
+        }
     }
 
-    #[test]
-    fn test_mul() {
-        test_binary(27, 27, |a, b| a * b, |a, b| (&a * &b).unwrap());
-        test_binary(
-            (2, 1, 3),
-            (2, 1, 3),
-            |a, b| a * b,
-            |a, b| (&a * &b).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_mul(x in 1..100, y in 1..5) {
+            test_binary(x, x, |a, b| a * b, |a, b| (&a * &b).unwrap());
+            test_binary(
+                (2, y, x),
+                (2, y, x),
+                |a, b| a * b,
+                |a, b| (&a * &b).unwrap(),
+            );
+        }
     }
 
-    #[test]
-    fn test_div() {
-        test_binary_transforms(
-            27,
-            27,
-            |a, b| a / b,
-            |a, b| (&a / &b).unwrap(),
-            identity,
-            shift_from_zero,
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_div(x in 1..100) {
+            test_binary_transforms(
+                x,
+                x,
+                |a, b| a / b,
+                |a, b| (&a / &b).unwrap(),
+                identity,
+                shift_from_zero,
+            );
+        }
     }
 
-    #[test]
-    fn test_maximum() {
-        test_binary(27, 27, |a, b| a.maximum(b), |a, b| a.maximum(&b).unwrap());
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_maximum(x in 1..100) {
+            test_binary(x, x, |a, b| a.maximum(b), |a, b| a.maximum(&b).unwrap());
+        }
     }
 
-    #[test]
-    fn test_minimum() {
-        test_binary(27, 27, |a, b| a.minimum(b), |a, b| a.minimum(&b).unwrap());
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_minimum(x in 1..100) {
+            test_binary(x, x, |a, b| a.minimum(b), |a, b| a.minimum(&b).unwrap());
+        }
     }
 
-    #[test]
-    fn test_mod() {
-        test_binary_transforms(
-            27,
-            27,
-            |a, b| a % b,
-            |a, b| {
-                let lhs = a.to_vec1::<f32>().unwrap();
-                let rhs = b.to_vec1::<f32>().unwrap();
-                let remainder: Vec<f32> = lhs.iter().zip(rhs.iter()).map(|(x, y)| x % y).collect();
-                Tensor::from_vec(remainder, 27, &Device::Cpu).unwrap()
-            },
-            identity,
-            shift_from_zero,
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_mod(size in 1usize..64) {
+            test_binary_transforms(
+                size,
+                size,
+                |a, b| a % b,
+                |a, b| {
+                    let lhs = a.to_vec1::<f32>().unwrap();
+                    let rhs = b.to_vec1::<f32>().unwrap();
+                    let remainder: Vec<f32> = lhs.iter().zip(rhs.iter()).map(|(x, y)| x % y).collect();
+                    Tensor::from_vec(remainder, size, &Device::Cpu).unwrap()
+                },
+                identity,
+                shift_from_zero,
+            );
+        }
     }
 
-    #[test]
-    fn test_lt() {
-        test_binary(
-            27,
-            27,
-            |a, b| a.lt(b),
-            |a, b| a.lt(&b).unwrap().to_dtype(DType::F32).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_lt(size in 1usize..64) {
+            test_binary(
+                size,
+                size,
+                |a, b| a.lt(b),
+                |a, b| a.lt(&b).unwrap().to_dtype(DType::F32).unwrap(),
+            );
+        }
     }
 
-    #[test]
-    fn test_gt() {
-        test_binary(
-            27,
-            27,
-            |a, b| a.gt(b),
-            |a, b| a.gt(&b).unwrap().to_dtype(DType::F32).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_gt(size in 1usize..64) {
+            test_binary(
+                size,
+                size,
+                |a, b| a.gt(b),
+                |a, b| a.gt(&b).unwrap().to_dtype(DType::F32).unwrap(),
+            );
+        }
     }
 
-    #[test]
-    fn test_le() {
-        test_binary(
-            27,
-            27,
-            |a, b| a.le(b),
-            |a, b| a.le(&b).unwrap().to_dtype(DType::F32).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_le(size in 1usize..64) {
+            test_binary(
+                size,
+                size,
+                |a, b| a.le(b),
+                |a, b| a.le(&b).unwrap().to_dtype(DType::F32).unwrap(),
+            );
+        }
     }
 
-    #[test]
-    fn test_ge() {
-        test_binary(
-            27,
-            27,
-            |a, b| a.ge(b),
-            |a, b| a.ge(&b).unwrap().to_dtype(DType::F32).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_ge(size in 1usize..64) {
+            test_binary(
+                size,
+                size,
+                |a, b| a.ge(b),
+                |a, b| a.ge(&b).unwrap().to_dtype(DType::F32).unwrap(),
+            );
+        }
     }
 
     #[test]

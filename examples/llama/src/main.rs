@@ -4,7 +4,10 @@ mod model;
 use benchmark::Benchmarker;
 use itertools::Itertools;
 use luminal::prelude::*;
-use luminal_cuda::runtime::{CudaRuntime, CustomState};
+use luminal_cuda::{
+    cuda_bandwidth_gbps, cuda_compute_f32_tflops,
+    runtime::{CudaRuntime, CustomState},
+};
 use model::*;
 use std::io::Write;
 use tokenizers::Tokenizer;
@@ -60,23 +63,23 @@ fn main() {
     println!("Building E-Graph...");
     cx.build_search_space::<CudaRuntime>();
 
-    let mut runtime = CudaRuntime::initialize((ctx, stream.clone(), custom_state));
+    let mut runtime = CudaRuntime::initialize((ctx.clone(), stream.clone(), custom_state));
     println!("Loading weights...");
     runtime.load_safetensors(&cx, "setup/model_combined.safetensors");
-
+    stream.synchronize().unwrap();
     println!("Compiling...");
     cx.set_dyn_dim('s', 1);
     cx.set_dyn_dim('p', 0);
     // inputs for search
-    runtime.set_data(input, Box::new(vec![1_i32]));
-    runtime.set_data(token_ids, Box::new(vec![0_i32]));
+    runtime.set_data(input, vec![1_i32]);
+    runtime.set_data(token_ids, vec![0_i32]);
     runtime = cx.search(runtime, 5);
 
     print!("{input_sentence}");
     std::io::stdout().flush().unwrap();
 
     let mut prev_seq = 0;
-    let mut benchmarker = Benchmarker::new(756., 2_000.); // H100 specs
+    let mut benchmarker = Benchmarker::new(); // H100 specs
     for i in 0..gen_tokens {
         let span = if i == 0 {
             span!(Level::INFO, "prefill")
@@ -89,17 +92,12 @@ fn main() {
         cx.set_dyn_dim('s', seq_len);
         cx.set_dyn_dim('p', prev_seq);
 
-        runtime.set_data(
-            input,
-            Box::new(sentence.iter().map(|i| *i as i32).collect_vec()),
-        );
+        runtime.set_data(input, sentence.iter().map(|i| *i as i32).collect_vec());
         runtime.set_data(
             token_ids,
-            Box::new(
-                (prev_seq..seq_len + prev_seq)
-                    .map(|i| i as i32)
-                    .collect_vec(),
-            ),
+            (prev_seq..seq_len + prev_seq)
+                .map(|i| i as i32)
+                .collect_vec(),
         );
         if i < 2 {
             // Re-allocate intermediate buffers
@@ -121,7 +119,11 @@ fn main() {
     println!();
 
     trace_session.stop();
-    benchmarker.report();
+    if let (Some(flops), Some(bandwidth)) =
+        (cuda_compute_f32_tflops(&ctx), cuda_bandwidth_gbps(&ctx))
+    {
+        benchmarker.report(flops as f64, bandwidth as f64);
+    }
     // Dump cuda trace to timeline
     if let Some(path) = trace_session.perfetto_path {
         runtime.record_cuda_perfetto_trace(path);
