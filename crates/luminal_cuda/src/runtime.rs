@@ -110,6 +110,7 @@ pub struct CudaRuntime {
     exec_graph: StableGraph<ExecutableKernel, (), Directed>,
     node_to_exec: FxHashMap<NodeIndex, NodeIndex>,
     timings: Vec<(Vec<SMEvent>, u64)>,
+    last_dyn_map: FxHashMap<char, usize>,
 }
 
 impl CudaRuntime {
@@ -212,7 +213,7 @@ impl CudaRuntime {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn allocate_intermediate_buffers(&mut self, dyn_dims: &FxHashMap<char, usize>) {
+    fn allocate_intermediate_buffers(&mut self, dyn_dims: &FxHashMap<char, usize>) {
         for node in self.llir_graph.node_indices().collect_vec() {
             if self.llir_graph[node].to_op::<Input>().is_some() {
                 continue;
@@ -363,6 +364,7 @@ impl Runtime for CudaRuntime {
             exec_graph: StableGraph::default(),
             node_to_exec: FxHashMap::default(),
             timings: vec![],
+            last_dyn_map: FxHashMap::default(),
         }
     }
 
@@ -516,7 +518,6 @@ impl Runtime for CudaRuntime {
             if let Some(kernel_op) = llir_graph[kernel].to_dialect::<dyn KernelOp>() {
                 let (kernel_function, module, code, grid, tb, shared_mem, constants) =
                     kernel_op.compile(&self.cuda_stream);
-                self.cuda_stream.synchronize().unwrap();
                 let inputs = llir_graph
                     .edges_directed(kernel, Direction::Incoming)
                     .sorted_by_key(|e| e.id())
@@ -567,7 +568,6 @@ impl Runtime for CudaRuntime {
     ) -> (Self::ProfileMetric, String) {
         self.buffers.clear();
         self.load_llir(llir_graph);
-        self.allocate_intermediate_buffers(dyn_map);
         let start = std::time::Instant::now();
         self.execute(dyn_map);
         self.timings.clear();
@@ -579,6 +579,10 @@ impl Runtime for CudaRuntime {
 
     #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
+        if self.buffers.is_empty() || *dyn_map != self.last_dyn_map {
+            self.last_dyn_map = dyn_map.clone();
+            self.allocate_intermediate_buffers(dyn_map);
+        }
         let mut llir_to_hlir: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
         for (hlir_node, llir_node) in self
             .llir_graph
@@ -648,7 +652,6 @@ impl Runtime for CudaRuntime {
                     let span = span!(Level::INFO, "kernel");
                     let _entered = span.enter();
                     unsafe { lb.launch(cfg) }.unwrap();
-                    self.cuda_stream.synchronize().unwrap();
                     drop(_entered);
                     drop(span);
                 }
@@ -726,7 +729,6 @@ impl Runtime for CudaRuntime {
                     let span = span!(Level::INFO, "megakernel");
                     let _entered = span.enter();
                     unsafe { lb.launch(cfg) }.unwrap();
-                    self.cuda_stream.synchronize().unwrap();
                     drop(_entered);
                     drop(span);
 
@@ -1266,7 +1268,6 @@ pub fn compile_interpreter(
         },
     )
     .unwrap();
-    cuda_stream.synchronize().unwrap();
     let module = cuda_stream.context().load_module(ptx).unwrap();
     let func = module.load_function("worker_kernel").unwrap();
     let constants = constants
@@ -1280,7 +1281,6 @@ pub fn compile_interpreter(
             )
         })
         .collect();
-    cuda_stream.synchronize().unwrap();
     (func, module, expression_map, constants)
 }
 

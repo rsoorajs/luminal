@@ -24,7 +24,6 @@ proptest! {
         let input_values = values.into_iter().take(len).collect::<Vec<f32>>();
         rt.set_data(input, input_values.clone());
         rt = cx.search(rt, 10);
-        rt.allocate_intermediate_buffers(&cx.dyn_map);
         rt.execute(&cx.dyn_map);
         let out = rt.get_f32(output);
         let expected = input_values.into_iter().map(|v| v * 2.0).collect::<Vec<f32>>();
@@ -55,7 +54,6 @@ proptest! {
 //     let mut rt = CudaRuntime::initialize(stream);
 //     rt.set_data(input, data);
 //     rt = cx.search(rt, 10);
-//     rt.allocate_intermediate_buffers(&cx.dyn_map);
 //     rt.execute(&cx.dyn_map);
 
 //     let out_dim0 = rt.get_f32(sum_dim0);
@@ -110,7 +108,6 @@ pub fn cuda_max_reduce_test() {
     let mut rt = CudaRuntime::initialize(stream);
     rt.set_data(input, data);
     rt = cx.search(rt, 10);
-    rt.allocate_intermediate_buffers(&cx.dyn_map);
     rt.execute(&cx.dyn_map);
 
     let out_dim0 = rt.get_f32(max_dim0);
@@ -157,7 +154,6 @@ pub fn cuda_mean_reduce_test() {
     let mut rt = CudaRuntime::initialize(stream);
     rt.set_data(input, data);
     rt = cx.search(rt, 10);
-    rt.allocate_intermediate_buffers(&cx.dyn_map);
     rt.execute(&cx.dyn_map);
 
     let out_dim0 = rt.get_f32(mean_dim0);
