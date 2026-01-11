@@ -2,7 +2,6 @@ mod benchmark;
 mod model;
 
 use benchmark::Benchmarker;
-use itertools::Itertools;
 use luminal::prelude::*;
 use luminal_cuda::{
     cuda_bandwidth_gbps, cuda_compute_f32_tflops, cudarc::driver::CudaContext, runtime::CudaRuntime,
@@ -12,48 +11,60 @@ use std::io::Write;
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
 
+// This example compiles and runs Llama 3 8B on CUDA.
+
 fn main() {
+    let max_seq_len = 4096;
+    let gen_tokens = 5;
+    let search_graphs = 10; // the number of graphs we want to search during compilation
+    let prompt = "Hello, how are you";
+
+    // Set up tracing to perfetto
     let trace_session = luminal_tracing::subscriber()
         .perfetto("trace.pftrace")
         .env_filter(format!("{}=trace,luminal=trace", env!("CARGO_PKG_NAME")))
         .init();
 
+    // Set up cuda context and stream
     let ctx = CudaContext::new(0).unwrap();
     let stream = ctx.default_stream();
 
-    let max_seq_len = 4096;
-    let gen_tokens: usize = 5;
-    let prompt = "Hello, how are you";
-
+    // Tokenize prompt
     let tokenizer = Tokenizer::from_file("setup/tokenizer.json").unwrap();
     let mut sentence = tokenizer.encode(prompt, true).unwrap().get_ids().to_vec();
+
+    // Allocate kv cache
     let mut kv_cache = KVCache::new(&stream, max_seq_len);
 
+    // Create compute graph
     let mut cx = Graph::default();
     let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
     let token_ids = cx.named_tensor("token_ids", 's').as_dtype(DType::Int);
     let model = model::Llama::init(&mut cx);
     let logits = model.forward(input, token_ids, &kv_cache).output();
 
+    // Build search space
     println!("Building E-Graph...");
     cx.build_search_space::<CudaRuntime>();
 
+    // Load model weights from safetensors file
     println!("Loading weights...");
-    let mut runtime = CudaRuntime::initialize(stream.clone());
+    let mut runtime = CudaRuntime::initialize(stream);
     runtime.load_safetensors(&cx, "setup/model_combined.safetensors");
 
+    // Run search process
     println!("Compiling...");
-    // inputs for search
     cx.set_dim('s', 1);
     cx.set_dim('p', 0);
     runtime.set_data(input, vec![1]);
     runtime.set_data(token_ids, vec![0]);
-    runtime = cx.search(runtime, 5);
+    runtime = cx.search(runtime, search_graphs);
     kv_cache.reset();
 
     print!("{prompt}");
     std::io::stdout().flush().unwrap();
 
+    // Decode loop
     let mut prev_seq = 0;
     let mut benchmarker = Benchmarker::new();
     for i in 0..gen_tokens {
@@ -63,21 +74,28 @@ fn main() {
             span!(Level::INFO, "decode")
         };
         let _entered = span.enter();
-        // Embed the tokenized sequence
+
+        // Set runtime dimensions
         let seq_len = sentence.len();
         cx.set_dim('s', seq_len);
         cx.set_dim('p', prev_seq);
 
-        runtime.set_data(input, sentence.iter().map(|i| *i as i32).collect_vec());
+        // Set input data
+        runtime.set_data(
+            input,
+            sentence.iter().map(|i| *i as i32).collect::<Vec<_>>(),
+        );
         runtime.set_data(
             token_ids,
-            (prev_seq as i32..(seq_len + prev_seq) as i32).collect_vec(),
+            (prev_seq as i32..(seq_len + prev_seq) as i32).collect::<Vec<_>>(),
         );
 
+        // Execute forward pass
         benchmarker.start_iteration(seq_len, prev_seq);
         runtime.execute(&cx.dyn_map);
         let logits_data = runtime.get_f32(logits);
 
+        // Sample next token
         let sample_span = span!(Level::INFO, "sample");
         let _sample_entered = sample_span.enter();
         sentence = vec![*sample(&logits_data, VOCAB_SIZE).last().unwrap()];
@@ -88,13 +106,14 @@ fn main() {
     }
     println!();
 
-    trace_session.stop();
+    // Report benchmarks
     if let (Some(flops), Some(bandwidth)) =
         (cuda_compute_f32_tflops(&ctx), cuda_bandwidth_gbps(&ctx))
     {
         benchmarker.report(flops as f64, bandwidth as f64);
     }
     // Dump cuda trace to timeline
+    trace_session.stop();
     if let Some(path) = trace_session.perfetto_path {
         runtime.record_cuda_perfetto_trace(path);
     }

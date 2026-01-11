@@ -111,6 +111,7 @@ pub struct CudaRuntime {
     node_to_exec: FxHashMap<NodeIndex, NodeIndex>,
     timings: Vec<(Vec<SMEvent>, u64)>,
     last_dyn_map: FxHashMap<char, usize>,
+    intermediate_buffer_dims: FxHashSet<char>,
 }
 
 impl CudaRuntime {
@@ -214,11 +215,14 @@ impl CudaRuntime {
 
     #[tracing::instrument(skip_all)]
     fn allocate_intermediate_buffers(&mut self, dyn_dims: &FxHashMap<char, usize>) {
+        self.intermediate_buffer_dims.clear();
         for node in self.llir_graph.node_indices().collect_vec() {
             if self.llir_graph[node].to_op::<Input>().is_some() {
                 continue;
             }
             if let Some(op) = self.llir_graph[node].to_dialect::<dyn BlockOp>() {
+                self.intermediate_buffer_dims
+                    .extend(op.output_size().dyn_vars());
                 self.buffers.insert(
                     node,
                     self.cuda_stream
@@ -228,6 +232,8 @@ impl CudaRuntime {
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
+                self.intermediate_buffer_dims
+                    .extend(op.output_size().dyn_vars());
                 self.buffers.insert(
                     node,
                     self.cuda_stream
@@ -365,6 +371,7 @@ impl Runtime for CudaRuntime {
             node_to_exec: FxHashMap::default(),
             timings: vec![],
             last_dyn_map: FxHashMap::default(),
+            intermediate_buffer_dims: FxHashSet::default(),
         }
     }
 
@@ -579,7 +586,13 @@ impl Runtime for CudaRuntime {
 
     #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
-        if self.buffers.is_empty() || *dyn_map != self.last_dyn_map {
+        if self.buffers.is_empty()
+            || dyn_map.len() != self.last_dyn_map.len()
+            || dyn_map
+                .iter()
+                .filter(|(d, _)| self.intermediate_buffer_dims.contains(*d))
+                .any(|(d, v)| self.last_dyn_map.get(d).map(|n| *n != *v).unwrap_or(true))
+        {
             self.last_dyn_map = dyn_map.clone();
             self.allocate_intermediate_buffers(dyn_map);
         }
