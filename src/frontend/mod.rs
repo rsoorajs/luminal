@@ -4,4 +4,7 @@ pub mod matmul;
 pub mod movement;
 pub mod other;
 pub mod reduction;
+pub mod tensor;
 pub mod unary;
+
+pub use tensor::*;

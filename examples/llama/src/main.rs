@@ -3,15 +3,8 @@ mod model;
 
 use benchmark::Benchmarker;
 use itertools::Itertools;
-use luminal::{
-    graph::{Graph, Runtime},
-    op::DType,
-    prelude::FxHashMap,
-};
-use luminal_cuda::{
-    cuda_bandwidth_gbps, cuda_compute_f32_tflops,
-    runtime::{CudaRuntime, CustomState},
-};
+use luminal::prelude::*;
+use luminal_cuda::{cuda_bandwidth_gbps, cuda_compute_f32_tflops, runtime::CudaRuntime};
 use model::*;
 use std::io::Write;
 use tokenizers::Tokenizer;
@@ -23,6 +16,12 @@ fn main() {
         .env_filter(format!("{}=trace,luminal=trace", env!("CARGO_PKG_NAME")))
         .init();
 
+    let ctx = luminal_cuda::cudarc::driver::CudaContext::new(0).unwrap();
+    ctx.bind_to_thread().unwrap();
+    ctx.set_flags(luminal_cuda::cudarc::driver::sys::CUctx_flags::CU_CTX_SCHED_BLOCKING_SYNC)
+        .unwrap();
+    let stream = ctx.default_stream();
+
     let max_seq_len = 4096;
     let gen_tokens: usize = 5;
     let input_sentence = "Hello, how are you";
@@ -30,54 +29,30 @@ fn main() {
     let tokenizer = Tokenizer::from_file("setup/tokenizer.json").expect("Failed to load tokenizer");
     let encoding = tokenizer.encode(input_sentence, true).unwrap();
     let mut sentence = encoding.get_ids().to_vec();
+    let mut kv_cache = KVCache::new(&stream, max_seq_len);
 
     println!("Building Graph...");
     let mut cx = Graph::default();
     let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
     let token_ids = cx.named_tensor("token_ids", 's').as_dtype(DType::Int);
     let model = model::Llama::init(&mut cx);
-    let logits = model.forward(input, token_ids).output();
-
-    let ctx = luminal_cuda::cudarc::driver::CudaContext::new(0).unwrap();
-    ctx.bind_to_thread().unwrap();
-    ctx.set_flags(luminal_cuda::cudarc::driver::sys::CUctx_flags::CU_CTX_SCHED_BLOCKING_SYNC)
-        .unwrap();
-    let stream = ctx.default_stream();
-
-    println!("Allocating KV Cache...");
-    let mut custom_state = FxHashMap::default();
-    custom_state.insert(
-        "kv_cache".to_string(),
-        CustomState::KVCache(
-            (0..LAYERS)
-                .map(|_| {
-                    (
-                        stream
-                            .alloc_zeros::<f32>((HIDDEN / KV_GROUPS) * max_seq_len)
-                            .unwrap(),
-                        stream
-                            .alloc_zeros::<f32>((HIDDEN / KV_GROUPS) * max_seq_len)
-                            .unwrap(),
-                    )
-                })
-                .collect_vec(),
-        ),
-    );
+    let logits = model.forward(input, token_ids, &kv_cache).output();
 
     println!("Building E-Graph...");
     cx.build_search_space::<CudaRuntime>();
 
-    let mut runtime = CudaRuntime::initialize((ctx.clone(), stream.clone(), custom_state));
+    let mut runtime = CudaRuntime::initialize(stream.clone());
     println!("Loading weights...");
     runtime.load_safetensors(&cx, "setup/model_combined.safetensors");
     stream.synchronize().unwrap();
     println!("Compiling...");
-    cx.set_dyn_dim('s', 1);
-    cx.set_dyn_dim('p', 0);
+    cx.set_dim('s', 1);
+    cx.set_dim('p', 0);
     // inputs for search
     runtime.set_data(input, vec![1_i32]);
     runtime.set_data(token_ids, vec![0_i32]);
     runtime = cx.search(runtime, 5);
+    kv_cache.reset();
 
     print!("{input_sentence}");
     std::io::stdout().flush().unwrap();
@@ -93,8 +68,8 @@ fn main() {
         let _entered = span.enter();
         // Embed the tokenized sequence
         let seq_len = sentence.len();
-        cx.set_dyn_dim('s', seq_len);
-        cx.set_dyn_dim('p', prev_seq);
+        cx.set_dim('s', seq_len);
+        cx.set_dim('p', prev_seq);
 
         runtime.set_data(input, sentence.iter().map(|i| *i as i32).collect_vec());
         runtime.set_data(

@@ -1,4 +1,4 @@
-use crate::op;
+use crate::hlir::*;
 use crate::prelude::*;
 use std::ops::AddAssign;
 use std::ops::DivAssign;
@@ -24,9 +24,9 @@ impl Add for GraphTensor {
         // );
         let new_id = self
             .graph()
-            .add_op(op::Add::default())
-            .input(self.id, 0, self.shape)
-            .input(rhs.id, 0, rhs.shape)
+            .add_op(crate::hlir::Add::default())
+            .input(self.id, self.shape)
+            .input(rhs.id, rhs.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -85,9 +85,9 @@ impl Mul for GraphTensor {
         // );
         let new_id = self
             .graph()
-            .add_op(op::Mul::default())
-            .input(self.id, 0, self.shape)
-            .input(rhs.id, 0, rhs.shape)
+            .add_op(crate::hlir::Mul::default())
+            .input(self.id, self.shape)
+            .input(rhs.id, rhs.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -144,9 +144,9 @@ impl Rem<GraphTensor> for GraphTensor {
         assert_eq!(self.dims(), rhs.dims(), "Dims must match to mod tensors.");
         let new_id = self
             .graph()
-            .add_op(op::Mod::default())
-            .input(self.id, 0, self.shape)
-            .input(rhs.id, 0, rhs.shape)
+            .add_op(Mod::default())
+            .input(self.id, self.shape)
+            .input(rhs.id, rhs.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -255,9 +255,9 @@ impl GraphTensor {
         assert_eq!(self.dims(), rhs.dims(), "Dims must match to lt tensors.");
         let new_id = self
             .graph()
-            .add_op(op::LessThan::default())
-            .input(self.id, 0, self.shape)
-            .input(rhs.id, 0, rhs.shape)
+            .add_op(LessThan::default())
+            .input(self.id, self.shape)
+            .input(rhs.id, rhs.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }

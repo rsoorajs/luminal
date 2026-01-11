@@ -2,13 +2,12 @@ mod ops;
 pub use ops::*;
 
 use cudarc::driver::CudaStream;
-use luminal::{prelude::FxHashMap, shape::Expression, utils::EgglogOp};
+use luminal::{prelude::FxHashMap, shape::Expression};
 use std::fmt::Debug;
 
-use crate::runtime::CustomState;
-
 #[allow(unused_variables)]
-pub trait BlockOp: Debug + as_any::AsAny + EgglogOp {
+pub trait BlockOp: Debug + as_any::AsAny {
+    fn op_name(&self) -> &'static str;
     fn launch_range(&self) -> Vec<Expression> {
         unimplemented!()
     }
@@ -24,7 +23,6 @@ pub trait BlockOp: Debug + as_any::AsAny + EgglogOp {
     #[allow(clippy::mutable_key_type)]
     fn schedule_op(
         &self,
-        custom_state: &mut FxHashMap<String, CustomState>,
         stream: &CudaStream,
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {

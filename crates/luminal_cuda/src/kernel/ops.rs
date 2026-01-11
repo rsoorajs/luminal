@@ -8,12 +8,9 @@ use cudarc::{
 use itertools::Itertools;
 use luminal::{
     graph::{extract_dtype, extract_expr, extract_expr_list},
+    op::OpParam::*,
+    op::*,
     prelude::*,
-    serialized_egraph::SerializedEGraph,
-    utils::{
-        flatten_mul_strides, EgglogOp, LLIROp,
-        OpParam::{self, *},
-    },
 };
 
 pub type Ops = (
@@ -21,7 +18,7 @@ pub type Ops = (
     KernelMul,
     KernelIota,
     KernelGather,
-    KernelSumReduce,
+    // KernelSumReduce, // for some reason this prevents llama example from working. fairly certian there's an underlying bug in search or extraction.
     KernelMaxReduce,
     KernelMeanReduce,
 );
@@ -87,7 +84,6 @@ impl EgglogOp for KernelMaxReduce {
 impl KernelOp for KernelMaxReduce {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -131,7 +127,7 @@ extern \"C\" {{
         int in_start = {in_index};
         int iters = {iters};
         int iter_stride = {iter_stride};
-        
+
         {dtype} max_value = NEG_INF_F;
         for (int i = tid; i < iters; i += THREADS_PER_BLOCK) {{
             max_value = fmaxf(max_value, in[in_start + i * iter_stride]);
@@ -141,21 +137,21 @@ extern \"C\" {{
         for (int s = WARP_SIZE / 2; s > 0; s /= 2) {{
             max_value = fmaxf(max_value, __shfl_down_sync(FULL_MASK, max_value, s));
         }}
-        
+
         if (lane_id == 0) {{
             warp_sums[warp_id] = max_value;
         }}
         __syncthreads();
-        
+
         if (warp_id == 0) {{
             int cnt = THREADS_PER_BLOCK / WARP_SIZE;
             {dtype} block_max = tid < cnt ? warp_sums[tid] : NEG_INF_F;
-            
+
             #pragma unroll
             for (int s = cnt / 2; s > 0; s /= 2) {{
                 block_max = fmaxf(block_max, __shfl_down_sync(FULL_MASK, block_max, s));
             }}
-            
+
             if (tid == 0) {{
                 out[{out_index}] = block_max;
             }}
@@ -174,7 +170,7 @@ extern \"C\" {{
         );
 
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("reduce_max_k").unwrap();
 
         let constants = vars
@@ -263,7 +259,6 @@ impl EgglogOp for KernelMeanReduce {
 impl KernelOp for KernelMeanReduce {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -306,7 +301,7 @@ extern \"C\" {{
         int in_start = {in_index};
         int iters = {iters};
         int iter_stride = {iter_stride};
-        
+
         {dtype} sum = 0;
         for (int i = tid; i < iters; i += THREADS_PER_BLOCK) {{
             sum += in[in_start + i * iter_stride];
@@ -316,21 +311,21 @@ extern \"C\" {{
         for (int s = WARP_SIZE / 2; s > 0; s /= 2) {{
             sum += __shfl_down_sync(FULL_MASK, sum, s);
         }}
-        
+
         if (lane_id == 0) {{
             warp_sums[warp_id] = sum;
         }}
         __syncthreads();
-        
+
         if (warp_id == 0) {{
             int cnt = THREADS_PER_BLOCK / WARP_SIZE;
             {dtype} block_sum = tid < cnt ? warp_sums[tid] : 0;
-            
+
             #pragma unroll
             for (int s = cnt / 2; s > 0; s /= 2) {{
                 block_sum += __shfl_down_sync(FULL_MASK, block_sum, s);
             }}
-            
+
             if (tid == 0) {{
                 out[{out_index}] = ({dtype})(block_sum / (float)iters);
             }}
@@ -349,7 +344,7 @@ extern \"C\" {{
         );
 
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("reduce_mean_k").unwrap();
 
         let constants = vars
@@ -434,7 +429,6 @@ impl EgglogOp for KernelSumReduce {
 impl KernelOp for KernelSumReduce {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -477,7 +471,7 @@ extern \"C\" {{
         int in_start = {in_index};
         int iters = {iters};
         int iter_stride = {iter_stride};
-        
+
         {dtype} sum = 0;
         for (int i = tid; i < iters; i += THREADS_PER_BLOCK) {{
             sum += in[in_start + i * iter_stride];
@@ -487,21 +481,21 @@ extern \"C\" {{
         for (int s = WARP_SIZE / 2; s > 0; s /= 2) {{
             sum += __shfl_down_sync(FULL_MASK, sum, s);
         }}
-        
+
         if (lane_id == 0) {{
             warp_sums[warp_id] = sum;
         }}
         __syncthreads();
-        
+
         if (warp_id == 0) {{
             int cnt = THREADS_PER_BLOCK / WARP_SIZE;
             {dtype} block_sum = tid < cnt ? warp_sums[tid] : 0;
-            
+
             #pragma unroll
             for (int s = cnt / 2; s > 0; s /= 2) {{
                 block_sum += __shfl_down_sync(FULL_MASK, block_sum, s);
             }}
-            
+
             if (tid == 0) {{
                 out[{out_index}] = block_sum;
             }}
@@ -520,7 +514,7 @@ extern \"C\" {{
         );
 
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("reduce_sum_k").unwrap();
 
         let constants = vars
@@ -603,7 +597,6 @@ impl EgglogOp for KernelAdd {
 impl KernelOp for KernelAdd {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -640,22 +633,19 @@ extern \"C\" {{
             flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
         );
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("add_k").unwrap();
         let constants = vars
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
             .collect();
+        let out_size = self.out_shape.iter().copied().product::<Expression>();
         (
             func,
             module,
             kernel,
-            (
-                self.out_shape.iter().copied().product::<Expression>(),
-                1.into(),
-                1.into(),
-            ),
-            (1.into(), 1.into(), 1.into()),
+            (out_size.ceil_div(128), 1.into(), 1.into()),
+            (out_size.min(128), 1.into(), 1.into()),
             0.into(),
             constants,
         )
@@ -688,10 +678,10 @@ impl EgglogOp for KernelMul {
 (rule
     (
         (= ?a (Mul ?out_shape ?inp_a ?inp_a_strides ?inp_b ?inp_b_strides ?out_strides))
-        (= (dtype ?inp_a) (Int))
+        (= ?dty (dtype ?inp_a))
     )
     (
-        (union ?a (KernelMul ?out_shape ?inp_a ?inp_a_strides ?inp_b ?inp_b_strides ?out_strides (Int)))
+        (union ?a (KernelMul ?out_shape ?inp_a ?inp_a_strides ?inp_b ?inp_b_strides ?out_strides ?dty))
     )
     :name \"kernel mul\"
 )"
@@ -725,7 +715,6 @@ impl EgglogOp for KernelMul {
 impl KernelOp for KernelMul {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -762,22 +751,19 @@ extern \"C\" {{
             flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
         );
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("mul_k").unwrap();
         let constants = vars
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
             .collect();
+        let out_size = self.out_shape.iter().copied().product::<Expression>();
         (
             func,
             module,
             kernel,
-            (
-                self.out_shape.iter().copied().product::<Expression>(),
-                1.into(),
-                1.into(),
-            ),
-            (1.into(), 1.into(), 1.into()),
+            (out_size.ceil_div(128), 1.into(), 1.into()),
+            (out_size.min(128), 1.into(), 1.into()),
             0.into(),
             constants,
         )
@@ -850,7 +836,6 @@ impl EgglogOp for KernelGather {
 impl KernelOp for KernelGather {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -889,7 +874,7 @@ extern \"C\" {{
             flatten_mul_strides(&self.out_shape, &self.data_stride).to_kernel()
         );
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("gather").unwrap();
         let constants = vars
             .into_iter()
@@ -962,7 +947,6 @@ impl EgglogOp for KernelIota {
 impl KernelOp for KernelIota {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -989,7 +973,7 @@ extern \"C\" {{
             self.expr.to_kernel(),
         );
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("iota_k").unwrap();
         let constants = vars
             .into_iter()

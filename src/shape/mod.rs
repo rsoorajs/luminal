@@ -1,7 +1,7 @@
-mod symbolic;
+mod expression;
 mod tracker;
 
-pub use symbolic::*;
+pub use expression::*;
 pub use tracker::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +13,45 @@ pub enum ReshapeDim {
 }
 
 use std::ops::{Bound, Range, RangeBounds, RangeFrom, RangeFull, RangeTo, RangeToInclusive};
+
+pub fn flatten_z_strides(range: &[Expression], strides: &[Expression]) -> Expression {
+    assert_eq!(range.len(), strides.len());
+    let mut current_elem_size = Expression::from(1);
+    let mut flat_stride = Expression::from(0);
+    for (dim, (range, stride)) in range.iter().zip(strides).enumerate().rev() {
+        let div = Expression::from('z') / current_elem_size;
+        let m = if dim > 0 { div % range } else { div };
+        flat_stride += stride.substitute('z', m);
+        current_elem_size *= range;
+    }
+    flat_stride.simplify()
+}
+
+pub fn flatten_mul_strides(range: &[Expression], strides: &[Expression]) -> Expression {
+    assert_eq!(range.len(), strides.len());
+    let mut current_elem_size = Expression::from(1);
+    let mut flat_stride = Expression::from(0);
+    for (dim, (range, stride)) in range.iter().zip(strides).enumerate().rev() {
+        let div = Expression::from('z') / current_elem_size;
+        let m = if dim > 0 { div % range } else { div };
+        flat_stride += m * stride;
+        current_elem_size *= range;
+    }
+    flat_stride.simplify()
+}
+
+pub fn flatten_z_strides_mask(range: &[Expression], strides: &[Expression]) -> Expression {
+    assert_eq!(range.len(), strides.len());
+    let mut current_elem_size = Expression::from(1);
+    let mut flat_stride = Expression::from(1);
+    for (dim, (range, stride)) in range.iter().zip(strides).enumerate().rev() {
+        let div = Expression::from('z') / current_elem_size;
+        let m = if dim > 0 { div % range } else { div };
+        flat_stride *= stride.substitute('z', m);
+        current_elem_size *= range;
+    }
+    flat_stride.simplify()
+}
 
 fn get_start_bound<D: Into<Expression> + Copy>(bound: Bound<D>) -> Expression {
     match bound {
