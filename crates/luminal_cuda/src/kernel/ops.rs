@@ -24,7 +24,229 @@ pub type Ops = (
     KernelSumReduce,
     KernelMaxReduce,
     KernelMeanReduce,
+    KernelArgsort,
 );
+
+#[derive(Default, Debug, Clone)]
+pub struct KernelArgsort {
+    dim: usize,
+    descending: bool,
+    shape: Vec<Expression>,
+    strides: Vec<Expression>,
+    reduced_shape: Vec<Expression>,
+    reduced_strides: Vec<Expression>,
+    reduced_out_strides: Vec<Expression>,
+    iters: Expression,
+    iter_stride: Expression,
+    out_stride: Expression,
+    dtype: DType,
+}
+impl EgglogOp for KernelArgsort {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "KernelArgsort".to_string(),
+            vec![Input, Int, Int, EList, EList, EList, EList, EList, Expr, Expr, Expr, Dty],
+        )
+    }
+
+    fn rewrites(&self) -> Vec<String> {
+        vec!["
+(rule
+    (
+        (= ?a (ArgSort ?inp ?dim ?descending ?shape ?strides ?reduced_shape ?reduced_strides ?reduced_out_strides ?iters ?iter_stride ?out_stride))
+        (= ?dty (dtype ?inp))
+    )
+    (
+        (union ?a (KernelArgsort ?inp ?dim ?descending ?shape ?strides ?reduced_shape ?reduced_strides ?reduced_out_strides ?iters ?iter_stride ?out_stride ?dty))
+    )
+    :name \"kernel argsort\"
+)"
+        .to_string()]
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn extract<'a>(
+        &self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        (
+            LLIROp::new::<dyn KernelOp>(Box::new(Self {
+                dim: egraph.enodes[children[1]].0.parse::<usize>().unwrap(),
+                descending: egraph.enodes[children[2]].0.parse::<i32>().unwrap() != 0,
+                shape: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
+                strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
+                reduced_shape: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
+                reduced_strides: extract_expr_list(egraph, children[6], list_cache, expr_cache).unwrap(),
+                reduced_out_strides: extract_expr_list(egraph, children[7], list_cache, expr_cache).unwrap(),
+                iters: extract_expr(egraph, children[8], expr_cache).unwrap(),
+                iter_stride: extract_expr(egraph, children[9], expr_cache).unwrap(),
+                out_stride: extract_expr(egraph, children[10], expr_cache).unwrap(),
+                dtype: extract_dtype(egraph, children[11]),
+            }) as Box<dyn KernelOp>),
+            vec![children[0]],
+        )
+    }
+}
+
+impl KernelOp for KernelArgsort {
+    fn compile(
+        &self,
+        ctx: &Arc<CudaContext>,
+        stream: &Arc<CudaStream>,
+    ) -> (
+        CudaFunction,
+        Arc<CudaModule>,
+        String,
+        (Expression, Expression, Expression),
+        (Expression, Expression, Expression),
+        Expression,
+        FxHashMap<char, CudaSlice<u8>>,
+    ) {
+        let vars = self
+            .shape
+            .iter()
+            .flat_map(|e| e.dyn_vars())
+            .chain(self.strides.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.reduced_shape.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.reduced_strides.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.reduced_out_strides.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.out_stride.dyn_vars())
+            .chain(self.iters.dyn_vars())
+            .chain(self.iter_stride.dyn_vars())
+            .collect::<FxHashSet<_>>();
+
+        let dtype = cuda_dtype(self.dtype);
+        let n_blocks: Expression = self.reduced_shape.iter().copied().product();
+        let in_index = flatten_mul_strides(&self.reduced_shape, &self.reduced_strides);
+        let out_index = flatten_mul_strides(&self.reduced_shape, &self.reduced_out_strides);
+
+        let threads_per_block = 1024;
+        let shmem_limit = 4096; // safe shmem limit for values + indices
+        let kernel = format!(
+            "
+#define THREADS_PER_BLOCK {threads_per_block}
+#define SHMEM_LIMIT {shmem_limit}
+#define ASCENDING {ascending}
+{constants}
+extern \"C\" {{
+    __global__ void argsort_k(int *output, const {dtype} *data) {{
+        extern __shared__ char shared_mem[];
+        {dtype} *shmem_vals = ({dtype}*)shared_mem;
+        int *shmem_idx = (int*)(shmem_vals + SHMEM_LIMIT);
+        
+        int const_z = blockIdx.x;
+        int tid = threadIdx.x;
+        
+        int in_base = {in_index};
+        int out_base = {out_index};
+        int N = {iters};
+        int in_stride = {iter_stride};
+        int out_stride = {out_stride};
+        
+        {dtype} *vals;
+        int *idx;
+        int idx_stride;
+
+        int use_shmem = (N <= SHMEM_LIMIT);
+        if (use_shmem) {{
+            vals = shmem_vals;
+            idx = shmem_idx;
+            for (int i = tid; i < N; i += THREADS_PER_BLOCK) {{
+                vals[i] = data[in_base + i * in_stride];
+            }}
+            idx_stride = 1;
+            in_stride = 1;
+        }} else {{
+            vals = ({dtype}*)(data + in_base);
+            idx = output + out_base;
+            idx_stride = out_stride;
+        }}
+        
+        // init indices
+        for (int i = tid; i < N; i += THREADS_PER_BLOCK) {{
+            idx[i * idx_stride] = i;
+        }}
+        __syncthreads();
+        
+        // odd even transposition sort
+        // https://www.geeksforgeeks.org/dsa/odd-even-transposition-sort-brick-sort-using-pthreads/
+        for (int phase = 0; phase < N; phase++) {{
+            int p2 = phase % 2;
+            for (int i = tid; i < N / 2; i += THREADS_PER_BLOCK) {{
+                int left = 2 * i + p2;
+                int right = 2 * i + 1 + p2;
+                
+                if (right < N) {{
+                    int idx_l = idx[left * idx_stride];
+                    int idx_r = idx[right * idx_stride];
+                    {dtype} val_l = vals[idx_l * in_stride];
+                    {dtype} val_r = vals[idx_r * in_stride];
+                    bool cond = ASCENDING ? val_l > val_r : val_l < val_r;
+
+                    if (cond) {{
+                        idx[left * idx_stride] = idx_r;
+                        idx[right * idx_stride] = idx_l;
+                    }}
+                }}
+            }}
+            __syncthreads();
+        }}
+        
+        // only need to write back if using shmem
+        if (use_shmem) {{
+            for (int i = tid; i < N; i += THREADS_PER_BLOCK) {{
+                output[out_base + i * out_stride] = idx[i];
+            }}
+        }}
+    }}
+}}",
+            constants = vars
+                .iter()
+                .map(|i| format!("__constant__ int const_{i}[1];"))
+                .join("\n"),
+            dtype = dtype,
+            in_index = in_index.to_kernel(),
+            out_index = out_index.to_kernel(),
+            iters = self.iters.to_kernel(),
+            iter_stride = self.iter_stride.to_kernel(),
+            out_stride = self.out_stride.to_kernel(),
+            threads_per_block = threads_per_block,
+            shmem_limit = shmem_limit,
+            ascending = if self.descending { 0 } else { 1 },
+        );
+
+        let ptx = compile_ptx(&kernel).unwrap();
+        let module = ctx.load_module(ptx).unwrap();
+        let func = module.load_function("argsort_k").unwrap();
+
+        let constants = vars
+            .into_iter()
+            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
+            .collect();
+
+        let shmem_bytes = shmem_limit * 8; // safe for 4 bytes dtype (f32) + 4 bytes int indices 
+
+        (
+            func,
+            module,
+            kernel,
+            (n_blocks, 1.into(), 1.into()),                 // grid
+            (threads_per_block.into(), 1.into(), 1.into()), // threads
+            shmem_bytes.into(),                             // shmem
+            constants,
+        )
+    }
+
+    fn output_size(&self) -> Expression {
+        self.shape.iter().copied().product()
+    }
+}
 
 #[derive(Default, Debug, Clone)]
 

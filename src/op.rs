@@ -37,6 +37,7 @@ pub type Ops = (
     Gather,
     SumReduce,
     MaxReduce,
+    ArgSort,
 );
 
 /// Supported dtypes
@@ -1260,6 +1261,183 @@ impl NativeOp for SumReduce {
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
+pub struct ArgSort {
+    pub dim: usize,
+    pub descending: bool,
+    pub shape: Vec<Expression>,
+    pub strides: Vec<Expression>,
+    pub reduced_shape: Vec<Expression>,
+    pub reduced_strides: Vec<Expression>,
+    pub reduced_out_strides: Vec<Expression>,
+    pub iters: Expression,
+    pub iter_stride: Expression,
+    pub out_stride: Expression,
+}
+impl HLIROp for ArgSort {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+        let desc = self.descending as i32;
+        let shape = inputs[0].2;
+        let strides = inputs[0].2.strides;
+        let iters = shape.dims[self.dim];
+        let iter_stride = strides[self.dim];
+        let mut reduced_shape = shape;
+        reduced_shape.remove_dim(self.dim);
+        let mut reduced_strides = strides.clone();
+        reduced_strides.remove(self.dim);
+
+        // Compute contiguous output strides
+        let mut contiguous_strides = vec![Expression::from(1); shape.dims.len()];
+        for i in (0..shape.dims.len() - 1).rev() {
+            contiguous_strides[i] = contiguous_strides[i + 1] * shape.dims[i + 1];
+        }
+        let out_stride = contiguous_strides[self.dim];
+        let mut reduced_out_strides = contiguous_strides;
+        reduced_out_strides.remove(self.dim);
+
+        format!(
+            "(ArgSort {} {} {} {} {} {} {} {} {} {} {})",
+            inputs[0].1,
+            self.dim,
+            desc,
+            elist_to_egglog(&shape.dims),
+            elist_to_egglog(&strides),
+            elist_to_egglog(&reduced_shape.dims),
+            elist_to_egglog(&reduced_strides),
+            elist_to_egglog(&reduced_out_strides),
+            iters.to_egglog(),
+            iter_stride.to_egglog(),
+            out_stride.to_egglog()
+        )
+    }
+}
+
+impl EgglogOp for ArgSort {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "ArgSort".to_string(),
+            vec![Input, Int, Int, EList, EList, EList, EList, EList, Expr, Expr, Expr],
+        )
+    }
+    fn cleanup(&self) -> bool {
+        true
+    }
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+        "(rule
+           (
+               (= ?e (ArgSort ?inp ?dim ?descending ?shape ?strides ?reduced_shape ?reduced_strides ?reduced_out_strides ?iters ?iter_stride ?out_stride))
+           )
+           (
+               (set (dtype ?e) (Int))
+           )
+        )"
+            .to_string(),
+        ]
+    }
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        (
+            LLIROp::new::<dyn NativeOp>(Box::new(Self {
+                dim: egraph.enodes[children[1]].0.parse::<usize>().unwrap(),
+                descending: egraph.enodes[children[2]].0.parse::<i32>().unwrap() != 0,
+                shape: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
+                strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
+                reduced_shape: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
+                reduced_strides: extract_expr_list(egraph, children[6], list_cache, expr_cache).unwrap(),
+                reduced_out_strides: extract_expr_list(egraph, children[7], list_cache, expr_cache).unwrap(),
+                iters: extract_expr(egraph, children[8], expr_cache).unwrap(),
+                iter_stride: extract_expr(egraph, children[9], expr_cache).unwrap(),
+                out_stride: extract_expr(egraph, children[10], expr_cache).unwrap(),
+            })),
+            vec![children[0]],
+        )
+    }
+}
+
+impl NativeOp for ArgSort {
+    fn execute(&self, inputs: Vec<&NativeData>, dyn_map: &FxHashMap<char, usize>) -> NativeData {
+        let iter_stride = self.iter_stride.exec(dyn_map).unwrap();
+        let iters = self.iters.exec(dyn_map).unwrap();
+        let out_stride = self.out_stride.exec(dyn_map).unwrap();
+        let total_elements: usize = self.shape.iter().map(|e| e.exec(dyn_map).unwrap()).product();
+        let mut output = vec![0i32; total_elements];
+
+        let reduced_shape: Vec<usize> = self.reduced_shape.iter().map(|e| e.exec(dyn_map).unwrap()).collect();
+        let reduced_out_strides: Vec<usize> = self.reduced_out_strides.iter().map(|e| e.exec(dyn_map).unwrap()).collect();
+
+        for (outer_idx, in_base) in StridedIterator::new(&self.reduced_shape, &self.reduced_strides, dyn_map).enumerate() {
+            let mut out_base = 0usize;
+            let mut idx = outer_idx;
+            // find current slice start for output
+            for i in (0..reduced_shape.len()).rev() {
+                let coord = idx % reduced_shape[i];
+                idx /= reduced_shape[i];
+                out_base += coord * reduced_out_strides[i];
+            }
+
+            let mut indices: Vec<i32> = (0..iters as i32).collect();
+            match inputs[0] {
+                NativeData::F32(a) => {
+                    indices.sort_by(|&i, &j| {
+                        let vi = a[in_base + i as usize * iter_stride];
+                        let vj = a[in_base + j as usize * iter_stride];
+                        if self.descending {
+                            vj.total_cmp(&vi)
+                        } else {
+                            vi.total_cmp(&vj)
+                        }
+                    });
+                },
+                NativeData::F16(a) => {
+                    indices.sort_by(|&i, &j| {
+                        let vi = a[in_base + i as usize * iter_stride];
+                        let vj = a[in_base + j as usize * iter_stride];
+                        if self.descending {
+                            vj.total_cmp(&vi)
+                        } else {
+                            vi.total_cmp(&vj)
+                        }
+                    });
+                },
+                NativeData::Bf16(a) => {
+                    indices.sort_by(|&i, &j| {
+                        let vi = a[in_base + i as usize * iter_stride];
+                        let vj = a[in_base + j as usize * iter_stride];
+                        if self.descending {
+                            vj.total_cmp(&vi)
+                        } else {
+                            vi.total_cmp(&vj)
+                        }
+                    });
+                },
+                NativeData::Int(a) => {
+                    indices.sort_by(|&i, &j| {
+                        let vi = a[in_base + i as usize * iter_stride];
+                        let vj = a[in_base + j as usize * iter_stride];
+                        if self.descending {
+                            vj.cmp(&vi)
+                        } else {
+                            vi.cmp(&vj)
+                        }
+                    });
+                },
+            }
+
+            for (k, &sorted_idx) in indices.iter().enumerate() {
+                output[out_base + k * out_stride] = sorted_idx;
+            }
+        }
+
+        NativeData::Int(output)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct MaxReduce {
     pub dim: usize,
     pub shape: Vec<Expression>,
@@ -1536,7 +1714,7 @@ impl Runtime for NativeRuntime {
 }
 
 impl NativeRuntime {
-    pub fn get_f32(&self, id: impl ToId) -> &Vec<f32> {
+    fn get_data_id(&self, id: impl ToId) -> petgraph::graph::NodeIndex {
         let id = id.to_id();
         let output_id = self
             .graph
@@ -1550,15 +1728,26 @@ impl NativeRuntime {
                 }
             })
             .unwrap();
-        let data_id = self
-            .graph
+        self.graph
             .neighbors_directed(output_id, Direction::Incoming)
             .next()
-            .unwrap();
+            .unwrap()
+    }
+
+    pub fn get_f32(&self, id: impl ToId) -> &Vec<f32> {
+        let data_id = self.get_data_id(id);
         let NativeData::F32(f) = self.buffers.get(&data_id).unwrap() else {
             panic!()
         };
         f
+    }
+
+    pub fn get_i32(&self, id: impl ToId) -> &Vec<i32> {
+        let data_id = self.get_data_id(id);
+        let NativeData::Int(i) = self.buffers.get(&data_id).unwrap() else {
+            panic!()
+        };
+        i
     }
 }
 

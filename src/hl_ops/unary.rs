@@ -216,13 +216,16 @@ impl GraphTensor {
 
     /// Compute the sorted indexes of this tensor along a certian axis
     pub fn argsort(self, axis: usize, descending: bool) -> GraphTensor {
-        // Compare all elements with all other elements by making an axis
-        let ax_size = self.dims()[axis];
-        let a = self.expand_dim(axis + 1, ax_size);
-        let b = self.expand_dim(axis, ax_size) + 1e-9; // eps for stable sort
-        let mut ind = if descending { a.lt(b) } else { a.gt(b) };
-        ind = ind.sum(axis).cast(DType::Int);
-        ind.inverse_permutation(axis)
+        let new_id = self
+            .graph()
+            .add_op(op::ArgSort {
+                dim: axis,
+                descending: descending,
+                ..Default::default()
+            })
+            .input(self.id, 0, self.shape)
+            .finish();
+        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, DType::Int)
     }
 
     /// Sort the tensor along a certian axis

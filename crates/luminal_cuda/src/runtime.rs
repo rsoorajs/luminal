@@ -161,7 +161,7 @@ impl CudaRuntime {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
+    fn get_output_data(&self, id: impl ToId) -> Vec<u8> {
         let id = id.to_id();
         let output_id = self
             .llir_graph
@@ -186,8 +186,19 @@ impl CudaRuntime {
                     .expect("Cannot find tensor in runtime!"),
             )
             .unwrap()
+    }
+
+    pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
+        self.get_output_data(id)
             .chunks_exact(4)
             .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect_vec()
+    }
+
+    pub fn get_i32(&self, id: impl ToId) -> Vec<i32> {
+        self.get_output_data(id)
+            .chunks_exact(4)
+            .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
             .collect_vec()
     }
 
