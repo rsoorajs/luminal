@@ -228,7 +228,7 @@ impl Graph {
             if enabled!(Level::DEBUG){
                 let log_dir = Path::new("llir_graphs"); 
                 if !log_dir.exists() {fs::create_dir(log_dir).unwrap();}
-                fs::write(log_dir.join(format!("llir_{}", i)), llir_graph.to_dot().unwrap()).unwrap(); 
+                fs::write(log_dir.join(format!("llir_{}.dot", i)), llir_graph.to_dot().unwrap()).unwrap(); 
             }
             let (new_metric, display_metric) = runtime.profile(&llir_graph, &self.dyn_map);
             let mut new_best = false;
