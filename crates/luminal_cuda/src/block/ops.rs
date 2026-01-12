@@ -100,6 +100,21 @@ impl BlockOp for RowAdd {
         vec![vec![true; self.range.len()], vec![true; self.range.len()]]
     }
 
+    fn bytes_loaded(&self) -> Expression {
+        // Load 2 input rows (a + b) per launch
+        self.range.iter().copied().product::<Expression>().max(1) * self.row_width * 2 * 4
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        // Store 1 output row per launch
+        self.range.iter().copied().product::<Expression>().max(1) * self.row_width * 4
+    }
+
+    fn flops(&self) -> Expression {
+        // 1 add per element
+        self.range.iter().copied().product::<Expression>().max(1) * self.row_width
+    }
+
     fn cuda_op(&self) -> (String, String) {
         let struct_body =
             "const int a_strides; const int b_strides; const int out_strides; int row_width;"
@@ -234,6 +249,22 @@ impl BlockOp for RowSwishMul {
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
         vec![vec![true; self.range.len()], vec![true; self.range.len()]]
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        // Load 2 input rows (a + b) per launch
+        self.range.iter().copied().product::<Expression>() * self.row_width * 2 * 4
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        // Store 1 output row per launch
+        self.range.iter().copied().product::<Expression>() * self.row_width * 4
+    }
+
+    fn flops(&self) -> Expression {
+        // swish(x) * b[idx] = x / (1 + exp(-x)) * b
+        // ~5 ops per element: neg, exp, add, div, mul
+        self.range.iter().copied().product::<Expression>() * self.row_width * 5
     }
 
     fn cuda_op(&self) -> (String, String) {
@@ -421,6 +452,22 @@ impl BlockOp for RowRMSNorm {
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
         vec![vec![true; self.range.len()], vec![true; self.range.len()]]
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        // Load input row + weight row per launch
+        self.range.iter().copied().product::<Expression>() * self.row_width * 2 * 4
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        // Store 1 output row per launch
+        self.range.iter().copied().product::<Expression>() * self.row_width * 4
+    }
+
+    fn flops(&self) -> Expression {
+        // Per row: d squares, d-1 adds for sum, div by d, add eps, sqrt, recip, then 2d muls (inp * inv_rms * weight)
+        // Approximate: 5*d ops per row
+        self.range.iter().copied().product::<Expression>() * self.row_width * 5
     }
 
     fn cuda_op(&self) -> (String, String) {
@@ -811,6 +858,22 @@ impl BlockOp for RowRope {
         vec![vec![true; self.range.len()], vec![true; self.range.len()]]
     }
 
+    fn bytes_loaded(&self) -> Expression {
+        // Load input row (row_width floats) + token_ids (1 int per row)
+        self.range.iter().copied().product::<Expression>() * (self.row_width * 4 + 4)
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        // Store 1 output row per launch
+        self.range.iter().copied().product::<Expression>() * self.row_width * 4
+    }
+
+    fn flops(&self) -> Expression {
+        // Per pair of elements: pow, sincos, 4 muls, 2 adds ≈ 10 ops
+        // row_width/2 pairs per row
+        self.range.iter().copied().product::<Expression>() * self.row_width * 5
+    }
+
     fn cuda_op(&self) -> (String, String) {
         let struct_body = "
             const int inp;
@@ -1033,6 +1096,47 @@ impl BlockOp for TileMatmul {
         let mut b = vec![true; self.range.len()];
         b[self.range.len() - 2] = false;
         vec![a, b]
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        // Matmul C = A @ B where A is (M, K) and B is (K, N)
+        // Loads: A (M * K) + B (K * N) floats
+        // untiled_range[0] = M, untiled_range[1] = N, iters = K
+        // Batch dimensions from range[0..len-2]
+        let batch: Expression = if self.range.len() > 2 {
+            self.range[..self.range.len() - 2].iter().copied().product()
+        } else {
+            1.into()
+        };
+        let m = self.untiled_range[0];
+        let n = self.untiled_range[1];
+        let k = self.iters;
+        batch * (m * k + k * n) * 4
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        // Store C (M * N) floats
+        let batch: Expression = if self.range.len() > 2 {
+            self.range[..self.range.len() - 2].iter().copied().product()
+        } else {
+            1.into()
+        };
+        let m = self.untiled_range[0];
+        let n = self.untiled_range[1];
+        batch * m * n * 4
+    }
+
+    fn flops(&self) -> Expression {
+        // Matmul FLOPs: 2 * M * N * K (one mul + one add per output element per K iteration)
+        let batch: Expression = if self.range.len() > 2 {
+            self.range[..self.range.len() - 2].iter().copied().product()
+        } else {
+            1.into()
+        };
+        let m = self.untiled_range[0];
+        let n = self.untiled_range[1];
+        let k = self.iters;
+        batch * m * n * k * 2
     }
 
     fn cuda_op(&self) -> (String, String) {
