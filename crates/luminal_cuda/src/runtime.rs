@@ -819,9 +819,13 @@ impl Runtime for CudaRuntime {
                             &self.hlir_buffers[&llir_to_hlir[inp]]
                         }
                     }));
+                    let span = span!(Level::INFO, "host_op");
+                    let _entered = span.enter();
                     internal
                         .execute(stream, &host_op_buffers, dyn_map)
                         .unwrap();
+                    drop(_entered);
+                    drop(span);
                 }
             }
         }
