@@ -1,13 +1,9 @@
-mod benchmark;
 mod model;
 
-use benchmark::Benchmarker;
 use luminal::prelude::*;
-use luminal_cuda::{
-    cuda_bandwidth_gbps, cuda_compute_f32_tflops, cudarc::driver::CudaContext, runtime::CudaRuntime,
-};
+use luminal_cuda::{cudarc::driver::CudaContext, runtime::CudaRuntime};
 use model::*;
-use std::io::Write;
+use std::{io::Write, time::Duration};
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
 
@@ -69,8 +65,9 @@ fn main() {
 
     // Decode loop
     let mut prev_seq = 0;
-    let mut benchmarker = Benchmarker::new();
+    let mut fwd_durations = vec![];
     for i in 0..gen_tokens {
+        let start = std::time::Instant::now();
         let span = if i == 0 {
             span!(Level::INFO, "prefill")
         } else {
@@ -94,7 +91,6 @@ fn main() {
         );
 
         // Execute forward pass
-        benchmarker.start_iteration(seq_len, prev_seq);
         runtime.execute(&cx.dyn_map);
         let logits_data = runtime.get_f32(logits);
 
@@ -105,17 +101,17 @@ fn main() {
         prev_seq += seq_len;
         print!("{}", tokenizer.decode(&sentence, true).unwrap());
         std::io::stdout().flush().unwrap();
-        benchmarker.end_iteration(i);
+        fwd_durations.push(start.elapsed());
     }
     println!();
 
     // Report benchmarks
-    if let (Some(flops), Some(bandwidth)) =
-        (cuda_compute_f32_tflops(&ctx), cuda_bandwidth_gbps(&ctx))
-    {
-        benchmarker.report(flops as f64, bandwidth as f64);
-        runtime.print_execution_stats();
-    }
+    println!("  TTFT: {:.2} ms", fwd_durations[0].as_secs_f64() * 1e3);
+    println!(
+        "  TPOT: {:.2} ms",
+        (fwd_durations.iter().sum::<Duration>() / fwd_durations.len() as u32).as_secs_f64() * 1e3
+    );
+    runtime.print_execution_stats();
     // Dump cuda trace to timeline
     trace_session.stop();
     if let Some(path) = trace_session.perfetto_path {

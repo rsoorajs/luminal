@@ -47,6 +47,21 @@ pub trait BlockOp: Debug + as_any::AsAny {
     fn cuda_op(&self) -> (String, String) {
         ("".to_string(), "".to_string())
     } // C dtype, C function
+
+    /// Returns the number of bytes this op will load from global memory.
+    fn bytes_loaded(&self) -> Expression {
+        0.into()
+    }
+
+    /// Returns the number of bytes this op will store to global memory.
+    fn bytes_stored(&self) -> Expression {
+        0.into()
+    }
+
+    /// Returns the number of floating point operations this op performs.
+    fn flops(&self) -> Expression {
+        0.into()
+    }
     #[allow(clippy::mutable_key_type)]
     fn schedule_op(
         &self,
