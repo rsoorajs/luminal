@@ -21,3 +21,6 @@ tokenizer.json
 
 .ruff_cache/
 *.cache/
+
+*.dot 
+*.html
