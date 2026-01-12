@@ -1,8 +1,8 @@
 use crate::{block::BlockOp, kernel::KernelOp};
 use cudarc::{
     driver::{
-        CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr, LaunchConfig,
-        PushKernelArg, ValidAsZeroBits,
+        CudaFunction, CudaSlice, CudaStream, DevicePtr, DeviceRepr, LaunchConfig, PushKernelArg,
+        ValidAsZeroBits,
     },
     nvrtc::{compile_ptx_with_opts, CompileOptions},
 };
@@ -46,25 +46,23 @@ pub enum CudaInput {
 }
 
 #[derive(Clone)]
-pub enum ExecutableKernel {
+enum ExecutableKernel {
     Megakernel {
         interpreter: CudaFunction,
         interpreter_constants: FxHashMap<char, CudaSlice<u8>>,
         n_barriers: Expression,
-        work_queue: Vec<Task>,
+        work_queue: TaskQueue,
         node_to_task_index: FxHashMap<NodeIndex, usize>,
-        module: Arc<CudaModule>,
     },
     Kernel {
         kernel: CudaFunction,
-        code: String,
+        _code: String,
         launch_grid: (Expression, Expression, Expression),
         launch_threadblock: (Expression, Expression, Expression),
         shared_mem: Expression,
         inputs: Vec<NodeIndex>,
         output: NodeIndex,
         constants: FxHashMap<char, CudaSlice<u8>>,
-        module: Arc<CudaModule>,
     },
 }
 
@@ -187,7 +185,7 @@ impl CudaRuntime {
             .and_then(|n| self.exec_graph.node_weight_mut(*n))
         {
             if self.llir_graph[llir_node].to_op::<Input>().is_none() {
-                work_queue[node_to_task_index[&llir_node]].out_ptr = ptr as *mut f32;
+                work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
             }
         }
         for edge in self
@@ -210,7 +208,7 @@ impl CudaRuntime {
                 .get(&dest)
                 .and_then(|n| self.exec_graph.node_weight_mut(*n))
             {
-                work_queue[node_to_task_index[&dest]].source_ptrs[n_input] = ptr as *const f32;
+                work_queue.set_source_ptr(node_to_task_index[&dest], n_input, ptr as *const f32);
             }
         }
     }
@@ -455,10 +453,32 @@ impl Runtime for CudaRuntime {
                 .chain(once(0.into()))
                 .chain(once(1.into()))
                 .collect::<FxHashSet<_>>();
-            let (interpreter, module, expressions, interpreter_constants) =
-                compile_interpreter(&self.cuda_stream, &block_ops, &expressions);
-            // Build task queue
-            let mut tasks: Vec<Task> = vec![];
+            // Build temporary expression map for calculating payload sizes
+            let temp_expression_map = expressions
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (*e, i as i32))
+                .collect::<FxHashMap<_, _>>();
+
+            // Calculate actual max payload size from the ops being used
+            let max_payload_size = block_ops
+                .iter()
+                .map(|op| {
+                    op.schedule_op(&self.cuda_stream, &temp_expression_map)
+                        .len()
+                })
+                .max()
+                .unwrap_or(0);
+
+            let (interpreter, expressions, interpreter_constants) = compile_interpreter(
+                &self.cuda_stream,
+                &block_ops,
+                &expressions,
+                max_payload_size,
+            );
+
+            // Build task queue with dynamic payload size
+            let mut tasks = TaskQueue::new(max_payload_size);
             let mut node_to_task_index = FxHashMap::default();
             for node in toposort(&llir_graph, None).unwrap() {
                 if !subgraph.contains(&node) {
@@ -475,7 +495,8 @@ impl Runtime for CudaRuntime {
                     .position(|o| o.op_name() == op.op_name())
                     .unwrap();
                 let mut payload = op.schedule_op(&self.cuda_stream, &expressions);
-                payload.extend(vec![0; size_of::<Payload>() - payload.len()]);
+                // Pad payload to max_payload_size
+                payload.resize(max_payload_size, 0);
                 let range = op.launch_range();
                 let in_dep_a_stride = consumer_barrier_strides
                     .get(&(node, 0))
@@ -494,37 +515,34 @@ impl Runtime for CudaRuntime {
                     .map(|s| flatten_z_strides(&range, s))
                     .unwrap_or(0.into());
                 node_to_task_index.insert(node, tasks.len());
-                tasks.push(Task {
-                    op: op_code as i32,
-                    range: expressions[&range.iter().copied().product()],
-                    remaining: -1,
-                    in_dep_a_stride: expressions[&in_dep_a_stride],
-                    in_dep_a_base: expressions[&producer_barrier_bases
+                tasks.push_task(
+                    op_code as i32,
+                    expressions[&range.iter().copied().product()],
+                    -1,
+                    expressions[&in_dep_a_stride],
+                    expressions[&producer_barrier_bases
                         .get(&sources[0])
                         .copied()
                         .unwrap_or(0.into())],
-                    in_dep_b_stride: expressions[&in_dep_b_stride],
-                    in_dep_b_base: expressions[&sources
+                    expressions[&in_dep_b_stride],
+                    expressions[&sources
                         .get(1)
                         .and_then(|n| producer_barrier_bases.get(n).copied())
                         .unwrap_or(0.into())],
-                    in_dep_c_stride: expressions[&in_dep_c_stride],
-                    in_dep_c_base: expressions[&sources
+                    expressions[&in_dep_c_stride],
+                    expressions[&sources
                         .get(2)
                         .and_then(|n| producer_barrier_bases.get(n).copied())
                         .unwrap_or(0.into())],
-                    out_dep_stride: expressions[&out_dep_stride],
-                    out_dep_base: expressions[&producer_barrier_bases[&node]],
-                    source_ptrs: [null(); 3],
-                    out_ptr: null_mut(),
-                    payload: PayloadBytes {
-                        bytes: payload.try_into().unwrap(),
-                    },
-                });
+                    expressions[&out_dep_stride],
+                    expressions[&producer_barrier_bases[&node]],
+                    [null(); 3],
+                    null_mut(),
+                    &payload,
+                );
             }
             let exec_node = exec_graph.add_node(ExecutableKernel::Megakernel {
                 interpreter,
-                module,
                 interpreter_constants,
                 n_barriers,
                 work_queue: tasks,
@@ -537,7 +555,7 @@ impl Runtime for CudaRuntime {
         // Add kernels
         for kernel in llir_graph.node_indices() {
             if let Some(kernel_op) = llir_graph[kernel].to_dialect::<dyn KernelOp>() {
-                let (kernel_function, module, code, grid, tb, shared_mem, constants) =
+                let (kernel_function, _, code, grid, tb, shared_mem, constants) =
                     kernel_op.compile(&self.cuda_stream);
                 let inputs = llir_graph
                     .edges_directed(kernel, Direction::Incoming)
@@ -548,8 +566,7 @@ impl Runtime for CudaRuntime {
                     kernel,
                     exec_graph.add_node(ExecutableKernel::Kernel {
                         kernel: kernel_function,
-                        module,
-                        code,
+                        _code: code,
                         launch_grid: grid,
                         launch_threadblock: tb,
                         inputs,
@@ -629,8 +646,7 @@ impl Runtime for CudaRuntime {
             match &mut self.exec_graph[exec_node] {
                 ExecutableKernel::Kernel {
                     kernel,
-                    module: _,
-                    code: _,
+                    _code: _,
                     launch_grid,
                     launch_threadblock,
                     inputs,
@@ -702,7 +718,7 @@ impl Runtime for CudaRuntime {
                         .cuda_stream
                         .alloc_zeros::<i32>(n_barriers.exec(dyn_map).unwrap())
                         .unwrap();
-                    let d_tasks = self.cuda_stream.memcpy_stod(work_queue).unwrap();
+                    let d_tasks = self.cuda_stream.memcpy_stod(work_queue.as_slice()).unwrap();
                     let d_head = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
                     let queue_lock = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
                     // Set up timing buffer (start_time_u64,[[event_start_u64,event_type_i32 for sm_event in sm[:1000] for sm in sms[:sm_count]])
@@ -780,34 +796,6 @@ impl Runtime for CudaRuntime {
     }
 }
 
-// TODO: get rid of this, go through all ops to get largest payload, and build the Task struct with CStructBuilder
-// this is only here because it is currently the largest payload so it lets us have the Task struct with correct alignment / sizing
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct AttentionOp {
-    row_width: i32,
-    n_rows: i32,
-    kv_row_stride: i32,
-    q: i32,
-    k: i32,
-    v: i32,
-    out: i32,
-    key_cache: *mut f32,
-    val_cache: *mut f32,
-    prev_seq: i32,
-    q_pos_stride: i32,
-    group_pos_stride: i32,
-    head_pos_stride: i32,
-}
-unsafe impl DeviceRepr for AttentionOp {}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub union Payload {
-    attention: AttentionOp,
-}
-unsafe impl DeviceRepr for Payload {}
-
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct SMEvent {
@@ -817,33 +805,99 @@ pub struct SMEvent {
 unsafe impl DeviceRepr for SMEvent {}
 unsafe impl ValidAsZeroBits for SMEvent {}
 
-const PAYLOAD_SIZE: usize = std::mem::size_of::<Payload>();
-
-#[repr(C, align(8))]
-#[derive(Clone, Copy)]
-pub struct PayloadBytes {
-    pub bytes: [u8; PAYLOAD_SIZE],
+#[derive(Clone)]
+struct TaskQueue {
+    data: Vec<u8>,
+    task_stride: usize,
+    num_tasks: usize,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct Task {
-    pub op: i32,
-    pub range: i32,
-    pub remaining: i32,
-    pub in_dep_a_stride: i32,
-    pub in_dep_a_base: i32,
-    pub in_dep_b_stride: i32,
-    pub in_dep_b_base: i32,
-    pub in_dep_c_stride: i32,
-    pub in_dep_c_base: i32,
-    pub out_dep_stride: i32,
-    pub out_dep_base: i32,
-    pub source_ptrs: [*const f32; 3],
-    pub out_ptr: *mut f32,
-    pub payload: PayloadBytes,
+impl TaskQueue {
+    fn new(payload_size: usize) -> Self {
+        // Task layout: 11 ints (44 bytes) + 3 pointers (24 bytes) + 1 pointer (8 bytes) + payload
+        // = 76 bytes + payload_size, aligned to 8 bytes
+        let base_size = size_of::<i32>() * 11 + size_of::<*const f32>() * 3 + size_of::<*mut f32>();
+        let total = base_size + payload_size;
+        let task_stride = (total + 7) & !7; // Align to 8 bytes
+        Self {
+            data: Vec::new(),
+            task_stride,
+            num_tasks: 0,
+        }
+    }
+
+    fn push_task(
+        &mut self,
+        op: i32,
+        range: i32,
+        remaining: i32,
+        in_dep_a_stride: i32,
+        in_dep_a_base: i32,
+        in_dep_b_stride: i32,
+        in_dep_b_base: i32,
+        in_dep_c_stride: i32,
+        in_dep_c_base: i32,
+        out_dep_stride: i32,
+        out_dep_base: i32,
+        source_ptrs: [*const f32; 3],
+        out_ptr: *mut f32,
+        payload: &[u8],
+    ) {
+        use crate::block::CStruct;
+
+        let mut bytes = CStruct::new()
+            .int(op)
+            .int(range)
+            .int(remaining)
+            .int(in_dep_a_stride)
+            .int(in_dep_a_base)
+            .int(in_dep_b_stride)
+            .int(in_dep_b_base)
+            .int(in_dep_c_stride)
+            .int(in_dep_c_base)
+            .int(out_dep_stride)
+            .int(out_dep_base)
+            .ptr_const_f32(source_ptrs[0])
+            .ptr_const_f32(source_ptrs[1])
+            .ptr_const_f32(source_ptrs[2])
+            .ptr_mut_f32(out_ptr)
+            .bytes(1, payload) // Add payload with byte alignment
+            .finish_struct();
+
+        // Pad to task_stride
+        bytes.resize(self.task_stride, 0);
+
+        self.data.extend_from_slice(&bytes);
+        self.num_tasks += 1;
+    }
+
+    fn set_out_ptr(&mut self, index: usize, ptr: *mut f32) {
+        // Layout: 11 ints (44 bytes) + padding (4 bytes) + 3 ptrs (24 bytes) + out_ptr (8 bytes)
+        let ints_size = size_of::<i32>() * 11; // 44
+        let padding = (8 - (ints_size % 8)) % 8; // 4 bytes padding to align to 8
+        let offset = index * self.task_stride + ints_size + padding + size_of::<*const f32>() * 3;
+        let bytes = (ptr as usize).to_ne_bytes();
+        self.data[offset..offset + size_of::<*mut f32>()].copy_from_slice(&bytes);
+    }
+
+    fn set_source_ptr(&mut self, index: usize, input_num: usize, ptr: *const f32) {
+        // Layout: 11 ints (44 bytes) + padding (4 bytes) + source_ptrs[input_num]
+        let ints_size = size_of::<i32>() * 11; // 44
+        let padding = (8 - (ints_size % 8)) % 8; // 4 bytes padding to align to 8
+        let offset =
+            index * self.task_stride + ints_size + padding + size_of::<*const f32>() * input_num;
+        let bytes = (ptr as usize).to_ne_bytes();
+        self.data[offset..offset + size_of::<*const f32>()].copy_from_slice(&bytes);
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn len(&self) -> usize {
+        self.num_tasks
+    }
 }
-unsafe impl DeviceRepr for Task {}
 
 #[tracing::instrument(skip_all)]
 fn compute_barrier_strides(
@@ -1101,13 +1155,6 @@ type BarrierStrides = (
     Expression,
 );
 
-type InterpreterCompileResult = (
-    CudaFunction,
-    Arc<CudaModule>,
-    FxHashMap<Expression, i32>,
-    FxHashMap<char, CudaSlice<u8>>,
-);
-
 #[tracing::instrument(skip_all)]
 pub fn get_barrier_strides(graph: &LLIRGraph, block_ops: &FxHashSet<NodeIndex>) -> BarrierStrides {
     // Resolve dependencies
@@ -1210,7 +1257,12 @@ pub fn compile_interpreter(
     cuda_stream: &Arc<CudaStream>,
     ops: &Vec<Arc<Box<dyn BlockOp>>>,
     expressions: &FxHashSet<Expression>,
-) -> InterpreterCompileResult {
+    payload_size: usize,
+) -> (
+    CudaFunction,
+    FxHashMap<Expression, i32>,
+    FxHashMap<char, CudaSlice<u8>>,
+) {
     // Compile the interpreter
     let mut kernel = include_str!("block/interpreter.cu").to_string();
     kernel = kernel.replace(
@@ -1250,12 +1302,16 @@ pub fn compile_interpreter(
     );
     kernel = kernel.replace(
         "//%extra_op_payloads%",
-        &ops.iter()
-            .map(|op| {
-                let op_name = op.op_name();
-                format!("{op_name}Payload {op_name};")
-            })
-            .join(" "),
+        &format!(
+            "{} char _padding[{}];",
+            ops.iter()
+                .map(|op| {
+                    let op_name = op.op_name();
+                    format!("{op_name}Payload {op_name};")
+                })
+                .join(" "),
+            payload_size
+        ),
     );
     kernel = kernel.replace("//%extra_op_calls%", &ops.iter().map(|op| {
             let op_name = op.op_name();
@@ -1303,7 +1359,7 @@ pub fn compile_interpreter(
             )
         })
         .collect();
-    (func, module, expression_map, constants)
+    (func, expression_map, constants)
 }
 
 #[allow(unused)]
