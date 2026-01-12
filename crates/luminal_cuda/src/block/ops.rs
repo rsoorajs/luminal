@@ -1305,7 +1305,11 @@ impl CStruct {
         let ptr_align = std::mem::size_of::<usize>();
         let len = self.buf.len();
         let rem = len % ptr_align;
-        if rem != 0 { len + (ptr_align - rem) } else { len }
+        if rem != 0 {
+            len + (ptr_align - rem)
+        } else {
+            len
+        }
     }
 
     /// Pad the struct size to a multiple of max_align.

@@ -62,7 +62,7 @@ pub trait BlockOp: Debug + as_any::AsAny {
 luminal::impl_into_ops!(BlockOp);
 
 #[tracing::instrument(skip_all)]
-pub(crate) fn compute_barrier_strides(
+fn compute_barrier_strides(
     mut prod_range: Vec<Expression>,
     mut cons_range: Vec<Vec<Expression>>,
     mut cons_shared: Vec<Vec<bool>>,
@@ -164,7 +164,7 @@ pub(crate) fn compute_barrier_strides(
 }
 
 #[tracing::instrument(skip_all)]
-pub fn get_barrier_strides(
+fn get_barrier_strides(
     graph: &LLIRGraph,
     block_ops: &FxHashSet<NodeIndex>,
 ) -> (
@@ -370,7 +370,7 @@ impl TaskQueue {
     }
 }
 
-pub(crate) struct ManualTrackBuilder {
+struct ManualTrackBuilder {
     packets: Vec<schema::TracePacket>,
     track_uuid: u64,
     sequence_id: u32,
@@ -501,7 +501,7 @@ fn hash32<T: Hash>(val: T) -> u32 {
 }
 
 #[tracing::instrument(skip_all)]
-pub(crate) fn compile_interpreter(
+fn compile_interpreter(
     cuda_stream: &Arc<CudaStream>,
     ops: &Vec<Arc<Box<dyn BlockOp>>>,
     expressions: &FxHashSet<Expression>,
