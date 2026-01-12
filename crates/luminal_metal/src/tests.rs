@@ -1,0 +1,158 @@
+//! Metal backend tests
+//!
+//! Tests for MetalRuntime and Metal kernel operations.
+
+use crate::runtime::MetalRuntime;
+use luminal::prelude::*;
+use proptest::prelude::*;
+
+/// Helper function to compare floating point vectors with tolerance
+fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "Length mismatch: got {}, expected {}",
+        actual.len(),
+        expected.len()
+    );
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        let diff = (a - e).abs();
+        let rel_err = diff / e.abs().max(1.0);
+        assert!(
+            rel_err < tolerance,
+            "Mismatch at index {}: got {}, expected {}, rel_err={}",
+            i,
+            a,
+            e,
+            rel_err
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(5))]
+
+    /// Test basic addition: input + input = 2 * input
+    #[test]
+    fn metal_add_test(len in 1usize..32, values in proptest::collection::vec(-5.0f32..5.0, 1..64)) {
+        prop_assume!(values.len() >= len);
+
+        let mut cx = Graph::default();
+        let input = cx.tensor(len);
+        let output = (input + input).output();
+
+        cx.build_search_space::<MetalRuntime>();
+        let mut rt = MetalRuntime::initialize(());
+        let input_values: Vec<f32> = values.into_iter().take(len).collect();
+        rt.set_data(input, &input_values);
+        rt = cx.search(rt, 5);
+        rt.allocate_intermediate_buffers(&cx.dyn_map);
+        rt.execute(&cx.dyn_map);
+
+        let out = rt.get_f32(output);
+        let expected: Vec<f32> = input_values.iter().map(|v| v * 2.0).collect();
+        assert_close(&out, &expected, 0.001);
+    }
+
+    /// Test basic multiplication: input * input = input^2
+    #[test]
+    fn metal_mul_test(len in 1usize..32, values in proptest::collection::vec(0.1f32..5.0, 1..64)) {
+        prop_assume!(values.len() >= len);
+
+        let mut cx = Graph::default();
+        let input = cx.tensor(len);
+        let output = (input * input).output();
+
+        cx.build_search_space::<MetalRuntime>();
+        let mut rt = MetalRuntime::initialize(());
+        let input_values: Vec<f32> = values.into_iter().take(len).collect();
+        rt.set_data(input, &input_values);
+        rt = cx.search(rt, 5);
+        rt.allocate_intermediate_buffers(&cx.dyn_map);
+        rt.execute(&cx.dyn_map);
+
+        let out = rt.get_f32(output);
+        let expected: Vec<f32> = input_values.iter().map(|v| v * v).collect();
+        assert_close(&out, &expected, 0.001);
+    }
+
+    /// Test exp2: 2^x
+    #[test]
+    fn metal_exp2_test(len in 1usize..32, values in proptest::collection::vec(-3.0f32..3.0, 1..64)) {
+        prop_assume!(values.len() >= len);
+
+        let mut cx = Graph::default();
+        let input = cx.tensor(len);
+        let output = input.exp2().output();
+
+        cx.build_search_space::<MetalRuntime>();
+        let mut rt = MetalRuntime::initialize(());
+        let input_values: Vec<f32> = values.into_iter().take(len).collect();
+        rt.set_data(input, &input_values);
+        rt = cx.search(rt, 5);
+        rt.allocate_intermediate_buffers(&cx.dyn_map);
+        rt.execute(&cx.dyn_map);
+
+        let out = rt.get_f32(output);
+        let expected: Vec<f32> = input_values.iter().map(|v| 2.0f32.powf(*v)).collect();
+        assert_close(&out, &expected, 0.001);
+    }
+}
+
+/// Simple deterministic test for add
+#[test]
+fn metal_simple_add() {
+    let mut cx = Graph::default();
+    let a = cx.tensor(4);
+    let b = cx.tensor(4);
+    let output = (a + b).output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    rt.set_data(a, &[1.0, 2.0, 3.0, 4.0]);
+    rt.set_data(b, &[5.0, 6.0, 7.0, 8.0]);
+    rt = cx.search(rt, 5);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(output);
+    assert_eq!(out, vec![6.0, 8.0, 10.0, 12.0]);
+}
+
+/// Simple deterministic test for mul
+#[test]
+fn metal_simple_mul() {
+    let mut cx = Graph::default();
+    let a = cx.tensor(4);
+    let b = cx.tensor(4);
+    let output = (a * b).output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    rt.set_data(a, &[1.0, 2.0, 3.0, 4.0]);
+    rt.set_data(b, &[5.0, 6.0, 7.0, 8.0]);
+    rt = cx.search(rt, 5);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(output);
+    assert_eq!(out, vec![5.0, 12.0, 21.0, 32.0]);
+}
+
+/// Simple deterministic test for exp2
+#[test]
+fn metal_simple_exp2() {
+    let mut cx = Graph::default();
+    let input = cx.tensor(4);
+    let output = input.exp2().output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    rt.set_data(input, &[0.0, 1.0, 2.0, 3.0]);
+    rt = cx.search(rt, 5);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(output);
+    assert_close(&out, &[1.0, 2.0, 4.0, 8.0], 0.001);
+}

@@ -1,6 +1,5 @@
 //! Metal Runtime implementation
 //!
-//! A simplified runtime that only supports KernelOps (no BlockOps/Megakernels).
 
 use crate::kernel::MetalKernelOp;
 use itertools::Itertools;
@@ -123,7 +122,7 @@ impl Runtime for MetalRuntime {
         dyn_map: &FxHashMap<char, usize>,
     ) -> (Self::ProfileMetric, String) {
         self.load_llir(llir_graph);
-        self.allocate_buffers(dyn_map);
+        self.allocate_intermediate_buffers(dyn_map);
 
         let start = std::time::Instant::now();
         self.execute(dyn_map);
@@ -203,8 +202,9 @@ impl Runtime for MetalRuntime {
 }
 
 impl MetalRuntime {
-    /// Allocate intermediate buffers based on output sizes
-    fn allocate_buffers(&mut self, dyn_map: &FxHashMap<char, usize>) {
+    /// Allocate intermediate buffers based on output sizes.
+    /// Must be called before execute() when not using profile().
+    pub fn allocate_intermediate_buffers(&mut self, dyn_map: &FxHashMap<char, usize>) {
         for node in self.llir_graph.node_indices() {
             // Skip Input nodes (they use hlir_buffers)
             if self.llir_graph[node].to_op::<Input>().is_some() {

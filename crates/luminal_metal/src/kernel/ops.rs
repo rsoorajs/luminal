@@ -60,7 +60,7 @@ macro_rules! metal_unary_op {
             }
 
             fn cleanup(&self) -> bool {
-                true
+                false
             }
 
             fn extract<'a>(
@@ -185,7 +185,7 @@ impl EgglogOp for MetalAdd {
     }
 
     fn cleanup(&self) -> bool {
-        true
+        false
     }
 
     fn extract<'a>(
@@ -292,7 +292,7 @@ impl EgglogOp for MetalMul {
     }
 
     fn cleanup(&self) -> bool {
-        true
+        false
     }
 
     fn extract<'a>(
