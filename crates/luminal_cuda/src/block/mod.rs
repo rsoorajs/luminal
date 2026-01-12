@@ -37,7 +37,7 @@ pub trait BlockOp: Debug + as_any::AsAny {
     fn launch_range(&self) -> Vec<Expression> {
         unimplemented!()
     }
-    /// Returns the output buffer size in bytes.
+    /// Returns the output buffer size in elements.
     fn output_size(&self) -> Expression {
         unimplemented!()
     }

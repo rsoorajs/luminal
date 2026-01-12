@@ -190,7 +190,7 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
-        self.out_shape.iter().copied().product::<Expression>() * 4
+        self.out_shape.iter().copied().product()
     }
 
     fn bytes_loaded(&self) -> Expression {
@@ -198,7 +198,7 @@ extern \"C\" {{
     }
 
     fn bytes_stored(&self) -> Expression {
-        self.output_size()
+        self.output_size() * 4
     }
 
     fn flops(&self) -> Expression {
@@ -380,7 +380,7 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
-        self.out_shape.iter().copied().product::<Expression>() * 4
+        self.out_shape.iter().copied().product()
     }
 
     fn bytes_loaded(&self) -> Expression {
@@ -388,7 +388,7 @@ extern \"C\" {{
     }
 
     fn bytes_stored(&self) -> Expression {
-        self.output_size()
+        self.output_size() * 4
     }
 
     fn flops(&self) -> Expression {
@@ -567,7 +567,7 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
-        self.out_shape.iter().copied().product::<Expression>() * 4
+        self.out_shape.iter().copied().product()
     }
 
     fn bytes_loaded(&self) -> Expression {
@@ -575,7 +575,7 @@ extern \"C\" {{
     }
 
     fn bytes_stored(&self) -> Expression {
-        self.output_size()
+        self.output_size() * 4
     }
 
     fn flops(&self) -> Expression {
@@ -701,15 +701,15 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
-        self.out_shape.iter().copied().product::<Expression>() * 4
+        self.out_shape.iter().copied().product()
     }
 
     fn bytes_loaded(&self) -> Expression {
-        self.output_size() * 2
+        self.output_size() * 4 * 2
     }
 
     fn bytes_stored(&self) -> Expression {
-        self.output_size()
+        self.output_size() * 4
     }
 
     fn flops(&self) -> Expression {
@@ -835,15 +835,15 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
-        self.out_shape.iter().copied().product::<Expression>() * 4
+        self.out_shape.iter().copied().product()
     }
 
     fn bytes_loaded(&self) -> Expression {
-        self.output_size() * 2
+        self.output_size() * 4 * 2
     }
 
     fn bytes_stored(&self) -> Expression {
-        self.output_size()
+        self.output_size() * 4
     }
 
     fn flops(&self) -> Expression {
@@ -973,15 +973,15 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
-        self.out_shape.iter().copied().product::<Expression>() * 4
+        self.out_shape.iter().copied().product()
     }
 
     fn bytes_loaded(&self) -> Expression {
-        self.output_size() * 2
+        self.output_size() * 4 * 2
     }
 
     fn bytes_stored(&self) -> Expression {
-        self.output_size()
+        self.output_size() * 4
     }
 
     fn flops(&self) -> Expression {
@@ -1088,7 +1088,7 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
-        self.range * 4
+        self.range
     }
 
     fn bytes_loaded(&self) -> Expression {
@@ -1096,7 +1096,7 @@ extern \"C\" {{
     }
 
     fn bytes_stored(&self) -> Expression {
-        self.output_size()
+        self.output_size() * 4
     }
 
     fn flops(&self) -> Expression {

@@ -93,7 +93,7 @@ impl BlockOp for RowAdd {
     }
 
     fn output_size(&self) -> Expression {
-        self.range.iter().copied().product::<Expression>().max(1) * self.row_width * 4
+        self.range.iter().copied().product::<Expression>().max(1) * self.row_width
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
@@ -229,7 +229,7 @@ impl BlockOp for RowSwishMul {
     }
 
     fn output_size(&self) -> Expression {
-        self.range.iter().copied().product::<Expression>() * self.row_width * 4
+        self.range.iter().copied().product::<Expression>() * self.row_width
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
@@ -416,7 +416,7 @@ impl BlockOp for RowRMSNorm {
     }
 
     fn output_size(&self) -> Expression {
-        self.range.iter().copied().product::<Expression>() * self.row_width * 4
+        self.range.iter().copied().product::<Expression>() * self.row_width
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
@@ -804,7 +804,7 @@ impl BlockOp for RowRope {
     }
 
     fn output_size(&self) -> Expression {
-        self.range.iter().copied().product::<Expression>() * self.row_width * 4
+        self.range.iter().copied().product::<Expression>() * self.row_width
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
@@ -1024,7 +1024,7 @@ impl BlockOp for TileMatmul {
     }
 
     fn output_size(&self) -> Expression {
-        self.untiled_range.iter().copied().product::<Expression>() * 4
+        self.untiled_range.iter().copied().product::<Expression>()
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {

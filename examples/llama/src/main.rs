@@ -114,6 +114,7 @@ fn main() {
         (cuda_compute_f32_tflops(&ctx), cuda_bandwidth_gbps(&ctx))
     {
         benchmarker.report(flops as f64, bandwidth as f64);
+        runtime.print_execution_stats();
     }
     // Dump cuda trace to timeline
     trace_session.stop();

@@ -232,7 +232,7 @@ impl CudaRuntime {
                 self.buffers.insert(
                     node,
                     self.cuda_stream
-                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap())
+                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
@@ -243,7 +243,7 @@ impl CudaRuntime {
                 self.buffers.insert(
                     node,
                     self.cuda_stream
-                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap())
+                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;

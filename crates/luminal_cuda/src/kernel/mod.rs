@@ -22,7 +22,7 @@ pub trait KernelOp: luminal::op::EgglogOp {
         FxHashMap<char, CudaSlice<u8>>,
     );
 
-    /// Returns the output buffer size in bytes.
+    /// Returns the output buffer size in elements.
     fn output_size(&self) -> Expression;
 
     /// Returns the number of bytes this kernel will load from global memory.
