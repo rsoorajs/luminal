@@ -1299,6 +1299,15 @@ impl CStruct {
         self.ptr_const_f32(p as *const f32)
     }
 
+    /// Returns the current size of the buffer after alignment for a pointer field.
+    /// Useful for computing field offsets.
+    pub fn current_size(&self) -> usize {
+        let ptr_align = std::mem::size_of::<usize>();
+        let len = self.buf.len();
+        let rem = len % ptr_align;
+        if rem != 0 { len + (ptr_align - rem) } else { len }
+    }
+
     /// Pad the struct size to a multiple of max_align.
     pub fn finish_struct(mut self) -> Vec<u8> {
         let align = self.max_align;
