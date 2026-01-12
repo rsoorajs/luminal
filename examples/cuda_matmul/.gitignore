@@ -18,6 +18,8 @@ Cargo.lock
 *.dot 
 *.html
 
+*.pftrace 
+
 llir_graphs/
 
 proptest-regressions/
