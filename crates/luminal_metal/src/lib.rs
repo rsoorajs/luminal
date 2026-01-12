@@ -1,0 +1,13 @@
+//! Metal backend for Luminal
+//!
+//! This crate provides Metal GPU support for Luminal on Apple Silicon devices.
+
+pub mod kernel;
+pub mod runtime;
+
+pub use metal::{Buffer, Device, MTLResourceOptions};
+pub use objc::rc::autoreleasepool;
+pub use runtime::MetalRuntime;
+
+// Re-export kernel ops
+pub use kernel::MetalOps;
