@@ -1104,10 +1104,7 @@ impl BlockOp for TileMatmul {
         // untiled_range[0] = M, untiled_range[1] = N, iters = K
         // Batch dimensions from range[0..len-2]
         let batch: Expression = if self.range.len() > 2 {
-            self.range[..self.range.len() - 2]
-                .iter()
-                .copied()
-                .product()
+            self.range[..self.range.len() - 2].iter().copied().product()
         } else {
             1.into()
         };
@@ -1120,10 +1117,7 @@ impl BlockOp for TileMatmul {
     fn bytes_stored(&self) -> Expression {
         // Store C (M * N) floats
         let batch: Expression = if self.range.len() > 2 {
-            self.range[..self.range.len() - 2]
-                .iter()
-                .copied()
-                .product()
+            self.range[..self.range.len() - 2].iter().copied().product()
         } else {
             1.into()
         };
@@ -1135,10 +1129,7 @@ impl BlockOp for TileMatmul {
     fn flops(&self) -> Expression {
         // Matmul FLOPs: 2 * M * N * K (one mul + one add per output element per K iteration)
         let batch: Expression = if self.range.len() > 2 {
-            self.range[..self.range.len() - 2]
-                .iter()
-                .copied()
-                .product()
+            self.range[..self.range.len() - 2].iter().copied().product()
         } else {
             1.into()
         };
