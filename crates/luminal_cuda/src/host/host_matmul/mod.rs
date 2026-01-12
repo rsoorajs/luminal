@@ -73,7 +73,7 @@ impl HostOp for HostMatmul {
     fn execute(
         &self,
         stream: &Arc<CudaStream>,
-        inputs: &mut Vec<CudaSlice<u8>>,
+        inputs: &[&CudaSlice<u8>],
         dyn_map: &FxHashMap<char, usize>,
     ) -> anyhow::Result<()> {
         let blas = CudaBlas::new(stream.clone())?;
@@ -121,9 +121,9 @@ impl HostOp for HostMatmul {
         trace!("\nReading data from GPU buffers:");
 
         // Copy from device to host and convert bytes to f32
-        let a_bytes: Vec<u8> = stream.memcpy_dtov(&inputs[1])?;
-        let b_bytes: Vec<u8> = stream.memcpy_dtov(&inputs[2])?;
-        let c_bytes: Vec<u8> = stream.memcpy_dtov(&inputs[0])?;
+        let a_bytes: Vec<u8> = stream.memcpy_dtov(inputs[1])?;
+        let b_bytes: Vec<u8> = stream.memcpy_dtov(inputs[2])?;
+        let c_bytes: Vec<u8> = stream.memcpy_dtov(inputs[0])?;
 
         // Reinterpret bytes as f32
         let a_host: &[f32] =
@@ -176,7 +176,7 @@ impl HostOp for HostMatmul {
         stream.synchronize()?;
 
         // Read back result to verify
-        let result_bytes: Vec<u8> = stream.memcpy_dtov(&inputs[0])?;
+        let result_bytes: Vec<u8> = stream.memcpy_dtov(inputs[0])?;
         let result: &[f32] = unsafe {
             std::slice::from_raw_parts(result_bytes.as_ptr() as *const f32, (m * n) as usize)
         };

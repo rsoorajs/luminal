@@ -14,8 +14,7 @@ use std::{
 };
 
 use crate::{egglog_utils, graph::extract_expr, serialized_egraph::SerializedEGraph};
-use egglog::{prelude::RustSpan, var};
-use egglog_ast::span::Span;
+use egglog::{ast::Span, prelude::RustSpan, var};
 
 type ExprBox = GenerationalBox<Vec<Term>, SyncStorage>;
 

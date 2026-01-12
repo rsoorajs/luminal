@@ -22,8 +22,7 @@ as-any = "0.3.1"
 serde = { version = "1.0.202", features = ["derive"] }
 generational-box = "0.5.6"
 serde_json = "1.0.140"
-egglog = "1.0.0"
-egglog-ast = "1.0.0"
+egglog = {git = "https://github.com/egraphs-good/egglog", rev = "363d42005136c20c9782e9b52664703c0c265d19"}
 egraph-serialize = { version = "0.3.0", default-features = false, features = ["graphviz", "serde"]}
 tracing = "0.1.43"
 paste = "1.0.15"

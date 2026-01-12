@@ -44,7 +44,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tracing::{span, Level};
+use tracing::{span, trace, Level};
 use tracing_perfetto_sdk_schema::{
     self as schema, trace_packet, track_descriptor, track_event, TrackEvent,
 };
@@ -60,6 +60,7 @@ pub enum CustomState {
     ),
 }
 
+#[derive(Clone)]
 pub enum ExecutableKernel {
     Megakernel {
         interpreter: CudaFunction,
@@ -279,6 +280,8 @@ impl CudaRuntime {
                         .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
                         .unwrap(),
                 );
+                let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+                self.register_buffer(node, ptr);
             }
         }
     }
@@ -808,20 +811,17 @@ impl Runtime for CudaRuntime {
                     output,
                     internal,
                 } => {
-                    let mut host_op_buffers: Vec<CudaSlice<u8>> =
-                        vec![self.buffers[output].clone()];
+                    let mut host_op_buffers: Vec<&CudaSlice<u8>> = vec![&self.buffers[output]];
                     host_op_buffers.extend(inputs.iter().map(|inp| {
                         if let Some(buf) = self.buffers.get(inp) {
-                            buf.clone()
+                            buf
                         } else {
-                            self.hlir_buffers[&llir_to_hlir[inp]].clone()
+                            &self.hlir_buffers[&llir_to_hlir[inp]]
                         }
                     }));
                     internal
-                        .execute(stream, &mut host_op_buffers, dyn_map)
+                        .execute(stream, &host_op_buffers, dyn_map)
                         .unwrap();
-                    // Update self.buffers with the modified buffer to propagate event tracking
-                    self.buffers.insert(*output, host_op_buffers[0].clone());
                 }
             }
         }
@@ -1390,16 +1390,16 @@ pub fn print_debug_buffers(debug_buffers: FxHashMap<(usize, String), &'static mu
                 .collect();
             for (i, (a, b)) in buf.iter().zip(file_floats).enumerate() {
                 if (*a - b).abs() > 1e-4 {
-                    println!(
+                    trace!(
                         "{} mismatch at index {i}: {a} != {b}",
                         label.replace("diff:", "")
                     );
                     continue 'debug;
                 }
             }
-            println!("{} matches", label.replace("diff:", ""));
+            trace!("{} matches", label.replace("diff:", ""));
         } else {
-            println!(
+            trace!(
                 "{label} ({}): {:?}...{:?}",
                 buf.len(),
                 buf.iter().take(3).map(|f| format!("{f:.4}")).collect_vec(),

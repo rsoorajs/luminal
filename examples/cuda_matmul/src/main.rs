@@ -1,17 +1,21 @@
-use env_logger;
 use log::debug;
 use luminal::{prelude::*, visualization::ToDot};
 use luminal_cuda::runtime::CudaRuntime;
+use luminal_tracing;
 use ndarray::Array2;
 use rand::Rng;
 use std::fs;
 
 fn main() {
-    env_logger::init();
+    // Initialize tracing with Perfetto export
+    let trace_session = luminal_tracing::subscriber()
+        .perfetto("cuda_matmul_trace.pftrace")
+        .env_filter("luminal_cuda=trace,luminal=trace")
+        .init();
 
-    let m = (2 as usize).pow(10);
-    let n = (2 as usize).pow(10);
-    let k = (2 as usize).pow(10);
+    let m = (2 as usize).pow(8);
+    let n = (2 as usize).pow(12);
+    let k = (2 as usize).pow(12);
 
     // Create compute graph
     let mut cx = Graph::new();
@@ -46,14 +50,17 @@ fn main() {
 
     rt.allocate_intermediate_buffers(&cx.dyn_map);
 
-    rt = cx.search(rt, 1);
+    rt = cx.search(rt, 10);
+
     fs::write("llir.dot", (&rt.llir_graph).to_dot().unwrap()).unwrap();
+    rt.allocate_intermediate_buffers(&cx.dyn_map); // if you remove this it all fails... 
 
     // Run
     cx.set_dyn_dim('m', m);
     cx.set_dyn_dim('n', n);
     cx.set_dyn_dim('k', k);
 
+    
     rt.execute(&cx.dyn_map);
 
     // Get output tensor
@@ -63,4 +70,11 @@ fn main() {
     debug!("Matrix A:\n{:.2}", a_matrix);
     debug!("Matrix B:\n{:.2}", b_matrix);
     debug!("Result:\n{:.2}", result_matrix);
+
+    // Flush and stop the trace session
+    trace_session.stop();
+    if let Some(path) = trace_session.perfetto_path {
+        println!("Trace saved to: {}", path.display());
+        println!("View it at: https://ui.perfetto.dev/");
+    }
 }
