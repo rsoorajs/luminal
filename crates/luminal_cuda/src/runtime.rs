@@ -36,7 +36,6 @@ enum ExecutableKernel {
     },
     Kernel {
         kernel: CudaFunction,
-        _code: String,
         launch_grid: (Expression, Expression, Expression),
         launch_threadblock: (Expression, Expression, Expression),
         shared_mem: Expression,
@@ -366,7 +365,7 @@ impl Runtime for CudaRuntime {
         // Add kernels
         for kernel in llir_graph.node_indices() {
             if let Some(kernel_op) = llir_graph[kernel].to_dialect::<dyn KernelOp>() {
-                let (kernel_function, _, code, grid, tb, shared_mem, constants) =
+                let (kernel_function, _, _, grid, tb, shared_mem, constants) =
                     kernel_op.compile(&self.cuda_stream);
                 let inputs = llir_graph
                     .edges_directed(kernel, Direction::Incoming)
@@ -377,7 +376,6 @@ impl Runtime for CudaRuntime {
                     kernel,
                     exec_graph.add_node(ExecutableKernel::Kernel {
                         kernel: kernel_function,
-                        _code: code,
                         launch_grid: grid,
                         launch_threadblock: tb,
                         inputs,
@@ -477,7 +475,6 @@ impl Runtime for CudaRuntime {
             match &mut self.exec_graph[exec_node] {
                 ExecutableKernel::Kernel {
                     kernel,
-                    _code: _,
                     launch_grid,
                     launch_threadblock,
                     inputs,
@@ -527,7 +524,8 @@ impl Runtime for CudaRuntime {
                     for ptr in &ptrs {
                         lb.arg(ptr);
                     }
-                    let span = span!(Level::INFO, "kernel");
+                    let span = span!(Level::INFO, "kernel", kernel = field::Empty);
+                    span.record("kernel", &kernel_name);
                     let _entered = span.enter();
 
                     // Use CUDA events for accurate GPU-side timing
@@ -759,13 +757,6 @@ impl CudaRuntime {
                 if let Some(&idx) = op_name_to_idx.get(op.op_name()) {
                     let flops_expr = op.flops();
                     let flops_val = flops_expr.exec(dyn_map).unwrap();
-                    if op.op_name() == "TileMatmul" {
-                        tracing::debug!(
-                            "TileMatmul flops: expr={:?}, val={}",
-                            flops_expr,
-                            flops_val
-                        );
-                    }
                     op_bytes_loaded[idx] += op.bytes_loaded().exec(dyn_map).unwrap();
                     op_bytes_stored[idx] += op.bytes_stored().exec(dyn_map).unwrap();
                     op_flops[idx] += flops_val;
