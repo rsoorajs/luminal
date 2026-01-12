@@ -287,6 +287,7 @@ fn get_barrier_strides(
 #[derive(Copy, Clone)]
 pub(crate) struct SMEvent {
     pub start: u64,
+    pub stop: u64,
     pub event: i32,
 }
 unsafe impl DeviceRepr for SMEvent {}

@@ -596,7 +596,8 @@ impl Runtime for CudaRuntime {
                     let d_tasks = self.cuda_stream.memcpy_stod(work_queue.as_slice()).unwrap();
                     let d_head = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
                     let queue_lock = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
-                    // Set up timing buffer (start_time_u64,[[event_start_u64,event_type_i32 for sm_event in sm[:1000] for sm in sms[:sm_count]])
+                    // Set up timing buffer storing (start_u64, stop_u64, event_i32) tuples
+                    // for up to 1000 events per SM
                     let timing_buffer = self
                         .cuda_stream
                         .alloc_zeros::<SMEvent>(sm_count as usize * 1000)
@@ -778,17 +779,20 @@ impl CudaRuntime {
 
         for (sm_timings, _start_time, _) in timings {
             for sm_chunk in sm_timings.chunks(1000) {
-                for i in 0..sm_chunk.len().saturating_sub(1) {
-                    let event = sm_chunk[i].event;
-                    let next_start = sm_chunk[i + 1].start;
-                    if next_start == 0 {
+                for event in sm_chunk.iter() {
+                    if event.start == 0 {
                         break; // No more events recorded for this SM
                     }
                     // event >= 2 means it's a block op (0=Issue, 1=Wait)
-                    if event >= 2 {
-                        let op_idx = (event - 2) as usize;
+                    if event.event >= 2 {
+                        let op_idx = (event.event - 2) as usize;
                         if op_idx < op_names.len() {
-                            let duration = next_start.saturating_sub(sm_chunk[i].start);
+                            let stop = if event.stop == 0 {
+                                event.start
+                            } else {
+                                event.stop
+                            };
+                            let duration = stop.saturating_sub(event.start);
                             op_times_ns[op_idx] += duration;
                         }
                     }
