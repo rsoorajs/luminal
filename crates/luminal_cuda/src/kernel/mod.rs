@@ -22,7 +22,28 @@ pub trait KernelOp: luminal::op::EgglogOp {
         FxHashMap<char, CudaSlice<u8>>,
     );
 
+    /// Returns the output buffer size in bytes.
     fn output_size(&self) -> Expression;
+
+    /// Returns the number of bytes this kernel will load from global memory.
+    fn bytes_loaded(&self) -> Expression {
+        0.into()
+    }
+
+    /// Returns the number of bytes this kernel will store to global memory.
+    fn bytes_stored(&self) -> Expression {
+        0.into()
+    }
+
+    /// Returns the number of floating point operations this kernel performs.
+    fn flops(&self) -> Expression {
+        0.into()
+    }
+
+    /// Returns the name of this kernel for profiling display.
+    fn kernel_name(&self) -> &'static str {
+        "Unknown"
+    }
 }
 
 luminal::impl_into_ops!(KernelOp);

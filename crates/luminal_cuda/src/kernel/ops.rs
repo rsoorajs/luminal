@@ -190,7 +190,23 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
-        self.out_shape.iter().copied().product()
+        self.out_shape.iter().copied().product::<Expression>() * 4
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        self.out_shape.iter().copied().product::<Expression>() * self.iters * 4
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        self.output_size()
+    }
+
+    fn flops(&self) -> Expression {
+        self.out_shape.iter().copied().product::<Expression>() * self.iters
+    }
+
+    fn kernel_name(&self) -> &'static str {
+        "MaxReduce"
     }
 }
 
@@ -364,7 +380,24 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
-        self.out_shape.iter().copied().product()
+        self.out_shape.iter().copied().product::<Expression>() * 4
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        self.out_shape.iter().copied().product::<Expression>() * self.iters * 4
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        self.output_size()
+    }
+
+    fn flops(&self) -> Expression {
+        let n_outputs: Expression = self.out_shape.iter().copied().product();
+        n_outputs * self.iters + n_outputs
+    }
+
+    fn kernel_name(&self) -> &'static str {
+        "MeanReduce"
     }
 }
 
@@ -534,7 +567,23 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
-        self.out_shape.iter().copied().product()
+        self.out_shape.iter().copied().product::<Expression>() * 4
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        self.out_shape.iter().copied().product::<Expression>() * self.iters * 4
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        self.output_size()
+    }
+
+    fn flops(&self) -> Expression {
+        self.out_shape.iter().copied().product::<Expression>() * self.iters
+    }
+
+    fn kernel_name(&self) -> &'static str {
+        "SumReduce"
     }
 }
 
@@ -652,7 +701,23 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
+        self.out_shape.iter().copied().product::<Expression>() * 4
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        self.output_size() * 2
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        self.output_size()
+    }
+
+    fn flops(&self) -> Expression {
         self.out_shape.iter().copied().product()
+    }
+
+    fn kernel_name(&self) -> &'static str {
+        "Add"
     }
 }
 
@@ -770,7 +835,23 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
+        self.out_shape.iter().copied().product::<Expression>() * 4
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        self.output_size() * 2
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        self.output_size()
+    }
+
+    fn flops(&self) -> Expression {
         self.out_shape.iter().copied().product()
+    }
+
+    fn kernel_name(&self) -> &'static str {
+        "Mul"
     }
 }
 
@@ -892,7 +973,23 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
-        self.out_shape.iter().copied().product()
+        self.out_shape.iter().copied().product::<Expression>() * 4
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        self.output_size() * 2
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        self.output_size()
+    }
+
+    fn flops(&self) -> Expression {
+        0.into()
+    }
+
+    fn kernel_name(&self) -> &'static str {
+        "Gather"
     }
 }
 
@@ -991,6 +1088,22 @@ extern \"C\" {{
     }
 
     fn output_size(&self) -> Expression {
-        self.range
+        self.range * 4
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        0.into()
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        self.output_size()
+    }
+
+    fn flops(&self) -> Expression {
+        0.into()
+    }
+
+    fn kernel_name(&self) -> &'static str {
+        "Iota"
     }
 }

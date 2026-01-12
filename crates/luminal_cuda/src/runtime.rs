@@ -1,5 +1,7 @@
 use crate::{block::*, kernel::KernelOp};
-use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg};
+use cudarc::driver::{
+    sys::CUevent_flags, CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
+};
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
 use luminal::hlir::*;
@@ -41,7 +43,31 @@ enum ExecutableKernel {
         inputs: Vec<NodeIndex>,
         output: NodeIndex,
         constants: FxHashMap<char, CudaSlice<u8>>,
+        // Profiling metrics
+        kernel_name: &'static str,
+        bytes_loaded: Expression,
+        bytes_stored: Expression,
+        flops: Expression,
     },
+}
+
+/// Statistics for a single kernel execution
+#[derive(Debug, Clone)]
+pub struct KernelStats {
+    pub name: &'static str,
+    pub execution_time_us: f64,
+    pub bytes_loaded: usize,
+    pub bytes_stored: usize,
+    pub flops: usize,
+    pub bandwidth_gbps: f64,
+    pub tflops: f64,
+}
+
+/// Aggregated execution statistics
+#[derive(Debug, Default, Clone)]
+pub struct ExecutionStats {
+    pub kernel_stats: Vec<KernelStats>,
+    pub total_time_us: f64,
 }
 
 impl Drop for ExecutableKernel {
@@ -90,6 +116,8 @@ pub struct CudaRuntime {
     pub(crate) timings: Vec<(Vec<SMEvent>, u64, Uuid)>,
     last_dyn_map: FxHashMap<char, usize>,
     intermediate_buffer_dims: FxHashSet<char>,
+    /// Statistics from the last execution
+    pub last_execution_stats: ExecutionStats,
 }
 
 impl CudaRuntime {
@@ -204,7 +232,7 @@ impl CudaRuntime {
                 self.buffers.insert(
                     node,
                     self.cuda_stream
-                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
+                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap())
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
@@ -215,7 +243,7 @@ impl CudaRuntime {
                 self.buffers.insert(
                     node,
                     self.cuda_stream
-                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
+                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap())
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
@@ -282,6 +310,7 @@ impl Runtime for CudaRuntime {
             timings: vec![],
             last_dyn_map: FxHashMap::default(),
             intermediate_buffer_dims: FxHashSet::default(),
+            last_execution_stats: ExecutionStats::default(),
         }
     }
 
@@ -332,6 +361,10 @@ impl Runtime for CudaRuntime {
                         output: kernel,
                         shared_mem,
                         constants,
+                        kernel_name: kernel_op.kernel_name(),
+                        bytes_loaded: kernel_op.bytes_loaded(),
+                        bytes_stored: kernel_op.bytes_stored(),
+                        flops: kernel_op.flops(),
                     }),
                 );
             }
@@ -401,6 +434,8 @@ impl Runtime for CudaRuntime {
             self.register_buffer(llir_node, ptr);
         }
         let mut timings = vec![];
+        let mut kernel_stats = Vec::new();
+        let total_start = std::time::Instant::now();
         for exec_node in toposort(&self.exec_graph, None).unwrap() {
             match &mut self.exec_graph[exec_node] {
                 ExecutableKernel::Kernel {
@@ -412,6 +447,10 @@ impl Runtime for CudaRuntime {
                     output,
                     shared_mem,
                     constants,
+                    kernel_name,
+                    bytes_loaded,
+                    bytes_stored,
+                    flops,
                 } => {
                     for (dyn_dim, val) in dyn_map {
                         if let Some(global) = constants.get_mut(dyn_dim) {
@@ -453,8 +492,48 @@ impl Runtime for CudaRuntime {
                     }
                     let span = span!(Level::INFO, "kernel");
                     let _entered = span.enter();
+
+                    // Use CUDA events for accurate GPU-side timing
+                    let start_event = self
+                        .cuda_stream
+                        .context()
+                        .new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
+                        .unwrap();
+                    let end_event = self
+                        .cuda_stream
+                        .context()
+                        .new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
+                        .unwrap();
+
+                    start_event.record(&self.cuda_stream).unwrap();
                     unsafe { lb.launch(cfg) }.unwrap();
-                    self.cuda_stream.synchronize().unwrap();
+                    end_event.record(&self.cuda_stream).unwrap();
+
+                    // elapsed_ms synchronizes internally
+                    let kernel_time_ms = start_event.elapsed_ms(&end_event).unwrap();
+                    let kernel_time_us = kernel_time_ms as f64 * 1000.0;
+
+                    // Calculate metrics
+                    let loaded = bytes_loaded.exec(dyn_map).unwrap_or(0);
+                    let stored = bytes_stored.exec(dyn_map).unwrap_or(0);
+                    let flop_count = flops.exec(dyn_map).unwrap_or(0);
+
+                    // Calculate bandwidth (GB/s) and compute (TFLOPS)
+                    // Total memory traffic = bytes loaded + bytes stored
+                    let total_bytes = loaded + stored;
+                    let bandwidth_gbps = (total_bytes as f64) / (kernel_time_us * 1e-6) / 1e9;
+                    let tflops = (flop_count as f64) / (kernel_time_us * 1e-6) / 1e12;
+
+                    kernel_stats.push(KernelStats {
+                        name: *kernel_name,
+                        execution_time_us: kernel_time_us,
+                        bytes_loaded: loaded,
+                        bytes_stored: stored,
+                        flops: flop_count,
+                        bandwidth_gbps,
+                        tflops,
+                    });
+
                     drop(_entered);
                     drop(span);
                 }
@@ -552,6 +631,149 @@ impl Runtime for CudaRuntime {
             }
         }
         self.timings.extend(timings);
+
+        // Store execution stats
+        let total_time_us = total_start.elapsed().as_secs_f64() * 1_000_000.0;
+        self.last_execution_stats = ExecutionStats {
+            kernel_stats,
+            total_time_us,
+        };
+    }
+}
+
+impl CudaRuntime {
+    /// Print execution statistics for the last execution.
+    /// Shows bandwidth and compute utilization for each kernel.
+    pub fn print_execution_stats(&self) {
+        let stats = &self.last_execution_stats;
+        if stats.kernel_stats.is_empty() {
+            println!("No kernel execution stats available.");
+            return;
+        }
+
+        // Get device peak performance
+        let peak_bandwidth_gbps = crate::cuda_bandwidth_gbps(self.cuda_stream.context());
+        let peak_tflops = crate::cuda_compute_f32_tflops(self.cuda_stream.context());
+
+        println!("\n=== Kernel Execution Statistics ===\n");
+        println!(
+            "{:<20} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
+            "Kernel", "Time (us)", "Loaded", "Stored", "FLOPS", "BW (GB/s)", "TFLOPS", "Util %"
+        );
+        println!("{}", "-".repeat(108));
+
+        for stat in &stats.kernel_stats {
+            let total_bytes = stat.bytes_loaded + stat.bytes_stored;
+
+            // Show "-" if bytes are 0 (not specified)
+            let loaded_str = if stat.bytes_loaded > 0 {
+                format_size(stat.bytes_loaded)
+            } else {
+                "-".to_string()
+            };
+            let stored_str = if stat.bytes_stored > 0 {
+                format_size(stat.bytes_stored)
+            } else {
+                "-".to_string()
+            };
+            let flops_str = if stat.flops > 0 {
+                format_flops(stat.flops)
+            } else {
+                "-".to_string()
+            };
+            let bw_str = if total_bytes > 0 {
+                format!("{:.2}", stat.bandwidth_gbps)
+            } else {
+                "-".to_string()
+            };
+            let tflops_str = if stat.flops > 0 {
+                format!("{:.4}", stat.tflops)
+            } else {
+                "-".to_string()
+            };
+
+            // Calculate utilization based on whether this kernel is memory or compute bound
+            let util_str = if let Some(peak_bw) = peak_bandwidth_gbps {
+                if let Some(peak_tf) = peak_tflops {
+                    if total_bytes > 0 || stat.flops > 0 {
+                        // Show the higher utilization (the bottleneck)
+                        let bw_util = (stat.bandwidth_gbps / peak_bw as f64) * 100.0;
+                        let compute_util = (stat.tflops / peak_tf as f64) * 100.0;
+                        if bw_util > compute_util {
+                            format!("{:.1}% BW", bw_util)
+                        } else {
+                            format!("{:.1}% FP", compute_util)
+                        }
+                    } else {
+                        "-".to_string()
+                    }
+                } else if total_bytes > 0 {
+                    let bw_util = (stat.bandwidth_gbps / peak_bw as f64) * 100.0;
+                    format!("{:.1}% BW", bw_util)
+                } else {
+                    "-".to_string()
+                }
+            } else if let Some(peak_tf) = peak_tflops {
+                if stat.flops > 0 {
+                    let compute_util = (stat.tflops / peak_tf as f64) * 100.0;
+                    format!("{:.1}% FP", compute_util)
+                } else {
+                    "-".to_string()
+                }
+            } else {
+                "-".to_string()
+            };
+
+            println!(
+                "{:<20} {:>12.2} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
+                stat.name,
+                stat.execution_time_us,
+                loaded_str,
+                stored_str,
+                flops_str,
+                bw_str,
+                tflops_str,
+                util_str
+            );
+        }
+
+        println!("{}", "-".repeat(108));
+        println!("{:<20} {:>12.2}", "Total", stats.total_time_us);
+
+        // Print device info
+        if let (Some(peak_bw), Some(peak_tf)) = (peak_bandwidth_gbps, peak_tflops) {
+            println!(
+                "\nDevice peak: {} GB/s bandwidth, {} TFLOPS (F32)",
+                peak_bw, peak_tf
+            );
+        }
+        println!();
+    }
+}
+
+fn format_size(bytes: usize) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.2} GB", bytes as f64 / 1e9)
+    } else if bytes >= 1_000_000 {
+        format!("{:.2} MB", bytes as f64 / 1e6)
+    } else if bytes >= 1_000 {
+        format!("{:.2} KB", bytes as f64 / 1e3)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn format_flops(flops: usize) -> String {
+    if flops >= 1_000_000_000_000 {
+        format!("{:.2} T", flops as f64 / 1e12)
+    } else if flops >= 1_000_000_000 {
+        format!("{:.2} G", flops as f64 / 1e9)
+    } else if flops >= 1_000_000 {
+        format!("{:.2} M", flops as f64 / 1e6)
+    } else if flops >= 1_000 {
+        format!("{:.2} K", flops as f64 / 1e3)
+    } else {
+        format!("{}", flops)
     }
 }
 
