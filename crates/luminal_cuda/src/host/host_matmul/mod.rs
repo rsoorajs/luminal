@@ -12,7 +12,7 @@ use luminal::{
     },
 };
 use std::sync::Arc;
-use tracing::{trace};
+use tracing::{trace, span, Level};
 
 use crate::{cudarc::driver::CudaSlice, host::HostOp};
 
@@ -117,33 +117,15 @@ impl HostOp for HostMatmul {
             m * n * 4
         );
 
-        // Debug: Read data from GPU to verify buffers are valid
-        trace!("\nReading data from GPU buffers:");
-
-        // Copy from device to host and convert bytes to f32
-        let a_bytes: Vec<u8> = stream.memcpy_dtov(inputs[1])?;
-        let b_bytes: Vec<u8> = stream.memcpy_dtov(inputs[2])?;
-        let c_bytes: Vec<u8> = stream.memcpy_dtov(inputs[0])?;
-
-        // Reinterpret bytes as f32
-        let a_host: &[f32] =
-            unsafe { std::slice::from_raw_parts(a_bytes.as_ptr() as *const f32, (m * k) as usize) };
-        let b_host: &[f32] =
-            unsafe { std::slice::from_raw_parts(b_bytes.as_ptr() as *const f32, (k * n) as usize) };
-        let c_host: &[f32] =
-            unsafe { std::slice::from_raw_parts(c_bytes.as_ptr() as *const f32, (m * n) as usize) };
-
-        trace!("  A data: {:?}", a_host);
-        trace!("  B data: {:?}", b_host);
-        trace!("  C data (initial): {:?}", c_host);
-
         // Execute GEMM using raw cuBLAS API
         // cuBLAS expects column-major, but our matrices are row-major.
         // Use C^T = B^T * A^T (swap operands and dimensions)
         trace!("\nCalling cuBLAS with (row-major conversion):");
         trace!("  cublasSgemm_v2(handle, OP_N, OP_N, m={}, n={}, k={}, alpha={}, B, lda={}, A, ldb={}, beta={}, C, ldc={})",
                   n, m, k, alpha, n, k, beta, n);
-
+        stream.synchronize()?;
+        let sgemm_span = span!(Level::INFO, "SGEMM_V2 Call");
+        let _entered = sgemm_span.enter();
         unsafe {
             let status = cublasSgemm_v2(
                 *blas.handle(),
@@ -171,17 +153,10 @@ impl HostOp for HostMatmul {
                 ));
             }
         }
-
         trace!("\nSynchronizing stream...");
         stream.synchronize()?;
-
-        // Read back result to verify
-        let result_bytes: Vec<u8> = stream.memcpy_dtov(inputs[0])?;
-        let result: &[f32] = unsafe {
-            std::slice::from_raw_parts(result_bytes.as_ptr() as *const f32, (m * n) as usize)
-        };
-        trace!("Result C: {:?}", result);
-        trace!("HostMatmul completed successfully!");
+        drop(_entered);
+        drop(sgemm_span);
 
         Ok(())
     }
