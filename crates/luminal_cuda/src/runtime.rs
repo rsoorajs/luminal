@@ -33,10 +33,12 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tracing::{span, Level};
+use tracing::{field, span, Level};
 use tracing_perfetto_sdk_schema::{
-    self as schema, trace_packet, track_descriptor, track_event, TrackEvent,
+    self as schema, debug_annotation::NameField, trace_packet, track_descriptor, track_event,
+    TrackEvent,
 };
+use uuid::Uuid;
 
 pub enum CudaInput {
     Buffer(CudaSlice<u8>),
@@ -109,7 +111,7 @@ pub struct CudaRuntime {
     cuda_stream: Arc<CudaStream>,
     exec_graph: StableGraph<ExecutableKernel, (), Directed>,
     node_to_exec: FxHashMap<NodeIndex, NodeIndex>,
-    timings: Vec<(Vec<SMEvent>, u64)>,
+    timings: Vec<(Vec<SMEvent>, u64, Uuid)>,
     last_dyn_map: FxHashMap<char, usize>,
     intermediate_buffer_dims: FxHashSet<char>,
 }
@@ -259,30 +261,42 @@ impl CudaRuntime {
             .collect_vec();
         let data = std::fs::read(&file_path).unwrap();
         let mut trace = tracing_perfetto_sdk_schema::Trace::decode(data.as_slice()).unwrap();
-
-        let host_start_times: Vec<(u64, u32)> = trace
-            .packet
+        let host_start_times: Vec<(u64, u32)> = self
+            .timings
             .iter()
-            .filter_map(|p| match &p.data {
-                Some(tracing_perfetto_sdk_schema::trace_packet::Data::TrackEvent(TrackEvent {
-                    name_field: Some(tracing_perfetto_sdk_schema::track_event::NameField::Name(s)),
-                    r#type: ty,
-                    ..
-                })) if s == "megakernel"
-                    && *ty
-                        == Some(
-                            tracing_perfetto_sdk_schema::track_event::Type::SliceBegin as i32,
-                        ) =>
-                {
-                    Some((p.timestamp?, p.timestamp_clock_id?))
-                }
-                _ => None,
+            .map(|(_, _, id)| {
+                trace
+                    .packet
+                    .iter()
+                    .find_map(|p| match &p.data {
+                        Some(trace_packet::Data::TrackEvent(TrackEvent {
+                            r#type: ty,
+                            debug_annotations,
+                            ..
+                        })) if *ty == Some(track_event::Type::SliceBegin as i32)
+                            && debug_annotations.iter().any(|a| {
+                                matches!(
+                                    (&a.name_field, &a.value),
+                                    (
+                                        Some(NameField::Name(k)),
+                                        Some(tracing_perfetto_sdk_schema::debug_annotation::Value::StringValue(v)),
+                                    ) if k == "id" && *v == format!("{id}")
+                                )
+                            }) =>
+                        {
+                            Some((p.timestamp?, p.timestamp_clock_id?))
+                        }
+                        _ => {
+                            None
+                        },
+                    })
+                    .expect("Couldn't find span with correct uuid for gpu timing dump")
             })
-            .sorted_by_key(|i| *i)
             .collect_vec();
         let mut extra_packets = Vec::new();
-        for (run, (device_timings, device_start_time)) in self.timings.iter().enumerate() {
-            let (host_time, host_clock_id) = host_start_times[run];
+        for ((device_timings, device_start_time, _span_id), (host_time, host_clock_id)) in
+            self.timings.iter().zip(host_start_times)
+        {
             for (sm, sm_timings) in device_timings.chunks(1000).enumerate() {
                 let mut builder = ManualTrackBuilder::new(sm as u32, host_time, host_clock_id);
                 for n_op in 0..sm_timings.len() - 1 {
@@ -665,6 +679,7 @@ impl Runtime for CudaRuntime {
                     let span = span!(Level::INFO, "kernel");
                     let _entered = span.enter();
                     unsafe { lb.launch(cfg) }.unwrap();
+                    self.cuda_stream.synchronize().unwrap();
                     drop(_entered);
                     drop(span);
                 }
@@ -739,12 +754,15 @@ impl Runtime for CudaRuntime {
                     lb.arg(&start_time);
                     drop(_entered);
                     drop(span);
-                    let span = span!(Level::INFO, "megakernel");
+                    let mk_span_id = Uuid::new_v4();
+                    let span = span!(Level::INFO, "megakernel", id = field::Empty);
+                    // Record fields after span creation to work around tracing-perfetto-sdk-layer sync span bug
+                    span.record("id", format!("{}", mk_span_id).as_str());
                     let _entered = span.enter();
                     unsafe { lb.launch(cfg) }.unwrap();
+                    self.cuda_stream.synchronize().unwrap();
                     drop(_entered);
                     drop(span);
-
                     timings.push((
                         self.cuda_stream.memcpy_dtov(&timing_buffer).unwrap(),
                         self.cuda_stream
@@ -753,6 +771,7 @@ impl Runtime for CudaRuntime {
                             .into_iter()
                             .min()
                             .unwrap(),
+                        mk_span_id,
                     ));
                 }
             }
@@ -760,16 +779,6 @@ impl Runtime for CudaRuntime {
         self.timings.extend(timings);
     }
 }
-
-// struct TmpPtr(u64);
-
-// unsafe impl<'a> PushKernelArg<TmpPtr> for cudarc::driver::LaunchArgs<'a> {
-//     #[inline(always)]
-//     fn arg(&mut self, arg: TmpPtr) -> &mut Self {
-//         self.args.push(arg.0 as *const () as *mut _);
-//         self
-//     }
-// }
 
 // TODO: get rid of this, go through all ops to get largest payload, and build the Task struct with CStructBuilder
 // this is only here because it is currently the largest payload so it lets us have the Task struct with correct alignment / sizing

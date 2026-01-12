@@ -21,6 +21,7 @@ half = "2.7.1"
 pretty-duration = "0.1.1"
 bytemuck = "1.24.0"
 memmap2 = "0.9.9"
+uuid = {version="1.19.0", features=["v4"]}
 
 [dev-dependencies]
 proptest = "1.9.0"

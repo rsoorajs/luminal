@@ -7,7 +7,7 @@ use std::{
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_perfetto_sdk_layer::NativeLayer;
 use tracing_perfetto_sdk_schema::{
-    DataSourceConfig, TraceConfig,
+    DataSourceConfig, TraceConfig, TrackEventConfig,
     trace_config::{BufferConfig, DataSource},
 };
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -48,6 +48,7 @@ impl TraceOptions {
             let file = File::create(&file_path).expect("Failed to create trace file");
             let (writer, guard) = tracing_appender::non_blocking(file);
             let layer = NativeLayer::from_config(default_perfetto_config(), writer)
+                .with_delay_slice_begin(true)
                 .build()
                 .expect("Failed to build perfetto layer");
             let handle = layer.clone();
@@ -105,12 +106,17 @@ impl TraceSession {
 fn default_perfetto_config() -> TraceConfig {
     TraceConfig {
         buffers: vec![BufferConfig {
-            size_kb: Some(4096),
+            size_kb: Some(32_000),
             ..Default::default()
         }],
         data_sources: vec![DataSource {
             config: Some(DataSourceConfig {
                 name: Some("rust_tracing".into()),
+                track_event_config: Some(TrackEventConfig {
+                    filter_debug_annotations: Some(false),
+                    enabled_categories: vec!["*".to_string()],
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Default::default()

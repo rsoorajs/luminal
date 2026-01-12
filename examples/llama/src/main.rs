@@ -22,7 +22,10 @@ fn main() {
     // Set up tracing to perfetto
     let trace_session = luminal_tracing::subscriber()
         .perfetto("trace.pftrace")
-        .env_filter(format!("{}=trace,luminal=trace", env!("CARGO_PKG_NAME")))
+        .env_filter(format!(
+            "{}=trace,luminal=trace,luminal_cuda=trace",
+            env!("CARGO_PKG_NAME")
+        ))
         .init();
 
     // Set up cuda context and stream
