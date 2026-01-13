@@ -1,10 +1,8 @@
-//! Metal kernel operations
-
 mod ops;
 pub use ops::*;
 
+use luminal::op::EgglogOp;
 use luminal::prelude::*;
-use luminal::utils::EgglogOp;
 use metal::{Buffer, ComputeCommandEncoderRef, ComputePipelineState, Device};
 pub trait MetalKernelOp: EgglogOp {
     fn compile(&self, device: &Device) -> ComputePipelineState;

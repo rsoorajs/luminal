@@ -1,11 +1,6 @@
 use super::MetalKernelOp;
 use luminal::{
-    prelude::{ENodeId, *},
-    serialized_egraph::SerializedEGraph,
-    utils::{
-        flatten_mul_strides, EgglogOp, LLIROp,
-        OpParam::{self, *},
-    },
+    egglog_utils::SerializedEGraph, op::OpParam::*, op::*, prelude::*, shape::flatten_mul_strides,
 };
 use metal::{Buffer, ComputeCommandEncoderRef, ComputePipelineState, Device, MTLSize};
 

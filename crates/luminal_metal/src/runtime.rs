@@ -1,11 +1,9 @@
-//! Metal Runtime implementation
-//!
-
 use crate::kernel::MetalKernelOp;
 use itertools::Itertools;
 use luminal::{
-    graph::{LLIRGraph, Runtime},
-    op::{Input, Output},
+    graph::LLIRGraph,
+    hlir::{Input, Output},
+    op::Runtime,
     prelude::{
         petgraph::{algo::toposort, prelude::StableGraph, visit::EdgeRef, Direction},
         FxHashMap, NodeIndex, ToId,
