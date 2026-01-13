@@ -164,9 +164,9 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
 
       record_event(timings, &recorded_event, 0); // Record issue start
 
-      int dep_a = (t->in_dep_a_base == -1 ? 0 : eval_expression(t->in_dep_a_base, 0) + eval_expression(t->in_dep_a_stride, nt.current));
-      int dep_b = (t->in_dep_b_base == -1 ? 0 : eval_expression(t->in_dep_b_base, 0) + eval_expression(t->in_dep_b_stride, nt.current));
-      int dep_c = (t->in_dep_c_base == -1 ? 0 : eval_expression(t->in_dep_c_base, 0) + eval_expression(t->in_dep_c_stride, nt.current));
+      int dep_a = (t->in_dep_a_base == -1 ? 0 : (eval_expression(t->in_dep_a_base, 0) + eval_expression(t->in_dep_a_stride, nt.current)));
+      int dep_b = (t->in_dep_b_base == -1 ? 0 : (eval_expression(t->in_dep_b_base, 0) + eval_expression(t->in_dep_b_stride, nt.current)));
+      int dep_c = (t->in_dep_c_base == -1 ? 0 : (eval_expression(t->in_dep_c_base, 0) + eval_expression(t->in_dep_c_stride, nt.current)));
       dep_out = eval_expression(t->out_dep_base, 0) + eval_expression(t->out_dep_stride, nt.current);
       // Increment the output barrier to signal an op is in-flight
       atomicAdd(&ready[dep_out], 1);

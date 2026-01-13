@@ -250,7 +250,6 @@ fn get_barrier_strides(
                 })
                 .collect(),
         );
-        println!("Cons: {:?}", consumer_strides);
 
         producer_barrier_strides.insert(*node, producer_strides);
         assert_eq!(consumers.len(), consumer_strides.len());

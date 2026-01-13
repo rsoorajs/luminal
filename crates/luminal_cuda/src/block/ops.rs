@@ -942,6 +942,8 @@ impl BlockOp for RowRope {
     }
 }
 
+use crate::TILE_SIZE;
+
 #[derive(Debug, Default)]
 pub struct TileMatmul {
     range: Vec<Expression>,
@@ -967,7 +969,7 @@ impl EgglogOp for TileMatmul {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["
+        vec![format!("
         ; Cube mul - Tile sum -> TileMatmul (row major)
         (rule
             (
@@ -989,12 +991,12 @@ impl EgglogOp for TileMatmul {
                 ; input strides are same as cube mul but without last element
                 (let ?new_a_stride (RemoveNthFromEnd ?a_stride 0))
                 (let ?new_b_stride (RemoveNthFromEnd ?b_stride 0))
-                (let ?tm (TileMatmul ?sum_shape ?untiled_sum_shape ?iters ?a ?new_a_stride (MMul ?t_k (MNum 32)) (MNum 1) ?b ?new_b_stride (MNum 1) (MMul ?t_n (MNum 32)) ?sum_out_stride (MMul ?t_n (MNum 32)) (MNum 1)))
+                (let ?tm (TileMatmul ?sum_shape ?untiled_sum_shape ?iters ?a ?new_a_stride (MMul ?t_k (MNum {ts})) (MNum 1) ?b ?new_b_stride (MNum 1) (MMul ?t_n (MNum {ts})) ?sum_out_stride (MMul ?t_n (MNum {ts})) (MNum 1)))
                 (union ?ts ?tm)
                 (set (dtype ?tm) (F32))
             )
-        )".to_string(),
-        "
+        )", ts = TILE_SIZE),
+        format!("
         ; Cube mul - Tile sum -> TileMatmul (A row-major, B col-major, C row-major)
         (rule
             (
@@ -1029,19 +1031,19 @@ impl EgglogOp for TileMatmul {
                 (let ?new_b_stride (RemoveNthFromEnd ?b_stride 0))
 
                 ; Emit TileMatmul:
-                ;  - A row-major tile strides: m -> t_k*32, k -> 1
-                ;  - B col-major tile strides: k -> 1, n -> t_k*32
-                ;  - C row-major tile strides: m -> t_n*32, n -> 1
+                ;  - A row-major tile strides: m -> t_k*TILE_SIZE, k -> 1
+                ;  - B col-major tile strides: k -> 1, n -> t_k*TILE_SIZE
+                ;  - C row-major tile strides: m -> t_n*TILE_SIZE, n -> 1
                 (let ?tm (TileMatmul ?sum_shape ?untiled_sum_shape ?iters
-                            ?a ?new_a_stride (MMul ?t_k (MNum 32)) (MNum 1)
-                            ?b ?new_b_stride ?b_k_stride (MMul ?t_k (MNum 32))
-                            ?sum_out_stride (MMul ?t_n (MNum 32)) (MNum 1)))
+                            ?a ?new_a_stride (MMul ?t_k (MNum {ts})) (MNum 1)
+                            ?b ?new_b_stride ?b_k_stride (MMul ?t_k (MNum {ts}))
+                            ?sum_out_stride (MMul ?t_n (MNum {ts})) (MNum 1)))
                 (union ?ts ?tm)
                 (set (dtype ?tm) (F32))
             )
             :name \"cube mul\"
         )
-        ".to_string()]
+        ", ts = TILE_SIZE)]
     }
 
     fn cleanup(&self) -> bool {
@@ -1153,13 +1155,13 @@ impl BlockOp for TileMatmul {
             int n_pos_stride;
         "
         .to_string();
-        let function_body = "
-            auto warp_reduce_sum = [](float val) {
-                for (int offset = 16; offset > 0; offset >>= 1) {
+        let function_body = format!("
+            auto warp_reduce_sum = [](float val) {{
+                for (int offset = 16; offset > 0; offset >>= 1) {{
                     val += __shfl_down_sync(0xffffffff, val, offset);
-                }
+                }}
                 return val;
-            };
+            }};
             const float* a = source_ptrs[0] + eval_expression(payload.a, current);
             const float* b = source_ptrs[1] + eval_expression(payload.b, current);
             float*       c = out_ptr + eval_expression(payload.c, current);
@@ -1172,8 +1174,9 @@ impl BlockOp for TileMatmul {
             const int num_warps = threads >> 5;
             const int K = eval_expression(payload.iters, 0);
 
-            const int global_m0 = m_pos * 32;
-            const int global_n0 = n_pos * 32;
+            constexpr int TILE_SIZE = {ts};
+            const int global_m0 = m_pos * TILE_SIZE;
+            const int global_n0 = n_pos * TILE_SIZE;
             const int M = eval_expression(payload.untiled_range[0], 0);
             const int N = eval_expression(payload.untiled_range[1], 0);
 
@@ -1181,46 +1184,46 @@ impl BlockOp for TileMatmul {
             int cols_left = N - global_n0;
             if (rows_left <= 0 || cols_left <= 0) return;
 
-            const int tile_m = rows_left > 32 ? 32 : rows_left;
-            const int tile_n = cols_left > 32 ? 32 : cols_left;
+            const int tile_m = rows_left > TILE_SIZE ? TILE_SIZE : rows_left;
+            const int tile_n = cols_left > TILE_SIZE ? TILE_SIZE : cols_left;
             const int b_width = eval_expression(payload.b_width, 0);
 
             // Fast path for M=1 decode: warps parallelize over columns with K reduction
-            if (tile_m == 1 && num_warps > 0) {
+            if (tile_m == 1 && num_warps > 0) {{
                 constexpr int COLS_PER_WARP = 4;
-                for (int col_base = warp_id * COLS_PER_WARP; col_base < tile_n; col_base += num_warps * COLS_PER_WARP) {
-                    float partial[COLS_PER_WARP] = {0.0f, 0.0f, 0.0f, 0.0f};
-                    for (int k = lane; k < K; k += 32) {
+                for (int col_base = warp_id * COLS_PER_WARP; col_base < tile_n; col_base += num_warps * COLS_PER_WARP) {{
+                    float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
+                    for (int k = lane; k < K; k += 32) {{
                         float a_val = a[k];
                         #pragma unroll
-                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {
-                            if (col_base + ci < tile_n) {
+                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                            if (col_base + ci < tile_n) {{
                                 partial[ci] += a_val * b[(col_base + ci) * b_width + k];
-                            }
-                        }
-                    }
+                            }}
+                        }}
+                    }}
                     // Warp reduction for each column
                     #pragma unroll
-                    for (int ci = 0; ci < COLS_PER_WARP; ci++) {
+                    for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
                         partial[ci] = warp_reduce_sum(partial[ci]);
-                    }
+                    }}
                     // Lane 0 writes results
-                    if (lane == 0) {
+                    if (lane == 0) {{
                         #pragma unroll
-                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {
-                            if (col_base + ci < tile_n) {
+                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                            if (col_base + ci < tile_n) {{
                                 c[col_base + ci] = partial[ci];
-                            }
-                        }
-                    }
-                }
-            } else {
+                            }}
+                        }}
+                    }}
+                }}
+            }} else {{
                 // Generic path: handle any M, N tile
                 const int tile_elems = tile_m * tile_n;
                 const int a_width = eval_expression(payload.a_width, 0);
                 const int c_width = eval_expression(payload.c_width, 0);
 
-                for (int idx = t; idx < tile_elems; idx += threads) {
+                for (int idx = t; idx < tile_elems; idx += threads) {{
                     int ty = idx / tile_n;
                     int tx = idx % tile_n;
 
@@ -1229,14 +1232,13 @@ impl BlockOp for TileMatmul {
                     float*       C0 = c + ty * c_width + tx;
 
                     float acc = 0.f;
-                    for (int k = 0; k < K; ++k) {
+                    for (int k = 0; k < K; ++k) {{
                         acc += A0[k] * B0[k];
-                    }
+                    }}
                     *C0 = acc;
-                }
-            }
-        "
-        .to_string();
+                }}
+            }}
+        ", ts = TILE_SIZE);
         (struct_body, function_body)
     }
 
