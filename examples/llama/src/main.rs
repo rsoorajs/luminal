@@ -85,14 +85,28 @@ fn main() {
     let mut prev_seq = 0;
     let mut benchmarker = Benchmarker::new(); // H100 specs
     for i in 0..gen_tokens {
-        let span = if i == 0 {
-            span!(Level::INFO, "prefill")
-        } else {
-            span!(Level::INFO, "decode")
-        };
-        let _entered = span.enter();
         // Embed the tokenized sequence
         let seq_len = sentence.len();
+        let is_prefill = i == 0;
+
+        let _span = if is_prefill {
+            span!(
+                Level::INFO,
+                "prefill",
+                iteration = i,
+                seq_len = seq_len,
+                prev_seq = prev_seq
+            ).entered()
+        } else {
+            span!(
+                Level::INFO,
+                "decode",
+                iteration = i,
+                seq_len = seq_len,
+                prev_seq = prev_seq
+            ).entered()
+        };
+
         cx.set_dyn_dim('s', seq_len);
         cx.set_dyn_dim('p', prev_seq);
 
@@ -117,8 +131,11 @@ fn main() {
         runtime.execute(&cx.dyn_map);
         let logits_data = runtime.get_f32(logits);
 
-        let sample_span = span!(Level::INFO, "sample");
-        let _sample_entered = sample_span.enter();
+        let _sample_span = span!(
+            Level::INFO,
+            "sample",
+            vocab_size = VOCAB_SIZE
+        ).entered();
         sentence = vec![*sample(&logits_data, VOCAB_SIZE).last().unwrap()];
         prev_seq += seq_len;
         print!("{}", tokenizer.decode(&sentence, true).unwrap());
