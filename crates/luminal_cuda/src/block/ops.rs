@@ -179,7 +179,12 @@ impl BlockOp for RowAdd {
     }
 
     fn expressions(&self) -> Vec<Expression> {
-        vec![self.range.iter().copied().product::<Expression>().max(1) * self.row_width]
+        vec![
+            flatten_mul_strides(&self.range, &self.a_stride),
+            flatten_mul_strides(&self.range, &self.b_stride),
+            flatten_mul_strides(&self.range, &self.out_stride),
+            self.range.iter().copied().product::<Expression>().max(1) * self.row_width,
+        ]
     }
 }
 
