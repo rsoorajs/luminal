@@ -1520,8 +1520,7 @@ impl Runtime for NativeRuntime {
                 continue;
             }
 
-            let span = info_span!("native_op", op = %format!("{:?}", self.graph[node]));
-            let _entered = span.enter();
+            let _span = info_span!("native_op_execute", op = ?self.graph[node]).entered();
             let inputs = self
                 .graph
                 .edges_directed(node, Direction::Incoming)
