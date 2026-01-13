@@ -148,7 +148,7 @@ macro_rules! metal_unary_op {
                 );
 
                 let thread_group_size = MTLSize::new(256, 1, 1);
-                let thread_groups = MTLSize::new((n_elements as u64 + 255) / 256, 1, 1);
+                let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
                 encoder.dispatch_thread_groups(thread_groups, thread_group_size);
             }
         }
@@ -271,7 +271,7 @@ impl MetalKernelOp for MetalAdd {
         );
 
         let thread_group_size = MTLSize::new(256, 1, 1);
-        let thread_groups = MTLSize::new((n_elements as u64 + 255) / 256, 1, 1);
+        let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
 }
@@ -388,7 +388,7 @@ impl MetalKernelOp for MetalMul {
         );
 
         let thread_group_size = MTLSize::new(256, 1, 1);
-        let thread_groups = MTLSize::new((n_elements as u64 + 255) / 256, 1, 1);
+        let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
 }

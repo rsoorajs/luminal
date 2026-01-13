@@ -31,7 +31,7 @@ impl MetalRuntime {
     pub fn set_data(&mut self, id: impl ToId, data: &[f32]) {
         let buffer = self.device.new_buffer_with_data(
             data.as_ptr() as *const _,
-            (data.len() * std::mem::size_of::<f32>()) as u64,
+            std::mem::size_of_val(data) as u64,
             MTLResourceOptions::StorageModeShared,
         );
         self.hlir_buffers.insert(id.to_id(), buffer);
