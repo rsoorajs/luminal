@@ -1,5 +1,4 @@
-; THIS IS ALL WRONG
-; TileMatmul -> HostMatmul (row major) [M,K] x [K,N] -> [M,N] 
+; TileMatmul -> HostMatmul (row major) [M,K] x [K,N] (column Major) -> [M,N] (row major) 
 (rule
     (
     ;pub struct TileMatmul {
