@@ -4,7 +4,6 @@ use crate::{
     serialized_egraph::SerializedEGraph,
     utils::{EgglogOp, IntoEgglogOp, LLIROp}, visualization::ToDot,
 };
-use core::fmt;
 use std::{
     any::TypeId, fmt::Debug, fs, io::Write, ops::{Deref, DerefMut}, sync::Arc, path::Path,
 };
@@ -226,8 +225,13 @@ impl Graph {
         for (i, llir_graph) in llir_graphs.into_iter().enumerate() {
             progress_bar(i + 1);
             if enabled!(Level::DEBUG){
-                let log_dir = Path::new("llir_graphs"); 
-                if !log_dir.exists() {fs::create_dir(log_dir).unwrap();}
+                let log_dir = Path::new("llir_graphs");
+
+                if log_dir.exists() {
+                    fs::remove_dir_all(log_dir).unwrap();
+                }
+                fs::create_dir(log_dir).unwrap();
+
                 fs::write(log_dir.join(format!("llir_{}.dot", i)), llir_graph.to_dot().unwrap()).unwrap(); 
             }
             let (new_metric, display_metric) = runtime.profile(&llir_graph, &self.dyn_map);
@@ -257,6 +261,7 @@ impl Graph {
             );
         }
 
+        // Structured diagnostic data for tracing subscribers
         info!(
             target: "luminal::search",
             graphs = n_graphs,
