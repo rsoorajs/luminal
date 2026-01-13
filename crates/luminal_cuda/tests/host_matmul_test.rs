@@ -1,12 +1,20 @@
 use luminal::prelude::*;
 use luminal_cuda::runtime::CudaRuntime;
-use ndarray::Array;
+use candle_core::{Device, Tensor};
 
 #[cfg(test)]
 mod tests {
     use luminal::visualization::ToDot;
 
     use super::*;
+
+    /// Convert a row-major matrix B (k x n) to column-major layout using candle
+    fn to_col_major(b_row_major: &[f32], k: usize, n: usize) -> Vec<f32> {
+        let device = Device::Cpu;
+        let b_tensor = Tensor::from_vec(b_row_major.to_vec(), (k, n), &device).unwrap();
+        let b_transposed = b_tensor.t().unwrap().contiguous().unwrap();
+        b_transposed.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    }
 
     fn dynamic_matmul_graph_runtime() -> (Graph, CudaRuntime, GraphTensor, GraphTensor, GraphTensor)
     {
@@ -29,10 +37,11 @@ mod tests {
         cx.set_dyn_dim('k', 100);
 
         let a = vec![1.0; example_m * example_k];
-        let b = vec![1.0; example_k * example_n];
+        let b_row_major = vec![1.0; example_k * example_n];
+        let b_col_major = to_col_major(&b_row_major, example_k, example_n);
 
         rt.set_data(graph_a, Box::new(a.clone()));
-        rt.set_data(graph_b, Box::new(b.clone()));
+        rt.set_data(graph_b, Box::new(b_col_major));
 
         rt = cx.search(rt, 1);
         assert!(rt.llir_graph.to_dot().unwrap().contains("HostMatmul"));
@@ -47,7 +56,7 @@ mod tests {
         graph_b: GraphTensor,
         graph_c: GraphTensor,
         a: &Vec<f32>,
-        b: &Vec<f32>,
+        b_row_major: &Vec<f32>,
         m: i32,
         n: i32,
         k: i32,
@@ -57,11 +66,14 @@ mod tests {
         assert!(k > 0);
 
         assert!(a.len() == ((m * k) as usize));
-        assert!(b.len() == ((n * k) as usize));
+        assert!(b_row_major.len() == ((k * n) as usize));
+
+        // Convert B from row-major to column-major for luminal
+        let b_col_major = to_col_major(b_row_major, k as usize, n as usize);
 
         // Set input tensors
         rt.set_data(graph_a, Box::new(a.clone()));
-        rt.set_data(graph_b, Box::new(b.clone()));
+        rt.set_data(graph_b, Box::new(b_col_major));
 
         cx.set_dyn_dim('m', m as usize);
         cx.set_dyn_dim('n', n as usize);
@@ -82,15 +94,24 @@ mod tests {
         assert!(a.len() == ((m * k) as usize));
         assert!(b.len() == ((k * n) as usize));
 
-        // Convert vectors to ndarray matrices
-        let a_matrix = Array::from_shape_vec((m as usize, k as usize), a.clone()).unwrap();
-        let b_matrix = Array::from_shape_vec((k as usize, n as usize), b.clone()).unwrap();
+        // Use candle for CPU reference matmul
+        let device = Device::Cpu;
+
+        // A is row-major (m x k)
+        let a_tensor = Tensor::from_vec(a.clone(), (m as usize, k as usize), &device).unwrap();
+
+        // B is row-major (k x n)
+        let b_tensor = Tensor::from_vec(b.clone(), (k as usize, n as usize), &device).unwrap();
 
         // Perform matrix multiplication
-        let c_matrix = a_matrix.dot(&b_matrix);
+        let c_tensor = a_tensor.matmul(&b_tensor).unwrap();
 
-        // Convert result back to Vec<f32>
-        c_matrix.iter().copied().collect()
+        // Convert result to flat Vec<f32>
+        c_tensor.to_vec2::<f32>().unwrap()
+            .iter()
+            .flatten()
+            .cloned()
+            .collect()
     }
 
     mod proptests {
