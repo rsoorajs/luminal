@@ -14,14 +14,20 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 pub struct TraceOptions {
     perfetto_file: Option<PathBuf>,
-    pub env_filter: String,
+    env_filter: EnvFilter,
 }
 
 /// This is a convenience tracing subscriber with some opinionated defaults.
+/// By default, it will try to use the RUST_LOG environment variable, falling back to "luminal=trace" if not set.
 pub fn subscriber() -> TraceOptions {
     TraceOptions {
         perfetto_file: None,
-        env_filter: "luminal=trace".to_string(),
+        env_filter: EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| {
+                EnvFilter::builder()
+                    .parse("luminal=trace")
+                    .expect("Invalid default filter")
+            }),
     }
 }
 
@@ -31,16 +37,34 @@ impl TraceOptions {
         self
     }
 
+    /// Override with a specific filter string (ignores RUST_LOG)
     pub fn env_filter(mut self, env_filter: impl ToString) -> Self {
-        self.env_filter = env_filter.to_string();
+        self.env_filter = EnvFilter::builder()
+            .parse(env_filter.to_string())
+            .expect("Invalid tracing env filter");
+        self
+    }
+
+    /// Use RUST_LOG with a custom fallback if not set
+    pub fn env_filter_or(mut self, fallback: impl ToString) -> Self {
+        self.env_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| {
+                EnvFilter::builder()
+                    .parse(fallback.to_string())
+                    .expect("Invalid fallback filter")
+            });
+        self
+    }
+
+    /// Always use RUST_LOG (defaults to ERROR level if not set)
+    pub fn from_env(mut self) -> Self {
+        self.env_filter = EnvFilter::from_default_env();
         self
     }
 
     /// Install as the global tracing subscriber
     pub fn init(self) -> TraceSession {
-        let filter = EnvFilter::builder()
-            .parse(self.env_filter)
-            .expect("Invalid tracing env filter");
+        let filter = self.env_filter;
 
         if let Some(file_path) = self.perfetto_file {
             let file = File::create(&file_path).expect("Failed to create trace file");
