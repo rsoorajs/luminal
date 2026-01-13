@@ -27,6 +27,7 @@ struct Task {
 
 struct SMEvent {
   unsigned long long start;
+  unsigned long long stop;
   int event;
 };
 
@@ -97,10 +98,14 @@ __device__ inline bool fetch_next_task(Task *tasks, int num_tasks, int *head,
   return true;
 }
 
-__device__ inline void record_event(SMEvent *__restrict__ timings,
-                                    int *event_idx, int event_type) {
+__device__ inline void record_event(SMEvent *__restrict__ timings, int *event_idx, int event_type) {
   if (*event_idx < 1000) {
-    timings[*event_idx].start = read_globaltimer();
+    unsigned long long now = read_globaltimer();
+    if (*event_idx > 0) { // record the end of the previous op
+      timings[*event_idx - 1].stop = now;
+    }
+    timings[*event_idx].start = now;
+    timings[*event_idx].stop = 0ull;
     timings[*event_idx].event = event_type;
     (*event_idx)++;
   }
@@ -171,6 +176,10 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
       __threadfence();
       atomicSub(&ready[dep_out], 1);
     }
+  }
+
+  if (threadIdx.x == 0 && recorded_event > 0) {
+    timings[recorded_event - 1].stop = read_globaltimer();
   }
 }
 }

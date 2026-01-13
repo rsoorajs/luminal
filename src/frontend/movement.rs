@@ -1,6 +1,6 @@
 use itertools::Itertools;
 
-use crate::{prelude::*, utils::flatten_z_strides};
+use crate::{hlir::Gather, prelude::*};
 
 impl GraphTensor {
     /// Swap dimensions of the tensor
@@ -103,8 +103,8 @@ impl GraphTensor {
         let id = self
             .graph()
             .add_op(Gather::default())
-            .input(indexes.id, 0, indexes.shape)
-            .input(self.id, 0, self.shape)
+            .input(indexes.id, indexes.shape)
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(id, indexes.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -360,7 +360,8 @@ impl GraphTensor {
 #[cfg(test)]
 mod tests {
     use crate::{
-        hl_ops::{binary::tests::test_binary, unary::tests::test_unary},
+        frontend::{binary::tests::test_binary, unary::tests::test_unary},
+        op::DType,
         prelude::*,
     };
     use candle_core::{IndexOp, Tensor};

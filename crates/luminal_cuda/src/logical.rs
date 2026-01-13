@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use luminal::utils::{
+use luminal::op::{
     EgglogOp,
     OpParam::{self, *},
 };

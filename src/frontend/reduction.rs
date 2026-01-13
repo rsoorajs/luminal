@@ -1,7 +1,5 @@
-use crate::{
-    op::{self},
-    prelude::*,
-};
+use crate::hlir::*;
+use crate::prelude::*;
 
 impl GraphTensor {
     /// Reduce a dimension of the tensor by summing all elements along that axis.
@@ -12,11 +10,11 @@ impl GraphTensor {
         for dim in 0..axes.len() {
             id = self
                 .graph()
-                .add_op(op::SumReduce {
+                .add_op(SumReduce {
                     dim: axes[dim],
                     ..Default::default()
                 })
-                .input(id, 0, shape)
+                .input(id, shape)
                 .finish();
             shape.remove_dim(axes[dim]);
             shape = shape.contiguous();
@@ -38,11 +36,11 @@ impl GraphTensor {
         for dim in 0..axes.len() {
             id = self
                 .graph()
-                .add_op(op::MaxReduce {
+                .add_op(MaxReduce {
                     dim: axes[dim],
                     ..Default::default()
                 })
-                .input(id, 0, shape)
+                .input(id, shape)
                 .finish();
             shape.remove_dim(axes[dim]);
             shape = shape.contiguous();
@@ -74,7 +72,7 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    use crate::hl_ops::unary::tests::test_unary;
+    use crate::frontend::unary::tests::test_unary;
     use candle_core::{Device, Tensor};
     use proptest::prelude::*;
 

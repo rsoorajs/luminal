@@ -1,134 +1,119 @@
-mod benchmark;
 mod model;
 
-use benchmark::Benchmarker;
-use itertools::Itertools;
-use luminal::{
-    graph::{Graph, Runtime},
-    op::DType,
-    prelude::FxHashMap,
-};
-use luminal_cuda::{
-    cuda_bandwidth_gbps, cuda_compute_f32_tflops,
-    runtime::{CudaRuntime, CustomState},
-};
+use luminal::prelude::*;
+use luminal_cuda::{cudarc::driver::CudaContext, runtime::CudaRuntime};
 use model::*;
-use std::io::Write;
+use std::{io::Write, time::Duration};
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
 
+// This example compiles and runs Llama 3 8B on CUDA.
+
 fn main() {
+    let max_seq_len = 4096;
+    let gen_tokens = 5;
+    let search_graphs = 10; // the number of graphs we want to search during compilation
+    let prompt = "Hello, how are you";
+
+    // Set up tracing to perfetto
     let trace_session = luminal_tracing::subscriber()
         .perfetto("trace.pftrace")
-        .env_filter(format!("{}=trace,luminal=trace", env!("CARGO_PKG_NAME")))
+        .env_filter(format!(
+            "{}=trace,luminal=trace,luminal_cuda=trace",
+            env!("CARGO_PKG_NAME")
+        ))
         .init();
 
-    let max_seq_len = 4096;
-    let gen_tokens: usize = 5;
-    let input_sentence = "Hello, how are you";
+    // Set up cuda context and stream
+    let ctx = CudaContext::new(0).unwrap();
+    let stream = ctx.default_stream();
 
-    let tokenizer = Tokenizer::from_file("setup/tokenizer.json").expect("Failed to load tokenizer");
-    let encoding = tokenizer.encode(input_sentence, true).unwrap();
-    let mut sentence = encoding.get_ids().to_vec();
+    // Tokenize prompt
+    let tokenizer = Tokenizer::from_file("setup/tokenizer.json").unwrap();
+    let mut sentence = tokenizer.encode(prompt, true).unwrap().get_ids().to_vec();
 
-    println!("Building Graph...");
+    // Allocate kv cache
+    let mut kv_cache = KVCache::new(&stream, max_seq_len);
+
+    // Create compute graph
     let mut cx = Graph::default();
     let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
     let token_ids = cx.named_tensor("token_ids", 's').as_dtype(DType::Int);
     let model = model::Llama::init(&mut cx);
-    let logits = model.forward(input, token_ids).output();
+    let logits = model.forward(input, token_ids, &kv_cache).output();
 
-    let ctx = luminal_cuda::cudarc::driver::CudaContext::new(0).unwrap();
-    ctx.bind_to_thread().unwrap();
-    ctx.set_flags(luminal_cuda::cudarc::driver::sys::CUctx_flags::CU_CTX_SCHED_BLOCKING_SYNC)
-        .unwrap();
-    let stream = ctx.default_stream();
-
-    println!("Allocating KV Cache...");
-    let mut custom_state = FxHashMap::default();
-    custom_state.insert(
-        "kv_cache".to_string(),
-        CustomState::KVCache(
-            (0..LAYERS)
-                .map(|_| {
-                    (
-                        stream
-                            .alloc_zeros::<f32>((HIDDEN / KV_GROUPS) * max_seq_len)
-                            .unwrap(),
-                        stream
-                            .alloc_zeros::<f32>((HIDDEN / KV_GROUPS) * max_seq_len)
-                            .unwrap(),
-                    )
-                })
-                .collect_vec(),
-        ),
-    );
-
+    // Build search space
     println!("Building E-Graph...");
     cx.build_search_space::<CudaRuntime>();
 
-    let mut runtime = CudaRuntime::initialize((ctx.clone(), stream.clone(), custom_state));
+    // Load model weights from safetensors file
     println!("Loading weights...");
+    let mut runtime = CudaRuntime::initialize(stream);
     runtime.load_safetensors(&cx, "setup/model_combined.safetensors");
-    stream.synchronize().unwrap();
-    println!("Compiling...");
-    cx.set_dyn_dim('s', 1);
-    cx.set_dyn_dim('p', 0);
-    // inputs for search
-    runtime.set_data(input, vec![1_i32]);
-    runtime.set_data(token_ids, vec![0_i32]);
-    runtime = cx.search(runtime, 5);
 
-    print!("{input_sentence}");
+    // Run search process
+    println!("Compiling...");
+    cx.set_dim('s', 1);
+    cx.set_dim('p', 0);
+    runtime.set_data(input, vec![1]);
+    runtime.set_data(token_ids, vec![0]);
+    runtime = cx.search(runtime, search_graphs);
+    kv_cache.reset();
+
+    print!("{prompt}");
     std::io::stdout().flush().unwrap();
 
+    // Decode loop
     let mut prev_seq = 0;
-    let mut benchmarker = Benchmarker::new(); // H100 specs
+    let mut fwd_durations = vec![];
     for i in 0..gen_tokens {
+        let start = std::time::Instant::now();
         let span = if i == 0 {
             span!(Level::INFO, "prefill")
         } else {
             span!(Level::INFO, "decode")
         };
         let _entered = span.enter();
-        // Embed the tokenized sequence
-        let seq_len = sentence.len();
-        cx.set_dyn_dim('s', seq_len);
-        cx.set_dyn_dim('p', prev_seq);
 
-        runtime.set_data(input, sentence.iter().map(|i| *i as i32).collect_vec());
+        // Set runtime dimensions
+        let seq_len = sentence.len();
+        cx.set_dim('s', seq_len);
+        cx.set_dim('p', prev_seq);
+
+        // Set input data
+        runtime.set_data(
+            input,
+            sentence.iter().map(|i| *i as i32).collect::<Vec<_>>(),
+        );
         runtime.set_data(
             token_ids,
-            (prev_seq..seq_len + prev_seq)
-                .map(|i| i as i32)
-                .collect_vec(),
+            (prev_seq as i32..(seq_len + prev_seq) as i32).collect::<Vec<_>>(),
         );
-        if i < 2 {
-            // Re-allocate intermediate buffers
-            runtime.allocate_intermediate_buffers(&cx.dyn_map);
-        }
 
-        benchmarker.start_iteration(seq_len, prev_seq);
+        // Execute forward pass
         runtime.execute(&cx.dyn_map);
         let logits_data = runtime.get_f32(logits);
 
+        // Sample next token
         let sample_span = span!(Level::INFO, "sample");
         let _sample_entered = sample_span.enter();
         sentence = vec![*sample(&logits_data, VOCAB_SIZE).last().unwrap()];
         prev_seq += seq_len;
         print!("{}", tokenizer.decode(&sentence, true).unwrap());
         std::io::stdout().flush().unwrap();
-        benchmarker.end_iteration(i);
+        fwd_durations.push(start.elapsed());
     }
     println!();
 
-    trace_session.stop();
-    if let (Some(flops), Some(bandwidth)) =
-        (cuda_compute_f32_tflops(&ctx), cuda_bandwidth_gbps(&ctx))
-    {
-        benchmarker.report(flops as f64, bandwidth as f64);
-    }
+    // Report benchmarks
+    println!("  TTFT: {:.2} ms", fwd_durations[0].as_secs_f64() * 1e3);
+    println!(
+        "  TPOT: {:.2} ms",
+        (fwd_durations.iter().sum::<Duration>() / fwd_durations.len() as u32).as_secs_f64() * 1e3
+    );
+    runtime.print_execution_stats();
     // Dump cuda trace to timeline
+    trace_session.stop();
     if let Some(path) = trace_session.perfetto_path {
         runtime.record_cuda_perfetto_trace(path);
     }
@@ -137,14 +122,11 @@ fn main() {
 #[tracing::instrument(skip_all)]
 fn sample(logits: &[f32], vocab_size: usize) -> Vec<u32> {
     logits
-        .iter()
-        .chunks(vocab_size)
-        .into_iter()
-        .map(|logits| {
-            logits
-                .into_iter()
+        .chunks_exact(vocab_size)
+        .map(|row| {
+            row.iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .max_by(|(_, a), (_, b)| a.total_cmp(b))
                 .unwrap()
                 .0 as u32
         })

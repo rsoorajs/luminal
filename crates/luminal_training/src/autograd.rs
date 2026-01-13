@@ -1,10 +1,7 @@
 use petgraph::{visit::EdgeRef, Direction};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use luminal::{
-    op::{MaxReduce, SumReduce},
-    prelude::*,
-};
+use luminal::prelude::*;
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -27,15 +24,10 @@ fn build_dfs_set(
     while let Some(n) = stack.pop() {
         if !set.contains(&n) {
             set.insert(n);
-            stack.extend(
-                graph
-                    .edges_directed(n, direction)
-                    .filter(|e| !e.weight().is_schedule())
-                    .map(|e| match direction {
-                        Direction::Incoming => e.source(),
-                        Direction::Outgoing => e.target(),
-                    }),
-            );
+            stack.extend(graph.edges_directed(n, direction).map(|e| match direction {
+                Direction::Incoming => e.source(),
+                Direction::Outgoing => e.target(),
+            }));
         }
     }
     set
@@ -192,11 +184,11 @@ fn add_grad(
     for i in (0..fwd.shape.len()).rev() {
         if fwd.shape.strides[i] == 0 {
             grad.id = graph
-                .add_op(SumReduce {
+                .add_op(luminal::hlir::SumReduce {
                     dim: i,
                     ..Default::default()
                 })
-                .input(grad.id, 0, grad.shape)
+                .input(grad.id, grad.shape)
                 .finish();
             grad.shape.remove_dim(i);
             grad.shape = grad.shape.contiguous();
@@ -204,10 +196,10 @@ fn add_grad(
     }
 
     // Check to see if a reshape was done here. If so, we may need to assert grad shape is contiguous or insert a contiguous call
-    if let Some((_, _, mut pre_fwd_shape)) = graph.get_sources(fwd.id).first() {
-        if let Some(SumReduce { dim, .. }) = graph.try_get_op(fwd.id) {
+    if let Some((_, mut pre_fwd_shape)) = graph.get_sources(fwd.id).first() {
+        if let Some(luminal::hlir::SumReduce { dim, .. }) = graph.try_get_op(fwd.id) {
             pre_fwd_shape.remove_dim(*dim);
-        } else if let Some(MaxReduce { dim, .. }) = graph.try_get_op(fwd.id) {
+        } else if let Some(luminal::hlir::MaxReduce { dim, .. }) = graph.try_get_op(fwd.id) {
             pre_fwd_shape.remove_dim(*dim);
         }
         if grad.shape.dims != pre_fwd_shape.dims {
