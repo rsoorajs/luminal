@@ -1160,7 +1160,6 @@ impl BlockOp for TileMatmul {
                 }
                 return val;
             };
-            extern __shared__ __align__(16) char smem[];
             const float* a = source_ptrs[0] + eval_expression(payload.a, current);
             const float* b = source_ptrs[1] + eval_expression(payload.b, current);
             float*       c = out_ptr + eval_expression(payload.c, current);
@@ -1170,101 +1169,67 @@ impl BlockOp for TileMatmul {
             const int threads   = blockDim.x;
             const int lane      = t & 31;
             const int warp_id   = t >> 5;
-            const int num_warps = threads >> 5;  // assume threads is a multiple of 32
-            const int iters = eval_expression(payload.iters, 0);
+            const int num_warps = threads >> 5;
+            const int K = eval_expression(payload.iters, 0);
 
-            // Fast path: 1 x 32 output row, full 32 columns, K multiple of 128
-            if (eval_expression(payload.untiled_range[0], 0) == 1 &&
-                n_pos * 32 + 32 <= eval_expression(payload.untiled_range[1], 0) &&
-                iters % 128 == 0 &&
-                num_warps > 0) {
+            const int global_m0 = m_pos * 32;
+            const int global_n0 = n_pos * 32;
+            const int M = eval_expression(payload.untiled_range[0], 0);
+            const int N = eval_expression(payload.untiled_range[1], 0);
 
-                const int K      = iters;
-                constexpr int tileK = 128;                 // tune as desired
-                float* sh_a      = reinterpret_cast<float*>(smem); // >= tileK floats
+            int rows_left = M - global_m0;
+            int cols_left = N - global_n0;
+            if (rows_left <= 0 || cols_left <= 0) return;
 
-                // Each warp may handle multiple columns (stride over 32 columns)
-                constexpr int MAX_COLS_PER_WARP = 32;      // upper bound
-                float acc[MAX_COLS_PER_WARP];
-                #pragma unroll
-                for (int i = 0; i < MAX_COLS_PER_WARP; ++i) {
-                    acc[i] = 0.0f;
-                }
+            const int tile_m = rows_left > 32 ? 32 : rows_left;
+            const int tile_n = cols_left > 32 ? 32 : cols_left;
+            const int b_width = eval_expression(payload.b_width, 0);
 
-                // Loop over K in tiles of tileK
-                for (int k0 = 0; k0 < K; k0 += tileK) {
-                    const int this_tile = min(tileK, K - k0);
-
-                    // All threads cooperatively load A tile into shared memory
-                    for (int kk = t; kk < this_tile; kk += threads) {
-                        sh_a[kk] = a[k0 + kk];
-                    }
-                    __syncthreads();
-
-                    if (warp_id < num_warps) {
-                        int col_idx_in_warp = 0;
-                        // Each warp covers columns j = warp_id, warp_id+num_warps, ...
-                        for (int j = warp_id; j < 32; j += num_warps, ++col_idx_in_warp) {
-                            const float* Brow = b + j * eval_expression(payload.b_width, 0);
-                            float partial = 0.0f;
-
-                            // Each lane handles kk = lane, lane+32, ...
-                            #pragma unroll
-                            for (int kk = lane; kk < this_tile; kk += 32) {
-                                float a_k  = sh_a[kk];
-                                float b_kj = Brow[k0 + kk];
-                                partial = fmaf(a_k, b_kj, partial);
-                            }
-
-                            // Reduce within warp for this column
-                            partial = warp_reduce_sum(partial);
-                            if (lane == 0) {
-                                acc[col_idx_in_warp] += partial;
+            // Fast path for M=1 decode: warps parallelize over columns with K reduction
+            if (tile_m == 1 && num_warps > 0) {
+                constexpr int COLS_PER_WARP = 4;
+                for (int col_base = warp_id * COLS_PER_WARP; col_base < tile_n; col_base += num_warps * COLS_PER_WARP) {
+                    float partial[COLS_PER_WARP] = {0.0f, 0.0f, 0.0f, 0.0f};
+                    for (int k = lane; k < K; k += 32) {
+                        float a_val = a[k];
+                        #pragma unroll
+                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {
+                            if (col_base + ci < tile_n) {
+                                partial[ci] += a_val * b[(col_base + ci) * b_width + k];
                             }
                         }
                     }
-
-                    __syncthreads();
-                }
-
-                // Final write: each warp writes its columns
-                if (warp_id < num_warps && lane == 0) {
-                    int col_idx_in_warp = 0;
-                    for (int j = warp_id; j < 32; j += num_warps, ++col_idx_in_warp) {
-                        c[j] = acc[col_idx_in_warp];
+                    // Warp reduction for each column
+                    #pragma unroll
+                    for (int ci = 0; ci < COLS_PER_WARP; ci++) {
+                        partial[ci] = warp_reduce_sum(partial[ci]);
+                    }
+                    // Lane 0 writes results
+                    if (lane == 0) {
+                        #pragma unroll
+                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {
+                            if (col_base + ci < tile_n) {
+                                c[col_base + ci] = partial[ci];
+                            }
+                        }
                     }
                 }
-
             } else {
-                // Generic / predicated path: handle M<=32, N<=32 with any number of threads
-                const int global_m0 = m_pos * 32;
-                const int global_n0 = n_pos * 32;
-
-                int rows_left = eval_expression(payload.untiled_range[0], 0) - global_m0;
-                int cols_left = eval_expression(payload.untiled_range[1], 0) - global_n0;
-
-                if (rows_left <= 0 || cols_left <= 0) return;
-
-                const int tile_m = rows_left > 32 ? 32 : rows_left;
-                const int tile_n = cols_left > 32 ? 32 : cols_left;
-
+                // Generic path: handle any M, N tile
                 const int tile_elems = tile_m * tile_n;
-
                 const int a_width = eval_expression(payload.a_width, 0);
-                const int b_width = eval_expression(payload.b_width, 0);
                 const int c_width = eval_expression(payload.c_width, 0);
 
-                // Stride over all valid (ty, tx) in this tile
                 for (int idx = t; idx < tile_elems; idx += threads) {
-                    int ty = idx / tile_n;  // 0 .. tile_m-1
-                    int tx = idx % tile_n;  // 0 .. tile_n-1
+                    int ty = idx / tile_n;
+                    int tx = idx % tile_n;
 
                     const float* A0 = a + ty * a_width;
                     const float* B0 = b + tx * b_width;
                     float*       C0 = c + ty * c_width + tx;
 
                     float acc = 0.f;
-                    for (int k = 0; k < iters; ++k) {
+                    for (int k = 0; k < K; ++k) {
                         acc += A0[k] * B0[k];
                     }
                     *C0 = acc;

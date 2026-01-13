@@ -51,51 +51,74 @@ __device__ __forceinline__ void nanosleep(unsigned int cycles) {
   asm volatile("nanosleep.u32 %0;" ::"r"(cycles));
 }
 
-__device__ inline void mutex_lock(int *m) {
-  while (atomicCAS(m, 0, 1) != 0) {
-    nanosleep(64);
-  }
-  __threadfence();
-}
-__device__ inline void mutex_unlock(int *m) {
-  __threadfence();
-  atomicExch(m, 0);
+__device__ __forceinline__ int atomic_load_acquire(int *addr) {
+  int val;
+  asm volatile("ld.global.acquire.gpu.b32 %0, [%1];" : "=r"(val) : "l"(addr));
+  return val;
 }
 
 struct NextTask {
   int current;
   int task_idx;
 };
+
+// Lock-free task fetching using CAS
+// remaining encoding:
+//   -1 = uninitialized (ready to be claimed)
+//   >= 0 = iterations remaining (current iteration = remaining value)
+//   -2 = exhausted (all iterations claimed)
 __device__ inline bool fetch_next_task(Task *tasks, int num_tasks, int *head,
                                        NextTask *out, int *queue_lock) {
-  mutex_lock(queue_lock);
+  while (true) {
+    int idx = atomic_load_acquire(head);
+    if (idx >= num_tasks) {
+      return false;
+    }
 
-  int idx = *head;
-  if (idx >= num_tasks) {
-    mutex_unlock(queue_lock);
-    return false;
+    Task *t = &tasks[idx];
+    int old_remaining = atomicAdd(&t->remaining, 0);
+
+    if (old_remaining == -1) {
+      // First to claim - initialize and claim first iteration
+      int range = eval_expression(t->range, 0);
+      // Set remaining to range-2 for next iteration, or -2 if single iteration
+      int new_remaining = (range == 1) ? -2 : range - 2;
+      if (atomicCAS(&t->remaining, -1, new_remaining) == -1) {
+        out->task_idx = idx;
+        out->current = range - 1;
+        if (range == 1) {
+          // Single iteration task - advance head
+          atomicCAS(head, idx, idx + 1);
+        }
+        return true;
+      }
+      continue;
+    }
+
+    if (old_remaining < 0) {
+      // Task exhausted (-2) or being processed, advance head
+      atomicCAS(head, idx, idx + 1);
+      continue;
+    }
+
+    if (old_remaining == 0) {
+      // Last iteration - claim it and mark exhausted
+      if (atomicCAS(&t->remaining, 0, -2) == 0) {
+        out->task_idx = idx;
+        out->current = 0;
+        atomicCAS(head, idx, idx + 1);
+        return true;
+      }
+      continue;
+    }
+
+    // Normal case: claim iteration old_remaining
+    if (atomicCAS(&t->remaining, old_remaining, old_remaining - 1) == old_remaining) {
+      out->task_idx = idx;
+      out->current = old_remaining;
+      return true;
+    }
   }
-
-  out->task_idx = idx;
-
-  // Check if we need to reset this remaining counter (-1 signals there are no
-  // remaining tasks here to run)
-  if (tasks[idx].remaining == -1) {
-    tasks[idx].remaining = eval_expression(tasks[idx].range, 0) - 1;
-  }
-
-  out->current = tasks[idx].remaining;
-
-  // Decrement the remaining count
-  tasks[idx].remaining--;
-
-  // If this is the last iteration in this task, advance the head
-  if (out->current == 0) {
-    atomicAdd(head, 1);
-  }
-
-  mutex_unlock(queue_lock);
-  return true;
 }
 
 __device__ inline void record_event(SMEvent *__restrict__ timings, int *event_idx, int event_type) {
@@ -155,13 +178,13 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
       atomicAdd(&ready[dep_out], 1);
       record_event(timings, &recorded_event, 1); // Record wait start
 
-      // Wait on input dependencies
-      while (atomicAdd(&ready[dep_a], 0) > 0)
-        nanosleep(64);
-      while (atomicAdd(&ready[dep_b], 0) > 0)
-        nanosleep(64);
-      while (atomicAdd(&ready[dep_c], 0) > 0)
-        nanosleep(64);
+      // Wait on input dependencies using efficient acquire loads
+      while (atomic_load_acquire(&ready[dep_a]) > 0)
+        nanosleep(32);
+      while (atomic_load_acquire(&ready[dep_b]) > 0)
+        nanosleep(32);
+      while (atomic_load_acquire(&ready[dep_c]) > 0)
+        nanosleep(32);
 
       __threadfence();
       record_event(timings, &recorded_event, t->op + 2); // Record op start
