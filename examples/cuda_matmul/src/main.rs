@@ -1,20 +1,22 @@
-use log::debug;
+use tracing::{info, debug};
 use luminal::{prelude::*, visualization::ToDot};
 use luminal_cuda::runtime::CudaRuntime;
-use luminal_tracing;
-use ndarray::Array2;
+use candle_core::{Device, Tensor};
 use rand::Rng;
 use std::fs;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 fn main() {
-    // Initialize tracing with Perfetto export
-    let trace_session = luminal_tracing::subscriber()
-        .perfetto("cuda_matmul_trace.pftrace")
-        .env_filter("luminal_cuda=trace,luminal=trace")
+    // Initialize tracing with file output
+    let log_file = std::fs::File::create("cuda_matmul.log").expect("Failed to create log file");
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::new("luminal_cuda=trace,luminal=trace"))
+        .with(fmt::layer().with_writer(log_file).with_ansi(false))
         .init();
 
     let m = (2 as usize).pow(8);
-    let n = (2 as usize).pow(12);
+    let n = (2 as usize).pow(11);
     let k = (2 as usize).pow(12);
 
     // Create compute graph
@@ -38,19 +40,37 @@ fn main() {
     // Generate random input tensors based on dimensions
     let mut rng = rand::rng();
     let a_data: Vec<f32> = (0..(m * k)).map(|_| rng.random_range(0.0..10.0)).collect();
-    let b_data: Vec<f32> = (0..(k * n)).map(|_| rng.random_range(0.0..10.0)).collect();
+    let b_data_row_major: Vec<f32> = (0..(k * n)).map(|_| rng.random_range(0.0..10.0)).collect();
 
-    let a_matrix = Array2::from_shape_vec((m, k), a_data.clone()).unwrap();
-    let b_matrix = Array2::from_shape_vec((k, n), b_data.clone()).unwrap();
+    // Create candle tensors on CPU for verification
+    let device = Device::Cpu;
 
-   
-    // Set input tensors
-    rt.set_data(a, Box::new(a_data));
-    rt.set_data(b, Box::new(b_data));
+    // A is row-major (m x k)
+    let a_candle = Tensor::from_vec(a_data.clone(), (m, k), &device).unwrap();
+
+    // B needs to be column-major for luminal, so create it as row-major (k x n)
+    // then transpose to get column-major layout
+    let b_candle_row_major = Tensor::from_vec(b_data_row_major.clone(), (k, n), &device).unwrap();
+
+    // For luminal, we need B in column-major format, which means we store it as transposed
+    // Convert row-major (k x n) to column-major by transposing to (n x k) then reading as flat
+    let b_candle_transposed = b_candle_row_major.t().unwrap().contiguous().unwrap();
+    let b_data_col_major = b_candle_transposed.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+    info!("Matrix A shape: {} x {} (row-major)", m, k);
+    info!("Matrix B shape: {} x {} (column-major layout)", k, n);
+
+    // Set input tensors for luminal
+    // A is row-major as is
+    rt.set_data(a, Box::new(a_data.clone()));
+    // B is in column-major format
+    rt.set_data(b, Box::new(b_data_col_major.clone()));
 
     rt.allocate_intermediate_buffers(&cx.dyn_map);
 
-    rt = cx.search(rt, 10);
+    // Use search limit of 1 to get HostMatmul like the test
+    rt = cx.search(rt, 1);
+    
 
     fs::write("llir.dot", (&rt.llir_graph).to_dot().unwrap()).unwrap();
     rt.allocate_intermediate_buffers(&cx.dyn_map); // if you remove this it all fails... 
@@ -60,21 +80,31 @@ fn main() {
     cx.set_dyn_dim('n', n);
     cx.set_dyn_dim('k', k);
 
-    
     rt.execute(&cx.dyn_map);
 
-    // Get output tensor
-    let result_data = rt.get_f32(c);
-    let result_matrix = Array2::from_shape_vec((m, n), result_data).unwrap();
+    // Get output tensor from luminal (row-major format)
+    let luminal_result_data = rt.get_f32(c);
 
-    debug!("Matrix A:\n{:.2}", a_matrix);
-    debug!("Matrix B:\n{:.2}", b_matrix);
-    debug!("Result:\n{:.2}", result_matrix);
+    // Compute matmul using candle for verification
+    // a_candle is (m x k) row-major, b_candle_row_major is (k x n) row-major
+    let candle_result = a_candle.matmul(&b_candle_row_major).unwrap();
+    let candle_result_flat = candle_result.to_vec2::<f32>().unwrap()
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<f32>>();
 
-    // Flush and stop the trace session
-    trace_session.stop();
-    if let Some(path) = trace_session.perfetto_path {
-        println!("Trace saved to: {}", path.display());
-        println!("View it at: https://ui.perfetto.dev/");
-    }
+    // Compare results
+    let diff = candle_result_flat.iter()
+        .zip(luminal_result_data.iter())
+        .map(|(a, b)| (a - b).abs())
+        .collect::<Vec<f32>>();
+
+    let max_diff = diff.iter().cloned().fold(0.0f32, f32::max);
+
+    // Check if results match within tolerance
+    // Use 0.1 tolerance for GPU vs CPU comparison (floating point precision differences)
+    assert!(max_diff < 0.1);
+    
+    println!("\nLogs written to: cuda_matmul.log");
 }

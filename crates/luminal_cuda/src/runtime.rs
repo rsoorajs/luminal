@@ -286,6 +286,7 @@ impl CudaRuntime {
         }
     }
 
+    // this was broken by addition of host ops
     pub fn record_cuda_perfetto_trace(&self, file_path: impl AsRef<std::path::Path>) {
         let ops = <crate::block::Ops as IntoBlockOp>::into_vec();
         let data = std::fs::read(&file_path).unwrap();
@@ -299,7 +300,7 @@ impl CudaRuntime {
                     name_field: Some(tracing_perfetto_sdk_schema::track_event::NameField::Name(s)),
                     r#type: ty,
                     ..
-                })) if s == "megakernel"
+                })) if s == "megakernel_execute"
                     && *ty
                         == Some(
                             tracing_perfetto_sdk_schema::track_event::Type::SliceBegin as i32,
@@ -712,12 +713,15 @@ impl Runtime for CudaRuntime {
                             lb.arg(&self.hlir_buffers[&llir_to_hlir[inp]]);
                         }
                     }
-                    let span = span!(Level::INFO, "kernel");
-                    let _entered = span.enter();
+                    let _span = span!(
+                        Level::INFO,
+                        "cuda_kernel_launch",
+                        grid_dim = ?(cfg.grid_dim.0, cfg.grid_dim.1, cfg.grid_dim.2),
+                        block_dim = ?(cfg.block_dim.0, cfg.block_dim.1, cfg.block_dim.2),
+                        shared_mem_bytes = cfg.shared_mem_bytes
+                    ).entered();
                     unsafe { lb.launch(cfg) }.unwrap();
                     self.cuda_stream.synchronize().unwrap();
-                    drop(_entered);
-                    drop(span);
                 }
                 ExecutableKernel::Megakernel {
                     interpreter,
@@ -730,53 +734,74 @@ impl Runtime for CudaRuntime {
                         .cuda_context
                         .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
                         .unwrap();
-                    let span = span!(Level::INFO, "megakernel_setup");
-                    let _entered = span.enter();
-                    // Upload queue, barriers and program counter
-                    let d_barriers = self
-                        .cuda_stream
-                        .alloc_zeros::<i32>(n_barriers.exec(dyn_map).unwrap())
-                        .unwrap();
-                    let d_tasks = self.cuda_stream.memcpy_stod(work_queue).unwrap();
-                    let d_head = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
-                    let queue_lock = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
-                    // Set up timing buffer (start_time_u64,[[event_start_u64,event_type_i32 for sm_event in sm[:1000] for sm in sms[:sm_count]])
-                    let timing_buffer = self
-                        .cuda_stream
-                        .alloc_zeros::<SMEvent>(sm_count as usize * 1000)
-                        .unwrap();
-                    let start_time = self
-                        .cuda_stream
-                        .alloc_zeros::<u64>(sm_count as usize)
-                        .unwrap();
 
-                    // Set up dyn dims
-                    for (dyn_dim, val) in dyn_map {
-                        if let Some(global) = interpreter_constants.get_mut(&dyn_dim) {
-                            let mut view = global.as_view_mut();
-                            let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
-                            self.cuda_stream
-                                .memcpy_htod(&[*val as i32], &mut symbol)
-                                .unwrap();
+                    let (d_barriers, d_tasks, d_head, queue_lock, timing_buffer, start_time, cfg) = {
+                        let _span = span!(
+                            Level::INFO,
+                            "megakernel_setup",
+                            sm_count = sm_count,
+                            n_barriers = n_barriers.exec(dyn_map).unwrap(),
+                            n_tasks = work_queue.len()
+                        ).entered();
+
+                        // Upload queue, barriers and program counter
+                        let d_barriers = self
+                            .cuda_stream
+                            .alloc_zeros::<i32>(n_barriers.exec(dyn_map).unwrap())
+                            .unwrap();
+                        let d_tasks = self.cuda_stream.memcpy_stod(work_queue).unwrap();
+                        let d_head = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
+                        let queue_lock = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
+                        // Set up timing buffer (start_time_u64,[[event_start_u64,event_type_i32 for sm_event in sm[:1000] for sm in sms[:sm_count]])
+                        let timing_buffer = self
+                            .cuda_stream
+                            .alloc_zeros::<SMEvent>(sm_count as usize * 1000)
+                            .unwrap();
+                        let start_time = self
+                            .cuda_stream
+                            .alloc_zeros::<u64>(sm_count as usize)
+                            .unwrap();
+
+                        // Set up dyn dims
+                        for (dyn_dim, val) in dyn_map {
+                            if let Some(global) = interpreter_constants.get_mut(&dyn_dim) {
+                                let mut view = global.as_view_mut();
+                                let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
+                                self.cuda_stream
+                                    .memcpy_htod(&[*val as i32], &mut symbol)
+                                    .unwrap();
+                            }
                         }
-                    }
 
-                    let shared_mem_max = self
-                        .cuda_context
-                        .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR)
-                        .unwrap();
+                        let shared_mem_max = self
+                            .cuda_context
+                            .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR)
+                            .unwrap();
 
-                    interpreter.set_attribute(
-                        cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                        shared_mem_max / 2, // Half shared mem, half L2
-                    ).unwrap();
+                        interpreter.set_attribute(
+                            cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                            shared_mem_max / 2, // Half shared mem, half L2
+                        ).unwrap();
 
-                    // Launch kernel
-                    let cfg = LaunchConfig {
-                        grid_dim: (sm_count as u32, 1, 1), // One block per SM
-                        block_dim: (1024, 1, 1),           // 1024 threads (32 warps) per block
-                        shared_mem_bytes: (shared_mem_max / 2) as u32,
+                        // Launch kernel config
+                        let cfg = LaunchConfig {
+                            grid_dim: (sm_count as u32, 1, 1), // One block per SM
+                            block_dim: (1024, 1, 1),           // 1024 threads (32 warps) per block
+                            shared_mem_bytes: (shared_mem_max / 2) as u32,
+                        };
+
+                        (d_barriers, d_tasks, d_head, queue_lock, timing_buffer, start_time, cfg)
                     };
+
+                    let _span = span!(
+                        Level::INFO,
+                        "megakernel_execute",
+                        sm_count = sm_count,
+                        grid_dim = ?(cfg.grid_dim.0, cfg.grid_dim.1, cfg.grid_dim.2),
+                        block_dim = ?(cfg.block_dim.0, cfg.block_dim.1, cfg.block_dim.2),
+                        shared_mem_bytes = cfg.shared_mem_bytes
+                    ).entered();
+
                     let mut lb = self.cuda_stream.launch_builder(interpreter);
                     let n_tasks = work_queue.len() as i32;
                     lb.arg(&d_tasks);
@@ -786,14 +811,8 @@ impl Runtime for CudaRuntime {
                     lb.arg(&queue_lock);
                     lb.arg(&timing_buffer);
                     lb.arg(&start_time);
-                    drop(_entered);
-                    drop(span);
-                    let span = span!(Level::INFO, "megakernel");
-                    let _entered = span.enter();
                     unsafe { lb.launch(cfg) }.unwrap();
                     self.cuda_stream.synchronize().unwrap();
-                    drop(_entered);
-                    drop(span);
 
                     timings.push((
                         self.cuda_stream.memcpy_dtov(&timing_buffer).unwrap(),
@@ -819,13 +838,14 @@ impl Runtime for CudaRuntime {
                             &self.hlir_buffers[&llir_to_hlir[inp]]
                         }
                     }));
-                    let span = span!(Level::INFO, "host_op");
-                    let _entered = span.enter();
+                    let _span = span!(
+                        Level::INFO,
+                        "host_op_execute",
+                        n_inputs = inputs.len()
+                    ).entered();
                     internal
                         .execute(stream, &host_op_buffers, dyn_map)
                         .unwrap();
-                    drop(_entered);
-                    drop(span);
                 }
             }
         }
