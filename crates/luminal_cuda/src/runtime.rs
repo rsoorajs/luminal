@@ -630,7 +630,7 @@ impl Runtime for CudaRuntime {
                     // Launch kernel
                     let cfg = LaunchConfig {
                         grid_dim: (sm_count as u32, 1, 1), // One block per SM
-                        block_dim: (1024, 1, 1),           // 1024 threads (32 warps) per block
+                        block_dim: (256, 1, 1),            // 1024 threads (32 warps) per block
                         shared_mem_bytes: (shared_mem_max / 2) as u32,
                     };
                     let mut lb = self.cuda_stream.launch_builder(interpreter);

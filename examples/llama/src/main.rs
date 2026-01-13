@@ -12,7 +12,7 @@ use tracing::{span, Level};
 fn main() {
     let max_seq_len = 4096;
     let gen_tokens = 5;
-    let search_graphs = 10; // the number of graphs we want to search during compilation
+    let search_graphs = 5; // the number of graphs we want to search during compilation
     let prompt = "Hello, how are you";
 
     // Set up tracing to perfetto
