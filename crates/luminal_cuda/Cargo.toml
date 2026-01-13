@@ -23,6 +23,6 @@ bytemuck = "1.24.0"
 memmap2 = "0.9.9"
 
 [dev-dependencies]
-ndarray = "0.15"
 proptest = "1.0"
 rand = "0.8"
+candle-core = "0.8"
