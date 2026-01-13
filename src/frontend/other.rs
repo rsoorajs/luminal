@@ -1,4 +1,5 @@
-use crate::{op::Constant, prelude::*};
+use crate::hlir::*;
+use crate::prelude::*;
 
 impl Graph {
     /// A scalar expression constant
@@ -81,7 +82,7 @@ impl GraphTensor {
         let id = self
             .graph()
             .add_op(Cast(dtype))
-            .input(self.id, 0, self.shape)
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(id, self.shape, self.graph_ref, dtype)
     }
