@@ -12,3 +12,5 @@ Cargo.lock
 /**/setup_weights/target
 *.model
 *.gguf
+
+*.proptest-regressions
