@@ -19,16 +19,8 @@ impl LayerNorm {
         cx: &mut Graph,
     ) -> Self {
         Self {
-            weight: if let Some(w) = weight {
-                Some(cx.named_tensor(w, dim))
-            } else {
-                None
-            },
-            bias: if let Some(b) = bias {
-                Some(cx.named_tensor(b, dim))
-            } else {
-                None
-            },
+            weight: weight.map(|w| cx.named_tensor(w, dim)),
+            bias: bias.map(|b| cx.named_tensor(b, dim)),
             mean_norm,
             epsilon,
         }
@@ -42,10 +34,10 @@ impl LayerNorm {
         }
         input = input.std_norm(input.shape.last_axis(), self.epsilon);
         if let Some(w) = self.weight {
-            input *= w.expand(input.shape);
+            input *= w.expand_lhs(&input.dims()[..input.dims().len() - 1]);
         }
         if let Some(b) = self.bias {
-            input += b.expand(input.shape);
+            input += b.expand_lhs(&input.dims()[..input.dims().len() - 1]);
         }
         input
     }

@@ -1,4 +1,6 @@
-use crate::{op, prelude::*};
+use itertools::Itertools;
+
+use crate::prelude::*;
 use std::ops::{Add, Mul, Neg};
 
 impl Neg for GraphTensor {
@@ -14,8 +16,8 @@ impl GraphTensor {
     pub fn log2(self) -> GraphTensor {
         let new_id = self
             .graph()
-            .add_op(op::Log2::default())
-            .input(self.id, 0, self.shape)
+            .add_op(crate::hlir::Log2::default())
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -24,8 +26,8 @@ impl GraphTensor {
     pub fn exp2(self) -> GraphTensor {
         let new_id = self
             .graph()
-            .add_op(op::Exp2::default())
-            .input(self.id, 0, self.shape)
+            .add_op(crate::hlir::Exp2::default())
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -44,8 +46,8 @@ impl GraphTensor {
     pub fn reciprocal(self) -> GraphTensor {
         let new_id = self
             .graph()
-            .add_op(op::Recip::default())
-            .input(self.id, 0, self.shape)
+            .add_op(crate::hlir::Recip::default())
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -54,8 +56,8 @@ impl GraphTensor {
     pub fn sin(self) -> GraphTensor {
         let new_id = self
             .graph()
-            .add_op(op::Sin::default())
-            .input(self.id, 0, self.shape)
+            .add_op(crate::hlir::Sin::default())
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -74,8 +76,8 @@ impl GraphTensor {
     pub fn sqrt(self) -> GraphTensor {
         let new_id = self
             .graph()
-            .add_op(op::Sqrt::default())
-            .input(self.id, 0, self.shape)
+            .add_op(crate::hlir::Sqrt::default())
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -83,8 +85,8 @@ impl GraphTensor {
     pub fn graph_break(self) -> GraphTensor {
         let new_id = self
             .graph()
-            .add_op(op::GraphBreak)
-            .input(self.id, 0, self.shape)
+            .add_op(crate::hlir::GraphBreak)
+            .input(self.id, self.shape)
             .finish();
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
     }
@@ -95,17 +97,19 @@ impl GraphTensor {
         GraphTensor: Add<T, Output = GraphTensor>,
     {
         (self * self)
-            .mean(axes)
+            .mean(axes.to_axes())
             .add(epsilon)
             .sqrt()
             .reciprocal()
-            .expand(self.shape)
+            .expand_to_shape_on_axes(self.shape, axes)
             .mul(self)
     }
 
     /// Center so mean is 0.0
     pub fn mean_norm(self, axes: impl ToAxes) -> GraphTensor {
-        self - self.mean(axes).expand(self.shape)
+        self - self
+            .mean(axes.to_axes())
+            .expand_to_shape_on_axes(self.shape, axes)
     }
 
     /// Applies a layer norm along an axis
@@ -118,31 +122,48 @@ impl GraphTensor {
 
     /// Normalize the tensor along `axes` using an Lp norm.
     pub fn normalize(self, p: f32, axes: impl ToAxes, epsilon: f32) -> GraphTensor {
-        let norm = self.abs().pow(p).sum(axes).pow(1.0 / p);
-        self / norm.maximum_f32(epsilon).expand(self.shape)
+        let norm = self.abs().pow(p).sum(axes.to_axes()).pow(1.0 / p);
+        self / norm
+            .maximum_f32(epsilon)
+            .expand_to_shape_on_axes(self.shape, axes)
     }
 
     /// Applies a softmax function along an axis
     pub fn softmax(self, axes: impl ToAxes) -> GraphTensor {
-        let m = self - self.max(axes.to_axes()).expand(self.shape);
+        let m = self
+            - self
+                .max(axes.to_axes())
+                .expand_to_shape_on_axes(self.shape, axes.to_axes());
         let exp = m.exp();
-        exp / exp.sum(axes).expand(self.shape)
+        exp / exp
+            .sum(axes.to_axes())
+            .expand_to_shape_on_axes(self.shape, axes)
     }
 
     /// Applies a log softmax function along an axis
     pub fn log_softmax(self, axes: impl ToAxes) -> GraphTensor {
-        let m = self - self.max(axes.to_axes()).expand(self.shape);
-        m - m.exp().sum(axes.to_axes()).log().expand(m.shape)
+        let m = self
+            - self
+                .max(axes.to_axes())
+                .expand_to_shape_on_axes(self.shape, axes.to_axes());
+        m - m
+            .exp()
+            .sum(axes.to_axes())
+            .log()
+            .expand_to_shape_on_axes(m.shape, axes)
     }
 
     /// Get the indicies of the max elements along an axis
     pub fn argmax(self, axis: usize) -> GraphTensor {
         // Get one-hot along last dimension
-        let x_equal = self.eq(self.max(axis).expand(self.shape));
+        let x_equal = self
+            .eq(self.max(axis).expand_dim(axis, self.dims()[axis]))
+            .cast(DType::Int);
         // Create index arange for last dimension
-        let r = self.graph().arange(self.dims()[axis]).cast(self.dtype);
+        let r = self.graph().arange(self.dims()[axis]);
+        let axes = (0..self.shape.len()).filter(|i| *i != axis).collect_vec();
         // Multiply one-hot by expanded index arange
-        (x_equal * r.expand(self.shape)).max(axis).cast(DType::Int)
+        (x_equal * r.expand_to_shape_on_axes(self.shape, axes)).max(axis)
     }
 
     /// Take the absolute value
@@ -274,6 +295,7 @@ pub(super) mod tests {
     use candle_nn::ops::softmax;
     use itertools::Itertools;
     use ordered_float::NotNan;
+    use proptest::prelude::*;
 
     fn cummax_ref_2d(a: Tensor) -> Tensor {
         let v = a.to_vec2::<f32>().unwrap();
@@ -303,8 +325,8 @@ pub(super) mod tests {
 
     pub fn test_unary(
         shape: impl ToShape,
-        func: fn(GraphTensor) -> GraphTensor,
-        ref_func: fn(Tensor) -> Tensor,
+        func: impl Fn(GraphTensor) -> GraphTensor,
+        ref_func: impl Fn(Tensor) -> Tensor,
     ) {
         let shape = shape
             .to_shape()
@@ -319,7 +341,7 @@ pub(super) mod tests {
         let mut rt = cx.search(NativeRuntime::default(), 1);
 
         let v = random_vec(shape.iter().copied().product());
-        rt.set_data(a.id, v.clone().into());
+        rt.set_data(a.id, v.clone());
         rt.execute(&cx.dyn_map);
 
         // Reference
@@ -331,155 +353,151 @@ pub(super) mod tests {
         assert_close(rt.get_f32(b.id), &ref_b.to_vec1::<f32>().unwrap())
     }
 
-    #[test]
-    fn test_exp() {
-        test_unary(27, |a| a.exp(), |a| a.exp().unwrap());
-    }
-    #[test]
-    fn test_log() {
-        test_unary(27, |a| a.log(), |a| a.log().unwrap());
-    }
-    #[test]
-    fn test_sin() {
-        test_unary(27, |a| a.sin(), |a| a.sin().unwrap());
-    }
-    #[test]
-    fn test_cos() {
-        test_unary(27, |a| a.cos(), |a| a.cos().unwrap());
-    }
-    #[test]
-    fn test_activations() {
-        test_unary(27, |a| a.relu(), |a| a.relu().unwrap());
-        test_unary(27, |a| a.gelu(), |a| a.gelu().unwrap());
-        test_unary(27, |a| a.swish(), |a| a.silu().unwrap());
-        test_unary(27, |a| a.tanh(), |a| a.tanh().unwrap());
-    }
-    #[test]
-    fn test_recip() {
-        test_unary(27, |a| a.reciprocal(), |a| a.recip().unwrap());
-    }
-    #[test]
-    fn test_sqrt() {
-        test_unary(27, |a| a.sqrt(), |a| a.sqrt().unwrap());
-    }
-    #[test]
-    fn test_square() {
-        test_unary(27, |a| a.square(), |a| a.powf(2.0).unwrap());
-    }
-    #[test]
-    fn test_softmax() {
-        test_unary(27, |a| a.softmax(0), |a| softmax(&a, 0).unwrap());
-        test_unary((4, 5), |a| a.softmax(1), |a| softmax(&a, 1).unwrap());
-    }
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
 
-    #[test]
-    fn test_layer_norm() {
-        test_unary(
-            27,
-            |a| a.layer_norm(0, 1e-5),
-            |a| {
-                let meaned = (a.clone() - a.mean(0).unwrap().broadcast_as(27)).unwrap();
-                meaned
-                    .powf(2.0)
-                    .unwrap()
-                    .mean(0)
-                    .unwrap()
-                    .add(&Tensor::new(1e-5_f32, a.device()).unwrap())
-                    .unwrap()
-                    .sqrt()
-                    .unwrap()
-                    .recip()
-                    .unwrap()
-                    .broadcast_as(27)
-                    .unwrap()
-                    .mul(&meaned)
-                    .unwrap()
-            },
-        );
-    }
+        #[test]
+        fn test_exp(size in 1usize..128) {
+            test_unary(size, |a| a.exp(), |a| a.exp().unwrap());
+        }
 
-    #[test]
-    fn test_cumulative() {
-        test_unary(27, |a| a.cumsum(0), |a| a.cumsum(0).unwrap());
-        test_unary((27, 63), |a| a.cumsum(1), |a| a.cumsum(1).unwrap());
-        test_unary((27, 63), |a| a.cumsum(0), |a| a.cumsum(0).unwrap());
-        test_unary(
-            (2, 3),
-            |a| a.cumsum((0, 1)),
-            |a| a.cumsum(0).unwrap().cumsum(1).unwrap(),
-        );
-        test_unary(
-            (2, 3),
-            |a| a.cumsum((1, 0)),
-            |a| a.cumsum(1).unwrap().cumsum(0).unwrap(),
-        );
-        test_unary((2, 3), |a| a.cummax(1), cummax_ref_2d);
-        test_unary((2, 3), |a| a.cumprod(1), cumprod_ref_2d);
-    }
+        #[test]
+        fn test_log(size in 1usize..128) {
+            test_unary(size, |a| a.log(), |a| a.log().unwrap());
+        }
 
-    #[test]
-    fn test_argmax() {
-        test_unary(
-            (9, 27),
-            |a| a.argmax(1).cast(DType::F32),
-            |a| {
-                a.argmax(1)
-                    .unwrap()
-                    .to_dtype(candle_core::DType::F32)
-                    .unwrap()
-            },
-        );
-        test_unary(
-            (9, 27),
-            |a| a.argmax(0).cast(DType::F32),
-            |a| {
-                a.argmax(0)
-                    .unwrap()
-                    .to_dtype(candle_core::DType::F32)
-                    .unwrap()
-            },
-        );
-    }
-    #[test]
-    fn test_topk() {
-        pub fn topk_sorted_indices(x: &[f32], k: usize) -> Vec<usize> {
-            if k == 0 {
-                return Vec::new();
-            }
+        #[test]
+        fn test_sin(size in 1usize..128) {
+            test_unary(size, |a| a.sin(), |a| a.sin().unwrap());
+        }
 
-            let mut heap: BinaryHeap<std::cmp::Reverse<(NotNan<f32>, usize)>> =
-                BinaryHeap::with_capacity(k);
+        #[test]
+        fn test_cos(size in 1usize..128) {
+            test_unary(size, |a| a.cos(), |a| a.cos().unwrap());
+        }
 
-            for (i, &v) in x.iter().enumerate() {
-                let v = NotNan::new(v).expect("NaN encountered in topk");
-                if heap.len() < k {
-                    heap.push(std::cmp::Reverse((v, i)));
-                } else if let Some(&std::cmp::Reverse((min_v, _))) = heap.peek() {
-                    if v > min_v {
-                        heap.pop();
+        #[test]
+        fn test_activations(size in 1usize..128) {
+            test_unary(size, |a| a.relu(), |a| a.relu().unwrap());
+            test_unary(size, |a| a.gelu(), |a| a.gelu().unwrap());
+            test_unary(size, |a| a.swish(), |a| a.silu().unwrap());
+            test_unary(size, |a| a.tanh(), |a| a.tanh().unwrap());
+        }
+
+        #[test]
+        fn test_recip(size in 1usize..128) {
+            test_unary(size, |a| a.reciprocal(), |a| a.recip().unwrap());
+        }
+
+        #[test]
+        fn test_sqrt(size in 1usize..128) {
+            test_unary(size, |a| a.sqrt(), |a| a.sqrt().unwrap());
+        }
+
+        #[test]
+        fn test_square(size in 1usize..128) {
+            test_unary(size, |a| a.square(), |a| a.powf(2.0).unwrap());
+        }
+
+        #[test]
+        fn test_softmax(size in 1usize..128, rows in 1usize..16, cols in 1usize..16) {
+            test_unary(size, |a| a.softmax(0), |a| softmax(&a, 0).unwrap());
+            test_unary((rows, cols), |a| a.softmax(1), |a| softmax(&a, 1).unwrap());
+        }
+
+        #[test]
+        fn test_layer_norm(size in 2usize..128) {
+            test_unary(
+                size,
+                |a| a.layer_norm(0, 1e-5),
+                |a| {
+                    let meaned = (a.clone() - a.mean(0).unwrap().broadcast_as(size)).unwrap();
+                    meaned
+                        .powf(2.0)
+                        .unwrap()
+                        .mean(0)
+                        .unwrap()
+                        .add(&Tensor::new(1e-5_f32, a.device()).unwrap())
+                        .unwrap()
+                        .sqrt()
+                        .unwrap()
+                        .recip()
+                        .unwrap()
+                        .broadcast_as(size)
+                        .unwrap()
+                        .mul(&meaned)
+                        .unwrap()
+                },
+            );
+        }
+
+        #[test]
+        fn test_cumulative(rows in 1usize..16, cols in 1usize..16) {
+            test_unary(rows, |a| a.cumsum(0), |a| a.cumsum(0).unwrap());
+            test_unary((rows, cols), |a| a.cumsum(1), |a| a.cumsum(1).unwrap());
+            test_unary((rows, cols), |a| a.cumsum(0), |a| a.cumsum(0).unwrap());
+            test_unary(
+                (rows, cols),
+                |a| a.cumsum((0, 1)),
+                |a| a.cumsum(0).unwrap().cumsum(1).unwrap(),
+            );
+            test_unary(
+                (rows, cols),
+                |a| a.cumsum((1, 0)),
+                |a| a.cumsum(1).unwrap().cumsum(0).unwrap(),
+            );
+            test_unary((rows, cols), |a| a.cummax(1), cummax_ref_2d);
+            test_unary((rows, cols), |a| a.cumprod(1), cumprod_ref_2d);
+        }
+
+        #[test]
+        fn test_argmax(rows in 1usize..16, cols in 1usize..16) {
+            test_unary((rows, cols), |a| a.argmax(0).cast(DType::F32), |a| a.argmax(0).unwrap().to_dtype(candle_core::DType::F32).unwrap());
+            test_unary((rows, cols), |a| a.argmax(1).cast(DType::F32), |a| a.argmax(1).unwrap().to_dtype(candle_core::DType::F32).unwrap());
+        }
+
+        #[test]
+        fn test_topk(rows in 1usize..12, cols in 1usize..12, k in 1usize..12) {
+            prop_assume!(k <= cols);
+            pub fn topk_sorted_indices(x: &[f32], k: usize) -> Vec<usize> {
+                if k == 0 {
+                    return Vec::new();
+                }
+
+                let mut heap: BinaryHeap<std::cmp::Reverse<(NotNan<f32>, usize)>> =
+                    BinaryHeap::with_capacity(k);
+
+                for (i, &v) in x.iter().enumerate() {
+                    let v = NotNan::new(v).expect("NaN encountered in topk");
+                    if heap.len() < k {
                         heap.push(std::cmp::Reverse((v, i)));
+                    } else if let Some(&std::cmp::Reverse((min_v, _))) = heap.peek() {
+                        if v > min_v {
+                            heap.pop();
+                            heap.push(std::cmp::Reverse((v, i)));
+                        }
                     }
                 }
+
+                let mut out: Vec<(NotNan<f32>, usize)> =
+                    heap.into_iter().map(|std::cmp::Reverse(t)| t).collect();
+
+                out.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+                out.into_iter().map(|(_, i)| i).collect()
             }
-
-            let mut out: Vec<(NotNan<f32>, usize)> =
-                heap.into_iter().map(|std::cmp::Reverse(t)| t).collect();
-
-            out.sort_unstable_by(|a, b| b.0.cmp(&a.0));
-            out.into_iter().map(|(_, i)| i).collect()
+            test_unary(
+                (rows, cols),
+                |a| a.topk_indexes(k, 1).cast(DType::F32) * 1.0,
+                |a| {
+                    let data = a.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+                    let topk = data
+                        .chunks_exact(cols)
+                        .flat_map(|c| topk_sorted_indices(c, k))
+                        .map(|i| i as f32)
+                        .collect_vec();
+                    Tensor::new(topk, a.device()).unwrap()
+                },
+            );
         }
-        test_unary(
-            (10, 9),
-            |a| a.topk_indexes(5, 1).cast(DType::F32) * 1.0,
-            |a| {
-                let data = a.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-                let topk = data
-                    .chunks_exact(9)
-                    .flat_map(|c| topk_sorted_indices(c, 5))
-                    .map(|i| i as f32)
-                    .collect_vec();
-                Tensor::new(topk, a.device()).unwrap()
-            },
-        );
     }
 }

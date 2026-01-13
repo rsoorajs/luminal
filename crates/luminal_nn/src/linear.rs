@@ -35,13 +35,14 @@ impl Linear {
 
 impl Linear {
     pub fn forward(&self, input: GraphTensor) -> GraphTensor {
-        let mut output = input.matmul(if self.permute {
+        let output = input.matmul(if self.permute {
             self.weight.permute((1, 0))
         } else {
             self.weight
         });
-        if let Some(bias) = self.bias {
-            output += bias.expand(output.shape);
+        if let Some(_bias) = self.bias {
+            todo!()
+            // output += bias.expand(output.shape);
         }
         output
     }

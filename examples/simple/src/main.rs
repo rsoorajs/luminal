@@ -13,8 +13,8 @@ fn main() {
     let mut rt = cx.search(NativeRuntime::default(), 1);
 
     // Set input tensors
-    rt.set_data(a, vec![1.0, 2.0, 3.0].into());
-    rt.set_data(b, vec![1.0, 2.0, 3.0, 3.0].into());
+    rt.set_data(a, vec![1.0, 2.0, 3.0]);
+    rt.set_data(b, vec![1.0, 2.0, 3.0, 3.0]);
 
     // Run
     rt.execute(&cx.dyn_map);

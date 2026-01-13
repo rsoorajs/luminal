@@ -2,13 +2,12 @@ use std::fs;
 
 use luminal::{
     self,
-    graph::{hlir_to_egglog, Graph, Runtime},
+    op::IntoEgglogOp,
     prelude::{
         egglog::{prelude::RustSpan, var},
         egglog_ast::span::Span,
         *,
     },
-    serialized_egraph::SerializedEGraph,
     visualization::{ToDot, ToHtml},
 };
 use luminal_cuda::runtime::CudaRuntime;
@@ -31,13 +30,13 @@ fn main() {
 
     let (program, root) = hlir_to_egglog(&cx);
 
-    type Ops = (<CudaRuntime as Runtime>::Ops, luminal::op::Ops);
+    type Ops = (<CudaRuntime as Runtime>::Ops, luminal::hlir::HLIROps);
     let ops = <Ops as IntoEgglogOp>::into_vec();
 
     // run e-graph saturation
     println!("Building and Saturating E-Graph");
     let mut egglog_obj = egglog::EGraph::default();
-    let code = luminal::egglog_utils::full_egglog(&program, &ops, true).join("\n");
+    let code = luminal::egglog_utils::full_egglog(&program, &ops, true);
     egglog_obj.parse_and_run_program(None, &code).unwrap();
 
     // EGraph Optimization Complete
@@ -48,7 +47,7 @@ fn main() {
 
     let (sort, value) = egglog_obj.eval_expr(&var!(root)).unwrap();
     let s_egraph = SerializedEGraph::new(&egglog_obj, vec![(sort, value)]);
-    let llir_graphs = egglog_to_llir(&s_egraph, &ops, 100);
+    let llir_graphs = egglog_to_llir(&s_egraph, &ops, &[], 100);
     let example_llir_graph = llir_graphs.last().unwrap();
 
     println!("Visualizing LLIR Graph");

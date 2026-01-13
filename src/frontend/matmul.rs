@@ -112,58 +112,71 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    use crate::hl_ops::binary::tests::test_binary;
+    use crate::frontend::binary::tests::test_binary;
+    use proptest::prelude::*;
 
-    #[test]
-    fn test_matrix_vector() {
-        test_binary(
-            (1, 3),
-            (3, 2),
-            |a, b| a.matmul(b),
-            |a, b| a.matmul(&b).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_matrix_vector(m in 1usize..6, k in 1usize..6, n in 1usize..6) {
+            test_binary(
+                (m, k),
+                (k, n),
+                |a, b| a.matmul(b),
+                |a, b| a.matmul(&b).unwrap(),
+            );
+        }
     }
 
-    #[test]
-    fn test_matmul() {
-        test_binary(
-            (2, 3),
-            (3, 3),
-            |a, b| a.matmul(b),
-            |a, b| a.matmul(&b).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_matmul(m in 1usize..6, k in 1usize..6, n in 1usize..6) {
+            test_binary(
+                (m, k),
+                (k, n),
+                |a, b| a.matmul(b),
+                |a, b| a.matmul(&b).unwrap(),
+            );
+        }
     }
 
-    #[test]
-    fn test_batch_matmul() {
-        test_binary(
-            (2, 3, 2),
-            (2, 4),
-            |a, b| a.matmul(b),
-            |a, b| {
-                a.reshape((6, 2))
-                    .unwrap()
-                    .matmul(&b)
-                    .unwrap()
-                    .reshape((2, 3, 4))
-                    .unwrap()
-            },
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_batch_matmul(batch in 1usize..4, m in 1usize..6, k in 1usize..6, n in 1usize..6) {
+            test_binary(
+                (batch, m, k),
+                (k, n),
+                |a, b| a.matmul(b),
+                |a, b| {
+                    a.reshape((batch * m, k))
+                        .unwrap()
+                        .matmul(&b)
+                        .unwrap()
+                        .reshape((batch, m, n))
+                        .unwrap()
+                },
+            );
+        }
     }
 
-    #[test]
-    fn test_batch_batch_matmul() {
-        test_binary(
-            (1, 2, 3),
-            (1, 2, 3),
-            |a, b| a.matmul(b.permute((0, 2, 1))),
-            |a, b| a.matmul(&b.permute((0, 2, 1)).unwrap()).unwrap(),
-        );
-        test_binary(
-            (1, 2, 2),
-            (1, 2, 3),
-            |a, b| a.matmul(b),
-            |a, b| a.matmul(&b).unwrap(),
-        );
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_batch_batch_matmul(batch in 1usize..4, m in 1usize..6, k in 1usize..6, n in 1usize..6) {
+            test_binary(
+                (batch, m, k),
+                (batch, m, k),
+                |a, b| a.matmul(b.permute((0, 2, 1))),
+                |a, b| a.matmul(&b.permute((0, 2, 1)).unwrap()).unwrap(),
+            );
+            test_binary(
+                (batch, m, k),
+                (batch, k, n),
+                |a, b| a.matmul(b),
+                |a, b| a.matmul(&b).unwrap(),
+            );
+        }
     }
 }

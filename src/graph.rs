@@ -1,3 +1,4 @@
+use crate::{egglog_utils, hlir::CustomOpHLIR, op::*, prelude::*};
 use crate::{
     egglog_utils,
     prelude::*,
@@ -8,15 +9,15 @@ use std::{
     any::TypeId, fmt::Debug, fs, io::Write, ops::{Deref, DerefMut}, sync::Arc, path::Path,
 };
 use colored::Colorize;
-use egglog::{ast::Span, prelude::RustSpan, var};
+use egglog::{CommandOutput, ast::Span, prelude::RustSpan, var};
 use egraph_serialize::{ClassId, NodeId};
 use itertools::Itertools;
 use petgraph::{Direction, stable_graph::StableGraph, visit::EdgeRef};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{self, info, enabled, Level};
 
-pub type LLIRGraph = StableGraph<LLIROp, (), petgraph::Directed>;
-pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, Dependency>;
+pub type LLIRGraph = StableGraph<LLIROp, ()>;
+pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ShapeTracker>;
 
 /// A Luminal compute graph.
 ///
@@ -28,46 +29,11 @@ pub struct Graph {
     /// Edge weights: (Input index, Output index, Input shape)
     pub graph: HLIRGraph,
     /// E-Graph search space
-    pub egraph: Option<SerializedEGraph>,
+    egraph: Option<SerializedEGraph>,
     /// Available ops
     pub ops: Option<Vec<Arc<Box<dyn EgglogOp>>>>,
-    /// Marked output hlir nodes
-    pub(crate) outputs: FxHashSet<NodeIndex>,
-}
-
-/// A dependency between two nodes
-#[derive(Debug, Clone, Copy)]
-#[allow(clippy::large_enum_variant)]
-pub enum Dependency {
-    /// A data dependency (transferring a tensor from one node to the next)
-    Data {
-        input_order: u8,
-        output_order: u8,
-        shape: ShapeTracker,
-    },
-    /// Explicit dependency for ordering. No tensors are transferred through this dependency
-    Schedule,
-}
-
-impl Dependency {
-    /// Try to extract dependency data
-    pub fn as_data(self) -> Option<(u8, u8, ShapeTracker)> {
-        if let Self::Data {
-            input_order,
-            output_order,
-            shape,
-        } = self
-        {
-            Some((input_order, output_order, shape))
-        } else {
-            None
-        }
-    }
-
-    /// Is this a schedule dependency?
-    pub fn is_schedule(&self) -> bool {
-        matches!(self, Self::Schedule)
-    }
+    /// Custom ops
+    pub custom_ops: Vec<Box<dyn CustomOp>>,
 }
 
 impl Graph {
@@ -76,8 +42,8 @@ impl Graph {
         Graph::default()
     }
 
-    /// Set a dynamic dimension
-    pub fn set_dyn_dim(&mut self, dimension: char, val: usize) {
+    /// Set a runtime dimension
+    pub fn set_dim(&mut self, dimension: char, val: usize) {
         self.dyn_map.insert(dimension, val);
     }
 
@@ -88,12 +54,12 @@ impl Graph {
 
     /// Create a new tensor with shape S and a name. This name will show up on the graph when displayed
     pub fn named_tensor(&mut self, name: impl ToString, shape: impl ToShape) -> GraphTensor {
-        let id = self.graph.add_node(Box::new(Input {
+        let id = self.graph.add_node(Box::new(crate::hlir::Input {
             node: 0,
             label: name.to_string(),
             dtype: DType::default(),
         }));
-        self.get_op_mut::<Input>(id).node = id.index();
+        self.get_op_mut::<crate::hlir::Input>(id).node = id.index();
         GraphTensor {
             id,
             graph_ref: self,
@@ -103,12 +69,11 @@ impl Graph {
     }
 
     /// Get the sources of a node given it's id
-    pub fn get_sources(&self, node_id: NodeIndex) -> Vec<(NodeIndex, u8, ShapeTracker)> {
+    pub fn get_sources(&self, node_id: NodeIndex) -> Vec<(NodeIndex, ShapeTracker)> {
         self.graph
             .edges_directed(node_id, Direction::Incoming)
-            .filter_map(|e| e.weight().as_data().map(|i| (e.source(), i)))
-            .sorted_by_key(|(_, (i, _, _))| *i)
-            .map(|(a, (_, c, b))| (a, c, b))
+            .sorted_by_key(|e| e.id())
+            .map(|e| (e.source(), *e.weight()))
             .collect()
     }
 
@@ -117,9 +82,8 @@ impl Graph {
     pub fn get_dests(&self, node_id: NodeIndex) -> Vec<(NodeIndex, &Box<dyn HLIROp>)> {
         self.graph
             .edges_directed(node_id, Direction::Outgoing)
-            .filter_map(|e| e.weight().as_data().map(|i| (e.target(), i)))
-            .sorted_by_key(|(_, (i, _, _))| *i)
-            .map(|(a, _)| (a, self.graph.node_weight(a).unwrap()))
+            .sorted_by_key(|e| e.id())
+            .map(|e| (e.target(), &self.graph[e.target()]))
             .collect()
     }
 
@@ -130,8 +94,8 @@ impl Graph {
     /// # let mut cx = Graph::new();
     /// let a = cx.tensor(3);
     /// let b_id = cx
-    ///     .add_op(luminal::op::Mul::default())
-    ///     .input(a.id, 0, a.shape)
+    ///     .add_op(luminal::hlir::Mul::default())
+    ///     .input(a.id, a.shape)
     ///     .finish();
     /// let b = GraphTensor::from_id(b_id, a.shape, a.graph(), a.dtype);
     /// ```
@@ -150,10 +114,6 @@ impl Graph {
             num_srcs: 0,
         }
     }
-    /// Create a schedule dependency between a and b
-    pub fn add_schedule_dependency(&mut self, a: NodeIndex, b: NodeIndex) {
-        self.graph.add_edge(a, b, Dependency::Schedule);
-    }
 
     pub fn try_get_op<T: HLIROp + 'static>(&self, node: NodeIndex) -> Option<&T> {
         self.node_weight(node).unwrap().as_any().downcast_ref::<T>()
@@ -171,17 +131,38 @@ impl Graph {
         self.try_get_op_mut(node).unwrap()
     }
 
+    pub fn custom_op(
+        &mut self,
+        op: impl CustomOp + 'static,
+        inputs: impl ToIds,
+        shape: impl ToShape,
+        dtype: DType,
+    ) -> GraphTensor {
+        self.custom_ops.push(Box::new(op));
+        let mut add = self.add_op(CustomOpHLIR {
+            id: self.custom_ops.len() - 1,
+            dtype,
+        });
+        for input in inputs.to_ids() {
+            add = add.input(input, ShapeTracker::new(()));
+        }
+        GraphTensor::from_id(add.finish(), ShapeTracker::new(shape), self, dtype)
+    }
+
     #[tracing::instrument(skip_all)]
     pub fn build_search_space<Rt: Runtime + 'static>(&mut self) {
         let mut ops = Rt::Ops::into_vec();
-        ops.extend(<crate::op::Ops as IntoEgglogOp>::into_vec());
+        ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
         let (program, root) = hlir_to_egglog(self);
-        self.egraph = Some(run_egglog(
-            &program,
-            &root,
-            &ops,
-            TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>(), // need to ignore hlir op cleanups if we're on native runtime
-        ));
+        self.egraph = Some(
+            run_egglog(
+                &program,
+                &root,
+                &ops,
+                TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>(), // need to ignore hlir op cleanups if we're on native runtime
+            )
+            .unwrap(),
+        );
         self.ops = Some(ops);
     }
 
@@ -190,6 +171,7 @@ impl Graph {
         let llir_graphs = egglog_to_llir(
             self.egraph.as_ref().unwrap(),
             self.ops.as_ref().unwrap(),
+            &self.custom_ops,
             limit,
         );
         let n_graphs = llir_graphs.len();
@@ -280,23 +262,6 @@ impl Graph {
     }
 }
 
-pub trait Runtime {
-    type Ops: IntoEgglogOp;
-    type CompileArg;
-    type Data;
-    type ExecReturn;
-    type ProfileMetric: PartialOrd + Clone + Debug;
-    fn initialize(arg: Self::CompileArg) -> Self;
-    fn load_llir(&mut self, llir_graph: &LLIRGraph);
-    fn set_data(&mut self, id: impl ToId, data: Self::Data);
-    fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn;
-    fn profile(
-        &mut self,
-        llir_graph: &LLIRGraph,
-        dyn_map: &FxHashMap<char, usize>,
-    ) -> (Self::ProfileMetric, String);
-}
-
 impl Deref for Graph {
     type Target = HLIRGraph;
     fn deref(&self) -> &Self::Target {
@@ -321,16 +286,8 @@ impl NewOp<'_> {
         self.new_op_id
     }
 
-    pub fn input(mut self, id: NodeIndex, from_output: u8, shape: ShapeTracker) -> Self {
-        self.graph_ref.graph.add_edge(
-            id,
-            self.new_op_id,
-            Dependency::Data {
-                input_order: self.num_srcs,
-                output_order: from_output,
-                shape,
-            },
-        );
+    pub fn input(mut self, id: NodeIndex, shape: ShapeTracker) -> Self {
+        self.graph_ref.graph.add_edge(id, self.new_op_id, shape);
         self.num_srcs += 1;
         self
     }
@@ -380,22 +337,11 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
                     .sorted_by_key(|e| e.id())
                     .map(|e| names[&e.source()].clone()),
             )
-            .map(|((n, _, sh), name)| (n, name, sh))
+            .map(|((n, sh), name)| (n, name, sh))
             .collect_vec();
         let code = graph[n].to_egglog(&sources);
         out.push_str(&format!("(let t{curr_id} {code})\n"));
         names.insert(n, format!("t{curr_id}"));
-        curr_id += 1;
-    }
-
-    // Mark outputs
-    for node in &graph.outputs {
-        out.push_str(&format!(
-            "(let t{curr_id} (Output {} {}))",
-            names[node],
-            node.index()
-        ));
-        names.insert(*node, format!("t{curr_id}"));
         curr_id += 1;
     }
 
@@ -414,15 +360,39 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
 }
 
 pub fn elist_to_egglog(shape: &[Expression]) -> String {
-    if shape.is_empty() {
-        "(ENil)".to_string()
+    list_to_egglog(
+        &shape.iter().map(|e| e.to_egglog()).collect_vec(),
+        "ECons",
+        "ENil",
+    )
+}
+
+pub fn list_to_egglog(list: &[impl ToString], cons: &str, nil: &str) -> String {
+    if list.is_empty() {
+        format!("({nil})")
     } else {
         format!(
-            "(ECons {} {})",
-            shape[0].to_egglog(),
-            elist_to_egglog(&shape[1..])
+            "({cons} {} {})",
+            list[0].to_string(),
+            list_to_egglog(&list[1..], cons, nil)
         )
     }
+}
+
+fn termdag_to_egglog(td: &egglog::TermDag, root: egglog::TermId) -> (String, String) {
+    let mut out = String::new();
+    for id in 0..td.size() {
+        let code = match td.get(id) {
+            egglog::Term::Lit(lit) => format!("{lit}"),
+            egglog::Term::Var(v) => v.clone(),
+            egglog::Term::App(head, args) => format!(
+                "({head} {})",
+                args.iter().map(|s| format!("t{s}")).join(" ")
+            ),
+        };
+        out.push_str(&format!("(let t{id} {code})\n"));
+    }
+    (out.replace("(MVar \"z\")", "(MIter)"), format!("t{root}"))
 }
 
 #[tracing::instrument(skip_all)]
@@ -431,49 +401,49 @@ fn run_egglog(
     root: &str,
     ops: &[Arc<Box<dyn EgglogOp>>],
     cleanup: bool,
-) -> SerializedEGraph {
-    let mut egraph = egglog::EGraph::default();
-    let code = egglog_utils::full_egglog(program, ops, cleanup);
+) -> Result<SerializedEGraph, egglog::Error> {
     let start = std::time::Instant::now();
-    for s in code {
-        let commands = match egraph.parser.get_program_from_string(None, &s) {
-            Ok(c) => c,
-            Err(e) => panic!("Failed to parse:\n{s}\nError: {e}"),
-        };
-        if let Err(e) = egraph.run_program(commands) {
-            panic!("Failed to run:\n{s}\nError: {e}");
-        }
-    }
-    info!(
-        target: "luminal::egglog",
-        "---- Egglog Rule Matches ----"
+    let code = egglog_utils::early_egglog(program, root, ops, cleanup);
+    let mut egraph = egglog::EGraph::default();
+    let commands = egraph.parser.get_program_from_string(None, &code)?;
+    let outputs = egraph.run_program(commands)?;
+    let CommandOutput::ExtractBest(termdag, _cost, term) = outputs.last().unwrap() else {
+        panic!();
+    };
+    let (program, root) = termdag_to_egglog(termdag, termdag.lookup(term));
+    let code = egglog_utils::full_egglog(&program, ops, cleanup);
+    let mut egraph = egglog::EGraph::default();
+    let commands = egraph.parser.get_program_from_string(None, &code)?;
+    println!("{}", "Egglog running...".green());
+    let _outputs = egraph.run_program(commands)?;
+    println!("{}", "---- Egglog Rule Matches ----".green());
+    let run_report = egraph.get_overall_run_report();
+    println!(
+        "{}",
+        run_report
+            .num_matches_per_rule
+            .iter()
+            .filter(|(k, _)| !k.contains("("))
+            .map(|(k, v)| format!(
+                "{k}: {v} ({})",
+                pretty_duration::pretty_duration(
+                    &run_report.search_and_apply_time_per_rule[k],
+                    None
+                )
+            ))
+            .join("\n")
+            .green()
     );
-    for (rule, matches) in egraph
-        .get_overall_run_report()
-        .num_matches_per_rule
-        .iter()
-        .filter(|(k, _)| !k.contains("("))
-    {
-        info!(
-            target: "luminal::egglog",
-            rule = %rule,
-            matches = *matches,
-            "rule matches"
-        );
-    }
-    info!(
-        target: "luminal::egglog",
-        duration = %pretty_duration::pretty_duration(&start.elapsed(), None),
-        "---- Egglog Took {} ----",
-        pretty_duration::pretty_duration(&start.elapsed(), None)
-    );
-    info!(
-        target: "luminal::egglog",
-        duration_ms = start.elapsed().as_millis() as u64,
-        "egglog run completed"
+    println!(
+        "{}",
+        format!(
+            "---- Egglog Took {} ----",
+            pretty_duration::pretty_duration(&start.elapsed(), None).bold()
+        )
+        .green()
     );
 
-    let (sort, value) = egraph.eval_expr(&var!(root)).unwrap();
+    let (sort, value) = egraph.eval_expr(&var!(root))?;
     let s = egraph.serialize(egglog::SerializeConfig {
         root_eclasses: vec![(sort, value)],
         max_functions: None,
@@ -555,7 +525,7 @@ fn run_egglog(
         "No valid graphs present in the e-graph!"
     );
 
-    egraph
+    Ok(egraph)
 }
 
 pub fn extract_expr_list<'a>(
@@ -723,12 +693,13 @@ pub fn extract_expr<'a>(
 pub fn egglog_to_llir(
     egraph: &SerializedEGraph,
     ops: &Vec<Arc<Box<dyn EgglogOp>>>,
+    custom_ops: &[Box<dyn CustomOp>],
     limit: usize,
 ) -> Vec<LLIRGraph> {
     // Get maps for all e-classes to e-node options
     let mut choices = vec![FxHashMap::default()];
     for (eclass, (label, enodes)) in &egraph.eclasses {
-        if !label.contains("IR") {
+        if !label.contains("IR") && !label.contains("IList") {
             continue;
         }
         choices = enodes
@@ -755,7 +726,7 @@ pub fn egglog_to_llir(
         let mut reachability_stack = vec![choice[&egraph.roots[0]]];
         while let Some(r) = reachability_stack.pop() {
             for ch in &egraph.enodes[r].1 {
-                if egraph.eclasses[ch].0.contains("IR") {
+                if egraph.eclasses[ch].0.contains("IR") || egraph.eclasses[ch].0.contains("IList") {
                     let n = choice[ch];
                     if !reachable.contains(n) {
                         reachability_stack.push(n);
@@ -767,38 +738,62 @@ pub fn egglog_to_llir(
         let mut graph = LLIRGraph::default();
         let mut edges_to_place = vec![];
         let mut enode_to_node = FxHashMap::default();
-        'nodes: for &node in choice.values() {
+        for &node in choice.values() {
             if !reachable.contains(node) {
+                continue;
+            }
+            if egraph.eclasses[&egraph.node_to_class[node]].0 != "IR" {
+                // Skip IList
                 continue;
             }
             let ch = egraph.enodes[node]
                 .1
                 .iter()
                 .map(|c| {
-                    if egraph.eclasses[c].0.contains("IR") {
+                    if egraph.eclasses[c].0.contains("IR") || egraph.eclasses[c].0.contains("IList")
+                    {
                         choice[c]
                     } else {
                         &egraph.eclasses[c].1[0]
                     }
                 })
                 .collect_vec();
-            if egraph.enodes[node].0.as_str() == "OutputJoin" {
-                // Handle output join
-                continue 'nodes;
-            }
-            for phys_op in ops {
-                if egraph.enodes[node].0.as_str() == phys_op.term().0 {
-                    // Extract this op
-                    let (op_instance, sources) = phys_op.extract(egraph, &ch, &mut lc, &mut c);
-                    let r = graph.add_node(op_instance);
-                    enode_to_node.insert(node, r);
-                    for source in sources {
-                        edges_to_place.push((source, node));
+            if egraph.enodes[node].0.as_str() == "CustomOpHLIR" {
+                // Extract custom op inputs and id
+                let mut inputs = vec![];
+                let mut ch = &egraph.eclasses[&egraph.enodes[node].1[0]].1[0];
+                loop {
+                    if egraph.enodes[ch].0 == "INil" {
+                        break;
+                    } else {
+                        inputs.push(&egraph.eclasses[&egraph.enodes[ch].1[0]].1[0]);
+                        ch = &egraph.eclasses[&egraph.enodes[ch].1[1]].1[0];
                     }
-                    continue 'nodes;
+                }
+                let id: usize = egraph.enodes[&egraph.eclasses[&egraph.enodes[node].1[1]].1[0]]
+                    .0
+                    .parse()
+                    .unwrap();
+                let r = graph.add_node(custom_ops[id].to_llir_op());
+                enode_to_node.insert(node, r);
+                for source in inputs {
+                    edges_to_place.push((source, node));
+                }
+            } else if egraph.enodes[node].0.as_str() != "OutputJoin" {
+                let Some(op) = ops
+                    .iter()
+                    .find(|op| egraph.enodes[node].0.as_str() == op.term().0)
+                else {
+                    todo!("{} extraction not implemented!", egraph.enodes[node].0);
+                };
+                // Extract this op
+                let (op_instance, sources) = op.extract(egraph, &ch, &mut lc, &mut c);
+                let r = graph.add_node(op_instance);
+                enode_to_node.insert(node, r);
+                for source in sources {
+                    edges_to_place.push((source, node));
                 }
             }
-            todo!("{} extraction not implemented!", egraph.enodes[node].0);
         }
         for (src, dest) in edges_to_place {
             graph.add_edge(enode_to_node[src], enode_to_node[dest], ());

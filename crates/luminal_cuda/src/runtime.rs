@@ -12,25 +12,17 @@ use cudarc::{
 };
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
-use luminal::{
-    graph::Graph,
-    op::Output,
-    prelude::{FxHashMap, FxHashSet, ToId},
-};
-use luminal::{
-    prelude::{
-        petgraph::{
-            algo::{toposort, Cycle},
-            prelude::StableGraph,
-            visit::{EdgeRef, NodeIndexable},
-            Directed, Direction,
-        },
-        Expression, Input, LLIRGraph, NodeIndex, Runtime,
+use luminal::hlir::*;
+use luminal::prelude::{
+    petgraph::{
+        algo::{toposort, Cycle},
+        prelude::StableGraph,
+        visit::{EdgeRef, NodeIndexable},
+        Directed, Direction,
     },
-    utils::flatten_z_strides,
+    *,
 };
 use memmap2::MmapOptions;
-use prost::Message as _;
 use safetensors::SafeTensors;
 use std::{
     collections::VecDeque,
@@ -49,37 +41,33 @@ use tracing_perfetto_sdk_schema::{
     self as schema, trace_packet, track_descriptor, track_event, TrackEvent,
 };
 
-#[allow(dead_code)]
-pub enum CustomState {
-    DebugBuffers(FxHashMap<(usize, String), &'static mut [f32]>),
-    KVCache(
-        Vec<(
-            cudarc::driver::CudaSlice<f32>,
-            cudarc::driver::CudaSlice<f32>,
-        )>,
-    ),
+pub enum CudaInput {
+    Buffer(CudaSlice<u8>),
+    Ptr(u64),
 }
 
 #[derive(Clone)]
-pub enum ExecutableKernel {
+enum ExecutableKernel {
     Megakernel {
         interpreter: CudaFunction,
         interpreter_constants: FxHashMap<char, CudaSlice<u8>>,
         n_barriers: Expression,
-        work_queue: Vec<Task>,
+        work_queue: TaskQueue,
         node_to_task_index: FxHashMap<NodeIndex, usize>,
-        module: Arc<CudaModule>,
     },
     Kernel {
         kernel: CudaFunction,
-        code: String,
         launch_grid: (Expression, Expression, Expression),
         launch_threadblock: (Expression, Expression, Expression),
         shared_mem: Expression,
         inputs: Vec<NodeIndex>,
         output: NodeIndex,
         constants: FxHashMap<char, CudaSlice<u8>>,
-        module: Arc<CudaModule>,
+        // Profiling metrics
+        kernel_name: &'static str,
+        bytes_loaded: Expression,
+        bytes_stored: Expression,
+        flops: Expression,
     },
     HostOp {
         stream: Arc<CudaStream>,
@@ -87,6 +75,48 @@ pub enum ExecutableKernel {
         output: NodeIndex,
         internal: Arc<Box<dyn HostOp>>,
     },
+}
+
+/// Statistics for a single kernel execution
+#[derive(Debug, Clone)]
+pub struct KernelStats {
+    pub name: &'static str,
+    pub execution_time_us: f64,
+    pub bytes_loaded: usize,
+    pub bytes_stored: usize,
+    pub flops: usize,
+    pub bandwidth_gbps: f64,
+    pub tflops: f64,
+}
+
+/// Statistics for a single block op execution (aggregated across all SMs)
+#[derive(Debug, Clone)]
+pub struct BlockOpStats {
+    pub name: &'static str,
+    pub execution_time_us: f64,
+    pub bytes_loaded: usize,
+    pub bytes_stored: usize,
+    pub flops: usize,
+    pub bandwidth_gbps: f64,
+    pub tflops: f64,
+}
+
+/// Aggregated execution statistics
+#[derive(Debug, Default, Clone)]
+pub struct ExecutionStats {
+    pub kernel_stats: Vec<KernelStats>,
+    pub block_op_stats: Vec<BlockOpStats>,
+    pub total_time_us: f64,
+    /// Total bytes loaded across all ops
+    pub total_bytes_loaded: usize,
+    /// Total bytes stored across all ops
+    pub total_bytes_stored: usize,
+    /// Total floating point operations across all ops
+    pub total_flops: usize,
+    /// Aggregate bandwidth in GB/s (total bytes / total time)
+    pub aggregate_bandwidth_gbps: f64,
+    /// Aggregate compute in TFLOPS (total flops / total time)
+    pub aggregate_tflops: f64,
 }
 
 impl Drop for ExecutableKernel {
@@ -130,15 +160,17 @@ impl Debug for ExecutableKernel {
 }
 
 pub struct CudaRuntime {
-    pub hlir_buffers: FxHashMap<NodeIndex, CudaSlice<u8>>,
+    pub hlir_buffers: FxHashMap<NodeIndex, CudaInput>,
     pub buffers: FxHashMap<NodeIndex, CudaSlice<u8>>,
     pub llir_graph: luminal::graph::LLIRGraph,
     cuda_stream: Arc<CudaStream>,
-    cuda_context: Arc<CudaContext>,
-    pub custom_state: FxHashMap<String, CustomState>,
     exec_graph: StableGraph<ExecutableKernel, (), Directed>,
     node_to_exec: FxHashMap<NodeIndex, NodeIndex>,
-    timings: Vec<(Vec<SMEvent>, u64)>,
+    pub(crate) timings: Vec<(Vec<SMEvent>, u64, Uuid)>,
+    last_dyn_map: FxHashMap<char, usize>,
+    intermediate_buffer_dims: FxHashSet<char>,
+    /// Statistics from the last execution
+    pub last_execution_stats: ExecutionStats,
 }
 
 impl CudaRuntime {
@@ -162,13 +194,13 @@ impl CudaRuntime {
         let mmap = unsafe { MmapOptions::new().map(&f).unwrap() };
         let st = SafeTensors::deserialize(&mmap).unwrap();
         for node in cx.graph.node_indices() {
-            if let Some(Input { label, .. }) = cx.graph[node].as_any().downcast_ref::<Input>() {
+            if let Some(Input { label, .. }) = (*cx.graph[node]).as_any().downcast_ref::<Input>() {
                 if let Ok(tensor) = st.tensor(label) {
                     match tensor.dtype() {
                         safetensors::Dtype::F32 => {
                             let bytes = tensor.data();
                             let f32s: &[f32] = bytemuck::cast_slice(bytes);
-                            let dev = f32s.to_cuda_buffer(&self.cuda_context, &self.cuda_stream);
+                            let dev = f32s.to_cuda_input(&self.cuda_stream);
                             self.hlir_buffers.insert(node, dev);
                         }
                         dtype => unimplemented!("{dtype} loading not supported yet"),
@@ -176,6 +208,11 @@ impl CudaRuntime {
                 }
             }
         }
+    }
+
+    pub fn set_data(&mut self, id: impl ToId, data: impl ToCudaInput) {
+        self.hlir_buffers
+            .insert(id.to_id(), data.to_cuda_input(&self.cuda_stream));
     }
 
     #[tracing::instrument(skip_all)]
@@ -221,7 +258,7 @@ impl CudaRuntime {
             .and_then(|n| self.exec_graph.node_weight_mut(*n))
         {
             if self.llir_graph[llir_node].to_op::<Input>().is_none() {
-                work_queue[node_to_task_index[&llir_node]].out_ptr = ptr as *mut f32;
+                work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
             }
         }
         for edge in self
@@ -244,18 +281,21 @@ impl CudaRuntime {
                 .get(&dest)
                 .and_then(|n| self.exec_graph.node_weight_mut(*n))
             {
-                work_queue[node_to_task_index[&dest]].source_ptrs[n_input] = ptr as *const f32;
+                work_queue.set_source_ptr(node_to_task_index[&dest], n_input, ptr as *const f32);
             }
         }
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn allocate_intermediate_buffers(&mut self, dyn_dims: &FxHashMap<char, usize>) {
+    fn allocate_intermediate_buffers(&mut self, dyn_dims: &FxHashMap<char, usize>) {
+        self.intermediate_buffer_dims.clear();
         for node in self.llir_graph.node_indices().collect_vec() {
             if self.llir_graph[node].to_op::<Input>().is_some() {
                 continue;
             }
             if let Some(op) = self.llir_graph[node].to_dialect::<dyn BlockOp>() {
+                self.intermediate_buffer_dims
+                    .extend(op.output_size().dyn_vars());
                 self.buffers.insert(
                     node,
                     self.cuda_stream
@@ -265,6 +305,8 @@ impl CudaRuntime {
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
+                self.intermediate_buffer_dims
+                    .extend(op.output_size().dyn_vars());
                 self.buffers.insert(
                     node,
                     self.cuda_stream
@@ -285,6 +327,7 @@ impl CudaRuntime {
             }
         }
     }
+}
 
     // this was broken by addition of host ops
     pub fn record_cuda_perfetto_trace(&self, file_path: impl AsRef<std::path::Path>) {
@@ -347,37 +390,27 @@ impl CudaRuntime {
     }
 }
 
-pub trait ToCudaBuffer {
-    fn to_cuda_buffer(&self, ctx: &Arc<CudaContext>, stream: &Arc<CudaStream>) -> CudaSlice<u8>;
-}
-
-impl ToCudaBuffer for Vec<f32> {
-    fn to_cuda_buffer(&self, _: &Arc<CudaContext>, stream: &Arc<CudaStream>) -> CudaSlice<u8> {
-        stream
-            .memcpy_stod(unsafe {
-                std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
-            })
-            .unwrap()
+impl ToCudaInput for &[f32] {
+    fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        CudaInput::Buffer(
+            stream
+                .memcpy_stod(unsafe {
+                    std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
+                })
+                .unwrap(),
+        )
     }
 }
 
-impl ToCudaBuffer for &[f32] {
-    fn to_cuda_buffer(&self, _: &Arc<CudaContext>, stream: &Arc<CudaStream>) -> CudaSlice<u8> {
-        stream
-            .memcpy_stod(unsafe {
-                std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
-            })
-            .unwrap()
-    }
-}
-
-impl ToCudaBuffer for Vec<i32> {
-    fn to_cuda_buffer(&self, _: &Arc<CudaContext>, stream: &Arc<CudaStream>) -> CudaSlice<u8> {
-        stream
-            .memcpy_stod(unsafe {
-                std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
-            })
-            .unwrap()
+impl ToCudaInput for Vec<i32> {
+    fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        CudaInput::Buffer(
+            stream
+                .memcpy_stod(unsafe {
+                    std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
+                })
+                .unwrap(),
+        )
     }
 }
 
@@ -397,33 +430,24 @@ impl Runtime for CudaRuntime {
     type ExecReturn = ();
     type ProfileMetric = Duration;
 
-    fn initialize((ctx, stream, custom_state): Self::CompileArg) -> Self {
+    fn initialize(stream: Self::CompileArg) -> Self {
         Self {
             hlir_buffers: FxHashMap::default(),
             buffers: FxHashMap::default(),
             cuda_stream: stream,
-            cuda_context: ctx,
             llir_graph: StableGraph::default(),
-            custom_state: custom_state,
             exec_graph: StableGraph::default(),
             node_to_exec: FxHashMap::default(),
             timings: vec![],
+            last_dyn_map: FxHashMap::default(),
+            intermediate_buffer_dims: FxHashSet::default(),
+            last_execution_stats: ExecutionStats::default(),
         }
     }
 
     #[tracing::instrument(skip_all)]
     fn load_llir(&mut self, llir_graph: &LLIRGraph) {
         self.exec_graph.clear();
-        // clear kv cache
-        for (_, s) in &mut self.custom_state {
-            if let CustomState::KVCache(layers) = s {
-                for (k, v) in layers {
-                    self.cuda_stream.memset_zeros(k).unwrap();
-                    self.cuda_stream.memset_zeros(v).unwrap();
-                }
-            }
-        }
-        let block_ops = <crate::block::Ops as IntoBlockOp>::into_vec();
         let block_ops_in_graph = llir_graph
             .node_indices()
             .filter(|n| llir_graph[*n].to_dialect::<dyn BlockOp>().is_some())
@@ -434,125 +458,11 @@ impl Runtime for CudaRuntime {
         let mut exec_graph = StableGraph::default();
         let mut node_to_exec = FxHashMap::default();
         for subgraph in block_subgraphs {
-            // Render expressions
-            let (
-                producer_barrier_strides,
-                consumer_barrier_strides,
-                mut producer_barrier_bases,
-                n_barriers,
-            ) = get_barrier_strides(&llir_graph, &subgraph);
-            for node in llir_graph
-                .node_indices()
-                .filter(|n| llir_graph[*n].to_op::<Input>().is_some())
-            {
-                producer_barrier_bases.insert(node, 0.into());
-            }
-            let expressions = llir_graph
-                .node_weights()
-                .filter_map(|op| op.to_dialect::<dyn BlockOp>())
-                .flat_map(|op| {
-                    op.expressions()
-                        .into_iter()
-                        .chain(once(op.launch_range().iter().copied().product()))
-                })
-                .chain(producer_barrier_strides.iter().map(|(n, e)| {
-                    flatten_z_strides(
-                        &llir_graph[*n]
-                            .to_dialect::<dyn BlockOp>()
-                            .unwrap()
-                            .launch_range(),
-                        e,
-                    )
-                }))
-                .chain(consumer_barrier_strides.iter().map(|((n, _), e)| {
-                    flatten_z_strides(
-                        &llir_graph[*n]
-                            .to_dialect::<dyn BlockOp>()
-                            .unwrap()
-                            .launch_range(),
-                        e,
-                    )
-                }))
-                .chain(producer_barrier_bases.values().copied())
-                .chain(once(0.into()))
-                .chain(once(1.into()))
-                .collect::<FxHashSet<_>>();
-            let (interpreter, module, expressions, interpreter_constants) = compile_interpreter(
-                &self.cuda_context,
-                &self.cuda_stream,
-                &block_ops,
-                &expressions,
-            );
-            // Build task queue
-            let mut tasks: Vec<Task> = vec![];
-            let mut node_to_task_index = FxHashMap::default();
-            for node in toposort(&llir_graph, None).unwrap() {
-                if !subgraph.contains(&node) {
-                    continue;
-                }
-                let sources = llir_graph
-                    .edges_directed(node, Direction::Incoming)
-                    .sorted_by_key(|e| e.id())
-                    .map(|e| e.source())
-                    .collect_vec();
-                let op = llir_graph[node].to_dialect::<dyn BlockOp>().unwrap();
-                let op_code = block_ops
-                    .iter()
-                    .position(|o| (**o).as_any().type_id() == (**op).as_any().type_id())
-                    .unwrap();
-                let mut payload =
-                    op.schedule_op(&mut self.custom_state, &self.cuda_stream, &expressions);
-                payload.extend(vec![0; size_of::<Payload>() - payload.len()]);
-                let range = op.launch_range();
-                let in_dep_a_stride = consumer_barrier_strides
-                    .get(&(node, 0))
-                    .map(|s| flatten_z_strides(&range, s))
-                    .unwrap_or(0.into());
-                let in_dep_b_stride = consumer_barrier_strides
-                    .get(&(node, 1))
-                    .map(|s| flatten_z_strides(&range, s))
-                    .unwrap_or(0.into());
-                let in_dep_c_stride = consumer_barrier_strides
-                    .get(&(node, 2))
-                    .map(|s| flatten_z_strides(&range, s))
-                    .unwrap_or(0.into());
-                let out_dep_stride = producer_barrier_strides
-                    .get(&node)
-                    .map(|s| flatten_z_strides(&range, s))
-                    .unwrap_or(0.into());
-                node_to_task_index.insert(node, tasks.len());
-                tasks.push(Task {
-                    op: op_code as i32,
-                    range: expressions[&range.iter().copied().product()],
-                    remaining: -1,
-                    in_dep_a_stride: expressions[&in_dep_a_stride],
-                    in_dep_a_base: expressions[&producer_barrier_bases
-                        .get(&sources[0])
-                        .copied()
-                        .unwrap_or(0.into())],
-                    in_dep_b_stride: expressions[&in_dep_b_stride],
-                    in_dep_b_base: expressions[&sources
-                        .get(1)
-                        .and_then(|n| producer_barrier_bases.get(n).copied())
-                        .unwrap_or(0.into())],
-                    in_dep_c_stride: expressions[&in_dep_c_stride],
-                    in_dep_c_base: expressions[&sources
-                        .get(2)
-                        .and_then(|n| producer_barrier_bases.get(n).copied())
-                        .unwrap_or(0.into())],
-                    out_dep_stride: expressions[&out_dep_stride],
-                    out_dep_base: expressions[&producer_barrier_bases[&node]],
-                    source_ptrs: [null(); 3],
-                    out_ptr: null_mut(),
-                    payload: PayloadBytes {
-                        bytes: payload.try_into().unwrap(),
-                    },
-                });
-            }
+            let (interpreter, constants, n_barriers, tasks, node_to_task_index) =
+                make_megakernel_from_llir_graph(llir_graph, &subgraph, &self.cuda_stream);
             let exec_node = exec_graph.add_node(ExecutableKernel::Megakernel {
                 interpreter,
-                module,
-                interpreter_constants,
+                interpreter_constants: constants,
                 n_barriers,
                 work_queue: tasks,
                 node_to_task_index,
@@ -576,14 +486,16 @@ impl Runtime for CudaRuntime {
                     kernel,
                     exec_graph.add_node(ExecutableKernel::Kernel {
                         kernel: kernel_function,
-                        module,
-                        code,
                         launch_grid: grid,
                         launch_threadblock: tb,
                         inputs,
                         output: kernel,
                         shared_mem,
                         constants,
+                        kernel_name: kernel_op.kernel_name(),
+                        bytes_loaded: kernel_op.bytes_loaded(),
+                        bytes_stored: kernel_op.bytes_stored(),
+                        flops: kernel_op.flops(),
                     }),
                 );
             }
@@ -636,53 +548,75 @@ impl Runtime for CudaRuntime {
     ) -> (Self::ProfileMetric, String) {
         self.buffers.clear();
         self.load_llir(llir_graph);
-        self.allocate_intermediate_buffers(dyn_map);
         let start = std::time::Instant::now();
         self.execute(dyn_map);
         self.timings.clear();
-        (
-            start.elapsed(),
-            pretty_duration::pretty_duration(&start.elapsed(), None),
-        )
+
+        let duration = start.elapsed();
+        let stats = &self.last_execution_stats;
+
+        // Compute MBU and MFU from execution stats
+        let peak_bandwidth_gbps = crate::cuda_bandwidth_gbps(self.cuda_stream.context());
+        let peak_tflops = crate::cuda_compute_f32_tflops(self.cuda_stream.context());
+
+        let mbu =
+            peak_bandwidth_gbps.map(|peak_bw| stats.aggregate_bandwidth_gbps / peak_bw as f64);
+        let mfu = peak_tflops.map(|peak_tf| stats.aggregate_tflops / peak_tf as f64);
+
+        let duration_str = pretty_duration::pretty_duration(&duration, None);
+        let mbu_str = mbu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
+        let mfu_str = mfu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
+        let display = format!("{duration_str} | MBU: {mbu_str} | MFU: {mfu_str}");
+
+        (duration, display)
     }
 
     #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
+        if self.buffers.is_empty()
+            || dyn_map.len() != self.last_dyn_map.len()
+            || dyn_map
+                .iter()
+                .filter(|(d, _)| self.intermediate_buffer_dims.contains(*d))
+                .any(|(d, v)| self.last_dyn_map.get(d).map(|n| *n != *v).unwrap_or(true))
+        {
+            self.last_dyn_map = dyn_map.clone();
+            self.allocate_intermediate_buffers(dyn_map);
+        }
         let mut llir_to_hlir: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
         for (hlir_node, llir_node) in self
             .llir_graph
             .node_indices()
-            .filter_map(|n| {
-                if let Some(Input { node, .. }) = self.llir_graph[n].to_op::<Input>() {
-                    Some((*node, n))
-                } else {
-                    None
-                }
-            })
+            .filter_map(|n| self.llir_graph[n].to_op::<Input>().map(|op| (op.node, n)))
             .collect_vec()
         {
             llir_to_hlir.insert(llir_node, NodeIndex::new(hlir_node));
-            let ptr = self.hlir_buffers[&NodeIndex::new(hlir_node)]
-                .device_ptr(&self.cuda_stream)
-                .0;
+            let ptr = match &self.hlir_buffers[&NodeIndex::new(hlir_node)] {
+                CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
+                CudaInput::Ptr(p) => *p,
+            };
             self.register_buffer(llir_node, ptr);
         }
         let mut timings = vec![];
+        let mut kernel_stats = Vec::new();
+        let total_start = std::time::Instant::now();
         for exec_node in toposort(&self.exec_graph, None).unwrap() {
             match &mut self.exec_graph[exec_node] {
                 ExecutableKernel::Kernel {
                     kernel,
-                    module: _,
-                    code: _,
                     launch_grid,
                     launch_threadblock,
                     inputs,
                     output,
                     shared_mem,
                     constants,
+                    kernel_name,
+                    bytes_loaded,
+                    bytes_stored,
+                    flops,
                 } => {
                     for (dyn_dim, val) in dyn_map {
-                        if let Some(global) = constants.get_mut(&dyn_dim) {
+                        if let Some(global) = constants.get_mut(dyn_dim) {
                             let mut view = global.as_view_mut();
                             let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
                             self.cuda_stream
@@ -708,9 +642,12 @@ impl Runtime for CudaRuntime {
                     lb.arg(&self.buffers[output]);
                     for inp in inputs {
                         if let Some(buf) = self.buffers.get(inp) {
-                            lb.arg(buf);
+                            ptrs.push(buf.device_ptr(&self.cuda_stream).0);
                         } else {
-                            lb.arg(&self.hlir_buffers[&llir_to_hlir[inp]]);
+                            ptrs.push(match &self.hlir_buffers[&llir_to_hlir[inp]] {
+                                CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
+                                CudaInput::Ptr(p) => *p,
+                            });
                         }
                     }
                     let _span = span!(
@@ -731,7 +668,8 @@ impl Runtime for CudaRuntime {
                     ..
                 } => {
                     let sm_count = self
-                        .cuda_context
+                        .cuda_stream
+                        .context()
                         .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
                         .unwrap();
 
@@ -822,6 +760,7 @@ impl Runtime for CudaRuntime {
                             .into_iter()
                             .min()
                             .unwrap(),
+                        mk_span_id,
                     ));
                 }
                 ExecutableKernel::HostOp {
@@ -849,208 +788,181 @@ impl Runtime for CudaRuntime {
                 }
             }
         }
-        self.timings.extend(timings);
+        self.timings.extend(timings.clone());
+
+        {
+            let span = span!(Level::TRACE, "timings");
+            let _entered = span.enter();
+            // Compute block op stats from SMEvent timings
+            let sm_count = self
+            .cuda_stream
+            .context()
+            .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+            .unwrap() as usize;
+            let block_op_stats =
+                Self::compute_block_op_stats(&self.llir_graph, &timings, dyn_map, sm_count);
+
+            // Compute aggregate stats from kernel and block op stats
+            let total_time_us = total_start.elapsed().as_secs_f64() * 1_000_000.0;
+
+            let total_bytes_loaded: usize =
+                kernel_stats.iter().map(|s| s.bytes_loaded).sum::<usize>()
+                    + block_op_stats.iter().map(|s| s.bytes_loaded).sum::<usize>();
+            let total_bytes_stored: usize =
+                kernel_stats.iter().map(|s| s.bytes_stored).sum::<usize>()
+                    + block_op_stats.iter().map(|s| s.bytes_stored).sum::<usize>();
+            let total_flops: usize = kernel_stats.iter().map(|s| s.flops).sum::<usize>()
+                + block_op_stats.iter().map(|s| s.flops).sum::<usize>();
+
+            let total_bytes = total_bytes_loaded + total_bytes_stored;
+            let aggregate_bandwidth_gbps = if total_time_us > 0.0 {
+                (total_bytes as f64) / (total_time_us * 1e-6) / 1e9
+            } else {
+                0.0
+            };
+            let aggregate_tflops = if total_time_us > 0.0 {
+                (total_flops as f64) / (total_time_us * 1e-6) / 1e12
+            } else {
+                0.0
+            };
+
+            // Store execution stats
+            self.last_execution_stats = ExecutionStats {
+                kernel_stats,
+                block_op_stats,
+                total_time_us,
+                total_bytes_loaded,
+                total_bytes_stored,
+                total_flops,
+                aggregate_bandwidth_gbps,
+                aggregate_tflops,
+            };
+        }
     }
-
-    fn set_data(&mut self, id: impl ToId, data: Self::Data) {
-        self.hlir_buffers.insert(
-            id.to_id(),
-            data.to_cuda_buffer(&self.cuda_context, &self.cuda_stream),
-        );
-    }
 }
 
-// TODO: get rid of this, go through all ops to get largest payload, and build the Task struct with CStructBuilder
-// this is only here because it is currently the largest payload so it lets us have the Task struct with correct alignment / sizing
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct AttentionOp {
-    row_width: i32,
-    n_rows: i32,
-    kv_row_stride: i32,
-    q: i32,
-    k: i32,
-    v: i32,
-    out: i32,
-    key_cache: *mut f32,
-    val_cache: *mut f32,
-    prev_seq: i32,
-    q_pos_stride: i32,
-    group_pos_stride: i32,
-    head_pos_stride: i32,
-}
-unsafe impl DeviceRepr for AttentionOp {}
+impl CudaRuntime {
+    fn compute_block_op_stats(
+        llir_graph: &LLIRGraph,
+        timings: &[(Vec<SMEvent>, u64, Uuid)],
+        dyn_map: &FxHashMap<char, usize>,
+        sm_count: usize,
+    ) -> Vec<BlockOpStats> {
+        use std::collections::HashMap;
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub union Payload {
-    attention: AttentionOp,
-}
-unsafe impl DeviceRepr for Payload {}
+        // Get unique op names (same order as in interpreter)
+        let op_names: Vec<&'static str> = llir_graph
+            .node_indices()
+            .filter_map(|n| llir_graph[n].to_dialect::<dyn BlockOp>())
+            .map(|bo| (bo.op_name(), bo.clone()))
+            .collect::<HashMap<_, _>>()
+            .into_iter()
+            .sorted_by_key(|(n, _)| *n)
+            .map(|(n, _)| n)
+            .collect();
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct SMEvent {
-    start: u64,
-    event: i32,
-}
-unsafe impl DeviceRepr for SMEvent {}
-unsafe impl ValidAsZeroBits for SMEvent {}
-
-const PAYLOAD_SIZE: usize = std::mem::size_of::<Payload>();
-
-#[repr(C, align(8))]
-#[derive(Clone, Copy)]
-pub struct PayloadBytes {
-    pub bytes: [u8; PAYLOAD_SIZE],
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct Task {
-    pub op: i32,
-    pub range: i32,
-    pub remaining: i32,
-    pub in_dep_a_stride: i32,
-    pub in_dep_a_base: i32,
-    pub in_dep_b_stride: i32,
-    pub in_dep_b_base: i32,
-    pub in_dep_c_stride: i32,
-    pub in_dep_c_base: i32,
-    pub out_dep_stride: i32,
-    pub out_dep_base: i32,
-    pub source_ptrs: [*const f32; 3],
-    pub out_ptr: *mut f32,
-    pub payload: PayloadBytes,
-}
-unsafe impl DeviceRepr for Task {}
-
-#[tracing::instrument(skip_all)]
-fn compute_barrier_strides(
-    mut prod_range: Vec<Expression>,
-    mut cons_range: Vec<Vec<Expression>>,
-    mut cons_shared: Vec<Vec<bool>>,
-) -> (Vec<Expression>, Vec<Vec<Expression>>) {
-    // returns (producer strides, consumer strides)
-    fn transpose<T>(v: Vec<Vec<T>>) -> Vec<Vec<T>> {
-        if v.is_empty() {
+        if op_names.is_empty() {
             return vec![];
         }
-        let len = v[0].len();
-        let mut iters: Vec<_> = v.into_iter().map(|n| n.into_iter()).collect();
-        (0..len)
-            .map(|_| {
-                iters
-                    .iter_mut()
-                    .map(|n| n.next().unwrap())
-                    .collect::<Vec<T>>()
+
+        // Build map from op_name to index for event decoding
+        let op_name_to_idx: HashMap<&'static str, usize> =
+            op_names.iter().enumerate().map(|(i, n)| (*n, i)).collect();
+
+        // Sum up bytes_loaded, bytes_stored, flops across ALL instances of each op type
+        let mut op_bytes_loaded: Vec<usize> = vec![0; op_names.len()];
+        let mut op_bytes_stored: Vec<usize> = vec![0; op_names.len()];
+        let mut op_flops: Vec<usize> = vec![0; op_names.len()];
+
+        for node in llir_graph.node_indices() {
+            if let Some(op) = llir_graph[node].to_dialect::<dyn BlockOp>() {
+                if let Some(&idx) = op_name_to_idx.get(op.op_name()) {
+                    let flops_expr = op.flops();
+                    let flops_val = flops_expr.exec(dyn_map).unwrap();
+                    op_bytes_loaded[idx] += op.bytes_loaded().exec(dyn_map).unwrap();
+                    op_bytes_stored[idx] += op.bytes_stored().exec(dyn_map).unwrap();
+                    op_flops[idx] += flops_val;
+                }
+            }
+        }
+
+        // Aggregate timing per op type across all SMs
+        // event codes: 0=Issue, 1=Wait, 2+=BlockOps (index in ops list)
+        let mut op_times_ns: Vec<u64> = vec![0; op_names.len()];
+
+        for (sm_timings, _start_time, _) in timings {
+            for sm_chunk in sm_timings.chunks(1000) {
+                for event in sm_chunk.iter() {
+                    if event.start == 0 {
+                        break; // No more events recorded for this SM
+                    }
+                    // event >= 2 means it's a block op (0=Issue, 1=Wait)
+                    if event.event >= 2 {
+                        let op_idx = (event.event - 2) as usize;
+                        if op_idx < op_names.len() {
+                            let stop = if event.stop == 0 {
+                                event.start
+                            } else {
+                                event.stop
+                            };
+                            let duration = stop.saturating_sub(event.start);
+                            op_times_ns[op_idx] += duration;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Compute bandwidth and TFLOPS from aggregated metrics
+        // Divide total SM-time by sm_count to get wall-clock time
+        op_names
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| op_times_ns[*i] > 0)
+            .map(|(i, &name)| {
+                // Total SM-time divided by number of SMs gives wall-clock time
+                let time_us = (op_times_ns[i] as f64 / sm_count as f64) / 1000.0;
+                let bytes_loaded = op_bytes_loaded[i];
+                let bytes_stored = op_bytes_stored[i];
+                let flop_count = op_flops[i];
+
+                let total_bytes = bytes_loaded + bytes_stored;
+                let bandwidth_gbps = if time_us > 0.0 {
+                    (total_bytes as f64) / (time_us * 1e-6) / 1e9
+                } else {
+                    0.0
+                };
+                let tflops = if time_us > 0.0 {
+                    (flop_count as f64) / (time_us * 1e-6) / 1e12
+                } else {
+                    0.0
+                };
+
+                BlockOpStats {
+                    name,
+                    execution_time_us: time_us,
+                    bytes_loaded,
+                    bytes_stored,
+                    flops: flop_count,
+                    bandwidth_gbps,
+                    tflops,
+                }
             })
             .collect()
     }
-    let max_range_len = prod_range
-        .len()
-        .max(cons_range.iter().map(|i| i.len()).max().unwrap_or_default());
-    let prod_range_len = prod_range.len();
-    let cons_range_lens = cons_range.iter().map(|c| c.len()).collect_vec();
-    prod_range.append(&mut vec![1.into(); max_range_len - prod_range.len()]);
-    for v in &mut cons_range {
-        v.append(&mut vec![1.into(); max_range_len - v.len()]);
-    }
-    for v in &mut cons_shared {
-        v.append(&mut vec![false; max_range_len - v.len()]);
-    }
-    let cons_range_t = transpose(cons_range);
-    let cons_shared_t = transpose(cons_shared);
-    assert_eq!(cons_shared_t.len(), prod_range.len());
-    let r = prod_range
-        .iter()
-        .zip(&cons_range_t)
-        .zip(cons_shared_t)
-        .rev()
-        .scan(Expression::from(1), |acc, ((pr, cr), cs)| {
-            let prev = *acc;
-            if cs.iter().all(|i| *i) {
-                if cr.iter().all(|cr| *pr == *cr) {
-                    *acc *= *pr;
-                    Some((prev, vec![prev; cr.len()]))
-                } else if let Some(Some(factor)) = cr.iter().try_fold(None, |acc, cr| {
-                    // Multiple producers per consumer
-                    if !(*pr % *cr).to_usize().map(|i| i == 0).unwrap_or_default() {
-                        return None;
-                    }
-                    if let Some(prev) = acc {
-                        if prev != (*pr / *cr) {
-                            return None;
-                        }
-                    }
-                    Some(Some(*pr / *cr))
-                }) {
-                    *acc *= *pr / factor;
-                    assert!(factor.to_usize().map(|i| i > 0).unwrap_or(true));
-                    Some((
-                        Expression::from('z') / factor * prev,
-                        vec![prev * 'z'; cr.len()],
-                    ))
-                } else if let Some(Some(factor)) = cr.iter().try_fold(None, |acc, cr| {
-                    // Multiple consumers per producer
-                    if !(*cr % *pr).to_usize().map(|i| i == 0).unwrap_or_default() {
-                        return None;
-                    }
-                    if let Some(prev) = acc {
-                        if prev != (*cr / *pr) {
-                            return None;
-                        }
-                    }
-                    Some(Some(*cr / *pr))
-                }) {
-                    assert!(factor.to_usize().map(|i| i > 0).unwrap_or(true));
-                    *acc *= cr[0] / factor;
-                    Some((
-                        prev * 'z',
-                        vec![Expression::from('z') / factor * prev; cr.len()],
-                    ))
-                } else {
-                    Some((0.into(), vec![0.into(); cr.len()]))
-                }
-            } else {
-                Some((0.into(), vec![0.into(); cr.len()]))
-            }
-        })
-        .collect_vec();
-    let (mut p, c): (Vec<Expression>, Vec<Vec<Expression>>) = r.into_iter().rev().unzip();
-    let mut c = transpose(c);
-    // Re-trim down to original range lengths
-    p = p[..prod_range_len].to_vec();
-    for (c, r) in c.iter_mut().zip(cons_range_lens) {
-        *c = c[..r].to_vec();
-    }
-    (p, c)
-}
 
-#[tracing::instrument(skip_all)]
-pub fn allocate_input_buffers(
-    stream: &Arc<CudaStream>,
-    inputs: &FxHashMap<usize, Vec<f32>>,
-    graph: &LLIRGraph,
-) -> FxHashMap<NodeIndex, CudaSlice<f32>> {
-    let mut buffers = FxHashMap::default();
-    for node in graph.node_indices() {
-        if let Some(gmem) = graph[node].to_op::<Input>() {
-            if let Some(buf) = inputs.get(&gmem.node) {
-                buffers.insert(node, stream.memcpy_stod(buf).unwrap());
-            }
+    /// Print execution statistics for the last execution.
+    /// Shows bandwidth and compute utilization for each kernel and block op.
+    pub fn print_execution_stats(&self) {
+        let stats = &self.last_execution_stats;
+        if stats.kernel_stats.is_empty() && stats.block_op_stats.is_empty() {
+            println!("No execution stats available.");
+            return;
         }
-    }
-    buffers
-}
 
-struct ManualTrackBuilder {
-    packets: Vec<schema::TracePacket>,
-    track_uuid: u64,
-    sequence_id: u32,
-    state_cleared: bool,
-    core_index: u32,
-}
+        // Get device peak performance
+        let peak_bandwidth_gbps = crate::cuda_bandwidth_gbps(self.cuda_stream.context());
+        let peak_tflops = crate::cuda_compute_f32_tflops(self.cuda_stream.context());
 
 impl ManualTrackBuilder {
     fn new(core_index: u32, ts0: u64, clock_id: u32) -> Self {
@@ -1433,25 +1345,115 @@ pub fn print_debug_buffers(debug_buffers: FxHashMap<(usize, String), &'static mu
                     .collect_vec(),
             );
         }
+        println!();
     }
-    free_debug_buffers(debug_buffers);
+
+    fn print_stat_row(
+        &self,
+        name: &str,
+        execution_time_us: f64,
+        bytes_loaded: usize,
+        bytes_stored: usize,
+        flops: usize,
+        bandwidth_gbps: f64,
+        tflops: f64,
+        peak_bandwidth_gbps: Option<usize>,
+        peak_tflops: Option<usize>,
+    ) {
+        let total_bytes = bytes_loaded + bytes_stored;
+
+        // Show "-" if bytes are 0 (not specified)
+        let loaded_str = if bytes_loaded > 0 {
+            format_size(bytes_loaded)
+        } else {
+            "-".to_string()
+        };
+        let stored_str = if bytes_stored > 0 {
+            format_size(bytes_stored)
+        } else {
+            "-".to_string()
+        };
+        let flops_str = if flops > 0 {
+            format_flops(flops)
+        } else {
+            "-".to_string()
+        };
+        let bw_str = if total_bytes > 0 {
+            format!("{:.2}", bandwidth_gbps)
+        } else {
+            "-".to_string()
+        };
+        let tflops_str = if flops > 0 {
+            format!("{:.4}", tflops)
+        } else {
+            "-".to_string()
+        };
+
+        // Calculate MBU (Memory Bandwidth Utilization) and MFU (Model FLOPS Utilization)
+        let mbu_str = if let Some(peak_bw) = peak_bandwidth_gbps {
+            if total_bytes > 0 {
+                let mbu = (bandwidth_gbps / peak_bw as f64) * 100.0;
+                format!("{:.1}%", mbu)
+            } else {
+                "-".to_string()
+            }
+        } else {
+            "-".to_string()
+        };
+
+        let mfu_str = if let Some(peak_tf) = peak_tflops {
+            if flops > 0 {
+                let mfu = (tflops / peak_tf as f64) * 100.0;
+                format!("{:.1}%", mfu)
+            } else {
+                "-".to_string()
+            }
+        } else {
+            "-".to_string()
+        };
+
+        println!(
+            "{:<20} {:>12.2} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
+            name,
+            execution_time_us,
+            loaded_str,
+            stored_str,
+            flops_str,
+            bw_str,
+            tflops_str,
+            mbu_str,
+            mfu_str
+        );
+    }
 }
 
-#[allow(unused)]
-#[tracing::instrument(skip_all)]
-pub fn dtoh_outputs(
-    stream: &Arc<CudaStream>,
-    buffers: &FxHashMap<NodeIndex, CudaSlice<f32>>,
-    graph: &StableGraph<Arc<Box<dyn BlockOp>>, (), Directed>,
-) -> Vec<Vec<f32>> {
-    graph
-        .externals(Direction::Outgoing)
-        .sorted()
-        .map(|n| stream.memcpy_dtov(&buffers[&n]).unwrap())
-        .collect()
+fn format_size(bytes: usize) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.2} GB", bytes as f64 / 1e9)
+    } else if bytes >= 1_000_000 {
+        format!("{:.2} MB", bytes as f64 / 1e6)
+    } else if bytes >= 1_000 {
+        format!("{:.2} KB", bytes as f64 / 1e3)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
-pub fn partition_marked_convex<T, E>(
+fn format_flops(flops: usize) -> String {
+    if flops >= 1_000_000_000_000 {
+        format!("{:.2} T", flops as f64 / 1e12)
+    } else if flops >= 1_000_000_000 {
+        format!("{:.2} G", flops as f64 / 1e9)
+    } else if flops >= 1_000_000 {
+        format!("{:.2} M", flops as f64 / 1e6)
+    } else if flops >= 1_000 {
+        format!("{:.2} K", flops as f64 / 1e3)
+    } else {
+        format!("{}", flops)
+    }
+}
+
+fn partition_marked_convex<T, E>(
     g: &StableGraph<T, E, Directed>,
     marked: &FxHashSet<NodeIndex>,
 ) -> Result<Vec<FxHashSet<NodeIndex>>, Cycle<NodeIndex>> {
