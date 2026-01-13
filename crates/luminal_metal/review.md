@@ -1,0 +1,6 @@
+  - 高：kernel 访问完全按连续索引 a[idx]/b[idx]/inp[idx]，忽略stride/broadcast，非连续或广播张量会算错。-crates/luminal_metal/src/kernel/ops.rs
+  - 高：output_size() 强制最小为 1，零尺寸张量会被当作 1 元素执行，可能越界读写。-crates/luminal_metal/src/kernel/ops.rs
+  - 中：execute() 依赖已分配 buffers，但 allocate_buffers() 只在 profile() 调用；常规 load_llir + set_data + execute 会 panic。-crates/luminal_metal/src/runtime.rs
+  - 中：get_f32() 只从 buffers 取输出，若输出直接来自 Input 或被优化成输入，取不到数据。-crates/luminal_metal/src/runtime.rs
+  - 低：输入边按 edge id 排序，若 LLIR 构图顺序变化可能导致输入顺序错位。-crates/luminal_metal/src/runtime.rs
+  - 低：当前实现只支持 f32，缺少对其他 dtype 的显式拒绝/报错。-crates/luminal_metal/src/runtime.rs -crates/luminal_metal/src/kernel/ops.rs

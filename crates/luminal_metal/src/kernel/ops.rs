@@ -8,7 +8,7 @@ use luminal::{
     prelude::{ENodeId, *},
     serialized_egraph::SerializedEGraph,
     utils::{
-        EgglogOp, LLIROp,
+        flatten_mul_strides, EgglogOp, LLIROp,
         OpParam::{self, *},
     },
 };
@@ -97,6 +97,14 @@ macro_rules! metal_unary_op {
 
         impl MetalKernelOp for $name {
             fn compile(&self, device: &Device) -> ComputePipelineState {
+                // Generate strided index expressions
+                let inp_index = flatten_mul_strides(&self.shape, &self.input_strides);
+                let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
+
+                // Convert expressions to Metal code
+                let inp_idx = inp_index.to_kernel().replace("const_z", "idx");
+                let out_idx = out_index.to_kernel().replace("const_z", "idx");
+
                 let source = format!(
                     r#"
                     #include <metal_stdlib>
@@ -109,11 +117,13 @@ macro_rules! metal_unary_op {
                         uint idx [[thread_position_in_grid]]
                     ) {{
                         if (idx < n_elements) {{
-                            out[idx] = {}(inp[idx]);
+                            out[{out_idx}] = {metal_op}(inp[{inp_idx}]);
                         }}
                     }}
                     "#,
-                    $metal_op
+                    metal_op = $metal_op,
+                    inp_idx = inp_idx,
+                    out_idx = out_idx
                 );
                 compile_shader(device, &source, "mkernel")
             }
@@ -211,7 +221,18 @@ impl EgglogOp for MetalAdd {
 
 impl MetalKernelOp for MetalAdd {
     fn compile(&self, device: &Device) -> ComputePipelineState {
-        let source = r#"
+        // Generate strided index expressions using 'z' = thread index
+        let a_index = flatten_mul_strides(&self.shape, &self.a_strides);
+        let b_index = flatten_mul_strides(&self.shape, &self.b_strides);
+        let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
+
+        // Convert expressions to Metal code, replacing 'const_z' with 'idx'
+        let a_idx = a_index.to_kernel().replace("const_z", "idx");
+        let b_idx = b_index.to_kernel().replace("const_z", "idx");
+        let out_idx = out_index.to_kernel().replace("const_z", "idx");
+
+        let source = format!(
+            r#"
             #include <metal_stdlib>
             using namespace metal;
 
@@ -221,13 +242,14 @@ impl MetalKernelOp for MetalAdd {
                 device float *out [[buffer(2)]],
                 device uint &n_elements [[buffer(3)]],
                 uint idx [[thread_position_in_grid]]
-            ) {
-                if (idx < n_elements) {
-                    out[idx] = a[idx] + b[idx];
-                }
-            }
-        "#;
-        compile_shader(device, source, "mkernel")
+            ) {{
+                if (idx < n_elements) {{
+                    out[{out_idx}] = a[{a_idx}] + b[{b_idx}];
+                }}
+            }}
+            "#
+        );
+        compile_shader(device, &source, "mkernel")
     }
 
     fn output_size(&self) -> Expression {
@@ -318,7 +340,18 @@ impl EgglogOp for MetalMul {
 
 impl MetalKernelOp for MetalMul {
     fn compile(&self, device: &Device) -> ComputePipelineState {
-        let source = r#"
+        // Generate strided index expressions using 'z' = thread index
+        let a_index = flatten_mul_strides(&self.shape, &self.a_strides);
+        let b_index = flatten_mul_strides(&self.shape, &self.b_strides);
+        let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
+
+        // Convert expressions to Metal code, replacing 'const_z' with 'idx'
+        let a_idx = a_index.to_kernel().replace("const_z", "idx");
+        let b_idx = b_index.to_kernel().replace("const_z", "idx");
+        let out_idx = out_index.to_kernel().replace("const_z", "idx");
+
+        let source = format!(
+            r#"
             #include <metal_stdlib>
             using namespace metal;
 
@@ -328,13 +361,14 @@ impl MetalKernelOp for MetalMul {
                 device float *out [[buffer(2)]],
                 device uint &n_elements [[buffer(3)]],
                 uint idx [[thread_position_in_grid]]
-            ) {
-                if (idx < n_elements) {
-                    out[idx] = a[idx] * b[idx];
-                }
-            }
-        "#;
-        compile_shader(device, source, "mkernel")
+            ) {{
+                if (idx < n_elements) {{
+                    out[{out_idx}] = a[{a_idx}] * b[{b_idx}];
+                }}
+            }}
+            "#
+        );
+        compile_shader(device, &source, "mkernel")
     }
 
     fn output_size(&self) -> Expression {

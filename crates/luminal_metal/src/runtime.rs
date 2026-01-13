@@ -67,9 +67,18 @@ impl MetalRuntime {
             .next()
             .unwrap();
 
+        // Try buffers first, then fallback to hlir_buffers for Input nodes
         let buffer = self
             .buffers
             .get(&data_id)
+            .or_else(|| {
+                // If data_id is an Input node, get from hlir_buffers
+                if let Some(Input { node, .. }) = self.llir_graph[data_id].to_op::<Input>() {
+                    self.hlir_buffers.get(&NodeIndex::new(*node))
+                } else {
+                    None
+                }
+            })
             .expect("Cannot find tensor in runtime!");
         let ptr = buffer.contents() as *const f32;
         let len = buffer.length() as usize / std::mem::size_of::<f32>();
