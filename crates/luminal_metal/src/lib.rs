@@ -1,7 +1,3 @@
-//! Metal backend for Luminal
-//!
-//! This crate provides Metal GPU support for Luminal on Apple Silicon devices.
-
 pub mod kernel;
 pub mod runtime;
 

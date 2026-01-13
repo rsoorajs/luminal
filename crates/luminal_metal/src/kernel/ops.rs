@@ -1,8 +1,3 @@
-//! Metal kernel operation implementations
-//!
-//! This module contains the concrete implementations of Metal kernels
-//! for each HLIR operation.
-
 use super::MetalKernelOp;
 use luminal::{
     prelude::{ENodeId, *},
@@ -14,10 +9,8 @@ use luminal::{
 };
 use metal::{Buffer, ComputeCommandEncoderRef, ComputePipelineState, Device, MTLSize};
 
-/// All Metal kernel operations
 pub type MetalOps = (MetalExp2, MetalAdd, MetalMul);
 
-// Utility function to compile a Metal shader
 fn compile_shader(device: &Device, source: &str, function_name: &str) -> ComputePipelineState {
     let library = device
         .new_library_with_source(source, &metal::CompileOptions::new())
@@ -30,7 +23,6 @@ fn compile_shader(device: &Device, source: &str, function_name: &str) -> Compute
         .expect("Failed to create compute pipeline state")
 }
 
-// Helper macro for creating simple unary operations
 macro_rules! metal_unary_op {
     ($name:ident, $op_name:expr, $metal_op:expr) => {
         #[derive(Debug, Default, Clone)]
@@ -163,10 +155,8 @@ macro_rules! metal_unary_op {
     };
 }
 
-// Define unary operations
 metal_unary_op!(MetalExp2, "MetalExp2", "exp2");
 
-// Binary operations need a different structure
 #[derive(Debug, Default, Clone)]
 pub struct MetalAdd {
     shape: Vec<Expression>,
@@ -340,12 +330,10 @@ impl EgglogOp for MetalMul {
 
 impl MetalKernelOp for MetalMul {
     fn compile(&self, device: &Device) -> ComputePipelineState {
-        // Generate strided index expressions using 'z' = thread index
         let a_index = flatten_mul_strides(&self.shape, &self.a_strides);
         let b_index = flatten_mul_strides(&self.shape, &self.b_strides);
         let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
 
-        // Convert expressions to Metal code, replacing 'const_z' with 'idx'
         let a_idx = a_index.to_kernel().replace("const_z", "idx");
         let b_idx = b_index.to_kernel().replace("const_z", "idx");
         let out_idx = out_index.to_kernel().replace("const_z", "idx");

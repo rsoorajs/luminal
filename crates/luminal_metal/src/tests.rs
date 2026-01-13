@@ -1,12 +1,7 @@
-//! Metal backend tests
-//!
-//! Tests for MetalRuntime and Metal kernel operations.
-
 use crate::runtime::MetalRuntime;
 use luminal::prelude::*;
 use proptest::prelude::*;
 
-/// Helper function to compare floating point vectors with tolerance
 fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
     assert_eq!(
         actual.len(),

@@ -14,14 +14,8 @@ use luminal::{
 use metal::{Buffer, CommandQueue, ComputePipelineState, Device, MTLResourceOptions};
 use std::time::Duration;
 
-/// Metal Runtime for Apple Silicon devices
-///
-/// This runtime implements the `Runtime` trait and executes computation graphs
-/// using Metal compute shaders. Currently only supports KernelOps.
 pub struct MetalRuntime {
-    /// Metal device handle
     device: Device,
-    /// Command queue for submitting work
     command_queue: CommandQueue,
     /// Buffers for HLIR input tensors (set by user)
     pub hlir_buffers: FxHashMap<NodeIndex, Buffer>,
@@ -34,7 +28,6 @@ pub struct MetalRuntime {
 }
 
 impl MetalRuntime {
-    /// Set input data for a tensor
     pub fn set_data(&mut self, id: impl ToId, data: &[f32]) {
         let buffer = self.device.new_buffer_with_data(
             data.as_ptr() as *const _,
@@ -44,10 +37,8 @@ impl MetalRuntime {
         self.hlir_buffers.insert(id.to_id(), buffer);
     }
 
-    /// Get output data from a tensor
     pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
         let id = id.to_id();
-        // Find the Output node that references this HLIR id
         let output_id = self
             .llir_graph
             .node_indices()
@@ -60,14 +51,12 @@ impl MetalRuntime {
             })
             .expect("Cannot find output tensor!");
 
-        // Get the buffer that feeds into the Output node
         let data_id = self
             .llir_graph
             .neighbors_directed(output_id, Direction::Incoming)
             .next()
             .unwrap();
 
-        // Try buffers first, then fallback to hlir_buffers for Input nodes
         let buffer = self
             .buffers
             .get(&data_id)
@@ -88,7 +77,6 @@ impl MetalRuntime {
 }
 
 impl Runtime for MetalRuntime {
-    // Only kernel ops, no block ops
     type Ops = crate::kernel::MetalOps;
     type CompileArg = ();
     type ExecReturn = ();
@@ -142,7 +130,6 @@ impl Runtime for MetalRuntime {
 
     #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
-        // Build LLIR node to HLIR node mapping for Input nodes
         let llir_to_hlir: FxHashMap<NodeIndex, NodeIndex> = self
             .llir_graph
             .node_indices()
@@ -155,14 +142,12 @@ impl Runtime for MetalRuntime {
             })
             .collect();
 
-        // Execute in topological order
         let topo_order = toposort(&self.llir_graph, None).expect("Graph has cycles!");
 
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
 
         for node in topo_order {
-            // Skip Input and Output nodes
             if self.llir_graph[node].to_op::<Input>().is_some()
                 || self.llir_graph[node].to_op::<Output>().is_some()
             {
@@ -172,7 +157,6 @@ impl Runtime for MetalRuntime {
             if let Some(kernel_op) = self.llir_graph[node].to_dialect::<dyn MetalKernelOp>() {
                 let pipeline = self.pipelines.get(&node).expect("Pipeline not compiled!");
 
-                // Gather input buffers
                 let input_nodes: Vec<NodeIndex> = self
                     .llir_graph
                     .edges_directed(node, Direction::Incoming)
@@ -211,11 +195,8 @@ impl Runtime for MetalRuntime {
 }
 
 impl MetalRuntime {
-    /// Allocate intermediate buffers based on output sizes.
-    /// Must be called before execute() when not using profile().
     pub fn allocate_intermediate_buffers(&mut self, dyn_map: &FxHashMap<char, usize>) {
         for node in self.llir_graph.node_indices() {
-            // Skip Input nodes (they use hlir_buffers)
             if self.llir_graph[node].to_op::<Input>().is_some() {
                 continue;
             }
