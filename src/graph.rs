@@ -252,7 +252,6 @@ impl Graph {
             );
         }
 
-        // Structured diagnostic data for tracing subscribers
         info!(
             target: "luminal::search",
             graphs = n_graphs,
