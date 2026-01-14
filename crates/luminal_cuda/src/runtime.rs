@@ -414,7 +414,7 @@ impl Runtime for CudaRuntime {
             if let Some(kernel_op) = llir_graph[kernel].to_dialect::<dyn KernelOp>() {
                 let (kernel_function, _, _, grid, tb, shared_mem, constants) =
                     kernel_op.compile(&self.cuda_stream);
-                let inputs: Vec<NodeIndex> = llir_graph
+                let inputs = llir_graph
                     .edges_directed(kernel, Direction::Incoming)
                     .sorted_by_key(|e| e.id())
                     .map(|e| e.source())
