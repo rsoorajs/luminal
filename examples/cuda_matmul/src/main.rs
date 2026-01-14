@@ -3,21 +3,23 @@ use luminal::{prelude::*, visualization::ToDot};
 use luminal_cuda::runtime::CudaRuntime;
 use rand::Rng;
 use std::fs;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 fn main() {
-    // Initialize tracing with file output
-    let log_file = std::fs::File::create("cuda_matmul.log").expect("Failed to create log file");
-
+    // Initialize tracing
     tracing_subscriber::registry()
-        .with(EnvFilter::new("luminal_cuda=trace,luminal=trace"))
-        .with(fmt::layer().with_writer(log_file).with_ansi(false))
+        .with(EnvFilter::try_from_default_env().unwrap())
+        .with(fmt::layer())
         .init();
 
-    let m = (2 as usize).pow(8);
-    let n = (2 as usize).pow(11);
-    let k = (2 as usize).pow(12);
+    let m = (2 as usize).pow(2);
+    let n = (2 as usize).pow(3);
+    let k = (2 as usize).pow(1);
+
+    info!(m);
+    info!(n);
+    info!(k); 
 
     // Create compute graph
     let mut cx = Graph::new();
@@ -29,7 +31,6 @@ fn main() {
 
     // Compile
     cx.build_search_space::<CudaRuntime>();
-    debug!("{:#?}", cx.ops);
 
     let mut rt = CudaRuntime::new().unwrap();
 
@@ -39,30 +40,40 @@ fn main() {
 
     // Generate random input tensors based on dimensions
     let mut rng = rand::rng();
-    let a_data: Vec<f32> = (0..(m * k)).map(|_| rng.random_range(0.0..10.0)).collect();
-    let b_data_row_major: Vec<f32> = (0..(k * n)).map(|_| rng.random_range(0.0..10.0)).collect();
+    let a_data: Vec<f32> = (0..(m * k)).map(|_| rng.random_range(0.0..1.0)).collect();
+    let b_data_row_major: Vec<f32> = (0..(k * n)).map(|_| rng.random_range(0.0..1.0)).collect();
 
     // Create candle tensors on CPU for verification
     let device = Device::Cpu;
 
     // A is row-major (m x k)
     let a_candle = Tensor::from_vec(a_data.clone(), (m, k), &device).unwrap();
+    debug!("a_candle: {:?}", a_candle);
+    trace!("a_candle matrix:\n{}", a_candle);
+
 
     // B needs to be column-major for luminal, so create it as row-major (k x n)
     // then transpose to get column-major layout
     let b_candle_row_major = Tensor::from_vec(b_data_row_major.clone(), (k, n), &device).unwrap();
+    debug!("b_candle: {:?}", b_candle_row_major);
+    trace!("b_candle:\n{}", b_candle_row_major); 
+
+
 
     // For luminal, we need B in column-major format, which means we store it as transposed
     // Convert row-major (k x n) to column-major by transposing to (n x k) then reading as flat
     let b_candle_transposed = b_candle_row_major.t().unwrap().contiguous().unwrap();
+    debug!("b_candle.t(): {:?}", b_candle_transposed);
+    trace!("b_candle.t():\n{}", b_candle_transposed); 
+
+
     let b_data_col_major = b_candle_transposed
         .flatten_all()
         .unwrap()
         .to_vec1::<f32>()
         .unwrap();
 
-    info!("Matrix A shape: {} x {} (row-major)", m, k);
-    info!("Matrix B shape: {} x {} (column-major layout)", k, n);
+
 
     // Set input tensors for luminal
     // A is row-major as is
@@ -85,6 +96,10 @@ fn main() {
     // Get output tensor from luminal (row-major format)
     let luminal_result_data = rt.get_f32(c);
 
+    let avg = luminal_result_data.iter().sum::<f32>() / luminal_result_data.len() as f32;
+    debug!("Average value: {}", avg);
+
+
     // Compute matmul using candle for verification
     // a_candle is (m x k) row-major, b_candle_row_major is (k x n) row-major
     let candle_result = a_candle.matmul(&b_candle_row_major).unwrap();
@@ -105,9 +120,9 @@ fn main() {
 
     let max_diff = diff.iter().cloned().fold(0.0f32, f32::max);
 
+
     // Check if results match within tolerance
     // Use 0.1 tolerance for GPU vs CPU comparison (floating point precision differences)
-    assert!(max_diff < 0.1);
+    assert!(max_diff < 0.1, "max_diff = {}", max_diff);
 
-    println!("\nLogs written to: cuda_matmul.log");
 }

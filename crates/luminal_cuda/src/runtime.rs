@@ -26,7 +26,7 @@ use std::{
     collections::VecDeque, ffi::c_void, fmt::Debug, fs::File, io::Read, mem::size_of, sync::Arc,
     time::Duration,
 };
-use tracing::{field, span, trace, Level};
+use tracing::{field, info, span, trace, Level};
 use uuid::Uuid;
 
 pub enum CudaInput {
@@ -511,6 +511,7 @@ impl Runtime for CudaRuntime {
     #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
         if self.buffers.is_empty()
+            || true
             || dyn_map.len() != self.last_dyn_map.len()
             || dyn_map
                 .iter()
@@ -982,7 +983,7 @@ impl CudaRuntime {
     pub fn print_execution_stats(&self) {
         let stats = &self.last_execution_stats;
         if stats.kernel_stats.is_empty() && stats.block_op_stats.is_empty() {
-            println!("No execution stats available.");
+            info!("No execution stats available.");
             return;
         }
 
@@ -992,8 +993,8 @@ impl CudaRuntime {
 
         // Print kernel stats if any
         if !stats.kernel_stats.is_empty() {
-            println!("\n=== Kernel Execution Statistics ===\n");
-            println!(
+            info!("\n=== Kernel Execution Statistics ===\n");
+            info!(
                 "{:<20} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
                 "Kernel",
                 "Time (us)",
@@ -1005,7 +1006,7 @@ impl CudaRuntime {
                 "MBU",
                 "MFU"
             );
-            println!("{}", "-".repeat(116));
+            info!("{}", "-".repeat(116));
 
             for stat in &stats.kernel_stats {
                 self.print_stat_row(
@@ -1021,7 +1022,7 @@ impl CudaRuntime {
                 );
             }
 
-            println!("{}", "-".repeat(116));
+            info!("{}", "-".repeat(116));
         }
     }
 
@@ -1069,7 +1070,7 @@ impl CudaRuntime {
                         .collect_vec(),
                 );
             }
-            println!();
+            info!("");
         }
     }
 }
@@ -1139,7 +1140,7 @@ impl CudaRuntime {
             "-".to_string()
         };
 
-        println!(
+        info!(
             "{:<20} {:>12.2} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
             name,
             execution_time_us,
