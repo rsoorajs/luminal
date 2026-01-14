@@ -13,9 +13,9 @@ fn main() {
         .with(fmt::layer())
         .init();
 
-    let m = (2 as usize).pow(2);
-    let n = (2 as usize).pow(3);
-    let k = (2 as usize).pow(1);
+    let m = (2 as usize).pow(12);
+    let n = (2 as usize).pow(12);
+    let k = (2 as usize).pow(12);
 
     info!(m);
     info!(n);
