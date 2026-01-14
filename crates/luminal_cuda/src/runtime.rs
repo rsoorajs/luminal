@@ -888,6 +888,8 @@ impl CudaRuntime {
         // Aggregate timing per op type across all SMs
         // event codes: 0=Issue, 1=Wait, 2+=BlockOps (index in ops list)
         let mut op_times_ns: Vec<u64> = vec![0; op_names.len()];
+        let mut issue_time_ns: u64 = 0;
+        let mut wait_time_ns: u64 = 0;
 
         for (sm_timings, _start_time, _) in timings {
             for sm_chunk in sm_timings.chunks(1000) {
@@ -895,16 +897,19 @@ impl CudaRuntime {
                     if event.start == 0 {
                         break; // No more events recorded for this SM
                     }
-                    // event >= 2 means it's a block op (0=Issue, 1=Wait)
-                    if event.event >= 2 {
+                    let stop = if event.stop == 0 {
+                        event.start
+                    } else {
+                        event.stop
+                    };
+                    let duration = stop.saturating_sub(event.start);
+                    if event.event == 0 {
+                        issue_time_ns += duration;
+                    } else if event.event == 1 {
+                        wait_time_ns += duration;
+                    } else {
                         let op_idx = (event.event - 2) as usize;
                         if op_idx < op_names.len() {
-                            let stop = if event.stop == 0 {
-                                event.start
-                            } else {
-                                event.stop
-                            };
-                            let duration = stop.saturating_sub(event.start);
                             op_times_ns[op_idx] += duration;
                         }
                     }
@@ -914,7 +919,7 @@ impl CudaRuntime {
 
         // Compute bandwidth and TFLOPS from aggregated metrics
         // Divide total SM-time by sm_count to get wall-clock time
-        op_names
+        let mut stats: Vec<BlockOpStats> = op_names
             .iter()
             .enumerate()
             .filter(|(i, _)| op_times_ns[*i] > 0)
@@ -947,7 +952,35 @@ impl CudaRuntime {
                     tflops,
                 }
             })
-            .collect()
+            .collect();
+
+        // Add Issue and Wait timing stats
+        if issue_time_ns > 0 {
+            let time_us = (issue_time_ns as f64 / sm_count as f64) / 1000.0;
+            stats.push(BlockOpStats {
+                name: "Issue",
+                execution_time_us: time_us,
+                bytes_loaded: 0,
+                bytes_stored: 0,
+                flops: 0,
+                bandwidth_gbps: 0.0,
+                tflops: 0.0,
+            });
+        }
+        if wait_time_ns > 0 {
+            let time_us = (wait_time_ns as f64 / sm_count as f64) / 1000.0;
+            stats.push(BlockOpStats {
+                name: "Wait",
+                execution_time_us: time_us,
+                bytes_loaded: 0,
+                bytes_stored: 0,
+                flops: 0,
+                bandwidth_gbps: 0.0,
+                tflops: 0.0,
+            });
+        }
+
+        stats
     }
 
     /// Print execution statistics for the last execution.

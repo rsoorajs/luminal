@@ -5,6 +5,8 @@ use luminal::op::{
     OpParam::{self, *},
 };
 
+use crate::TILE_SIZE;
+
 pub type Ops = (Exp, Sigmoid, CubeMul, TileSum);
 
 #[derive(Default, Debug, Clone)]
@@ -24,7 +26,7 @@ impl EgglogOp for CubeMul {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["(rule
+        vec![format!("(rule
             (
                 ; get mul
                 (= ?sa (Mul ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
@@ -47,49 +49,49 @@ impl EgglogOp for CubeMul {
                 (= ?dt (dtype ?a))
             )
             (
-                ; divide the last 3 dimensions by 32
+                ; divide the last 3 dimensions by TILE_SIZE
                 (let ?new_shape
                     (ReplaceNthFromEnd
                         (ReplaceNthFromEnd
                             (ReplaceNthFromEnd
                                 ?shape
-                            (MCeilDiv ?shape_last (MNum 32)) 0)
-                        (MCeilDiv ?shape_second_to_last (MNum 32)) 1)
-                    (MCeilDiv ?shape_third_to_last (MNum 32)) 2)
+                            (MCeilDiv ?shape_last (MNum {ts})) 0)
+                        (MCeilDiv ?shape_second_to_last (MNum {ts})) 1)
+                    (MCeilDiv ?shape_third_to_last (MNum {ts})) 2)
                 )
-                ; multiply last 3 strides by 32
+                ; multiply last 3 strides by TILE_SIZE
                 (let ?new_a_stride
                     (ReplaceNthFromEnd
                         (ReplaceNthFromEnd
                             (ReplaceNthFromEnd
                                 ?a_stride
-                            (MMul (MIter) (MNum 32)) 0)
-                        (MMul ?a_n_width (MNum 32)) 1)
-                    (MMul ?a_m_width (MNum 32)) 2)
+                            (MMul (MIter) (MNum {ts})) 0)
+                        (MMul ?a_n_width (MNum {ts})) 1)
+                    (MMul ?a_m_width (MNum {ts})) 2)
                 )
                 (let ?new_b_stride
                     (ReplaceNthFromEnd
                         (ReplaceNthFromEnd
                             (ReplaceNthFromEnd
                                 ?b_stride
-                            (MMul (MIter) (MNum 32)) 0)
-                        (MMul ?b_n_width (MNum 32)) 1)
-                    (MMul ?b_m_width (MNum 32)) 2)
+                            (MMul (MIter) (MNum {ts})) 0)
+                        (MMul ?b_n_width (MNum {ts})) 1)
+                    (MMul ?b_m_width (MNum {ts})) 2)
                 )
                 (let ?new_out_stride
                     (ReplaceNthFromEnd
                         (ReplaceNthFromEnd
                             (ReplaceNthFromEnd
                                 ?out_stride
-                            (MMul (MIter) (MNum 32)) 0)
-                        (MMul ?out_n_width (MNum 32)) 1)
-                    (MMul ?out_m_width (MNum 32)) 2)
+                            (MMul (MIter) (MNum {ts})) 0)
+                        (MMul ?out_n_width (MNum {ts})) 1)
+                    (MMul ?out_m_width (MNum {ts})) 2)
                 )
                 (let ?cm (CubeMul ?new_shape ?shape ?a ?new_a_stride ?a_m_width ?a_n_width ?a_k_width ?b ?new_b_stride ?b_m_width ?b_n_width ?b_k_width ?new_out_stride ?out_m_width ?out_n_width ?out_k_width))
                 (union ?sa ?cm)
                 (set (dtype ?cm) (F32))
             )
-        )".to_string()]
+        )", ts = TILE_SIZE)]
     }
 }
 
@@ -110,7 +112,7 @@ impl EgglogOp for TileSum {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["(rule
+        vec![format!("(rule
             (
                 ; get  sum
                 (= ?sa (Sum ?shape ?iters ?a ?a_stride ?a_k_stride ?out_stride))
@@ -125,34 +127,34 @@ impl EgglogOp for TileSum {
                 (= (F32) (dtype ?a))
             )
             (
-                ; divide second to last and last dimensions by 32
+                ; divide second to last and last dimensions by TILE_SIZE
                 (let ?new_shape
                     (ReplaceNthFromEnd
                         (ReplaceNthFromEnd
                             ?shape
-                        (MCeilDiv ?shape_n (MNum 32)) 0)
-                    (MCeilDiv ?shape_m (MNum 32)) 1)
+                        (MCeilDiv ?shape_n (MNum {ts})) 0)
+                    (MCeilDiv ?shape_m (MNum {ts})) 1)
                 )
-                ; multiply second to last and last strides by 32
+                ; multiply second to last and last strides by TILE_SIZE
                 (let ?new_a_stride
                     (ReplaceNthFromEnd
                         (ReplaceNthFromEnd
                             ?a_stride
-                        (MMul ?a_n_stride (MNum 32)) 0)
-                    (MMul ?a_m_stride (MNum 32)) 1)
+                        (MMul ?a_n_stride (MNum {ts})) 0)
+                    (MMul ?a_m_stride (MNum {ts})) 1)
                 )
                 (let ?new_out_stride
                     (ReplaceNthFromEnd
                         (ReplaceNthFromEnd
                             ?out_stride
-                        (MMul ?out_n_stride (MNum 32)) 0)
-                    (MMul ?out_m_stride (MNum 32)) 1)
+                        (MMul ?out_n_stride (MNum {ts})) 0)
+                    (MMul ?out_m_stride (MNum {ts})) 1)
                 )
                 (let ?ts (TileSum ?new_shape ?shape ?iters ?a ?new_a_stride ?a_m_stride ?a_n_stride ?a_k_stride ?new_out_stride ?out_m_stride ?out_n_stride))
                 (union ?sa ?ts)
                 (set (dtype ?ts) (F32))
             )
-        )".to_string()]
+        )", ts = TILE_SIZE)]
     }
 }
 

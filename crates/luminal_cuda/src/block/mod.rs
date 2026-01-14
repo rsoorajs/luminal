@@ -124,7 +124,7 @@ fn compute_barrier_strides(
             if cs.iter().all(|i| *i) {
                 if cr.iter().all(|cr| *pr == *cr) {
                     *acc *= *pr;
-                    Some((prev, vec![prev; cr.len()]))
+                    Some((Expression::from('z') * prev, vec![prev * 'z'; cr.len()]))
                 } else if let Some(Some(factor)) = cr.iter().try_fold(None, |acc, cr| {
                     // Multiple producers per consumer
                     if !(*pr % *cr).to_usize().map(|i| i == 0).unwrap_or_default() {
@@ -236,7 +236,7 @@ fn get_barrier_strides(
                     .launch_range()
             })
             .collect();
-        let (producer_strides, consumer_strides) = crate::block::compute_barrier_strides(
+        let (producer_strides, consumer_strides) = compute_barrier_strides(
             prod_range.clone(),
             cons_range.clone(),
             consumers
@@ -834,20 +834,22 @@ pub(crate) fn make_megakernel_from_llir_graph(
             expressions[&range.iter().copied().product()],
             -1,
             expressions[&in_dep_a_stride],
-            expressions[&producer_barrier_bases
+            producer_barrier_bases
                 .get(&sources[0])
-                .copied()
-                .unwrap_or(0.into())],
+                .map(|e| expressions[e])
+                .unwrap_or((-1).into()),
             expressions[&in_dep_b_stride],
-            expressions[&sources
+            sources
                 .get(1)
-                .and_then(|n| producer_barrier_bases.get(n).copied())
-                .unwrap_or(0.into())],
+                .and_then(|n| producer_barrier_bases.get(n))
+                .map(|e| expressions[e])
+                .unwrap_or((-1).into()),
             expressions[&in_dep_c_stride],
-            expressions[&sources
+            sources
                 .get(2)
-                .and_then(|n| producer_barrier_bases.get(n).copied())
-                .unwrap_or(0.into())],
+                .and_then(|n| producer_barrier_bases.get(n))
+                .map(|e| expressions[e])
+                .unwrap_or((-1).into()),
             expressions[&out_dep_stride],
             expressions[&producer_barrier_bases[&node]],
             [null(); 3],
