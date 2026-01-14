@@ -36,6 +36,8 @@ impl EgglogOp for RowAdd {
                 ; get add
                 (= ?sa (Add ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
                 (= ?row_width (nth_from_end ?shape 0))
+                (= (MNum ?row_width_num) ?row_width)
+                (<= ?row_width_num 4096) ; currently load full row to sram, should instead load chunks in up to capacity and stream rest in
                 ; assert the row is contiguous
                 (= (MNum 1) (nth_from_end ?a_stride 0))
                 (= (MNum 1) (nth_from_end ?b_stride 0))
@@ -100,11 +102,6 @@ impl BlockOp for RowAdd {
         vec![vec![true; self.range.len()], vec![true; self.range.len()]]
     }
 
-    fn bytes_loaded(&self) -> Expression {
-        // Load 2 input rows (a + b) per launch
-        self.range.iter().copied().product::<Expression>().max(1) * self.row_width * 2 * 4
-    }
-
     fn bytes_stored(&self) -> Expression {
         // Store 1 output row per launch
         self.range.iter().copied().product::<Expression>().max(1) * self.row_width * 4
@@ -115,21 +112,54 @@ impl BlockOp for RowAdd {
         self.range.iter().copied().product::<Expression>().max(1) * self.row_width
     }
 
-    fn cuda_op(&self) -> (String, String) {
-        let struct_body =
-            "const int a_strides; const int b_strides; const int out_strides; int row_width;"
-                .to_string();
-        let function_body = "
-            const float* a = source_ptrs[0] + eval_expression(payload.a_strides, current);
-            const float* b = source_ptrs[1] + eval_expression(payload.b_strides, current);
-            float* out = out_ptr + eval_expression(payload.out_strides, current);
+    fn cuda_struct(&self) -> String {
+        "const int a_strides; const int b_strides; const int out_strides; int row_width;"
+            .to_string()
+    }
 
-            for (int idx = t; idx < eval_expression(payload.row_width, 0); idx += blockDim.x) {
-                out[idx] = a[idx] + b[idx];
-            }
+    fn prologue_a(&self) -> String {
         "
-        .to_string();
-        (struct_body, function_body)
+        const float* a = source_ptrs[0] + eval_expression(payload.a_strides, current);
+        const int row_width = eval_expression(payload.row_width, 0);
+        const int hop_amt = row_width / blockDim.x;
+        #pragma unroll 8
+        for (int idx = t * hop_amt; idx < (t * hop_amt + hop_amt); idx++) {
+            if (idx < row_width) scratchpad[idx] = a[idx];
+        }
+        "
+        .to_string()
+    }
+
+    fn prologue_a_bytes_loaded(&self) -> Expression {
+        self.range.iter().copied().product::<Expression>().max(1) * self.row_width * 4
+    }
+
+    fn prologue_b(&self) -> String {
+        "
+        const float* b = source_ptrs[1] + eval_expression(payload.b_strides, current);
+        const int row_width = eval_expression(payload.row_width, 0);
+        const int hop_amt = row_width / blockDim.x;
+        #pragma unroll 8
+        for (int idx = t * hop_amt; idx < (t * hop_amt + hop_amt); idx++) {
+            if (idx < row_width) scratchpad[idx + row_width] = b[idx];
+        }
+        "
+        .to_string()
+    }
+
+    fn prologue_b_bytes_loaded(&self) -> Expression {
+        self.range.iter().copied().product::<Expression>().max(1) * self.row_width * 4
+    }
+
+    fn cuda_function(&self) -> String {
+        "
+        float* out = out_ptr + eval_expression(payload.out_strides, current);
+        int row_width = eval_expression(payload.row_width, 0);
+        for (int idx = t; idx < row_width; idx += blockDim.x) {
+            out[idx] = scratchpad[idx] + scratchpad[idx + row_width];
+        }
+        "
+        .to_string()
     }
 
     fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
@@ -267,27 +297,23 @@ impl BlockOp for RowSwishMul {
         self.range.iter().copied().product::<Expression>() * self.row_width * 5
     }
 
-    fn cuda_op(&self) -> (String, String) {
-        let struct_body = "
-            const int a;
-            const int b;
-            const int out;
-            int row_width;
-        "
-        .to_string();
-        let function_body = "
-            const float* a = source_ptrs[0] + eval_expression(payload.a, current);
-            const float* b = source_ptrs[1] + eval_expression(payload.b, current);
-            float* out = out_ptr + eval_expression(payload.out, current);
+    fn cuda_struct(&self) -> String {
+        "const int a; const int b; const int out; int row_width;".to_string()
+    }
 
-            for (int idx = t; idx < eval_expression(payload.row_width, 0); idx += blockDim.x) {
-                float x = a[idx];
-                float sw = x / (1.0f + __expf(-x)); // swish(x)
-                out[idx] = sw * b[idx];
-            }
+    fn cuda_function(&self) -> String {
         "
-        .to_string();
-        (struct_body, function_body)
+        const float* a = source_ptrs[0] + eval_expression(payload.a, current);
+        const float* b = source_ptrs[1] + eval_expression(payload.b, current);
+        float* out = out_ptr + eval_expression(payload.out, current);
+
+        for (int idx = t; idx < eval_expression(payload.row_width, 0); idx += blockDim.x) {
+            float x = a[idx];
+            float sw = x / (1.0f + __expf(-x)); // swish(x)
+            out[idx] = sw * b[idx];
+        }
+        "
+        .to_string()
     }
 
     fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
@@ -470,60 +496,57 @@ impl BlockOp for RowRMSNorm {
         self.range.iter().copied().product::<Expression>() * self.row_width * 5
     }
 
-    fn cuda_op(&self) -> (String, String) {
-        let struct_body = "
-            const int inp;
-            const int out;
-            int row_width;
+    fn cuda_struct(&self) -> String {
+        "const int inp; const int out; int row_width;".to_string()
+    }
+
+    fn cuda_function(&self) -> String {
         "
-        .to_string();
-        let function_body = "
-            const float* inp = source_ptrs[0] + eval_expression(payload.inp, current);
-            float*       out = out_ptr + eval_expression(payload.out, current);
+        const float* inp = source_ptrs[0] + eval_expression(payload.inp, current);
+        float*       out = out_ptr + eval_expression(payload.out, current);
 
-            const int d       = eval_expression(payload.row_width, 0);
-            const float eps   = 1e-5f;
-            const int nthreads = blockDim.x;
+        const int d       = eval_expression(payload.row_width, 0);
+        const float eps   = 1e-5f;
+        const int nthreads = blockDim.x;
 
-            // Shared partial sums (double for accuracy)
-            __shared__ double s_partials[1024];  // assumes blockDim.x <= 1024
-            __shared__ float  s_inv_rms;
+        // Shared partial sums (double for accuracy)
+        __shared__ double s_partials[1024];  // assumes blockDim.x <= 1024
+        __shared__ float  s_inv_rms;
 
-            // 1) Each thread computes a partial sum of squares over its stripe
-            double ss_local = 0.0;
-            for (int j = t; j < d; j += nthreads) {
-                float x = inp[j];
-                ss_local += (double)x * (double)x;
-            }
+        // 1) Each thread computes a partial sum of squares over its stripe
+        double ss_local = 0.0;
+        for (int j = t; j < d; j += nthreads) {
+            float x = inp[j];
+            ss_local += (double)x * (double)x;
+        }
 
-            s_partials[t] = ss_local;
-            __syncthreads();
+        s_partials[t] = ss_local;
+        __syncthreads();
 
-            // 2) Parallel reduction in shared memory to get total sum of squares
-            for (int offset = nthreads >> 1; offset > 0; offset >>= 1) {
-                if (t < offset) {
-                    s_partials[t] += s_partials[t + offset];
-                }
-                __syncthreads();
-            }
-
-            // 3) Thread 0 computes inv_rms and broadcasts it
-            if (t == 0) {
-                double ss_total = s_partials[0];
-                float denom     = sqrtf((float)(ss_total / (double)d) + eps);
-                s_inv_rms       = 1.0f / denom;
+        // 2) Parallel reduction in shared memory to get total sum of squares
+        for (int offset = nthreads >> 1; offset > 0; offset >>= 1) {
+            if (t < offset) {
+                s_partials[t] += s_partials[t + offset];
             }
             __syncthreads();
+        }
 
-            float inv_rms = s_inv_rms;
+        // 3) Thread 0 computes inv_rms and broadcasts it
+        if (t == 0) {
+            double ss_total = s_partials[0];
+            float denom     = sqrtf((float)(ss_total / (double)d) + eps);
+            s_inv_rms       = 1.0f / denom;
+        }
+        __syncthreads();
 
-            // 4) All threads normalize their stripe
-            for (int j = t; j < d; j += nthreads) {
-                out[j] = inp[j] * inv_rms * source_ptrs[1][j];
-            }
+        float inv_rms = s_inv_rms;
+
+        // 4) All threads normalize their stripe
+        for (int j = t; j < d; j += nthreads) {
+            out[j] = inp[j] * inv_rms * source_ptrs[1][j];
+        }
         "
-        .to_string();
-        (struct_body, function_body)
+        .to_string()
     }
 
     fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
@@ -874,54 +897,50 @@ impl BlockOp for RowRope {
         self.range.iter().copied().product::<Expression>() * self.row_width * 5
     }
 
-    fn cuda_op(&self) -> (String, String) {
-        let struct_body = "
-            const int inp;
-            const int out;
-            int row_width;
-            const int token_ids;
+    fn cuda_struct(&self) -> String {
+        "const int inp; const int out; int row_width; const int token_ids;".to_string()
+    }
+
+    fn cuda_function(&self) -> String {
         "
-        .to_string();
-        let function_body = "
-            const float* inp = source_ptrs[0] + eval_expression(payload.inp, current);
-            float*       out = out_ptr + eval_expression(payload.out, current);
-            const int* token_ids = (const int*)source_ptrs[1] + eval_expression(payload.token_ids, current);
+        const float* inp = source_ptrs[0] + eval_expression(payload.inp, current);
+        float*       out = out_ptr + eval_expression(payload.out, current);
+        const int* token_ids = (const int*)source_ptrs[1] + eval_expression(payload.token_ids, current);
 
-            const int D_total = eval_expression(payload.row_width, 0);    // = n_heads * d_head
-            const int d_head  = 128;            // head_dim
-            const int n_heads = D_total / d_head;
+        const int D_total = eval_expression(payload.row_width, 0);    // = n_heads * d_head
+        const int d_head  = 128;            // head_dim
+        const int n_heads = D_total / d_head;
 
-            const int   pos  = token_ids[0];   // must match position_ids[batch, seq]
-            const float base = 500000.0f;
+        const int   pos  = token_ids[0];   // must match position_ids[batch, seq]
+        const float base = 500000.0f;
 
-            const int half = d_head / 2;            // 64 when d_head = 128
+        const int half = d_head / 2;            // 64 when d_head = 128
 
-            for (int h = 0; h < n_heads; ++h) {
-                const float* head_in  = inp + h * d_head;
-                float*       head_out = out + h * d_head;
+        for (int h = 0; h < n_heads; ++h) {
+            const float* head_in  = inp + h * d_head;
+            float*       head_out = out + h * d_head;
 
-                // k indexes within the first half [0 .. half-1]
-                for (int k = t; k < half; k += blockDim.x) {
-                    const int j0 = k;           // first half index
-                    const int j1 = k + half;    // corresponding second-half index
+            // k indexes within the first half [0 .. half-1]
+            for (int k = t; k < half; k += blockDim.x) {
+                const int j0 = k;           // first half index
+                const int j1 = k + half;    // corresponding second-half index
 
-                    // exponent = -(2*k / d_head) to match inv_freq = base^{-(arange(0,dim,2)/dim)}
-                    const float exponent = -(2.0f * (float)k) / (float)d_head;
-                    const float theta    = (float)pos * __powf(base, exponent);
+                // exponent = -(2*k / d_head) to match inv_freq = base^{-(arange(0,dim,2)/dim)}
+                const float exponent = -(2.0f * (float)k) / (float)d_head;
+                const float theta    = (float)pos * __powf(base, exponent);
 
-                    float s, c;
-                    __sincosf(theta, &s, &c);
+                float s, c;
+                __sincosf(theta, &s, &c);
 
-                    const float x0 = head_in[j0];
-                    const float x1 = head_in[j1];
+                const float x0 = head_in[j0];
+                const float x1 = head_in[j1];
 
-                    head_out[j0] = x0 * c - x1 * s;
-                    head_out[j1] = x1 * c + x0 * s;
-                }
+                head_out[j0] = x0 * c - x1 * s;
+                head_out[j1] = x1 * c + x0 * s;
             }
+        }
         "
-        .to_string();
-        (struct_body, function_body)
+        .to_string()
     }
 
     fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
@@ -1141,105 +1160,95 @@ impl BlockOp for TileMatmul {
         batch * m * n * k * 2
     }
 
-    fn cuda_op(&self) -> (String, String) {
-        let struct_body = "
-            const int untiled_range[2];
-            const int a;
-            const int b;
-            const int c;
-            int iters;
-            int a_width;
-            int b_width;
-            int c_width;
-            int m_pos_stride;
-            int n_pos_stride;
-        "
-        .to_string();
-        let function_body = format!("
-            auto warp_reduce_sum = [](float val) {{
-                for (int offset = 16; offset > 0; offset >>= 1) {{
-                    val += __shfl_down_sync(0xffffffff, val, offset);
-                }}
-                return val;
-            }};
-            const float* a = source_ptrs[0] + eval_expression(payload.a, current);
-            const float* b = source_ptrs[1] + eval_expression(payload.b, current);
-            float*       c = out_ptr + eval_expression(payload.c, current);
-            const int m_pos = eval_expression(payload.m_pos_stride, current);
-            const int n_pos = eval_expression(payload.n_pos_stride, current);
+    fn cuda_struct(&self) -> String {
+        "const int untiled_range[2]; const int a; const int b; const int c; int iters; int a_width; int b_width; int c_width; int m_pos_stride; int n_pos_stride;".to_string()
+    }
 
-            const int threads   = blockDim.x;
-            const int lane      = t & 31;
-            const int warp_id   = t >> 5;
-            const int num_warps = threads >> 5;
-            const int K = eval_expression(payload.iters, 0);
+    fn cuda_function(&self) -> String {
+        format!("
+        auto warp_reduce_sum = [](float val) {{
+            for (int offset = 16; offset > 0; offset >>= 1) {{
+                val += __shfl_down_sync(0xffffffff, val, offset);
+            }}
+            return val;
+        }};
+        const float* a = source_ptrs[0] + eval_expression(payload.a, current);
+        const float* b = source_ptrs[1] + eval_expression(payload.b, current);
+        float*       c = out_ptr + eval_expression(payload.c, current);
+        const int m_pos = eval_expression(payload.m_pos_stride, current);
+        const int n_pos = eval_expression(payload.n_pos_stride, current);
 
-            constexpr int TILE_SIZE = {ts};
-            const int global_m0 = m_pos * TILE_SIZE;
-            const int global_n0 = n_pos * TILE_SIZE;
-            const int M = eval_expression(payload.untiled_range[0], 0);
-            const int N = eval_expression(payload.untiled_range[1], 0);
+        const int threads   = blockDim.x;
+        const int lane      = t & 31;
+        const int warp_id   = t >> 5;
+        const int num_warps = threads >> 5;
+        const int K = eval_expression(payload.iters, 0);
 
-            int rows_left = M - global_m0;
-            int cols_left = N - global_n0;
-            if (rows_left <= 0 || cols_left <= 0) return;
+        constexpr int TILE_SIZE = {ts};
+        const int global_m0 = m_pos * TILE_SIZE;
+        const int global_n0 = n_pos * TILE_SIZE;
+        const int M = eval_expression(payload.untiled_range[0], 0);
+        const int N = eval_expression(payload.untiled_range[1], 0);
 
-            const int tile_m = rows_left > TILE_SIZE ? TILE_SIZE : rows_left;
-            const int tile_n = cols_left > TILE_SIZE ? TILE_SIZE : cols_left;
-            const int b_width = eval_expression(payload.b_width, 0);
+        int rows_left = M - global_m0;
+        int cols_left = N - global_n0;
+        if (rows_left <= 0 || cols_left <= 0) return;
 
-            // Fast path for M=1 decode: warps parallelize over columns with K reduction
-            if (tile_m == 1 && num_warps > 0) {{
-                constexpr int COLS_PER_WARP = 4;
-                for (int col_base = warp_id * COLS_PER_WARP; col_base < tile_n; col_base += num_warps * COLS_PER_WARP) {{
-                    float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
-                    for (int k = lane; k < K; k += 32) {{
-                        float a_val = a[k];
-                        #pragma unroll
-                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
-                            if (col_base + ci < tile_n) {{
-                                partial[ci] += a_val * b[(col_base + ci) * b_width + k];
-                            }}
-                        }}
-                    }}
-                    // Warp reduction for each column
+        const int tile_m = rows_left > TILE_SIZE ? TILE_SIZE : rows_left;
+        const int tile_n = cols_left > TILE_SIZE ? TILE_SIZE : cols_left;
+        const int b_width = eval_expression(payload.b_width, 0);
+
+        // Fast path for M=1 decode: warps parallelize over columns with K reduction
+        if (tile_m == 1 && num_warps > 0) {{
+            constexpr int COLS_PER_WARP = 4;
+            for (int col_base = warp_id * COLS_PER_WARP; col_base < tile_n; col_base += num_warps * COLS_PER_WARP) {{
+                float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
+                for (int k = lane; k < K; k += 32) {{
+                    float a_val = a[k];
                     #pragma unroll
                     for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
-                        partial[ci] = warp_reduce_sum(partial[ci]);
-                    }}
-                    // Lane 0 writes results
-                    if (lane == 0) {{
-                        #pragma unroll
-                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
-                            if (col_base + ci < tile_n) {{
-                                c[col_base + ci] = partial[ci];
-                            }}
+                        if (col_base + ci < tile_n) {{
+                            partial[ci] += a_val * b[(col_base + ci) * b_width + k];
                         }}
                     }}
                 }}
-            }} else {{
-                // Generic path: handle any M, N tile
-                const int tile_elems = tile_m * tile_n;
-                const int a_width = eval_expression(payload.a_width, 0);
-                const int c_width = eval_expression(payload.c_width, 0);
-
-                for (int idx = t; idx < tile_elems; idx += threads) {{
-                    int ty = idx / tile_n;
-                    int tx = idx % tile_n;
-
-                    const float* A0 = a + ty * a_width;
-                    const float* B0 = b + tx * b_width;
-                    float*       C0 = c + ty * c_width + tx;
-
-                    float acc = 0.f;
-                    for (int k = 0; k < K; ++k) {{
-                        acc += A0[k] * B0[k];
+                // Warp reduction for each column
+                #pragma unroll
+                for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                    partial[ci] = warp_reduce_sum(partial[ci]);
+                }}
+                // Lane 0 writes results
+                if (lane == 0) {{
+                    #pragma unroll
+                    for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                        if (col_base + ci < tile_n) {{
+                            c[col_base + ci] = partial[ci];
+                        }}
                     }}
-                    *C0 = acc;
                 }}
             }}
-        ", ts = TILE_SIZE);
-        (struct_body, function_body)
+        }} else {{
+            // Generic path: handle any M, N tile
+            const int tile_elems = tile_m * tile_n;
+            const int a_width = eval_expression(payload.a_width, 0);
+            const int c_width = eval_expression(payload.c_width, 0);
+
+            for (int idx = t; idx < tile_elems; idx += threads) {{
+                int ty = idx / tile_n;
+                int tx = idx % tile_n;
+
+                const float* A0 = a + ty * a_width;
+                const float* B0 = b + tx * b_width;
+                float*       C0 = c + ty * c_width + tx;
+
+                float acc = 0.f;
+                for (int k = 0; k < K; ++k) {{
+                    acc += A0[k] * B0[k];
+                }}
+                *C0 = acc;
+            }}
+        }}
+        ", ts = TILE_SIZE)
     }
 
     fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {

@@ -44,9 +44,14 @@ pub trait BlockOp: Debug + as_any::AsAny {
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
         unimplemented!()
     }
-    fn cuda_op(&self) -> (String, String) {
-        ("".to_string(), "".to_string())
-    } // C dtype, C function
+    /// C struct body
+    fn cuda_struct(&self) -> String {
+        "".to_string()
+    }
+    /// C function body
+    fn cuda_function(&self) -> String {
+        "".to_string()
+    }
 
     /// Returns the number of bytes this op will load from global memory.
     fn bytes_loaded(&self) -> Expression {
@@ -72,6 +77,33 @@ pub trait BlockOp: Debug + as_any::AsAny {
     } // C struct
     fn expressions(&self) -> Vec<Expression> {
         vec![]
+    }
+    fn prologue_a(&self) -> String {
+        "".to_string()
+    }
+    fn prologue_a_flops(&self) -> Expression {
+        0.into()
+    }
+    fn prologue_a_bytes_loaded(&self) -> Expression {
+        0.into()
+    }
+    fn prologue_b(&self) -> String {
+        "".to_string()
+    }
+    fn prologue_b_flops(&self) -> Expression {
+        0.into()
+    }
+    fn prologue_b_bytes_loaded(&self) -> Expression {
+        0.into()
+    }
+    fn prologue_c(&self) -> String {
+        "".to_string()
+    }
+    fn prologue_c_flops(&self) -> Expression {
+        0.into()
+    }
+    fn prologue_c_bytes_loaded(&self) -> Expression {
+        0.into()
     }
 }
 
@@ -530,12 +562,10 @@ fn compile_interpreter(
 ) {
     // Compile the interpreter
     let mut kernel = include_str!("interpreter.cu").to_string();
+    let n_ops = ops.len();
     kernel = kernel.replace(
         "const int N_OPS = 0;",
-        &format!(
-            "const int N_OPS = {};",
-            ops.iter().filter(|op| !op.cuda_op().0.is_empty()).count()
-        ),
+        &format!("const int N_OPS = {};", n_ops),
     );
     kernel = kernel.replace(
         "//%extra_op_codes%",
@@ -547,7 +577,7 @@ fn compile_interpreter(
     kernel = kernel.replace(
         "//%extra_op_structs%",
         &ops.iter()
-            .map(|op| format!("struct {}Payload {{{}}};", op.op_name(), op.cuda_op().0))
+            .map(|op| format!("struct {}Payload {{{}}};", op.op_name(), op.cuda_struct()))
             .join("\n"),
     );
     kernel = kernel.replace(
@@ -556,9 +586,9 @@ fn compile_interpreter(
             .iter()
             .map(|op| {
                 let op_name = op.op_name();
-                let (_, op_body) = op.cuda_op();
+                let op_body = op.cuda_function();
                 format!(
-                    "__device__ void {op_name}_function({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t) {{
+                    "__device__ __forceinline__ void {op_name}_function({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t, float* scratchpad) {{
 {op_body}
 }}"
                 )
@@ -580,8 +610,91 @@ fn compile_interpreter(
     );
     kernel = kernel.replace("//%extra_op_calls%", &ops.iter().map(|op| {
             let op_name = op.op_name();
-            format!("case OpCode::{op_name}Op: {op_name}_function(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x); break;")
+            format!("case OpCode::{op_name}Op: {op_name}_function(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); break;")
         }).join("\n"));
+
+    // Generate prologue functions (only for non-empty prologues)
+    kernel = kernel.replace(
+        "//%extra_prologue_functions%",
+        &ops
+            .iter()
+            .flat_map(|op| {
+                let op_name = op.op_name();
+                let prologue_a = op.prologue_a();
+                let prologue_b = op.prologue_b();
+                let prologue_c = op.prologue_c();
+                let mut funcs = Vec::new();
+                if !prologue_a.is_empty() {
+                    funcs.push(format!(
+                        "__device__ __forceinline__ void {op_name}_prologue_a({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t, float* scratchpad) {{
+{prologue_a}
+}}"
+                    ));
+                }
+                if !prologue_b.is_empty() {
+                    funcs.push(format!(
+                        "__device__ __forceinline__ void {op_name}_prologue_b({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t, float* scratchpad) {{
+{prologue_b}
+}}"
+                    ));
+                }
+                if !prologue_c.is_empty() {
+                    funcs.push(format!(
+                        "__device__ __forceinline__ void {op_name}_prologue_c({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t, float* scratchpad) {{
+{prologue_c}
+}}"
+                    ));
+                }
+                funcs
+            })
+            .join("\n"),
+    );
+
+    // Generate prologue A calls (only for non-empty prologues, with event recording)
+    kernel = kernel.replace(
+        "//%prologue_a_calls%",
+        &ops.iter().enumerate().filter_map(|(i, op)| {
+            let op_name = op.op_name();
+            if op.prologue_a().is_empty() {
+                None
+            } else {
+                // Event code: 2 + N_OPS + op_idx * 3 + 0
+                let event_code = 2 + n_ops + i * 3;
+                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); __syncthreads(); {op_name}_prologue_a(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); break;"))
+            }
+        }).join("\n"),
+    );
+
+    // Generate prologue B calls (only for non-empty prologues, with event recording)
+    kernel = kernel.replace(
+        "//%prologue_b_calls%",
+        &ops.iter().enumerate().filter_map(|(i, op)| {
+            let op_name = op.op_name();
+            if op.prologue_b().is_empty() {
+                None
+            } else {
+                // Event code: 2 + N_OPS + op_idx * 3 + 1
+                let event_code = 2 + n_ops + i * 3 + 1;
+                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); __syncthreads(); {op_name}_prologue_b(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); break;"))
+            }
+        }).join("\n"),
+    );
+
+    // Generate prologue C calls (only for non-empty prologues, with event recording)
+    kernel = kernel.replace(
+        "//%prologue_c_calls%",
+        &ops.iter().enumerate().filter_map(|(i, op)| {
+            let op_name = op.op_name();
+            if op.prologue_c().is_empty() {
+                None
+            } else {
+                // Event code: 2 + N_OPS + op_idx * 3 + 2
+                let event_code = 2 + n_ops + i * 3 + 2;
+                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); __syncthreads(); {op_name}_prologue_c(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); break;"))
+            }
+        }).join("\n"),
+    );
+
     let constants = expressions
         .iter()
         .flat_map(|e| e.dyn_vars())
@@ -674,19 +787,44 @@ impl CudaRuntime {
             })
             .collect_vec();
         let mut extra_packets = Vec::new();
+        let n_ops = ops.len();
         for ((device_timings, device_start_time, _span_id), (host_time, host_clock_id)) in
             self.timings.iter().zip(host_start_times)
         {
             for (sm, sm_timings) in device_timings.chunks(1000).enumerate() {
                 let mut builder = ManualTrackBuilder::new(sm as u32, host_time, host_clock_id);
                 for n_op in 0..sm_timings.len() - 1 {
-                    let op = sm_timings[n_op].event as usize;
-                    let op_label = if op == 0 {
+                    let event = sm_timings[n_op].event as usize;
+                    // Event encoding:
+                    // 0: Issue
+                    // 1: Wait
+                    // 2 to 2 + n_ops - 1: Main ops
+                    // 2 + n_ops + op_idx * 3 + 0: Prologue A
+                    // 2 + n_ops + op_idx * 3 + 1: Prologue B
+                    // 2 + n_ops + op_idx * 3 + 2: Prologue C
+                    let op_label = if event == 0 {
                         "Issue".to_string()
-                    } else if op == 1 {
+                    } else if event == 1 {
                         "Wait".to_string()
+                    } else if event >= 2 && event < 2 + n_ops {
+                        ops[event - 2].op_name().to_string()
+                    } else if event >= 2 + n_ops {
+                        let prologue_event = event - 2 - n_ops;
+                        let op_idx = prologue_event / 3;
+                        let prologue_type = prologue_event % 3;
+                        if op_idx < n_ops {
+                            let suffix = match prologue_type {
+                                0 => "prologue A",
+                                1 => "prologue B",
+                                2 => "prologue C",
+                                _ => "prologue ?",
+                            };
+                            format!("{} ({})", ops[op_idx].op_name(), suffix)
+                        } else {
+                            format!("Unknown({})", event)
+                        }
                     } else {
-                        ops[op - 2].op_name().to_string()
+                        format!("Unknown({})", event)
                     };
                     if sm_timings[n_op + 1].start == 0 {
                         break;

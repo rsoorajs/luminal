@@ -281,8 +281,8 @@ impl BlockOp for LlamaAttention {
         vec![q, k, v]
     }
 
-    fn cuda_op(&self) -> (String, String) {
-        let struct_body = "
+    fn cuda_struct(&self) -> String {
+        "
             int head_size;
             int cur_seq;
             int kv_row_stride;
@@ -297,8 +297,11 @@ impl BlockOp for LlamaAttention {
             int group_pos_stride;
             int head_pos_stride;
         "
-        .to_string();
-        let function_body = "
+        .to_string()
+    }
+
+    fn cuda_function(&self) -> String {
+        "
             // shared buffer for block-wide reduction
             __shared__ float shared[32]; // max 32 warps per block
 
@@ -476,8 +479,7 @@ impl BlockOp for LlamaAttention {
                 O[j] *= inv_s;
             }
         "
-        .to_string();
-        (struct_body, function_body)
+        .to_string()
     }
 
     fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {

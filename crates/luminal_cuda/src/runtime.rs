@@ -726,14 +726,12 @@ impl CudaRuntime {
         dyn_map: &FxHashMap<char, usize>,
         sm_count: usize,
     ) -> Vec<BlockOpStats> {
-        use std::collections::HashMap;
-
         // Get unique op names (same order as in interpreter)
         let op_names: Vec<&'static str> = llir_graph
             .node_indices()
             .filter_map(|n| llir_graph[n].to_dialect::<dyn BlockOp>())
             .map(|bo| (bo.op_name(), bo.clone()))
-            .collect::<HashMap<_, _>>()
+            .collect::<FxHashMap<_, _>>()
             .into_iter()
             .sorted_by_key(|(n, _)| *n)
             .map(|(n, _)| n)
@@ -744,13 +742,21 @@ impl CudaRuntime {
         }
 
         // Build map from op_name to index for event decoding
-        let op_name_to_idx: HashMap<&'static str, usize> =
+        let op_name_to_idx: FxHashMap<&'static str, usize> =
             op_names.iter().enumerate().map(|(i, n)| (*n, i)).collect();
 
         // Sum up bytes_loaded, bytes_stored, flops across ALL instances of each op type
         let mut op_bytes_loaded: Vec<usize> = vec![0; op_names.len()];
         let mut op_bytes_stored: Vec<usize> = vec![0; op_names.len()];
         let mut op_flops: Vec<usize> = vec![0; op_names.len()];
+
+        // Sum up prologue metrics across ALL instances of each op type
+        let mut prologue_a_bytes_loaded: Vec<usize> = vec![0; op_names.len()];
+        let mut prologue_a_flops: Vec<usize> = vec![0; op_names.len()];
+        let mut prologue_b_bytes_loaded: Vec<usize> = vec![0; op_names.len()];
+        let mut prologue_b_flops: Vec<usize> = vec![0; op_names.len()];
+        let mut prologue_c_bytes_loaded: Vec<usize> = vec![0; op_names.len()];
+        let mut prologue_c_flops: Vec<usize> = vec![0; op_names.len()];
 
         for node in llir_graph.node_indices() {
             if let Some(op) = llir_graph[node].to_dialect::<dyn BlockOp>() {
@@ -760,13 +766,31 @@ impl CudaRuntime {
                     op_bytes_loaded[idx] += op.bytes_loaded().exec(dyn_map).unwrap();
                     op_bytes_stored[idx] += op.bytes_stored().exec(dyn_map).unwrap();
                     op_flops[idx] += flops_val;
+
+                    // Aggregate prologue metrics
+                    prologue_a_bytes_loaded[idx] += op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                    prologue_a_flops[idx] += op.prologue_a_flops().exec(dyn_map).unwrap_or(0);
+                    prologue_b_bytes_loaded[idx] += op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                    prologue_b_flops[idx] += op.prologue_b_flops().exec(dyn_map).unwrap_or(0);
+                    prologue_c_bytes_loaded[idx] += op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                    prologue_c_flops[idx] += op.prologue_c_flops().exec(dyn_map).unwrap_or(0);
                 }
             }
         }
 
         // Aggregate timing per op type across all SMs
-        // event codes: 0=Issue, 1=Wait, 2+=BlockOps (index in ops list)
-        let mut op_times_ns: Vec<u64> = vec![0; op_names.len()];
+        // Event encoding:
+        // 0: Issue
+        // 1: Wait
+        // 2 to 2 + n_ops - 1: Main ops
+        // 2 + n_ops + op_idx * 3 + 0: Prologue A
+        // 2 + n_ops + op_idx * 3 + 1: Prologue B
+        // 2 + n_ops + op_idx * 3 + 2: Prologue C
+        let n_ops = op_names.len();
+        let mut op_times_ns: Vec<u64> = vec![0; n_ops];
+        let mut prologue_a_times_ns: Vec<u64> = vec![0; n_ops];
+        let mut prologue_b_times_ns: Vec<u64> = vec![0; n_ops];
+        let mut prologue_c_times_ns: Vec<u64> = vec![0; n_ops];
         let mut issue_time_ns: u64 = 0;
         let mut wait_time_ns: u64 = 0;
 
@@ -782,14 +806,27 @@ impl CudaRuntime {
                         event.stop
                     };
                     let duration = stop.saturating_sub(event.start);
-                    if event.event == 0 {
+                    let event_code = event.event as usize;
+                    if event_code == 0 {
                         issue_time_ns += duration;
-                    } else if event.event == 1 {
+                    } else if event_code == 1 {
                         wait_time_ns += duration;
-                    } else {
-                        let op_idx = (event.event - 2) as usize;
-                        if op_idx < op_names.len() {
-                            op_times_ns[op_idx] += duration;
+                    } else if event_code >= 2 && event_code < 2 + n_ops {
+                        // Main op
+                        let op_idx = event_code - 2;
+                        op_times_ns[op_idx] += duration;
+                    } else if event_code >= 2 + n_ops {
+                        // Prologue event
+                        let prologue_event = event_code - 2 - n_ops;
+                        let op_idx = prologue_event / 3;
+                        let prologue_type = prologue_event % 3;
+                        if op_idx < n_ops {
+                            match prologue_type {
+                                0 => prologue_a_times_ns[op_idx] += duration,
+                                1 => prologue_b_times_ns[op_idx] += duration,
+                                2 => prologue_c_times_ns[op_idx] += duration,
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -832,6 +869,82 @@ impl CudaRuntime {
                 }
             })
             .collect();
+
+        // Add prologue timing stats (only for prologues that were recorded)
+        for (i, &name) in op_names.iter().enumerate() {
+            if prologue_a_times_ns[i] > 0 {
+                let time_us = (prologue_a_times_ns[i] as f64 / sm_count as f64) / 1000.0;
+                let bytes_loaded = prologue_a_bytes_loaded[i];
+                let flop_count = prologue_a_flops[i];
+                let bandwidth_gbps = if time_us > 0.0 && bytes_loaded > 0 {
+                    (bytes_loaded as f64) / (time_us * 1e-6) / 1e9
+                } else {
+                    0.0
+                };
+                let tflops = if time_us > 0.0 && flop_count > 0 {
+                    (flop_count as f64) / (time_us * 1e-6) / 1e12
+                } else {
+                    0.0
+                };
+                stats.push(BlockOpStats {
+                    name: Box::leak(format!("{} (prologue A)", name).into_boxed_str()),
+                    execution_time_us: time_us,
+                    bytes_loaded,
+                    bytes_stored: 0,
+                    flops: flop_count,
+                    bandwidth_gbps,
+                    tflops,
+                });
+            }
+            if prologue_b_times_ns[i] > 0 {
+                let time_us = (prologue_b_times_ns[i] as f64 / sm_count as f64) / 1000.0;
+                let bytes_loaded = prologue_b_bytes_loaded[i];
+                let flop_count = prologue_b_flops[i];
+                let bandwidth_gbps = if time_us > 0.0 && bytes_loaded > 0 {
+                    (bytes_loaded as f64) / (time_us * 1e-6) / 1e9
+                } else {
+                    0.0
+                };
+                let tflops = if time_us > 0.0 && flop_count > 0 {
+                    (flop_count as f64) / (time_us * 1e-6) / 1e12
+                } else {
+                    0.0
+                };
+                stats.push(BlockOpStats {
+                    name: Box::leak(format!("{} (prologue B)", name).into_boxed_str()),
+                    execution_time_us: time_us,
+                    bytes_loaded,
+                    bytes_stored: 0,
+                    flops: flop_count,
+                    bandwidth_gbps,
+                    tflops,
+                });
+            }
+            if prologue_c_times_ns[i] > 0 {
+                let time_us = (prologue_c_times_ns[i] as f64 / sm_count as f64) / 1000.0;
+                let bytes_loaded = prologue_c_bytes_loaded[i];
+                let flop_count = prologue_c_flops[i];
+                let bandwidth_gbps = if time_us > 0.0 && bytes_loaded > 0 {
+                    (bytes_loaded as f64) / (time_us * 1e-6) / 1e9
+                } else {
+                    0.0
+                };
+                let tflops = if time_us > 0.0 && flop_count > 0 {
+                    (flop_count as f64) / (time_us * 1e-6) / 1e12
+                } else {
+                    0.0
+                };
+                stats.push(BlockOpStats {
+                    name: Box::leak(format!("{} (prologue C)", name).into_boxed_str()),
+                    execution_time_us: time_us,
+                    bytes_loaded,
+                    bytes_stored: 0,
+                    flops: flop_count,
+                    bandwidth_gbps,
+                    tflops,
+                });
+            }
+        }
 
         // Add Issue and Wait timing stats
         if issue_time_ns > 0 {
@@ -955,7 +1068,7 @@ impl CudaRuntime {
             if let (Some(peak_bw), Some(peak_tf)) = (peak_bandwidth_gbps, peak_tflops) {
                 let mbu = (stats.aggregate_bandwidth_gbps / peak_bw as f64) * 100.0;
                 let mfu = (stats.aggregate_tflops / peak_tf as f64) * 100.0;
-                (format!("{:.1}%", mbu), format!("{:.1}%", mfu))
+                (format!("{mbu:.1}%"), format!("{mfu:.1}%"))
             } else {
                 ("-".to_string(), "-".to_string())
             };
@@ -1014,12 +1127,12 @@ impl CudaRuntime {
             "-".to_string()
         };
         let bw_str = if total_bytes > 0 {
-            format!("{:.2}", bandwidth_gbps)
+            format!("{bandwidth_gbps:.2}")
         } else {
             "-".to_string()
         };
         let tflops_str = if flops > 0 {
-            format!("{:.4}", tflops)
+            format!("{tflops:.4}")
         } else {
             "-".to_string()
         };
@@ -1048,16 +1161,7 @@ impl CudaRuntime {
         };
 
         println!(
-            "{:<20} {:>12.2} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
-            name,
-            execution_time_us,
-            loaded_str,
-            stored_str,
-            flops_str,
-            bw_str,
-            tflops_str,
-            mbu_str,
-            mfu_str
+            "{name:<20} {execution_time_us:>12.2} {loaded_str:>12} {stored_str:>12} {flops_str:>12} {bw_str:>12} {tflops_str:>12} {mbu_str:>8} {mfu_str:>8}"
         );
     }
 }
