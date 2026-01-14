@@ -150,7 +150,7 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
     __shared__ bool run_b_prologue;
     __shared__ bool run_c_prologue;
     __shared__ bool stop_wait_loop;
-    __shared__ float scratchpad[8192]; // 32KB scratchpad for prologues
+    __shared__ float scratchpad[8192]; // 32 KB scratchpad
     int recorded_event = 0;
     timings += blockIdx.x * 1000;
     if (threadIdx.x == 0) {
@@ -158,6 +158,7 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
     }
     while (true) {
         if (threadIdx.x == 0) {
+            record_event(timings, &recorded_event, 0); // Record issue start
             done = !fetch_next_task(tasks, num_tasks, head, &nt, queue_lock);
         }
         __syncthreads();
@@ -171,8 +172,6 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
         // Thread 0 calculates dependencies and waits for inputs
         if (threadIdx.x == 0) {
             __threadfence();
-
-            record_event(timings, &recorded_event, 0); // Record issue start
 
             dep_a = (t->in_dep_a_base == -1 ? 0 : (eval_expression(t->in_dep_a_base, 0) + eval_expression(t->in_dep_a_stride, nt.current)));
             dep_b = (t->in_dep_b_base == -1 ? 0 : (eval_expression(t->in_dep_b_base, 0) + eval_expression(t->in_dep_b_stride, nt.current)));
@@ -213,26 +212,32 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
                 switch (t->op) {
                 //%prologue_a_calls%
                 }
-                if (threadIdx.x == 0) run_a_prologue = false;
+                if (threadIdx.x == 0) {
+                    run_a_prologue = false;
+                }
             }
             if (run_b_prologue) {
                 switch (t->op) {
                 //%prologue_b_calls%
                 }
-                if (threadIdx.x == 0) run_b_prologue = false;
+                if (threadIdx.x == 0) {
+                    run_b_prologue = false;
+                }
             }
             if (run_c_prologue) {
                 switch (t->op) {
                 //%prologue_c_calls%
                 }
-                if (threadIdx.x == 0) run_c_prologue = false;
+                if (threadIdx.x == 0) {
+                    run_c_prologue = false;
+                }
             }
 
             __syncthreads();
             if (stop_wait_loop) break;
             nanosleep(32);
         }
-        if (threadIdx.x == 0) record_event(timings, &recorded_event, t->op + 2); // Record op start
+        if (threadIdx.x == 0) record_event(timings, &recorded_event, t->op + 2); // Record main op, ends Wait
 
         // Execute main operation
         switch (t->op) {

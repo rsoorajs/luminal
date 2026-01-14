@@ -1119,22 +1119,6 @@ impl BlockOp for TileMatmul {
         vec![a, b]
     }
 
-    fn bytes_loaded(&self) -> Expression {
-        // Matmul C = A @ B where A is (M, K) and B is (K, N)
-        // Loads: A (M * K) + B (K * N) floats
-        // untiled_range[0] = M, untiled_range[1] = N, iters = K
-        // Batch dimensions from range[0..len-2]
-        let batch: Expression = if self.range.len() > 2 {
-            self.range[..self.range.len() - 2].iter().copied().product()
-        } else {
-            1.into()
-        };
-        let m = self.untiled_range[0];
-        let n = self.untiled_range[1];
-        let k = self.iters;
-        batch * (m * k + k * n) * 4
-    }
-
     fn bytes_stored(&self) -> Expression {
         // Store C (M * N) floats
         let batch: Expression = if self.range.len() > 2 {
@@ -1164,6 +1148,73 @@ impl BlockOp for TileMatmul {
         "const int untiled_range[2]; const int a; const int b; const int c; int iters; int a_width; int b_width; int c_width; int m_pos_stride; int n_pos_stride;".to_string()
     }
 
+    fn prologue_b(&self) -> String {
+        format!(
+            "
+        // Load partial B tile into scratchpad (use full scratchpad for B only)
+        const float* b = source_ptrs[1] + eval_expression(payload.b, current);
+        const int n_pos = eval_expression(payload.n_pos_stride, current);
+        const int N = eval_expression(payload.untiled_range[1], 0);
+        const int K = eval_expression(payload.iters, 0);
+        constexpr int TILE_SIZE = {ts};
+        constexpr int SCRATCH_SIZE = 8192;
+        constexpr int PRELOAD_K_MAX = SCRATCH_SIZE / TILE_SIZE;  // 256
+
+        const int global_n0 = n_pos * TILE_SIZE;
+        const int cols_left = N - global_n0;
+        if (cols_left <= 0) return;
+
+        const int tile_n = min(cols_left, TILE_SIZE);
+        const int preload_k = min(K, PRELOAD_K_MAX);
+        const int b_width = eval_expression(payload.b_width, 0);
+
+        // Load B tile: preload_k rows x tile_n cols (B is column-major)
+        // Store column-major in scratchpad (each column contiguous)
+        const int total_b = preload_k * tile_n;
+        #pragma unroll 8
+        for (int idx = t; idx < total_b; idx += blockDim.x) {{
+            const int col = idx / preload_k;
+            const int row = idx % preload_k;
+            // B is column-major: b[col * b_width + row]
+            scratchpad[col * preload_k + row] = b[col * b_width + row];
+        }}
+        ",
+            ts = TILE_SIZE
+        )
+    }
+
+    fn prologue_b_bytes_loaded(&self) -> Expression {
+        // Preload min(K, 256) * N elements. Since Expression doesn't have min(),
+        // we approximate using 256 (PRELOAD_K_MAX) which is correct when K >= 256
+        let batch: Expression = if self.range.len() > 2 {
+            self.range[..self.range.len() - 2].iter().copied().product()
+        } else {
+            1.into()
+        };
+        // N * 256 * 4 bytes per batch
+        batch * self.untiled_range[1] * 256 * 4
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        // Main op loads:
+        // - All of A: M * K * 4 bytes (read directly from global memory)
+        // - Remaining B after preload: (K - 256) * N * 4 bytes
+        // Note: prologue_b loads first 256 * N * 4 bytes of B
+        // Total B = 256*N (prologue) + (K-256)*N (main) = K*N
+        //
+        // This formula assumes K >= 256 (typical for LLM hidden dimensions)
+        let batch: Expression = if self.range.len() > 2 {
+            self.range[..self.range.len() - 2].iter().copied().product()
+        } else {
+            1.into()
+        };
+        let m = self.untiled_range[0];
+        let n = self.untiled_range[1];
+        let k = self.iters;
+        // A: M * K, B streamed: (K - 256) * N = K * N - 256 * N
+        batch * (m * k + k * n - Expression::from(256) * n) * 4
+    }
+
     fn cuda_function(&self) -> String {
         format!("
         auto warp_reduce_sum = [](float val) {{
@@ -1185,25 +1236,46 @@ impl BlockOp for TileMatmul {
         const int K = eval_expression(payload.iters, 0);
 
         constexpr int TILE_SIZE = {ts};
+        constexpr int SCRATCH_SIZE = 8192;
+        constexpr int PRELOAD_K_MAX = SCRATCH_SIZE / TILE_SIZE;  // 256
+
         const int global_m0 = m_pos * TILE_SIZE;
         const int global_n0 = n_pos * TILE_SIZE;
         const int M = eval_expression(payload.untiled_range[0], 0);
         const int N = eval_expression(payload.untiled_range[1], 0);
 
-        int rows_left = M - global_m0;
-        int cols_left = N - global_n0;
+        const int rows_left = M - global_m0;
+        const int cols_left = N - global_n0;
         if (rows_left <= 0 || cols_left <= 0) return;
 
-        const int tile_m = rows_left > TILE_SIZE ? TILE_SIZE : rows_left;
-        const int tile_n = cols_left > TILE_SIZE ? TILE_SIZE : cols_left;
+        const int tile_m = min(rows_left, TILE_SIZE);
+        const int tile_n = min(cols_left, TILE_SIZE);
+        const int preload_k = min(K, PRELOAD_K_MAX);
+
         const int b_width = eval_expression(payload.b_width, 0);
+
+        // Scratchpad layout: [B: tile_n * preload_k] (A is read directly from global memory)
+        const float* b_scratch = scratchpad;
 
         // Fast path for M=1 decode: warps parallelize over columns with K reduction
         if (tile_m == 1 && num_warps > 0) {{
             constexpr int COLS_PER_WARP = 4;
             for (int col_base = warp_id * COLS_PER_WARP; col_base < tile_n; col_base += num_warps * COLS_PER_WARP) {{
                 float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
-                for (int k = lane; k < K; k += 32) {{
+
+                // First: use preloaded B from scratchpad, A from global memory
+                for (int k = lane; k < preload_k; k += 32) {{
+                    float a_val = a[k];
+                    #pragma unroll
+                    for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                        if (col_base + ci < tile_n) {{
+                            partial[ci] += a_val * b_scratch[(col_base + ci) * preload_k + k];
+                        }}
+                    }}
+                }}
+
+                // Then: stream remaining K elements from global memory for both A and B
+                for (int k = preload_k + lane; k < K; k += 32) {{
                     float a_val = a[k];
                     #pragma unroll
                     for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
@@ -1212,6 +1284,7 @@ impl BlockOp for TileMatmul {
                         }}
                     }}
                 }}
+
                 // Warp reduction for each column
                 #pragma unroll
                 for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
@@ -1230,21 +1303,30 @@ impl BlockOp for TileMatmul {
         }} else {{
             // Generic path: handle any M, N tile
             const int tile_elems = tile_m * tile_n;
-            const int a_width = eval_expression(payload.a_width, 0);
             const int c_width = eval_expression(payload.c_width, 0);
+            const int a_width = eval_expression(payload.a_width, 0);
 
             for (int idx = t; idx < tile_elems; idx += threads) {{
                 int ty = idx / tile_n;
                 int tx = idx % tile_n;
 
                 const float* A0 = a + ty * a_width;
-                const float* B0 = b + tx * b_width;
+                const float* B0_scratch = b_scratch + tx * preload_k;
+                const float* B0_global = b + tx * b_width;
                 float*       C0 = c + ty * c_width + tx;
 
                 float acc = 0.f;
-                for (int k = 0; k < K; ++k) {{
-                    acc += A0[k] * B0[k];
+
+                // First: use preloaded B, A from global memory
+                for (int k = 0; k < preload_k; ++k) {{
+                    acc += A0[k] * B0_scratch[k];
                 }}
+
+                // Then: stream remaining from global memory
+                for (int k = preload_k; k < K; ++k) {{
+                    acc += A0[k] * B0_global[k];
+                }}
+
                 *C0 = acc;
             }}
         }}

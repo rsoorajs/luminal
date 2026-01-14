@@ -660,7 +660,7 @@ fn compile_interpreter(
             } else {
                 // Event code: 2 + N_OPS + op_idx * 3 + 0
                 let event_code = 2 + n_ops + i * 3;
-                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); __syncthreads(); {op_name}_prologue_a(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); break;"))
+                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); {op_name}_prologue_a(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); __syncthreads(); if (threadIdx.x == 0) record_event(timings, &recorded_event, 1); break;"))
             }
         }).join("\n"),
     );
@@ -675,7 +675,7 @@ fn compile_interpreter(
             } else {
                 // Event code: 2 + N_OPS + op_idx * 3 + 1
                 let event_code = 2 + n_ops + i * 3 + 1;
-                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); __syncthreads(); {op_name}_prologue_b(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); break;"))
+                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); {op_name}_prologue_b(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); if (threadIdx.x == 0) record_event(timings, &recorded_event, 1); __syncthreads(); break;"))
             }
         }).join("\n"),
     );
@@ -690,7 +690,7 @@ fn compile_interpreter(
             } else {
                 // Event code: 2 + N_OPS + op_idx * 3 + 2
                 let event_code = 2 + n_ops + i * 3 + 2;
-                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); __syncthreads(); {op_name}_prologue_c(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); break;"))
+                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); {op_name}_prologue_c(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); if (threadIdx.x == 0) record_event(timings, &recorded_event, 1); __syncthreads(); break;"))
             }
         }).join("\n"),
     );
