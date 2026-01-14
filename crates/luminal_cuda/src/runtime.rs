@@ -1,15 +1,14 @@
 use crate::{
-    block::{BlockOp, IntoBlockOp},
+    block::{BlockOp, TaskQueue, SMEvent, make_megakernel_from_llir_graph},
     host::HostOp,
     kernel::KernelOp,
 };
 use cudarc::{
-    driver::{
-        CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr,
-        LaunchConfig, PushKernelArg, ValidAsZeroBits,
-    },
-    nvrtc::{compile_ptx_with_opts, CompileOptions},
+        driver::{
+            CudaFunction, CudaSlice, CudaStream, DevicePtr,
+            LaunchConfig, PushKernelArg, sys::CUevent_flags},
 };
+
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
 use luminal::hlir::*;
@@ -22,24 +21,21 @@ use luminal::prelude::{
     },
     *,
 };
+
 use memmap2::MmapOptions;
 use safetensors::SafeTensors;
 use std::{
+    sync::Arc,
     collections::VecDeque,
     ffi::c_void,
     fmt::Debug,
     fs::File,
-    hash::{DefaultHasher, Hash, Hasher},
     io::Read,
-    iter::once,
-    ptr::{null, null_mut},
-    sync::Arc,
     time::Duration,
+    mem::size_of,
 };
-use tracing::{span, trace, Level};
-use tracing_perfetto_sdk_schema::{
-    self as schema, trace_packet, track_descriptor, track_event, TrackEvent,
-};
+use tracing::{span, trace, Level, field};
+use uuid::Uuid;
 
 pub enum CudaInput {
     Buffer(CudaSlice<u8>),
@@ -183,9 +179,8 @@ impl CudaRuntime {
         ctx.bind_to_thread()?;
         ctx.set_flags(cudarc::driver::sys::CUctx_flags::CU_CTX_SCHED_BLOCKING_SYNC)?;
         let stream = ctx.default_stream();
-        let custom_state = FxHashMap::default();
 
-        Ok(Self::initialize((ctx, stream, custom_state)))
+        Ok(Self::initialize(stream))
     }
 
     #[tracing::instrument(skip_all)]
@@ -329,65 +324,8 @@ impl CudaRuntime {
     }
 }
 
-    // this was broken by addition of host ops
-    pub fn record_cuda_perfetto_trace(&self, file_path: impl AsRef<std::path::Path>) {
-        let ops = <crate::block::Ops as IntoBlockOp>::into_vec();
-        let data = std::fs::read(&file_path).unwrap();
-        let mut trace = tracing_perfetto_sdk_schema::Trace::decode(data.as_slice()).unwrap();
-
-        let host_start_times: Vec<(u64, u32)> = trace
-            .packet
-            .iter()
-            .filter_map(|p| match &p.data {
-                Some(tracing_perfetto_sdk_schema::trace_packet::Data::TrackEvent(TrackEvent {
-                    name_field: Some(tracing_perfetto_sdk_schema::track_event::NameField::Name(s)),
-                    r#type: ty,
-                    ..
-                })) if s == "megakernel_execute"
-                    && *ty
-                        == Some(
-                            tracing_perfetto_sdk_schema::track_event::Type::SliceBegin as i32,
-                        ) =>
-                {
-                    Some((p.timestamp?, p.timestamp_clock_id?))
-                }
-                _ => None,
-            })
-            .sorted_by_key(|i| *i)
-            .collect_vec();
-        let mut extra_packets = Vec::new();
-        for (run, (device_timings, device_start_time)) in self.timings.iter().enumerate() {
-            let (host_time, host_clock_id) = host_start_times[run];
-            for (sm, sm_timings) in device_timings.chunks(1000).into_iter().enumerate() {
-                let mut builder = ManualTrackBuilder::new(sm as u32, host_time, host_clock_id);
-                for n_op in 0..sm_timings.len() - 1 {
-                    let op = sm_timings[n_op].event as usize;
-                    let op_label = if op == 0 {
-                        "Issue".to_string()
-                    } else if op == 1 {
-                        "Wait".to_string()
-                    } else {
-                        ops[op - 2].term().0
-                    };
-                    if sm_timings[n_op + 1].start == 0 {
-                        break;
-                    }
-                    builder.push_slice(
-                        &op_label,
-                        sm_timings[n_op].start - *device_start_time,
-                        sm_timings[n_op + 1].start - *device_start_time,
-                        host_time,
-                        host_clock_id,
-                    );
-                }
-                extra_packets.extend(builder.into_packets());
-            }
-        }
-        trace.packet.extend(extra_packets);
-        let mut buf = Vec::with_capacity(trace.encoded_len());
-        trace.encode(&mut buf).unwrap();
-        std::fs::write(file_path, buf).unwrap();
-    }
+pub trait ToCudaInput {
+    fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput;
 }
 
 impl ToCudaInput for &[f32] {
@@ -414,6 +352,18 @@ impl ToCudaInput for Vec<i32> {
     }
 }
 
+impl ToCudaInput for Vec<f32> {
+    fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        CudaInput::Buffer(
+            stream
+                .memcpy_stod(unsafe {
+                    std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
+                })
+                .unwrap(),
+        )
+    }
+}
+
 impl Runtime for CudaRuntime {
     type Ops = (
         crate::logical::Ops,
@@ -421,12 +371,7 @@ impl Runtime for CudaRuntime {
         crate::block::Ops,
         crate::host::Ops,
     );
-    type CompileArg = (
-        Arc<CudaContext>,
-        Arc<CudaStream>,
-        FxHashMap<String, CustomState>,
-    );
-    type Data = Box<dyn ToCudaBuffer>;
+    type CompileArg = Arc<CudaStream>;
     type ExecReturn = ();
     type ProfileMetric = Duration;
 
@@ -474,9 +419,8 @@ impl Runtime for CudaRuntime {
         // Add kernels
         for kernel in llir_graph.node_indices() {
             if let Some(kernel_op) = llir_graph[kernel].to_dialect::<dyn KernelOp>() {
-                let (kernel_function, module, code, grid, tb, shared_mem, constants) =
-                    kernel_op.compile(&self.cuda_context, &self.cuda_stream);
-                self.cuda_stream.synchronize().unwrap();
+                let (kernel_function, _, _, grid, tb, shared_mem, constants) =
+                    kernel_op.compile( &self.cuda_stream);
                 let inputs: Vec<NodeIndex> = llir_graph
                     .edges_directed(kernel, Direction::Incoming)
                     .sorted_by_key(|e| e.id())
@@ -548,6 +492,7 @@ impl Runtime for CudaRuntime {
     ) -> (Self::ProfileMetric, String) {
         self.buffers.clear();
         self.load_llir(llir_graph);
+        self.allocate_intermediate_buffers(dyn_map);
         let start = std::time::Instant::now();
         self.execute(dyn_map);
         self.timings.clear();
@@ -597,7 +542,7 @@ impl Runtime for CudaRuntime {
             };
             self.register_buffer(llir_node, ptr);
         }
-        let mut timings = vec![];
+        let mut timings = Vec::new();
         let mut kernel_stats = Vec::new();
         let total_start = std::time::Instant::now();
         for exec_node in toposort(&self.exec_graph, None).unwrap() {
@@ -637,9 +582,7 @@ impl Runtime for CudaRuntime {
                         ),
                         shared_mem_bytes: shared_mem.exec(dyn_map).unwrap() as u32,
                     };
-                    let mut lb: cudarc::driver::LaunchArgs<'_> =
-                        self.cuda_stream.launch_builder(kernel);
-                    lb.arg(&self.buffers[output]);
+                    let mut ptrs = vec![];
                     for inp in inputs {
                         if let Some(buf) = self.buffers.get(inp) {
                             ptrs.push(buf.device_ptr(&self.cuda_stream).0);
@@ -650,15 +593,58 @@ impl Runtime for CudaRuntime {
                             });
                         }
                     }
-                    let _span = span!(
-                        Level::INFO,
-                        "cuda_kernel_launch",
-                        grid_dim = ?(cfg.grid_dim.0, cfg.grid_dim.1, cfg.grid_dim.2),
-                        block_dim = ?(cfg.block_dim.0, cfg.block_dim.1, cfg.block_dim.2),
-                        shared_mem_bytes = cfg.shared_mem_bytes
-                    ).entered();
+                    let mut lb = self.cuda_stream.launch_builder(kernel);
+                    lb.arg(&self.buffers[output]);
+                    for ptr in &ptrs {
+                        lb.arg(ptr);
+                    }
+                    let span = span!(Level::INFO, "kernel", kernel = field::Empty);
+                    span.record("kernel", &kernel_name);
+                    let _entered = span.enter();
+
+                    // Use CUDA events for accurate GPU-side timing
+                    let start_event = self
+                        .cuda_stream
+                        .context()
+                        .new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
+                        .unwrap();
+                    let end_event = self
+                        .cuda_stream
+                        .context()
+                        .new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
+                        .unwrap();
+
+                    start_event.record(&self.cuda_stream).unwrap();
                     unsafe { lb.launch(cfg) }.unwrap();
-                    self.cuda_stream.synchronize().unwrap();
+                    end_event.record(&self.cuda_stream).unwrap();
+
+                    // elapsed_ms synchronizes internally
+                    let kernel_time_ms = start_event.elapsed_ms(&end_event).unwrap();
+                    let kernel_time_us = kernel_time_ms as f64 * 1000.0;
+
+                    // Calculate metrics
+                    let loaded = bytes_loaded.exec(dyn_map).unwrap_or(0);
+                    let stored = bytes_stored.exec(dyn_map).unwrap_or(0);
+                    let flop_count = flops.exec(dyn_map).unwrap_or(0);
+
+                    // Calculate bandwidth (GB/s) and compute (TFLOPS)
+                    // Total memory traffic = bytes loaded + bytes stored
+                    let total_bytes = loaded + stored;
+                    let bandwidth_gbps = (total_bytes as f64) / (kernel_time_us * 1e-6) / 1e9;
+                    let tflops = (flop_count as f64) / (kernel_time_us * 1e-6) / 1e12;
+
+                    kernel_stats.push(KernelStats {
+                        name: *kernel_name,
+                        execution_time_us: kernel_time_us,
+                        bytes_loaded: loaded,
+                        bytes_stored: stored,
+                        flops: flop_count,
+                        bandwidth_gbps,
+                        tflops,
+                    });
+
+                    drop(_entered);
+                    drop(span);
                 }
                 ExecutableKernel::Megakernel {
                     interpreter,
@@ -687,7 +673,7 @@ impl Runtime for CudaRuntime {
                             .cuda_stream
                             .alloc_zeros::<i32>(n_barriers.exec(dyn_map).unwrap())
                             .unwrap();
-                        let d_tasks = self.cuda_stream.memcpy_stod(work_queue).unwrap();
+                        let d_tasks = self.cuda_stream.memcpy_stod(work_queue.as_slice()).unwrap();
                         let d_head = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
                         let queue_lock = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
                         // Set up timing buffer (start_time_u64,[[event_start_u64,event_type_i32 for sm_event in sm[:1000] for sm in sms[:sm_count]])
@@ -712,7 +698,7 @@ impl Runtime for CudaRuntime {
                         }
 
                         let shared_mem_max = self
-                            .cuda_context
+                            .cuda_stream.context()
                             .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR)
                             .unwrap();
 
@@ -749,8 +735,17 @@ impl Runtime for CudaRuntime {
                     lb.arg(&queue_lock);
                     lb.arg(&timing_buffer);
                     lb.arg(&start_time);
+                    let mk_span_id = Uuid::new_v4();
+                    let span = span!(Level::INFO, "megakernel", id = field::Empty);
+                    // Record fields after span creation to work around tracing-perfetto-sdk-layer sync span bug
+                    span.record("id", format!("{}", mk_span_id).as_str());
+                    let _entered = span.enter();
                     unsafe { lb.launch(cfg) }.unwrap();
                     self.cuda_stream.synchronize().unwrap();
+                    drop(_entered);
+                    drop(span);
+
+
 
                     timings.push((
                         self.cuda_stream.memcpy_dtov(&timing_buffer).unwrap(),
@@ -774,7 +769,10 @@ impl Runtime for CudaRuntime {
                         if let Some(buf) = self.buffers.get(inp) {
                             buf
                         } else {
-                            &self.hlir_buffers[&llir_to_hlir[inp]]
+                            match &self.hlir_buffers[&llir_to_hlir[inp]] {
+                                CudaInput::Buffer(buf) => buf,
+                                CudaInput::Ptr(_) => unimplemented!()
+                            }
                         }
                     }));
                     let _span = span!(
@@ -840,6 +838,7 @@ impl Runtime for CudaRuntime {
         }
     }
 }
+
 
 impl CudaRuntime {
     fn compute_block_op_stats(
@@ -964,342 +963,40 @@ impl CudaRuntime {
         let peak_bandwidth_gbps = crate::cuda_bandwidth_gbps(self.cuda_stream.context());
         let peak_tflops = crate::cuda_compute_f32_tflops(self.cuda_stream.context());
 
-impl ManualTrackBuilder {
-    fn new(core_index: u32, ts0: u64, clock_id: u32) -> Self {
-        let track_uuid = manual_track_uuid(core_index);
-        let sequence_id = manual_sequence_id(core_index);
-        let track_name = format!("SM {core_index}");
-        let synthetic_tid = 10_000 + core_index;
-        let descriptor = schema::TracePacket {
-            timestamp: Some(ts0.saturating_sub(1)),
-            timestamp_clock_id: Some(clock_id),
-            data: Some(trace_packet::Data::TrackDescriptor(
-                schema::TrackDescriptor {
-                    parent_uuid: None,
-                    uuid: Some(track_uuid),
-                    static_or_dynamic_name: Some(track_descriptor::StaticOrDynamicName::Name(
-                        track_name.clone(),
-                    )),
-                    thread: Some(schema::ThreadDescriptor {
-                        pid: Some(std::process::id() as i32),
-                        tid: Some(synthetic_tid as i32),
-                        thread_name: Some(track_name),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            )),
-            ..Default::default()
-        };
+        // Print kernel stats if any
+        if !stats.kernel_stats.is_empty() {
+            println!("\n=== Kernel Execution Statistics ===\n");
+            println!(
+                "{:<20} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
+                "Kernel",
+                "Time (us)",
+                "Loaded",
+                "Stored",
+                "Agg FLOPS",
+                "BW (GB/s)",
+                "TFLOPS",
+                "MBU",
+                "MFU"
+            );
+            println!("{}", "-".repeat(116));
 
-        let mut builder = Self {
-            packets: Vec::new(),
-            track_uuid,
-            sequence_id,
-            state_cleared: false,
-            core_index,
-        };
-        builder.push_packet(descriptor);
-        builder
-    }
-
-    fn push_slice(&mut self, label: &str, start: u64, end: u64, ts0: u64, clock_id: u32) {
-        self.push_packet(self.slice_packet(label, ts0 + start, clock_id, true));
-        self.push_packet(self.slice_packet(label, ts0 + end, clock_id, false));
-    }
-
-    fn slice_packet(
-        &self,
-        label: &str,
-        timestamp_ns: u64,
-        clock_id: u32,
-        is_begin: bool,
-    ) -> schema::TracePacket {
-        let mut debug_annotations = Vec::new();
-        debug_annotations.push(schema::DebugAnnotation {
-            name_field: Some(schema::debug_annotation::NameField::Name("sm".into())),
-            value: Some(schema::debug_annotation::Value::IntValue(
-                self.core_index as i64,
-            )),
-            ..Default::default()
-        });
-        debug_annotations.push(schema::DebugAnnotation {
-            name_field: Some(schema::debug_annotation::NameField::Name(
-                "span.label".into(),
-            )),
-            value: Some(schema::debug_annotation::Value::StringValue(label.into())),
-            ..Default::default()
-        });
-
-        schema::TracePacket {
-            timestamp: Some(timestamp_ns),
-            timestamp_clock_id: Some(clock_id),
-            data: Some(trace_packet::Data::TrackEvent(schema::TrackEvent {
-                track_uuid: Some(self.track_uuid),
-                r#type: Some(if is_begin {
-                    track_event::Type::SliceBegin as i32
-                } else {
-                    track_event::Type::SliceEnd as i32
-                }),
-                name_field: Some(track_event::NameField::Name(label.to_owned())),
-                debug_annotations,
-                ..Default::default()
-            })),
-            ..Default::default()
+            for stat in &stats.kernel_stats {
+                self.print_stat_row(
+                    stat.name,
+                    stat.execution_time_us,
+                    stat.bytes_loaded,
+                    stat.bytes_stored,
+                    stat.flops,
+                    stat.bandwidth_gbps,
+                    stat.tflops,
+                    peak_bandwidth_gbps,
+                    peak_tflops,
+                );
+            }
+            
+            println!("{}", "-".repeat(116));
         }
     }
-
-    fn push_packet(&mut self, mut packet: schema::TracePacket) {
-        packet.optional_trusted_packet_sequence_id = Some(
-            trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
-                self.sequence_id,
-            ),
-        );
-        if !self.state_cleared {
-            packet.sequence_flags =
-                Some(trace_packet::SequenceFlags::SeqIncrementalStateCleared as i32 as u32);
-            self.state_cleared = true;
-        }
-        self.packets.push(packet);
-    }
-
-    fn into_packets(self) -> Vec<schema::TracePacket> {
-        self.packets
-    }
-}
-
-fn manual_track_uuid(core_index: u32) -> u64 {
-    hash64((1u32, 42u32, core_index))
-}
-
-fn manual_sequence_id(core_index: u32) -> u32 {
-    hash32((2u32, 42u32, core_index))
-}
-
-fn hash64<T: Hash>(val: T) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    val.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn hash32<T: Hash>(val: T) -> u32 {
-    (hash64(val) & 0xffff_ffff) as u32
-}
-
-#[tracing::instrument(skip_all)]
-pub fn get_barrier_strides(
-    graph: &LLIRGraph,
-    block_ops: &FxHashSet<NodeIndex>,
-) -> (
-    FxHashMap<NodeIndex, Vec<Expression>>,
-    FxHashMap<(NodeIndex, usize), Vec<Expression>>,
-    FxHashMap<NodeIndex, Expression>,
-    Expression,
-) {
-    // Resolve dependencies
-    let mut producer_barrier_strides = FxHashMap::default();
-    let mut consumer_barrier_strides = FxHashMap::default();
-    for node in block_ops {
-        if graph
-            .neighbors_directed(*node, Direction::Outgoing)
-            .filter(|n| block_ops.contains(n))
-            .next()
-            .is_none()
-        {
-            producer_barrier_strides.insert(
-                *node,
-                vec![
-                    0.into();
-                    graph[*node]
-                        .to_dialect::<dyn BlockOp>()
-                        .unwrap()
-                        .launch_range()
-                        .len()
-                ],
-            ); // TODO: is this right?
-            continue;
-        }
-        let consumers = graph
-            .edges_directed(*node, Direction::Outgoing)
-            .sorted_by_key(|e| e.id())
-            .map(|e| {
-                let n_input = graph
-                    .edges_directed(e.target(), Direction::Incoming)
-                    .sorted_by_key(|e| e.id())
-                    .position(|ie| ie.id() == e.id())
-                    .unwrap();
-                (e.target(), n_input)
-            })
-            .filter(|(n, _)| block_ops.contains(n))
-            .collect_vec();
-        let prod_range = graph[*node]
-            .to_dialect::<dyn BlockOp>()
-            .unwrap()
-            .launch_range();
-        let cons_range: Vec<Vec<Expression>> = consumers
-            .iter()
-            .map(|(n, _)| {
-                graph[*n]
-                    .to_dialect::<dyn BlockOp>()
-                    .unwrap()
-                    .launch_range()
-            })
-            .collect();
-        let (producer_strides, consumer_strides) = compute_barrier_strides(
-            prod_range.clone(),
-            cons_range.clone(),
-            consumers
-                .iter()
-                .map(|(n, i)| {
-                    graph[*n]
-                        .to_dialect::<dyn BlockOp>()
-                        .unwrap()
-                        .consumer_barriers_seperate()
-                        .remove(*i)
-                })
-                .collect(),
-        );
-
-        producer_barrier_strides.insert(*node, producer_strides);
-        assert_eq!(consumers.len(), consumer_strides.len());
-        for ((cons, inp), strides) in consumers.into_iter().zip(consumer_strides) {
-            consumer_barrier_strides.insert((cons, inp), strides);
-        }
-    }
-    let mut n_barriers = Expression::from(1); // Starts at 1 to account for GMEM producers
-    let mut producer_barrier_bases = FxHashMap::default();
-    for op in block_ops {
-        producer_barrier_bases.insert(*op, n_barriers);
-        n_barriers = (n_barriers
-            + producer_barrier_strides[op]
-                .iter()
-                .zip(
-                    graph[*op]
-                        .to_dialect::<dyn BlockOp>()
-                        .unwrap()
-                        .launch_range(),
-                )
-                .map(|(stride, range)| stride.substitute('z', range))
-                .sum::<Expression>()
-            + 1)
-        .simplify();
-    }
-    (
-        producer_barrier_strides,
-        consumer_barrier_strides,
-        producer_barrier_bases,
-        n_barriers,
-    )
-}
-
-#[tracing::instrument(skip_all)]
-pub fn compile_interpreter(
-    cuda_ctx: &Arc<CudaContext>,
-    cuda_stream: &Arc<CudaStream>,
-    ops: &Vec<Arc<Box<dyn BlockOp>>>,
-    expressions: &FxHashSet<Expression>,
-) -> (
-    CudaFunction,
-    Arc<CudaModule>,
-    FxHashMap<Expression, i32>,
-    FxHashMap<char, CudaSlice<u8>>,
-) {
-    // Compile the interpreter
-    let mut kernel = include_str!("block/interpreter.cu").to_string();
-    kernel = kernel.replace(
-        "const int N_OPS = 0;",
-        &format!(
-            "const int N_OPS = {};",
-            ops.iter().filter(|op| !op.cuda_op().0.is_empty()).count()
-        ),
-    );
-    kernel = kernel.replace(
-        "//%extra_op_codes%",
-        &ops.iter()
-            .enumerate()
-            .map(|(i, op)| format!("{}Op = {i}", op.term().0))
-            .join(", "),
-    );
-    kernel = kernel.replace(
-        "//%extra_op_structs%",
-        &ops.iter()
-            .map(|op| format!("struct {}Payload {{{}}};", op.term().0, op.cuda_op().0))
-            .join("\n"),
-    );
-    kernel = kernel.replace(
-        "//%extra_op_functions%",
-        &ops
-            .iter()
-            .map(|op| {
-                let (op_name, _) = op.term();
-                let (_, op_body) = op.cuda_op();
-                format!(
-                    "__device__ void {op_name}_function({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t) {{
-{op_body}
-}}"
-                )
-            })
-            .join("\n"),
-    );
-    kernel = kernel.replace(
-        "//%extra_op_payloads%",
-        &ops.iter()
-            .map(|op| {
-                let op_name = op.term().0;
-                format!("{op_name}Payload {op_name};")
-            })
-            .join(" "),
-    );
-    kernel = kernel.replace("//%extra_op_calls%", &ops.iter().map(|op| {
-            let op_name = op.term().0;
-            format!("case OpCode::{op_name}Op: {op_name}_function(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x); break;")
-        }).join("\n"));
-    let constants = expressions
-        .iter()
-        .flat_map(|e| e.dyn_vars())
-        .collect::<FxHashSet<_>>();
-    let constant_string = constants
-        .iter()
-        .map(|v| format!("__constant__ int const_{v}[1];"))
-        .join("\n");
-    let expression_map = expressions
-        .iter()
-        .enumerate()
-        .map(|(i, e)| (*e, i as i32))
-        .collect::<FxHashMap<_, _>>();
-    let lambdas = expression_map
-        .iter()
-        .sorted_by_key(|(_, i)| **i)
-        .map(|(e, i)| format!("case {i}: return {};", e.to_kernel()))
-        .join("\n");
-    kernel = kernel.replace("//%expr_fns%", &lambdas);
-    kernel = kernel.replace("//%constants%", &constant_string);
-
-    let ptx = compile_ptx_with_opts(
-        &kernel,
-        CompileOptions {
-            arch: Some("sm_75"),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    cuda_stream.synchronize().unwrap();
-    let module = cuda_ctx.load_module(ptx).unwrap();
-    let func = module.load_function("worker_kernel").unwrap();
-    let constants = constants
-        .into_iter()
-        .map(|d| {
-            (
-                d,
-                module
-                    .get_global(&format!("const_{d}"), cuda_stream)
-                    .unwrap(),
-            )
-        })
-        .collect();
-    cuda_stream.synchronize().unwrap();
-    (func, module, expression_map, constants)
-}
 
 #[allow(unused)]
 pub fn free_debug_buffers(debug_buffers: FxHashMap<(usize, String), &mut [f32]>) {
@@ -1347,7 +1044,10 @@ pub fn print_debug_buffers(debug_buffers: FxHashMap<(usize, String), &'static mu
         }
         println!();
     }
+}
+}
 
+impl CudaRuntime {
     fn print_stat_row(
         &self,
         name: &str,

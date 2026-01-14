@@ -33,9 +33,9 @@ fn main() {
 
     let mut rt = CudaRuntime::new().unwrap();
 
-    cx.set_dyn_dim('m', m);
-    cx.set_dyn_dim('n', n);
-    cx.set_dyn_dim('k', k);
+    cx.set_dim('m', m);
+    cx.set_dim('n', n);
+    cx.set_dim('k', k);
 
     // Generate random input tensors based on dimensions
     let mut rng = rand::rng();
@@ -62,23 +62,23 @@ fn main() {
 
     // Set input tensors for luminal
     // A is row-major as is
-    rt.set_data(a, Box::new(a_data.clone()));
+    rt.set_data(a, a_data.clone());
     // B is in column-major format
-    rt.set_data(b, Box::new(b_data_col_major.clone()));
+    rt.set_data(b, b_data_col_major.clone());
 
-    rt.allocate_intermediate_buffers(&cx.dyn_map);
+
 
     // Use search limit of 1 to get HostMatmul like the test
-    rt = cx.search(rt, 1);
+    rt = cx.search(rt, 5);
     
 
     fs::write("llir.dot", (&rt.llir_graph).to_dot().unwrap()).unwrap();
-    rt.allocate_intermediate_buffers(&cx.dyn_map); // if you remove this it all fails... 
+
 
     // Run
-    cx.set_dyn_dim('m', m);
-    cx.set_dyn_dim('n', n);
-    cx.set_dyn_dim('k', k);
+    cx.set_dim('m', m);
+    cx.set_dim('n', n);
+    cx.set_dim('k', k);
 
     rt.execute(&cx.dyn_map);
 
