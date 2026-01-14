@@ -485,7 +485,6 @@ impl Runtime for CudaRuntime {
     ) -> (Self::ProfileMetric, String) {
         self.buffers.clear();
         self.load_llir(llir_graph);
-        self.allocate_intermediate_buffers(dyn_map);
         let start = std::time::Instant::now();
         self.execute(dyn_map);
         self.timings.clear();
@@ -512,7 +511,6 @@ impl Runtime for CudaRuntime {
     #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
         if self.buffers.is_empty()
-            || true
             || dyn_map.len() != self.last_dyn_map.len()
             || dyn_map
                 .iter()
@@ -748,7 +746,6 @@ impl Runtime for CudaRuntime {
                     self.cuda_stream.synchronize().unwrap();
                     drop(_entered);
                     drop(span);
-
                     timings.push((
                         self.cuda_stream.memcpy_dtov(&timing_buffer).unwrap(),
                         self.cuda_stream
