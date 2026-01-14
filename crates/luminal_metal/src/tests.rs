@@ -151,3 +151,118 @@ fn metal_simple_exp2() {
     let out = rt.get_f32(output);
     assert_close(&out, &[1.0, 2.0, 4.0, 8.0], 0.001);
 }
+
+#[test]
+fn metal_simple_log2() {
+    let mut cx = Graph::default();
+    let input = cx.tensor(4);
+    let output = input.log2().output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    rt.set_data(input, &[1.0, 2.0, 4.0, 8.0]);
+    rt = cx.search(rt, 5);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(output);
+    assert_close(&out, &[0.0, 1.0, 2.0, 3.0], 0.001);
+}
+
+#[test]
+fn metal_simple_sin() {
+    let mut cx = Graph::default();
+    let input = cx.tensor(4);
+    let output = input.sin().output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    rt.set_data(
+        input,
+        &[
+            0.0,
+            std::f32::consts::FRAC_PI_2,
+            std::f32::consts::PI,
+            3.0 * std::f32::consts::FRAC_PI_2,
+        ],
+    );
+    rt = cx.search(rt, 5);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(output);
+    assert_close(&out, &[0.0, 1.0, 0.0, -1.0], 0.01);
+}
+
+#[test]
+fn metal_simple_sqrt() {
+    let mut cx = Graph::default();
+    let input = cx.tensor(4);
+    let output = input.sqrt().output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    rt.set_data(input, &[1.0, 4.0, 9.0, 16.0]);
+    rt = cx.search(rt, 5);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(output);
+    assert_close(&out, &[1.0, 2.0, 3.0, 4.0], 0.001);
+}
+
+#[test]
+fn metal_simple_recip() {
+    let mut cx = Graph::default();
+    let input = cx.tensor(4);
+    let output = input.reciprocal().output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    rt.set_data(input, &[1.0, 2.0, 4.0, 5.0]);
+    rt = cx.search(rt, 5);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(output);
+    assert_close(&out, &[1.0, 0.5, 0.25, 0.2], 0.001);
+}
+
+#[test]
+fn metal_simple_mod() {
+    let mut cx = Graph::default();
+    let a = cx.tensor(4);
+    let b = cx.tensor(4);
+    let output = (a % b).output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    rt.set_data(a, &[7.0, 10.0, 15.0, 8.5]);
+    rt.set_data(b, &[3.0, 4.0, 6.0, 2.5]);
+    rt = cx.search(rt, 5);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(output);
+    assert_close(&out, &[1.0, 2.0, 3.0, 1.0], 0.001);
+}
+
+#[test]
+fn metal_simple_less_than() {
+    let mut cx = Graph::default();
+    let a = cx.tensor(4);
+    let b = cx.tensor(4);
+    let output = a.lt(b).output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    rt.set_data(a, &[1.0, 5.0, 3.0, 4.0]);
+    rt.set_data(b, &[2.0, 3.0, 3.0, 5.0]);
+    rt = cx.search(rt, 5);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(output);
+    // 1 < 2 = true (1.0), 5 < 3 = false (0.0), 3 < 3 = false (0.0), 4 < 5 = true (1.0)
+    assert_eq!(out, vec![1.0, 0.0, 0.0, 1.0]);
+}
