@@ -1,9 +1,9 @@
-use tracing::{info, debug};
+use candle_core::{Device, Tensor};
 use luminal::{prelude::*, visualization::ToDot};
 use luminal_cuda::runtime::CudaRuntime;
-use candle_core::{Device, Tensor};
 use rand::Rng;
 use std::fs;
+use tracing::{debug, info};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 fn main() {
@@ -55,7 +55,11 @@ fn main() {
     // For luminal, we need B in column-major format, which means we store it as transposed
     // Convert row-major (k x n) to column-major by transposing to (n x k) then reading as flat
     let b_candle_transposed = b_candle_row_major.t().unwrap().contiguous().unwrap();
-    let b_data_col_major = b_candle_transposed.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    let b_data_col_major = b_candle_transposed
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
 
     info!("Matrix A shape: {} x {} (row-major)", m, k);
     info!("Matrix B shape: {} x {} (column-major layout)", k, n);
@@ -66,14 +70,10 @@ fn main() {
     // B is in column-major format
     rt.set_data(b, b_data_col_major.clone());
 
-
-
     // Use search limit of 1 to get HostMatmul like the test
     rt = cx.search(rt, 5);
-    
 
     fs::write("llir.dot", (&rt.llir_graph).to_dot().unwrap()).unwrap();
-
 
     // Run
     cx.set_dim('m', m);
@@ -88,14 +88,17 @@ fn main() {
     // Compute matmul using candle for verification
     // a_candle is (m x k) row-major, b_candle_row_major is (k x n) row-major
     let candle_result = a_candle.matmul(&b_candle_row_major).unwrap();
-    let candle_result_flat = candle_result.to_vec2::<f32>().unwrap()
+    let candle_result_flat = candle_result
+        .to_vec2::<f32>()
+        .unwrap()
         .iter()
         .flatten()
         .cloned()
         .collect::<Vec<f32>>();
 
     // Compare results
-    let diff = candle_result_flat.iter()
+    let diff = candle_result_flat
+        .iter()
         .zip(luminal_result_data.iter())
         .map(|(a, b)| (a - b).abs())
         .collect::<Vec<f32>>();
@@ -105,6 +108,6 @@ fn main() {
     // Check if results match within tolerance
     // Use 0.1 tolerance for GPU vs CPU comparison (floating point precision differences)
     assert!(max_diff < 0.1);
-    
+
     println!("\nLogs written to: cuda_matmul.log");
 }

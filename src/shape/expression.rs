@@ -13,7 +13,10 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use crate::{egglog_utils::{self, SerializedEGraph}, graph::extract_expr, };
+use crate::{
+    egglog_utils::{self, SerializedEGraph},
+    graph::extract_expr,
+};
 use egglog::{ast::Span, prelude::RustSpan, var};
 
 type ExprBox = GenerationalBox<Vec<Term>, SyncStorage>;

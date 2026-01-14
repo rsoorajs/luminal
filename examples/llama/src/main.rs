@@ -86,7 +86,8 @@ fn main() {
                 iteration = i,
                 seq_len = seq_len,
                 prev_seq = prev_seq
-            ).entered()
+            )
+            .entered()
         } else {
             span!(
                 Level::INFO,
@@ -94,7 +95,8 @@ fn main() {
                 iteration = i,
                 seq_len = seq_len,
                 prev_seq = prev_seq
-            ).entered()
+            )
+            .entered()
         };
 
         cx.set_dim('s', seq_len);
@@ -115,11 +117,7 @@ fn main() {
         let logits_data = runtime.get_f32(logits);
 
         // Sample next token
-        let _sample_span = span!(
-            Level::INFO,
-            "sample",
-            vocab_size = VOCAB_SIZE
-        ).entered();
+        let _sample_span = span!(Level::INFO, "sample", vocab_size = VOCAB_SIZE).entered();
         sentence = vec![*sample(&logits_data, VOCAB_SIZE).last().unwrap()];
         prev_seq += seq_len;
         print!("{}", tokenizer.decode(&sentence, true).unwrap());

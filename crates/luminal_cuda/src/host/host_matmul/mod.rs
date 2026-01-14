@@ -5,12 +5,11 @@ use cudarc::cublas::{
 use cudarc::driver::{CudaStream, DevicePtr};
 use luminal::{
     graph::extract_expr,
-    prelude::*,
-    op::{ 
-        EgglogOp,
-        LLIROp,
+    op::{
+        EgglogOp, LLIROp,
         OpParam::{self, *},
     },
+    prelude::*,
 };
 use std::sync::Arc;
 use tracing::{span, Level};
@@ -58,7 +57,8 @@ impl EgglogOp for HostMatmul {
             k = ?k_extract,
             input_a = ?children[0],
             input_b = ?children[1]
-        ).entered();
+        )
+        .entered();
 
         (
             LLIROp::new::<dyn HostOp>(Box::new(Self {
@@ -107,7 +107,8 @@ impl HostOp for HostMatmul {
             b_expected_bytes = k * n * 4,
             c_size_bytes = inputs[0].len(),
             c_expected_bytes = m * n * 4
-        ).entered();
+        )
+        .entered();
 
         // Execute GEMM using raw cuBLAS API
         // A is row-major (m x k), B is column-major (k x n), C is row-major (m x n)
@@ -133,7 +134,8 @@ impl HostOp for HostMatmul {
             ldc = n,
             transpose_a = "T",
             transpose_b = "N"
-        ).entered();
+        )
+        .entered();
 
         let status = unsafe {
             cublasSgemm_v2(

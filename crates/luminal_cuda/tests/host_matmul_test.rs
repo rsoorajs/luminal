@@ -1,6 +1,6 @@
+use candle_core::{Device, Tensor};
 use luminal::prelude::*;
 use luminal_cuda::runtime::CudaRuntime;
-use candle_core::{Device, Tensor};
 
 #[cfg(test)]
 mod tests {
@@ -13,7 +13,11 @@ mod tests {
         let device = Device::Cpu;
         let b_tensor = Tensor::from_vec(b_row_major.to_vec(), (k, n), &device).unwrap();
         let b_transposed = b_tensor.t().unwrap().contiguous().unwrap();
-        b_transposed.flatten_all().unwrap().to_vec1::<f32>().unwrap()
+        b_transposed
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
     }
 
     fn dynamic_matmul_graph_runtime() -> (Graph, CudaRuntime, GraphTensor, GraphTensor, GraphTensor)
@@ -80,7 +84,7 @@ mod tests {
         cx.set_dim('k', k as usize);
 
         rt.execute(&cx.dyn_map);
-    
+
         rt.get_f32(graph_c)
     }
 
@@ -105,7 +109,9 @@ mod tests {
         let c_tensor = a_tensor.matmul(&b_tensor).unwrap();
 
         // Convert result to flat Vec<f32>
-        c_tensor.to_vec2::<f32>().unwrap()
+        c_tensor
+            .to_vec2::<f32>()
+            .unwrap()
             .iter()
             .flatten()
             .cloned()

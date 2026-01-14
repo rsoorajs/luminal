@@ -1,12 +1,10 @@
 use crate::{
-    block::{BlockOp, TaskQueue, SMEvent, make_megakernel_from_llir_graph},
+    block::{make_megakernel_from_llir_graph, BlockOp, SMEvent, TaskQueue},
     host::HostOp,
     kernel::KernelOp,
 };
-use cudarc::{
-        driver::{
-            CudaFunction, CudaSlice, CudaStream, DevicePtr,
-            LaunchConfig, PushKernelArg, sys::CUevent_flags},
+use cudarc::driver::{
+    sys::CUevent_flags, CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
 };
 
 use fixedbitset::FixedBitSet;
@@ -25,16 +23,10 @@ use luminal::prelude::{
 use memmap2::MmapOptions;
 use safetensors::SafeTensors;
 use std::{
-    sync::Arc,
-    collections::VecDeque,
-    ffi::c_void,
-    fmt::Debug,
-    fs::File,
-    io::Read,
+    collections::VecDeque, ffi::c_void, fmt::Debug, fs::File, io::Read, mem::size_of, sync::Arc,
     time::Duration,
-    mem::size_of,
 };
-use tracing::{span, trace, Level, field};
+use tracing::{field, span, trace, Level};
 use uuid::Uuid;
 
 pub enum CudaInput {
@@ -420,7 +412,7 @@ impl Runtime for CudaRuntime {
         for kernel in llir_graph.node_indices() {
             if let Some(kernel_op) = llir_graph[kernel].to_dialect::<dyn KernelOp>() {
                 let (kernel_function, _, _, grid, tb, shared_mem, constants) =
-                    kernel_op.compile( &self.cuda_stream);
+                    kernel_op.compile(&self.cuda_stream);
                 let inputs: Vec<NodeIndex> = llir_graph
                     .edges_directed(kernel, Direction::Incoming)
                     .sorted_by_key(|e| e.id())
@@ -666,7 +658,8 @@ impl Runtime for CudaRuntime {
                             sm_count = sm_count,
                             n_barriers = n_barriers.exec(dyn_map).unwrap(),
                             n_tasks = work_queue.len()
-                        ).entered();
+                        )
+                        .entered();
 
                         // Upload queue, barriers and program counter
                         let d_barriers = self
@@ -714,7 +707,15 @@ impl Runtime for CudaRuntime {
                             shared_mem_bytes: (shared_mem_max / 2) as u32,
                         };
 
-                        (d_barriers, d_tasks, d_head, queue_lock, timing_buffer, start_time, cfg)
+                        (
+                            d_barriers,
+                            d_tasks,
+                            d_head,
+                            queue_lock,
+                            timing_buffer,
+                            start_time,
+                            cfg,
+                        )
                     };
 
                     let _span = span!(
@@ -724,7 +725,8 @@ impl Runtime for CudaRuntime {
                         grid_dim = ?(cfg.grid_dim.0, cfg.grid_dim.1, cfg.grid_dim.2),
                         block_dim = ?(cfg.block_dim.0, cfg.block_dim.1, cfg.block_dim.2),
                         shared_mem_bytes = cfg.shared_mem_bytes
-                    ).entered();
+                    )
+                    .entered();
 
                     let mut lb = self.cuda_stream.launch_builder(interpreter);
                     let n_tasks = work_queue.len() as i32;
@@ -744,8 +746,6 @@ impl Runtime for CudaRuntime {
                     self.cuda_stream.synchronize().unwrap();
                     drop(_entered);
                     drop(span);
-
-
 
                     timings.push((
                         self.cuda_stream.memcpy_dtov(&timing_buffer).unwrap(),
@@ -771,18 +771,13 @@ impl Runtime for CudaRuntime {
                         } else {
                             match &self.hlir_buffers[&llir_to_hlir[inp]] {
                                 CudaInput::Buffer(buf) => buf,
-                                CudaInput::Ptr(_) => unimplemented!()
+                                CudaInput::Ptr(_) => unimplemented!(),
                             }
                         }
                     }));
-                    let _span = span!(
-                        Level::INFO,
-                        "host_op_execute",
-                        n_inputs = inputs.len()
-                    ).entered();
-                    internal
-                        .execute(stream, &host_op_buffers, dyn_map)
-                        .unwrap();
+                    let _span =
+                        span!(Level::INFO, "host_op_execute", n_inputs = inputs.len()).entered();
+                    internal.execute(stream, &host_op_buffers, dyn_map).unwrap();
                 }
             }
         }
@@ -838,7 +833,6 @@ impl Runtime for CudaRuntime {
         }
     }
 }
-
 
 impl CudaRuntime {
     fn compute_block_op_stats(
@@ -1026,58 +1020,58 @@ impl CudaRuntime {
                     peak_tflops,
                 );
             }
-            
+
             println!("{}", "-".repeat(116));
         }
     }
 
-#[allow(unused)]
-pub fn free_debug_buffers(debug_buffers: FxHashMap<(usize, String), &mut [f32]>) {
-    for (_, buffer) in debug_buffers {
-        unsafe {
-            assert_eq!(
-                cudarc::driver::sys::cuMemFreeHost(buffer.as_mut_ptr() as *mut c_void),
-                cudarc::driver::sys::CUresult::CUDA_SUCCESS
-            );
-        }
-    }
-}
-
-#[allow(unused)]
-pub fn print_debug_buffers(debug_buffers: FxHashMap<(usize, String), &'static mut [f32]>) {
-    'debug: for ((_, label), buf) in debug_buffers.iter().sorted_by_key(|((i, _), _)| *i) {
-        if label.contains("diff:") {
-            let mut file = std::fs::File::open(label.replace("diff:", "")).unwrap();
-            let mut file_buffer = Vec::new();
-            file.read_to_end(&mut file_buffer).unwrap();
-            let file_floats: Vec<f32> = file_buffer
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect();
-            for (i, (a, b)) in buf.iter().zip(file_floats).enumerate() {
-                if (*a - b).abs() > 1e-4 {
-                    trace!(
-                        "{} mismatch at index {i}: {a} != {b}",
-                        label.replace("diff:", "")
-                    );
-                    continue 'debug;
-                }
+    #[allow(unused)]
+    pub fn free_debug_buffers(debug_buffers: FxHashMap<(usize, String), &mut [f32]>) {
+        for (_, buffer) in debug_buffers {
+            unsafe {
+                assert_eq!(
+                    cudarc::driver::sys::cuMemFreeHost(buffer.as_mut_ptr() as *mut c_void),
+                    cudarc::driver::sys::CUresult::CUDA_SUCCESS
+                );
             }
-            trace!("{} matches", label.replace("diff:", ""));
-        } else {
-            trace!(
-                "{label} ({}): {:?}...{:?}",
-                buf.len(),
-                buf.iter().take(3).map(|f| format!("{f:.4}")).collect_vec(),
-                buf.iter()
-                    .skip(buf.len() - 3)
-                    .map(|f| format!("{f:.4}"))
-                    .collect_vec(),
-            );
         }
-        println!();
     }
-}
+
+    #[allow(unused)]
+    pub fn print_debug_buffers(debug_buffers: FxHashMap<(usize, String), &'static mut [f32]>) {
+        'debug: for ((_, label), buf) in debug_buffers.iter().sorted_by_key(|((i, _), _)| *i) {
+            if label.contains("diff:") {
+                let mut file = std::fs::File::open(label.replace("diff:", "")).unwrap();
+                let mut file_buffer = Vec::new();
+                file.read_to_end(&mut file_buffer).unwrap();
+                let file_floats: Vec<f32> = file_buffer
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+                for (i, (a, b)) in buf.iter().zip(file_floats).enumerate() {
+                    if (*a - b).abs() > 1e-4 {
+                        trace!(
+                            "{} mismatch at index {i}: {a} != {b}",
+                            label.replace("diff:", "")
+                        );
+                        continue 'debug;
+                    }
+                }
+                trace!("{} matches", label.replace("diff:", ""));
+            } else {
+                trace!(
+                    "{label} ({}): {:?}...{:?}",
+                    buf.len(),
+                    buf.iter().take(3).map(|f| format!("{f:.4}")).collect_vec(),
+                    buf.iter()
+                        .skip(buf.len() - 3)
+                        .map(|f| format!("{f:.4}"))
+                        .collect_vec(),
+                );
+            }
+            println!();
+        }
+    }
 }
 
 impl CudaRuntime {

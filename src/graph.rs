@@ -1,10 +1,8 @@
 use crate::{egglog_utils, hlir::CustomOpHLIR, op::*, prelude::*};
 use crate::{
     egglog_utils::SerializedEGraph,
-    op::{EgglogOp, IntoEgglogOp, LLIROp}, visualization::ToDot,
-};
-use std::{
-    any::TypeId, fmt::Debug, fs, io::Write, ops::{Deref, DerefMut}, sync::Arc, path::Path,
+    op::{EgglogOp, IntoEgglogOp, LLIROp},
+    visualization::ToDot,
 };
 use colored::Colorize;
 use egglog::{CommandOutput, ast::Span, prelude::RustSpan, var};
@@ -12,7 +10,16 @@ use egraph_serialize::{ClassId, NodeId};
 use itertools::Itertools;
 use petgraph::{Direction, stable_graph::StableGraph, visit::EdgeRef};
 use rustc_hash::{FxHashMap, FxHashSet};
-use tracing::{self, info, enabled, Level};
+use std::{
+    any::TypeId,
+    fmt::Debug,
+    fs,
+    io::Write,
+    ops::{Deref, DerefMut},
+    path::Path,
+    sync::Arc,
+};
+use tracing::{self, Level, enabled, info};
 
 pub type LLIRGraph = StableGraph<LLIROp, ()>;
 pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ShapeTracker>;
@@ -204,7 +211,7 @@ impl Graph {
         // Search loop
         for (i, llir_graph) in llir_graphs.into_iter().enumerate() {
             progress_bar(i + 1);
-            if enabled!(Level::DEBUG){
+            if enabled!(Level::DEBUG) {
                 let log_dir = Path::new("llir_graphs");
 
                 if log_dir.exists() {
@@ -212,7 +219,11 @@ impl Graph {
                 }
                 fs::create_dir(log_dir).unwrap();
 
-                fs::write(log_dir.join(format!("llir_{}.dot", i)), llir_graph.to_dot().unwrap()).unwrap(); 
+                fs::write(
+                    log_dir.join(format!("llir_{}.dot", i)),
+                    llir_graph.to_dot().unwrap(),
+                )
+                .unwrap();
             }
             let (new_metric, display_metric) = runtime.profile(&llir_graph, &self.dyn_map);
             let mut new_best = false;
@@ -801,4 +812,3 @@ pub fn egglog_to_llir(
     }
     graphs
 }
-
