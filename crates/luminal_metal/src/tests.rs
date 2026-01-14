@@ -266,3 +266,41 @@ fn metal_simple_less_than() {
     // 1 < 2 = true (1.0), 5 < 3 = false (0.0), 3 < 3 = false (0.0), 4 < 5 = true (1.0)
     assert_eq!(out, vec![1.0, 0.0, 0.0, 1.0]);
 }
+
+#[test]
+fn metal_simple_sum_reduce() {
+    let mut cx = Graph::default();
+    let input = cx.tensor((2, 4));
+    // sum over axis 1
+    let output = input.sum(1).output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    // [[1,2,3,4], [5,6,7,8]] -> [10, 26]
+    rt.set_data(input, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    rt = cx.search(rt, 5);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(output);
+    assert_close(&out, &[10.0, 26.0], 0.001);
+}
+
+#[test]
+fn metal_simple_max_reduce() {
+    let mut cx = Graph::default();
+    let input = cx.tensor((2, 4));
+    // max over axis 1
+    let output = input.max(1).output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    // [[1,4,2,3], [8,5,7,6]] -> [4, 8]
+    rt.set_data(input, &[1.0, 4.0, 2.0, 3.0, 8.0, 5.0, 7.0, 6.0]);
+    rt = cx.search(rt, 5);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(output);
+    assert_close(&out, &[4.0, 8.0], 0.001);
+}
