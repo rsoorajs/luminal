@@ -18,7 +18,6 @@ pub struct TraceOptions {
 }
 
 /// This is a convenience tracing subscriber with some opinionated defaults.
-/// By default, it will try to use the RUST_LOG environment variable, falling back to "luminal=trace" if not set.
 pub fn subscriber() -> TraceOptions {
     TraceOptions {
         perfetto_file: None,
@@ -32,7 +31,6 @@ impl TraceOptions {
         self
     }
 
-    /// Override with a specific filter string (ignores RUST_LOG)
     pub fn env_filter(mut self, env_filter: impl ToString) -> Self {
         self.env_filter = Some(env_filter.to_string());
         self
