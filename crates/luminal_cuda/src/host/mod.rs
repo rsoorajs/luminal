@@ -1,11 +1,14 @@
 use std::{fmt::Debug, sync::Arc};
 
 use crate::cudarc::driver::{CudaSlice, CudaStream};
-use luminal::prelude::*;
+use luminal::{
+    prelude::*,
+    op::EgglogOp,
+};
 mod host_matmul;
 
 pub type Ops = (
-    host_matmul::HostMatmul,
+    // host_matmul::HostMatmul,
 );
 
 pub trait HostOp: Debug + as_any::AsAny + EgglogOp {

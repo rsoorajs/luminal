@@ -6,7 +6,8 @@ use cudarc::driver::{CudaStream, DevicePtr};
 use luminal::{
     graph::extract_expr,
     prelude::*,
-    utils::{
+    op::{ 
+        EgglogOp,
         LLIROp,
         OpParam::{self, *},
     },
@@ -40,7 +41,7 @@ impl EgglogOp for HostMatmul {
     #[allow(unused_variables)]
     fn extract<'a>(
         &'a self,
-        egraph: &'a luminal::serialized_egraph::SerializedEGraph,
+        egraph: &'a luminal::egglog_utils::SerializedEGraph,
         children: &[&'a ENodeId],
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
