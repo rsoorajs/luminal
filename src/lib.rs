@@ -17,6 +17,7 @@ pub mod prelude {
     pub use crate::hlir::NativeRuntime;
     pub use crate::op::{DType, Runtime};
     pub use crate::shape::*;
+    pub use tracing; 
     pub use anyhow;
     pub use egglog;
     pub use egglog::ast as egglog_ast;
