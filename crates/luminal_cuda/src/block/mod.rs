@@ -711,7 +711,7 @@ fn compile_interpreter(
     let lambdas = expression_map
         .iter()
         .sorted_by_key(|(_, i)| **i)
-        .map(|(e, i)| format!("case {i}: return {};", e.to_kernel()))
+        .map(|(e, i)| format!("case {i}: return {};", e.simplify().to_kernel()))
         .join("\n");
     kernel = kernel.replace("//%expr_fns%", &lambdas);
     kernel = kernel.replace("//%constants%", &constant_string);

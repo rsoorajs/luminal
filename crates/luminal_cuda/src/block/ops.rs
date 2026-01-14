@@ -117,46 +117,19 @@ impl BlockOp for RowAdd {
             .to_string()
     }
 
-    fn prologue_a(&self) -> String {
-        "
-        const float* a = source_ptrs[0] + eval_expression(payload.a_strides, current);
-        const int row_width = eval_expression(payload.row_width, 0);
-        const int hop_amt = row_width / blockDim.x;
-        #pragma unroll 8
-        for (int idx = t * hop_amt; idx < (t * hop_amt + hop_amt); idx++) {
-            if (idx < row_width) scratchpad[idx] = a[idx];
-        }
-        "
-        .to_string()
-    }
-
-    fn prologue_a_bytes_loaded(&self) -> Expression {
-        self.range.iter().copied().product::<Expression>().max(1) * self.row_width * 4
-    }
-
-    fn prologue_b(&self) -> String {
-        "
-        const float* b = source_ptrs[1] + eval_expression(payload.b_strides, current);
-        const int row_width = eval_expression(payload.row_width, 0);
-        const int hop_amt = row_width / blockDim.x;
-        #pragma unroll 8
-        for (int idx = t * hop_amt; idx < (t * hop_amt + hop_amt); idx++) {
-            if (idx < row_width) scratchpad[idx + row_width] = b[idx];
-        }
-        "
-        .to_string()
-    }
-
-    fn prologue_b_bytes_loaded(&self) -> Expression {
-        self.range.iter().copied().product::<Expression>().max(1) * self.row_width * 4
+    fn bytes_loaded(&self) -> Expression {
+        // Load 2 input rows (a + b) per launch
+        self.range.iter().copied().product::<Expression>().max(1) * self.row_width * 2 * 4
     }
 
     fn cuda_function(&self) -> String {
         "
+        const float* a = source_ptrs[0] + eval_expression(payload.a_strides, current);
+        const float* b = source_ptrs[1] + eval_expression(payload.b_strides, current);
         float* out = out_ptr + eval_expression(payload.out_strides, current);
         int row_width = eval_expression(payload.row_width, 0);
         for (int idx = t; idx < row_width; idx += blockDim.x) {
-            out[idx] = scratchpad[idx] + scratchpad[idx + row_width];
+            out[idx] = a[idx] + b[idx];
         }
         "
         .to_string()
@@ -187,13 +160,14 @@ pub struct RowSwishMul {
     a_stride: Vec<Expression>,
     b_stride: Vec<Expression>,
     row_width: Expression,
+    n_chunks: Expression,
 }
 
 impl EgglogOp for RowSwishMul {
     fn term(&self) -> (String, Vec<OpParam>) {
         (
             "RowSwishMul".to_string(),
-            vec![EList, Input, EList, Input, EList, Expr],
+            vec![EList, Input, EList, Input, EList, Expr, Expr],
         )
     }
 
@@ -225,6 +199,7 @@ impl EgglogOp for RowSwishMul {
                 ;(= (F32) (dtype ?self))
             )
             (
+                (let ?n_chunks (MDiv (MAdd ?width (MNum 127)) (MNum 128)))
                 (let ?rsm (RowSwishMul
                     (ECons ?batch (ENil))
                     ?self
@@ -232,6 +207,7 @@ impl EgglogOp for RowSwishMul {
                     ?other
                     (ECons ?width (ENil))
                     ?width
+                    ?n_chunks
                 ))
                 (union ?swishmul ?rsm)
                 (set (dtype ?rsm) (F32))
@@ -258,6 +234,7 @@ impl EgglogOp for RowSwishMul {
                 a_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
                 b_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
                 row_width: extract_expr(egraph, children[5], expr_cache).unwrap(),
+                n_chunks: extract_expr(egraph, children[6], expr_cache).unwrap(),
             })),
             vec![children[1], children[3]],
         )
@@ -270,7 +247,10 @@ impl BlockOp for RowSwishMul {
     }
 
     fn launch_range(&self) -> Vec<Expression> {
-        self.range.clone()
+        // Add n_chunks as inner dimension: [batch..., n_chunks]
+        let mut range = self.range.clone();
+        range.push(self.n_chunks);
+        range
     }
 
     fn output_size(&self) -> Expression {
@@ -278,16 +258,18 @@ impl BlockOp for RowSwishMul {
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
-        vec![vec![true; self.range.len()], vec![true; self.range.len()]]
+        // All batch dimensions separate barriers, plus chunk dimension
+        let launch_dims = self.range.len() + 1;
+        vec![vec![true; launch_dims], vec![true; launch_dims]]
     }
 
     fn bytes_loaded(&self) -> Expression {
-        // Load 2 input rows (a + b) per launch
+        // Load 2 input rows (a + b) per launch (total across all chunks)
         self.range.iter().copied().product::<Expression>() * self.row_width * 2 * 4
     }
 
     fn bytes_stored(&self) -> Expression {
-        // Store 1 output row per launch
+        // Store 1 output row per launch (total across all chunks)
         self.range.iter().copied().product::<Expression>() * self.row_width * 4
     }
 
@@ -298,16 +280,22 @@ impl BlockOp for RowSwishMul {
     }
 
     fn cuda_struct(&self) -> String {
-        "const int a; const int b; const int out; int row_width;".to_string()
+        "const int a; const int b; const int out; int row_width; int chunk_idx;".to_string()
     }
 
     fn cuda_function(&self) -> String {
         "
-        const float* a = source_ptrs[0] + eval_expression(payload.a, current);
-        const float* b = source_ptrs[1] + eval_expression(payload.b, current);
-        float* out = out_ptr + eval_expression(payload.out, current);
+        const int chunk_idx = eval_expression(payload.chunk_idx, current);
+        const int row_width = eval_expression(payload.row_width, 0);
+        const int chunk_start = chunk_idx * 128;
+        const int chunk_end = min(chunk_start + 128, row_width);
 
-        for (int idx = t; idx < eval_expression(payload.row_width, 0); idx += blockDim.x) {
+        const float* a = source_ptrs[0] + eval_expression(payload.a, current) + chunk_start;
+        const float* b = source_ptrs[1] + eval_expression(payload.b, current) + chunk_start;
+        float* out = out_ptr + eval_expression(payload.out, current) + chunk_start;
+
+        const int chunk_size = chunk_end - chunk_start;
+        for (int idx = t; idx < chunk_size; idx += blockDim.x) {
             float x = a[idx];
             float sw = x / (1.0f + __expf(-x)); // swish(x)
             out[idx] = sw * b[idx];
@@ -317,19 +305,43 @@ impl BlockOp for RowSwishMul {
     }
 
     fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+        // Extend a_stride and b_stride with 0 for the chunk dimension
+        // so batch offset doesn't change when chunk changes
+        let mut a_stride_ext = self.a_stride.clone();
+        a_stride_ext.push(0.into());
+        let mut b_stride_ext = self.b_stride.clone();
+        b_stride_ext.push(0.into());
+
+        // Stride for extracting chunk index: [0, 0, ..., 1]
+        let mut chunk_stride = vec![0.into(); self.range.len() + 1];
+        chunk_stride[self.range.len()] = 1.into();
+
+        let launch_range = self.launch_range();
         CStruct::new()
-            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
-            .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
-            .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
+            .int(expressions[&flatten_mul_strides(&launch_range, &a_stride_ext)])
+            .int(expressions[&flatten_mul_strides(&launch_range, &b_stride_ext)])
+            .int(expressions[&flatten_mul_strides(&launch_range, &a_stride_ext)])
             .int(expressions[&self.row_width])
+            .int(expressions[&flatten_mul_strides(&launch_range, &chunk_stride)])
             .finish_struct()
     }
 
     fn expressions(&self) -> Vec<Expression> {
+        // Extend strides with 0 for the chunk dimension
+        let mut a_stride_ext = self.a_stride.clone();
+        a_stride_ext.push(0.into());
+        let mut b_stride_ext = self.b_stride.clone();
+        b_stride_ext.push(0.into());
+
+        let mut chunk_stride = vec![0.into(); self.range.len() + 1];
+        chunk_stride[self.range.len()] = 1.into();
+
+        let launch_range = self.launch_range();
         vec![
-            flatten_mul_strides(&self.range, &self.a_stride),
-            flatten_mul_strides(&self.range, &self.b_stride),
+            flatten_mul_strides(&launch_range, &a_stride_ext),
+            flatten_mul_strides(&launch_range, &b_stride_ext),
             self.row_width,
+            flatten_mul_strides(&launch_range, &chunk_stride),
         ]
     }
 }
@@ -1148,61 +1160,8 @@ impl BlockOp for TileMatmul {
         "const int untiled_range[2]; const int a; const int b; const int c; int iters; int a_width; int b_width; int c_width; int m_pos_stride; int n_pos_stride;".to_string()
     }
 
-    fn prologue_b(&self) -> String {
-        format!(
-            "
-        // Load partial B tile into scratchpad (use full scratchpad for B only)
-        const float* b = source_ptrs[1] + eval_expression(payload.b, current);
-        const int n_pos = eval_expression(payload.n_pos_stride, current);
-        const int N = eval_expression(payload.untiled_range[1], 0);
-        const int K = eval_expression(payload.iters, 0);
-        constexpr int TILE_SIZE = {ts};
-        constexpr int SCRATCH_SIZE = 8192;
-        constexpr int PRELOAD_K_MAX = SCRATCH_SIZE / TILE_SIZE;  // 256
-
-        const int global_n0 = n_pos * TILE_SIZE;
-        const int cols_left = N - global_n0;
-        if (cols_left <= 0) return;
-
-        const int tile_n = min(cols_left, TILE_SIZE);
-        const int preload_k = min(K, PRELOAD_K_MAX);
-        const int b_width = eval_expression(payload.b_width, 0);
-
-        // Load B tile: preload_k rows x tile_n cols (B is column-major)
-        // Store column-major in scratchpad (each column contiguous)
-        const int total_b = preload_k * tile_n;
-        #pragma unroll 8
-        for (int idx = t; idx < total_b; idx += blockDim.x) {{
-            const int col = idx / preload_k;
-            const int row = idx % preload_k;
-            // B is column-major: b[col * b_width + row]
-            scratchpad[col * preload_k + row] = b[col * b_width + row];
-        }}
-        ",
-            ts = TILE_SIZE
-        )
-    }
-
-    fn prologue_b_bytes_loaded(&self) -> Expression {
-        // Preload min(K, 256) * N elements. Since Expression doesn't have min(),
-        // we approximate using 256 (PRELOAD_K_MAX) which is correct when K >= 256
-        let batch: Expression = if self.range.len() > 2 {
-            self.range[..self.range.len() - 2].iter().copied().product()
-        } else {
-            1.into()
-        };
-        // N * 256 * 4 bytes per batch
-        batch * self.untiled_range[1] * 256 * 4
-    }
-
     fn bytes_loaded(&self) -> Expression {
-        // Main op loads:
-        // - All of A: M * K * 4 bytes (read directly from global memory)
-        // - Remaining B after preload: (K - 256) * N * 4 bytes
-        // Note: prologue_b loads first 256 * N * 4 bytes of B
-        // Total B = 256*N (prologue) + (K-256)*N (main) = K*N
-        //
-        // This formula assumes K >= 256 (typical for LLM hidden dimensions)
+        // Load A (M * K) + B (K * N) per batch
         let batch: Expression = if self.range.len() > 2 {
             self.range[..self.range.len() - 2].iter().copied().product()
         } else {
@@ -1211,8 +1170,7 @@ impl BlockOp for TileMatmul {
         let m = self.untiled_range[0];
         let n = self.untiled_range[1];
         let k = self.iters;
-        // A: M * K, B streamed: (K - 256) * N = K * N - 256 * N
-        batch * (m * k + k * n - Expression::from(256) * n) * 4
+        batch * (m * k + k * n) * 4
     }
 
     fn cuda_function(&self) -> String {
@@ -1236,8 +1194,6 @@ impl BlockOp for TileMatmul {
         const int K = eval_expression(payload.iters, 0);
 
         constexpr int TILE_SIZE = {ts};
-        constexpr int SCRATCH_SIZE = 8192;
-        constexpr int PRELOAD_K_MAX = SCRATCH_SIZE / TILE_SIZE;  // 256
 
         const int global_m0 = m_pos * TILE_SIZE;
         const int global_n0 = n_pos * TILE_SIZE;
@@ -1250,12 +1206,8 @@ impl BlockOp for TileMatmul {
 
         const int tile_m = min(rows_left, TILE_SIZE);
         const int tile_n = min(cols_left, TILE_SIZE);
-        const int preload_k = min(K, PRELOAD_K_MAX);
 
         const int b_width = eval_expression(payload.b_width, 0);
-
-        // Scratchpad layout: [B: tile_n * preload_k] (A is read directly from global memory)
-        const float* b_scratch = scratchpad;
 
         // Fast path for M=1 decode: warps parallelize over columns with K reduction
         if (tile_m == 1 && num_warps > 0) {{
@@ -1263,19 +1215,8 @@ impl BlockOp for TileMatmul {
             for (int col_base = warp_id * COLS_PER_WARP; col_base < tile_n; col_base += num_warps * COLS_PER_WARP) {{
                 float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
 
-                // First: use preloaded B from scratchpad, A from global memory
-                for (int k = lane; k < preload_k; k += 32) {{
-                    float a_val = a[k];
-                    #pragma unroll
-                    for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
-                        if (col_base + ci < tile_n) {{
-                            partial[ci] += a_val * b_scratch[(col_base + ci) * preload_k + k];
-                        }}
-                    }}
-                }}
-
-                // Then: stream remaining K elements from global memory for both A and B
-                for (int k = preload_k + lane; k < K; k += 32) {{
+                // Stream all K elements from global memory
+                for (int k = lane; k < K; k += 32) {{
                     float a_val = a[k];
                     #pragma unroll
                     for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
@@ -1311,20 +1252,12 @@ impl BlockOp for TileMatmul {
                 int tx = idx % tile_n;
 
                 const float* A0 = a + ty * a_width;
-                const float* B0_scratch = b_scratch + tx * preload_k;
-                const float* B0_global = b + tx * b_width;
+                const float* B0 = b + tx * b_width;
                 float*       C0 = c + ty * c_width + tx;
 
                 float acc = 0.f;
-
-                // First: use preloaded B, A from global memory
-                for (int k = 0; k < preload_k; ++k) {{
-                    acc += A0[k] * B0_scratch[k];
-                }}
-
-                // Then: stream remaining from global memory
-                for (int k = preload_k; k < K; ++k) {{
-                    acc += A0[k] * B0_global[k];
+                for (int k = 0; k < K; ++k) {{
+                    acc += A0[k] * B0[k];
                 }}
 
                 *C0 = acc;
