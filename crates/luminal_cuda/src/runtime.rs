@@ -385,6 +385,7 @@ impl Runtime for CudaRuntime {
     #[tracing::instrument(skip_all)]
     fn load_llir(&mut self, llir_graph: &LLIRGraph) {
         self.exec_graph.clear();
+        self.buffers.clear();
         let block_ops_in_graph = llir_graph
             .node_indices()
             .filter(|n| llir_graph[*n].to_dialect::<dyn BlockOp>().is_some())
