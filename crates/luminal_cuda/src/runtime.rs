@@ -140,7 +140,7 @@ impl Debug for ExecutableKernel {
             "{}",
             match self {
                 Self::Megakernel { work_queue, .. } => format!("Megakernel ({})", work_queue.len()),
-                Self::Kernel { .. } => "Kernel".to_string(),
+                Self::Kernel { kernel_name, .. } => format!("Kernel: ({})", kernel_name),
                 Self::HostOp { .. } => "HostOp".to_string(),
             }
         )
@@ -483,8 +483,11 @@ impl Runtime for CudaRuntime {
         llir_graph: &LLIRGraph,
         dyn_map: &FxHashMap<char, usize>,
     ) -> (Self::ProfileMetric, String) {
+        trace!("clear buffers"); 
         self.buffers.clear();
+        trace!("load llir"); 
         self.load_llir(llir_graph);
+        trace!("execute"); 
         let start = std::time::Instant::now();
         self.execute(dyn_map);
         self.timings.clear();
@@ -517,7 +520,9 @@ impl Runtime for CudaRuntime {
                 .filter(|(d, _)| self.intermediate_buffer_dims.contains(*d))
                 .any(|(d, v)| self.last_dyn_map.get(d).map(|n| *n != *v).unwrap_or(true))
         {
+            trace!("re-assigning dynamic dimensions"); 
             self.last_dyn_map = dyn_map.clone();
+            trace!("reallocating intermediate buffers");
             self.allocate_intermediate_buffers(dyn_map);
         }
         let mut llir_to_hlir: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
@@ -538,6 +543,7 @@ impl Runtime for CudaRuntime {
         let mut kernel_stats = Vec::new();
         let total_start = std::time::Instant::now();
         for exec_node in toposort(&self.exec_graph, None).unwrap() {
+            trace!("Executing: {:?}", self.exec_graph[exec_node]);
             match &mut self.exec_graph[exec_node] {
                 ExecutableKernel::Kernel {
                     kernel,
