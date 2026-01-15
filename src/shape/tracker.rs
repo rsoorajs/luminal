@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use rustc_hash::FxHashMap;
 use tinyvec::ArrayVec;
 
@@ -7,6 +9,12 @@ use crate::prelude::*;
 pub struct ShapeTracker {
     pub dims: ArrayVec<[Expression; 10]>,
     pub strides: ArrayVec<[Expression; 10]>,
+}
+
+impl Display for ShapeTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sh{:?} st{:?}", self.dims, self.strides)
+    }
 }
 
 impl ShapeTracker {
