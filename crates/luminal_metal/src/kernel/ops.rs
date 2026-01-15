@@ -1210,7 +1210,7 @@ impl MetalKernelOp for MetalGather {
             .replace("const_z", "idx");
         let data_idx = flatten_mul_strides(&self.out_shape, &self.data_stride)
             .to_kernel()
-            .replace("const_z", "data_index");
+            .replace("const_z", "gathered_index");
 
         let source = format!(
             r#"
@@ -1225,7 +1225,7 @@ impl MetalKernelOp for MetalGather {
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
-                    int data_index = indexes[{index_idx}];
+                    int gathered_index = indexes[{index_idx}];
                     out[{out_idx}] = data[{data_idx}];
                 }}
             }}
