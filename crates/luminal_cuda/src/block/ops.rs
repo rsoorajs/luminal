@@ -1000,81 +1000,90 @@ impl EgglogOp for TileMatmul {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec![format!("
-        ; Cube mul - Tile sum -> TileMatmul (row major)
+        vec![
+        // Direct Mul -> Sum -> TileMatmul (A row-major, B col-major, C row-major)
+        // This matches the transposed B case which is the standard matmul layout
+        format!("
         (rule
             (
-                ; get cube mul
-                (= ?cm (CubeMul ?mul_shape ?untiled_mul_shape ?a ?a_stride ?a_m_stride ?a_n_stride ?a_k_stride ?b ?b_stride ?b_m_stride ?b_n_stride ?b_k_stride ?out_stride ?out_m_stride ?out_n_stride ?out_k_stride))
-                ; get tile sum
-                (= ?ts (TileSum ?sum_shape ?untiled_sum_shape ?iters ?cm ?sum_in_stride ?sum_in_m_stride ?sum_in_n_stride ?sum_in_k_stride ?sum_out_stride ?sum_out_m_stride ?sum_out_n_stride))
-                ; assert k stride on the intermediate is 1
-                (= ?out_k_stride (MNum 1))
-                (= ?sum_in_k_stride (MNum 1))
-                ; assert matmul strides
-                (= ?b_n_stride (MNum 1))
-                ; get dimensions
-                (= ?t_n (nth_from_end ?mul_shape 1))
-                (= ?t_k (nth_from_end ?mul_shape 0))
+                ; Match Mul node
+                (= ?mul (Mul ?mul_shape ?a ?a_stride ?b ?b_stride ?mul_out_stride))
+
+                ; Match Sum that reduces the Mul (k dimension)
+                (= ?sum (Sum ?out_shape ?k ?mul ?sum_in_stride ?k_stride ?sum_out_stride))
+
+                ; Get dimensions from output shape
+                (= ?m (nth_from_end ?out_shape 1))
+                (= ?n (nth_from_end ?out_shape 0))
+                (!= ?m (MNum 0))
+                (!= ?n (MNum 0))
+
+                ; Get output strides
+                (= ?sum_out_m_stride (nth_from_end ?sum_out_stride 1))
+                (= ?sum_out_n_stride (nth_from_end ?sum_out_stride 0))
+
+                ; Get A strides
+                (= ?a_m_stride (nth_from_end ?a_stride 2))
+                (= ?a_n_stride (nth_from_end ?a_stride 1))
+                (= ?a_k_stride (nth_from_end ?a_stride 0))
+
+                ; Get B strides
+                (= ?b_m_stride (nth_from_end ?b_stride 2))
+                (= ?b_n_stride (nth_from_end ?b_stride 1))
+                (= ?b_k_stride (nth_from_end ?b_stride 0))
+
+                ; Assert contiguous k stride on output (required for reduction)
+                (= ?k_stride (MNum 1))
+
+                ; Assert A has contiguous k (row-major A)
+                (= ?a_k_stride (MNum 1))
+
+                ; Assert B has contiguous k (col-major B / transposed)
+                (= ?b_k_stride (MNum 1))
+
                 (= (F32) (dtype ?a))
             )
             (
-                ; input strides are same as cube mul but without last element
-                (let ?new_a_stride (RemoveNthFromEnd ?a_stride 0))
-                (let ?new_b_stride (RemoveNthFromEnd ?b_stride 0))
-                (let ?tm (TileMatmul ?sum_shape ?untiled_sum_shape ?iters ?a ?new_a_stride (MMul ?t_k (MNum {ts})) (MNum 1) ?b ?new_b_stride (MNum 1) (MMul ?t_n (MNum {ts})) ?sum_out_stride (MMul ?t_n (MNum {ts})) (MNum 1)))
-                (union ?ts ?tm)
+                ; Create tiled shape
+                (let ?tiled_m (MCeilDiv ?m (MNum {ts})))
+                (let ?tiled_n (MCeilDiv ?n (MNum {ts})))
+                (let ?tiled_shape
+                    (ReplaceNthFromEnd
+                        (ReplaceNthFromEnd ?out_shape ?tiled_n 0)
+                    ?tiled_m 1))
+
+                ; Create tiled strides for A: scale m and n strides, remove k
+                (let ?scaled_a_stride
+                    (ReplaceNthFromEnd
+                        (ReplaceNthFromEnd ?a_stride
+                            (MMul ?a_n_stride (MNum {ts})) 1)
+                        (MMul ?a_m_stride (MNum {ts})) 2))
+                (let ?tiled_a_stride (RemoveNthFromEnd ?scaled_a_stride 0))
+
+                ; Create tiled strides for B: scale m and n strides, remove k
+                (let ?scaled_b_stride
+                    (ReplaceNthFromEnd
+                        (ReplaceNthFromEnd ?b_stride
+                            (MMul ?b_n_stride (MNum {ts})) 1)
+                        (MMul ?b_m_stride (MNum {ts})) 2))
+                (let ?tiled_b_stride (RemoveNthFromEnd ?scaled_b_stride 0))
+
+                ; Create tiled output strides
+                (let ?tiled_out_stride
+                    (ReplaceNthFromEnd
+                        (ReplaceNthFromEnd ?sum_out_stride (MMul ?sum_out_n_stride (MNum {ts})) 0)
+                    (MMul ?sum_out_m_stride (MNum {ts})) 1))
+
+                (let ?tm (TileMatmul
+                    ?tiled_shape ?out_shape ?k
+                    ?a ?tiled_a_stride ?a_m_stride (MNum 1)
+                    ?b ?tiled_b_stride (MNum 1) ?b_n_stride
+                    ?tiled_out_stride ?sum_out_m_stride (MNum 1)))
+                (union ?sum ?tm)
                 (set (dtype ?tm) (F32))
             )
-        )", ts = TILE_SIZE),
-        format!("
-        ; Cube mul - Tile sum -> TileMatmul (A row-major, B col-major, C row-major)
-        (rule
-            (
-                ; get cube mul
-                (= ?cm (CubeMul ?mul_shape ?untiled_mul_shape
-                                ?a ?a_stride ?a_m_stride ?a_n_stride ?a_k_stride
-                                ?b ?b_stride ?b_m_stride ?b_n_stride ?b_k_stride
-                                ?out_stride ?out_m_stride ?out_n_stride ?out_k_stride))
-                ; get tile sum
-                (= ?ts (TileSum ?sum_shape ?untiled_sum_shape ?iters ?cm
-                                ?sum_in_stride ?sum_in_m_stride ?sum_in_n_stride ?sum_in_k_stride
-                                ?sum_out_stride ?sum_out_m_stride ?sum_out_n_stride))
-
-                ; assert k stride on the intermediate is 1 (contiguous)
-                (= ?out_k_stride (MNum 1))
-                (= ?sum_in_k_stride (MNum 1))
-
-                ; A row-major (contiguous in its last dim k)
-                (= ?a_k_stride (MNum 1))
-
-                ; B col-major (contiguous in its first dim k)
-                (= ?b_k_stride (MNum 1))
-
-                ; get tile dims
-                (= ?t_n (nth_from_end ?mul_shape 1))
-                (= ?t_k (nth_from_end ?mul_shape 0))
-                ;(= (F32) (dtype ?a))
-            )
-            (
-                ; input strides are same as cube mul but without last element
-                (let ?new_a_stride (RemoveNthFromEnd ?a_stride 0))
-                (let ?new_b_stride (RemoveNthFromEnd ?b_stride 0))
-
-                ; Emit TileMatmul:
-                ;  - A row-major tile strides: m -> t_k*TILE_SIZE, k -> 1
-                ;  - B col-major tile strides: k -> 1, n -> t_k*TILE_SIZE
-                ;  - C row-major tile strides: m -> t_n*TILE_SIZE, n -> 1
-                (let ?tm (TileMatmul ?sum_shape ?untiled_sum_shape ?iters
-                            ?a ?new_a_stride (MMul ?t_k (MNum {ts})) (MNum 1)
-                            ?b ?new_b_stride ?b_k_stride (MMul ?t_k (MNum {ts}))
-                            ?sum_out_stride (MMul ?t_n (MNum {ts})) (MNum 1)))
-                (union ?ts ?tm)
-                (set (dtype ?tm) (F32))
-            )
-            :name \"cube mul\"
-        )
-        ", ts = TILE_SIZE)]
+            :name \"tile matmul\"
+        )", ts = TILE_SIZE)]
     }
 
     fn cleanup(&self) -> bool {
