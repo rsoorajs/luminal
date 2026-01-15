@@ -233,7 +233,7 @@ impl CudaRuntime {
             .collect_vec()
     }
 
-    fn register_buffer(&mut self, llir_node: NodeIndex, ptr: u64) {
+    fn register_buffer(&mut self, llir_index: NodeIndex, ptr: u64) {
         // Remap pointers in work queue
         if let Some(ExecutableKernel::Megakernel {
             work_queue,
@@ -241,16 +241,16 @@ impl CudaRuntime {
             ..
         }) = self
             .node_to_exec
-            .get(&llir_node)
+            .get(&llir_index)
             .and_then(|n| self.exec_graph.node_weight_mut(*n))
         {
-            if self.llir_graph[llir_node].to_op::<Input>().is_none() {
-                work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
+            if self.llir_graph[llir_index].to_op::<Input>().is_none() {
+                work_queue.set_out_ptr(node_to_task_index[&llir_index], ptr as *mut f32);
             }
         }
         for edge in self
             .llir_graph
-            .edges_directed(llir_node, Direction::Outgoing)
+            .edges_directed(llir_index, Direction::Outgoing)
         {
             let dest = edge.target();
             let n_input = self
@@ -290,6 +290,7 @@ impl CudaRuntime {
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+                trace!("node: {:?} assigned to ptr: {:?}", node, ptr);
                 self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
                 self.intermediate_buffer_dims
@@ -301,6 +302,7 @@ impl CudaRuntime {
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+                trace!("node: {:?} assigned to ptr: {:?}", node, ptr);
                 self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
                 self.buffers.insert(
@@ -309,7 +311,8 @@ impl CudaRuntime {
                         .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
                         .unwrap(),
                 );
-                let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+                let ptr: u64 = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+                trace!("node: {:?} assigned to ptr: {:?}", node, ptr);
                 self.register_buffer(node, ptr);
             }
         }
@@ -514,6 +517,7 @@ impl Runtime for CudaRuntime {
     #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
         if self.buffers.is_empty()
+            || true
             || dyn_map.len() != self.last_dyn_map.len()
             || dyn_map
                 .iter()
@@ -537,6 +541,7 @@ impl Runtime for CudaRuntime {
                 CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
                 CudaInput::Ptr(p) => *p,
             };
+            trace!("llir_node: {:?} registered to ptr {:?}", self.llir_graph[llir_node], ptr);
             self.register_buffer(llir_node, ptr);
         }
         let mut timings = Vec::new();
@@ -581,14 +586,19 @@ impl Runtime for CudaRuntime {
                         shared_mem_bytes: shared_mem.exec(dyn_map).unwrap() as u32,
                     };
                     let mut ptrs = vec![];
-                    for inp in inputs {
+                    for (i, inp) in inputs.iter().enumerate() {
                         if let Some(buf) = self.buffers.get(inp) {
-                            ptrs.push(buf.device_ptr(&self.cuda_stream).0);
+                            let ptr = buf.device_ptr(&self.cuda_stream).0; 
+                            trace!("buffer match: input {}: {:?}, {}", i, self.llir_graph[*inp], ptr);
+                            ptrs.push(ptr);
                         } else {
-                            ptrs.push(match &self.hlir_buffers[&llir_to_hlir[inp]] {
+                            let ptr = match &self.hlir_buffers[&llir_to_hlir[inp]] {
                                 CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
                                 CudaInput::Ptr(p) => *p,
-                            });
+                            };
+                            trace!("no buffer match. input {}: {:?}, {}", i, self.llir_graph[*inp], ptr);
+                            ptrs.push(ptr);
+                           
                         }
                     }
                     let mut lb = self.cuda_stream.launch_builder(kernel);
