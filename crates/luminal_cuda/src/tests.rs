@@ -1,6 +1,5 @@
 use cudarc::driver::CudaContext;
 use luminal::prelude::*;
-use luminal::graph::hlir_to_egglog;
 use proptest::prelude::*;
 
 use crate::runtime::CudaRuntime;
