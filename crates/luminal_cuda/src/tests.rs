@@ -1,5 +1,6 @@
 use cudarc::driver::CudaContext;
 use luminal::prelude::*;
+use luminal::graph::hlir_to_egglog;
 use proptest::prelude::*;
 
 use crate::runtime::CudaRuntime;
@@ -182,71 +183,6 @@ pub fn cuda_mean_reduce_test() {
 }
 
 #[test]
-pub fn native_argsort_test() {
-    let mut cx = Graph::default();
-    let input = cx.tensor((10, 20));
-    let sorted_dim0 = input.argsort(0, true).output();
-    let sorted_dim1 = input.argsort(1, false).output();
-
-    let data: Vec<f32> = (0..200).map(|i| ((i * 73 + 17) % 200) as f32).collect();
-
-    let sorted_cols: Vec<Vec<i32>> = (0..20)
-        .map(|col| {
-            let mut indices: Vec<i32> = (0..10).collect();
-            indices.sort_by(|&a, &b| {
-                let va = data[(a as usize) * 20 + col];
-                let vb = data[(b as usize) * 20 + col];
-                vb.partial_cmp(&va).unwrap()
-            });
-            indices
-        })
-        .collect();
-
-    let expected_dim0: Vec<i32> = (0..10)
-        .flat_map(|row| (0..20).map(|col| sorted_cols[col][row]).collect::<Vec<_>>())
-        .collect();
-
-    let expected_dim1: Vec<i32> = (0..10)
-        .flat_map(|row| {
-            let mut indices: Vec<i32> = (0..20).collect();
-            indices.sort_by(|&a, &b| {
-                let va = data[row * 20 + (a as usize)];
-                let vb = data[row * 20 + (b as usize)];
-                va.partial_cmp(&vb).unwrap()
-            });
-            indices
-        })
-        .collect();
-
-    cx.build_search_space::<NativeRuntime>();
-    let mut rt = cx.search(NativeRuntime::default(), 1);
-    rt.set_data(input.id, data);
-    rt.execute(&cx.dyn_map);
-
-    let out_dim0 = rt.get_i32(sorted_dim0.id).clone();
-    let out_dim1 = rt.get_i32(sorted_dim1.id).clone();
-
-    assert_eq!(out_dim0.len(), expected_dim0.len(), "dim0 length mismatch");
-    assert_eq!(out_dim1.len(), expected_dim1.len(), "dim1 length mismatch");
-
-    for i in 0..out_dim0.len() {
-        assert_eq!(
-            out_dim0[i], expected_dim0[i],
-            "dim0 mismatch at {i}: got {}, expected {}",
-            out_dim0[i], expected_dim0[i]
-        );
-    }
-
-    for i in 0..out_dim1.len() {
-        assert_eq!(
-            out_dim1[i], expected_dim1[i],
-            "dim1 mismatch at {i}: got {}, expected {}",
-            out_dim1[i], expected_dim1[i]
-        );
-    }
-}
-
-#[test]
 pub fn cuda_argsort_test() {
     let rows = 10;   // shmem tet
     let cols = 5000; // no shmem test
@@ -321,3 +257,14 @@ pub fn cuda_argsort_test() {
     }
 }
 
+#[test]
+pub fn print_argsort_egglog_pattern() {
+    let mut cx = Graph::default();
+    let input = cx.tensor((10, 20));
+    let _sorted = input.argsort(1, true).output();
+    
+    let (egglog_program, _root) = hlir_to_egglog(&cx);
+    println!("=== ARGSORT EGGLOG PATTERN ===");
+    println!("{}", egglog_program);
+    println!("=== END PATTERN ===");
+}

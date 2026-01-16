@@ -29,39 +29,69 @@ pub type Ops = (
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelArgsort {
-    dim: usize,
     descending: bool,
     shape: Vec<Expression>,
-    strides: Vec<Expression>,
-    reduced_shape: Vec<Expression>,
-    reduced_strides: Vec<Expression>,
-    reduced_out_strides: Vec<Expression>,
+    in_strides: Vec<Expression>,
+    out_strides: Vec<Expression>,
     iters: Expression,
-    iter_stride: Expression,
-    out_stride: Expression,
     dtype: DType,
 }
 impl EgglogOp for KernelArgsort {
     fn term(&self) -> (String, Vec<OpParam>) {
         (
             "KernelArgsort".to_string(),
-            vec![Input, Int, Int, EList, EList, EList, EList, EList, Expr, Expr, Expr, Dty],
+            // Input, descending, shape, in_strides_3d, out_strides, iters, dtype
+            vec![Input, Int, EList, EList, EList, Expr, Dty],
         )
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["
-(rule
-    (
-        (= ?a (ArgSort ?inp ?dim ?descending ?shape ?strides ?reduced_shape ?reduced_strides ?reduced_out_strides ?iters ?iter_stride ?out_stride))
-        (= ?dty (dtype ?inp))
-    )
-    (
-        (union ?a (KernelArgsort ?inp ?dim ?descending ?shape ?strides ?reduced_shape ?reduced_strides ?reduced_out_strides ?iters ?iter_stride ?out_stride ?dty))
-    )
-    :name \"kernel argsort\"
-)"
-        .to_string()]
+        let inverse_perm_pattern = "
+            (= ?sum_cmp (Sum ?sum_shape ?sum_iters ?cmp ?sum_in_strides ?sum_iter_stride ?sum_out_strides))
+            (= ?cast (Cast ?sum_cmp (Int)))
+            (= ?cand_iota (Iota ?cand_expr ?cand_size))
+            (= ?pos_iota (Iota ?pos_expr ?pos_size))
+            (= ?lt1 (LessThan ?lt1_shape ?cast ?cast_str1 ?cand_iota ?cand_str1 ?lt1_out))
+            (= ?lt2 (LessThan ?lt2_shape ?cand_iota ?cand_str2 ?cast ?cast_str2 ?lt2_out))
+            (= ?ne (Add ?ne_shape ?lt1 ?lt1_str ?lt2 ?lt2_str ?ne_out))
+            (= ?neg1 (Constant -1.000000))
+            (= ?neg_ne (Mul ?neg_shape ?ne ?ne_str ?neg1 ?neg1_str ?neg_out))
+            (= ?one (Constant 1.000000))
+            (= ?eq (Add ?eq_shape ?neg_ne ?neg_str ?one ?one_str ?eq_out))
+            (= ?mul_pos (Mul ?mul_shape ?eq ?eq_str ?pos_iota ?pos_str ?mul_out))
+            (= ?result (Sum ?final_shape ?final_iters ?mul_pos ?mul_strides ?mul_iter_stride ?out_strides))
+            (= ?dty (dtype ?inp))
+        ";
+    
+        let ascending_rule = format!("
+    (rule
+        (
+            ; Ascending: LessThan(add_eps, input) means a.gt(b) in Rust
+            (= ?add_eps (Add ?add_shape ?inp ?inp_str1 ?eps ?eps_str ?add_out))
+            (= ?cmp (LessThan ?cmp_shape ?add_eps ?add_str ?inp ?inp_str2 ?cmp_out))
+            {inverse_perm_pattern}
+        )
+        (
+            (union ?result (KernelArgsort ?inp 0 ?final_shape ?inp_str2 ?out_strides ?sum_iters ?dty))
+        )
+        :name \"kernel argsort ascending\"
+    )");
+    
+        let descending_rule = format!("
+    (rule
+        (
+            ; Descending: LessThan(input, add_eps) means a.lt(b) in Rust
+            (= ?add_eps (Add ?add_shape ?inp ?inp_str1 ?eps ?eps_str ?add_out))
+            (= ?cmp (LessThan ?cmp_shape ?inp ?inp_str2 ?add_eps ?add_str ?cmp_out))
+            {inverse_perm_pattern}
+        )
+        (
+            (union ?result (KernelArgsort ?inp 1 ?final_shape ?inp_str2 ?out_strides ?sum_iters ?dty))
+        )
+        :name \"kernel argsort descending\"
+    )");
+    
+        vec![ascending_rule, descending_rule]
     }
 
     fn cleanup(&self) -> bool {
@@ -77,17 +107,12 @@ impl EgglogOp for KernelArgsort {
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                dim: egraph.enodes[children[1]].0.parse::<usize>().unwrap(),
-                descending: egraph.enodes[children[2]].0.parse::<i32>().unwrap() != 0,
-                shape: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
-                strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                reduced_shape: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
-                reduced_strides: extract_expr_list(egraph, children[6], list_cache, expr_cache).unwrap(),
-                reduced_out_strides: extract_expr_list(egraph, children[7], list_cache, expr_cache).unwrap(),
-                iters: extract_expr(egraph, children[8], expr_cache).unwrap(),
-                iter_stride: extract_expr(egraph, children[9], expr_cache).unwrap(),
-                out_stride: extract_expr(egraph, children[10], expr_cache).unwrap(),
-                dtype: extract_dtype(egraph, children[11]),
+                descending: egraph.enodes[children[1]].0.parse::<i32>().unwrap() != 0,
+                shape: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
+                in_strides: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
+                out_strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
+                iters: extract_expr(egraph, children[5], expr_cache).unwrap(),
+                dtype: extract_dtype(egraph, children[6]),
             }) as Box<dyn KernelOp>),
             vec![children[0]],
         )
@@ -108,26 +133,55 @@ impl KernelOp for KernelArgsort {
         Expression,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
-        let vars = self
-            .shape
+        let sort_axis = self.shape.iter()
+            .position(|&s| s == self.iters)
+            .unwrap_or(self.shape.len() - 1);
+        
+        // Remove extra dim from in_strides to get the original input strides.
+        let in_strides: Vec<Expression> = self.in_strides.iter()
+            .enumerate()
+            .filter(|&(i, _)| i != sort_axis + 1)
+            .map(|(_, &s)| s)
+            .collect();
+        
+        let iter_stride = in_strides[sort_axis];
+        let out_stride = self.out_strides[sort_axis];
+        
+        // derive the batch dimensions from the sort_axis
+        let batch_shape: Vec<Expression> = self.shape.iter()
+            .enumerate()
+            .filter(|&(i, _)| i != sort_axis)
+            .map(|(_, &s)| s)
+            .collect();
+        let batch_in_strides: Vec<Expression> = in_strides.iter()
+            .enumerate()
+            .filter(|&(i, _)| i != sort_axis)
+            .map(|(_, &s)| s)
+            .collect();
+        let batch_out_strides: Vec<Expression> = self.out_strides.iter()
+            .enumerate()
+            .filter(|&(i, _)| i != sort_axis)
+            .map(|(_, &s)| s)
+            .collect();
+
+        let vars = batch_shape
             .iter()
             .flat_map(|e| e.dyn_vars())
-            .chain(self.strides.iter().flat_map(|e| e.dyn_vars()))
-            .chain(self.reduced_shape.iter().flat_map(|e| e.dyn_vars()))
-            .chain(self.reduced_strides.iter().flat_map(|e| e.dyn_vars()))
-            .chain(self.reduced_out_strides.iter().flat_map(|e| e.dyn_vars()))
-            .chain(self.out_stride.dyn_vars())
+            .chain(batch_in_strides.iter().flat_map(|e| e.dyn_vars()))
+            .chain(batch_out_strides.iter().flat_map(|e| e.dyn_vars()))
+            .chain(out_stride.dyn_vars())
             .chain(self.iters.dyn_vars())
-            .chain(self.iter_stride.dyn_vars())
+            .chain(iter_stride.dyn_vars())
             .collect::<FxHashSet<_>>();
 
         let dtype = cuda_dtype(self.dtype);
-        let n_blocks: Expression = self.reduced_shape.iter().copied().product();
-        let in_index = flatten_mul_strides(&self.reduced_shape, &self.reduced_strides);
-        let out_index = flatten_mul_strides(&self.reduced_shape, &self.reduced_out_strides);
+        let n_blocks: Expression = batch_shape.iter().copied().product();
+        let in_index = flatten_mul_strides(&batch_shape, &batch_in_strides);
+        let out_index = flatten_mul_strides(&batch_shape, &batch_out_strides);
 
         let threads_per_block = 1024;
         let shmem_limit = 4096; // safe shmem limit for values + indices
+        
         let kernel = format!(
             "
 #define THREADS_PER_BLOCK {threads_per_block}
@@ -214,8 +268,8 @@ extern \"C\" {{
             in_index = in_index.to_kernel(),
             out_index = out_index.to_kernel(),
             iters = self.iters.to_kernel(),
-            iter_stride = self.iter_stride.to_kernel(),
-            out_stride = self.out_stride.to_kernel(),
+            iter_stride = iter_stride.to_kernel(),
+            out_stride = out_stride.to_kernel(),
             threads_per_block = threads_per_block,
             shmem_limit = shmem_limit,
             ascending = if self.descending { 0 } else { 1 },
