@@ -11,7 +11,7 @@ use luminal::{
 
 use crate::block::BlockOp;
 
-pub type Ops = (RowAdd, RowSwishMul, RowRMSNorm, RowRope, TileMatmul);
+pub type Ops = (RowAdd, RowSwishMul, RowRMSNorm, RowRope, TileMatmulSplitK);
 
 #[derive(Debug, Default)]
 pub struct RowAdd {
@@ -262,7 +262,7 @@ impl BlockOp for RowSwishMul {
     }
 
     fn producer_barriers_seperate(&self) -> Vec<bool> {
-        vec![true; self.range.len()]
+        vec![true; self.launch_range().len()]
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
@@ -990,12 +990,13 @@ impl BlockOp for RowRope {
 }
 
 use crate::TILE_SIZE;
+const K_CHUNK_SIZE: usize = 4096;
 
 #[derive(Debug, Default)]
-pub struct TileMatmul {
-    range: Vec<Expression>,
-    untiled_range: Vec<Expression>,
-    iters: Expression,
+pub struct TileMatmulSplitK {
+    range: Vec<Expression>,         // [batch..., tiled_m, tiled_n, k_chunks]
+    untiled_range: Vec<Expression>, // [M, N]
+    total_k: Expression,
     a_stride: Vec<Expression>,
     a_m_stride: Expression,
     b_stride: Vec<Expression>,
@@ -1004,10 +1005,10 @@ pub struct TileMatmul {
     out_m_stride: Expression,
 }
 
-impl EgglogOp for TileMatmul {
+impl EgglogOp for TileMatmulSplitK {
     fn term(&self) -> (String, Vec<OpParam>) {
         (
-            "TileMatmul".to_string(),
+            "TileMatmulSplitK".to_string(),
             vec![
                 EList, EList, Expr, Input, EList, Expr, Expr, Input, EList, Expr, Expr, EList,
                 Expr, Expr,
@@ -1017,7 +1018,7 @@ impl EgglogOp for TileMatmul {
 
     fn rewrites(&self) -> Vec<String> {
         vec![
-            // Direct Mul -> Sum -> TileMatmul (A row-major, B col-major, C row-major)
+            // Direct Mul -> Sum -> TileMatmulSplitK (A row-major, B col-major, C row-major)
             format!(
                 "
         (rule
@@ -1060,13 +1061,15 @@ impl EgglogOp for TileMatmul {
                 (= (F32) (dtype ?a))
             )
             (
-                ; Create tiled shape
+                ; Create tiled shape with K chunks
                 (let ?tiled_m (MCeilDiv ?m (MNum {ts})))
                 (let ?tiled_n (MCeilDiv ?n (MNum {ts})))
+                (let ?k_chunks (MCeilDiv ?k (MNum {kc})))
                 (let ?tiled_shape
-                    (ReplaceNthFromEnd
-                        (ReplaceNthFromEnd ?out_shape ?tiled_n 0)
-                    ?tiled_m 1))
+                    (ECons ?k_chunks
+                        (ReplaceNthFromEnd
+                            (ReplaceNthFromEnd ?out_shape ?tiled_n 0)
+                        ?tiled_m 1)))
 
                 ; Create tiled strides for A: scale m and n strides, remove k
                 (let ?scaled_a_stride
@@ -1074,7 +1077,7 @@ impl EgglogOp for TileMatmul {
                         (ReplaceNthFromEnd ?a_stride
                             (MMul ?a_n_stride (MNum {ts})) 1)
                         (MMul ?a_m_stride (MNum {ts})) 2))
-                (let ?tiled_a_stride (RemoveNthFromEnd ?scaled_a_stride 0))
+                (let ?tiled_a_stride (ECons (MNum 0) (RemoveNthFromEnd ?scaled_a_stride 0)))
 
                 ; Create tiled strides for B: scale m and n strides, remove k
                 (let ?scaled_b_stride
@@ -1082,15 +1085,16 @@ impl EgglogOp for TileMatmul {
                         (ReplaceNthFromEnd ?b_stride
                             (MMul ?b_n_stride (MNum {ts})) 1)
                         (MMul ?b_m_stride (MNum {ts})) 2))
-                (let ?tiled_b_stride (RemoveNthFromEnd ?scaled_b_stride 0))
+                (let ?tiled_b_stride (ECons (MNum 0) (RemoveNthFromEnd ?scaled_b_stride 0)))
 
-                ; Create tiled output strides
+                ; Create tiled output strides (k_chunk dimension has 0 stride since all chunks write to same output)
                 (let ?tiled_out_stride
-                    (ReplaceNthFromEnd
-                        (ReplaceNthFromEnd ?sum_out_stride (MMul ?sum_out_n_stride (MNum {ts})) 0)
-                    (MMul ?sum_out_m_stride (MNum {ts})) 1))
+                    (ECons (MNum 0)
+                        (ReplaceNthFromEnd
+                            (ReplaceNthFromEnd ?sum_out_stride (MMul ?sum_out_n_stride (MNum {ts})) 0)
+                        (MMul ?sum_out_m_stride (MNum {ts})) 1)))
 
-                (let ?tm (TileMatmul
+                (let ?tm (TileMatmulSplitK
                     ?tiled_shape ?out_shape ?k
                     ?a ?tiled_a_stride ?a_m_stride (MNum 1)
                     ?b ?tiled_b_stride (MNum 1) ?b_n_stride
@@ -1098,9 +1102,10 @@ impl EgglogOp for TileMatmul {
                 (union ?sum ?tm)
                 (set (dtype ?tm) (F32))
             )
-            :name \"tile matmul\"
+            :name \"tile matmul split k\"
         )",
-                ts = TILE_SIZE
+                ts = TILE_SIZE,
+                kc = K_CHUNK_SIZE
             ),
         ]
     }
@@ -1121,26 +1126,23 @@ impl EgglogOp for TileMatmul {
                 range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
                 untiled_range: extract_expr_list(egraph, children[1], list_cache, expr_cache)
                     .unwrap(),
-                iters: extract_expr(egraph, children[2], expr_cache).unwrap(),
+                total_k: extract_expr(egraph, children[2], expr_cache).unwrap(),
                 a_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
                 a_m_stride: extract_expr(egraph, children[5], expr_cache).unwrap(),
-                // a_n_stride: extract_expr(egraph, children[6], expr_cache).unwrap(),
                 b_stride: extract_expr_list(egraph, children[8], list_cache, expr_cache).unwrap(),
-                // b_m_stride: extract_expr(egraph, children[9], expr_cache).unwrap(),
                 b_n_stride: extract_expr(egraph, children[10], expr_cache).unwrap(),
                 out_stride: extract_expr_list(egraph, children[11], list_cache, expr_cache)
                     .unwrap(),
                 out_m_stride: extract_expr(egraph, children[12], expr_cache).unwrap(),
-                // out_n_stride: extract_expr(egraph, children[13], expr_cache).unwrap(),
             })),
             vec![children[3], children[7]],
         )
     }
 }
 
-impl BlockOp for TileMatmul {
+impl BlockOp for TileMatmulSplitK {
     fn op_name(&self) -> &'static str {
-        "TileMatmul"
+        "TileMatmulSplitK"
     }
 
     fn launch_range(&self) -> Vec<Expression> {
@@ -1152,21 +1154,29 @@ impl BlockOp for TileMatmul {
     }
 
     fn producer_barriers_seperate(&self) -> Vec<bool> {
-        vec![true; self.range.len()]
+        // All dimensions are separable except k_chunks (at index 0)
+        // since multiple k_chunks write to the same output tile via atomicAdd
+        // Range layout: [k_chunks, batch..., tiled_m, tiled_n]
+        let mut sep = vec![true; self.range.len()];
+        sep[0] = false; // k_chunk dimension at index 0 is NOT separable
+        sep
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+        // Range layout: [k_chunks, batch..., tiled_m, tiled_n]
+        // For input A: all dims except n (at index len-1)
         let mut a = vec![true; self.range.len()];
-        a[self.range.len() - 1] = false;
+        a[self.range.len() - 1] = false; // n dimension
+                                         // For input B: all dims except m (at index len-2)
         let mut b = vec![true; self.range.len()];
-        b[self.range.len() - 2] = false;
+        b[self.range.len() - 2] = false; // m dimension
         vec![a, b]
     }
 
     fn bytes_stored(&self) -> Expression {
-        // Store C (M * N) floats
-        let batch: Expression = if self.range.len() > 2 {
-            self.range[..self.range.len() - 2].iter().copied().product()
+        // Store C (M * N) floats - each k_chunk atomically adds
+        let batch: Expression = if self.range.len() > 3 {
+            self.range[..self.range.len() - 3].iter().copied().product()
         } else {
             1.into()
         };
@@ -1177,31 +1187,31 @@ impl BlockOp for TileMatmul {
 
     fn flops(&self) -> Expression {
         // Matmul FLOPs: 2 * M * N * K (one mul + one add per output element per K iteration)
-        let batch: Expression = if self.range.len() > 2 {
-            self.range[..self.range.len() - 2].iter().copied().product()
+        let batch: Expression = if self.range.len() > 3 {
+            self.range[..self.range.len() - 3].iter().copied().product()
         } else {
             1.into()
         };
         let m = self.untiled_range[0];
         let n = self.untiled_range[1];
-        let k = self.iters;
+        let k = self.total_k;
         batch * m * n * k * 2
     }
 
     fn cuda_struct(&self) -> String {
-        "const int untiled_range[2]; const int a; const int b; const int c; int iters; int a_width; int b_width; int c_width; int m_pos_stride; int n_pos_stride;".to_string()
+        "const int untiled_range[2]; const int a; const int b; const int c; int total_k; int a_width; int b_width; int c_width; int m_pos_stride; int n_pos_stride; int k_chunk_stride;".to_string()
     }
 
     fn bytes_loaded(&self) -> Expression {
         // Load A (M * K) + B (K * N) per batch
-        let batch: Expression = if self.range.len() > 2 {
-            self.range[..self.range.len() - 2].iter().copied().product()
+        let batch: Expression = if self.range.len() > 3 {
+            self.range[..self.range.len() - 3].iter().copied().product()
         } else {
             1.into()
         };
         let m = self.untiled_range[0];
         let n = self.untiled_range[1];
-        let k = self.iters;
+        let k = self.total_k;
         batch * (m * k + k * n) * 4
     }
 
@@ -1213,8 +1223,16 @@ impl BlockOp for TileMatmul {
             }}
             return val;
         }};
-        const float* a = source_ptrs[0] + eval_expression(payload.a, current);
-        const float* b = source_ptrs[1] + eval_expression(payload.b, current);
+        const int k_chunk = eval_expression(payload.k_chunk_stride, current);
+        const int total_K = eval_expression(payload.total_k, 0);
+        const int k_start = k_chunk * {kc};
+        const int k_end = min(k_start + {kc}, total_K);
+        const int K = k_end - k_start;
+
+        if (K <= 0) return;
+
+        const float* a = source_ptrs[0] + eval_expression(payload.a, current) + k_start;
+        const float* b = source_ptrs[1] + eval_expression(payload.b, current) + k_start;
         float*       c = out_ptr + eval_expression(payload.c, current);
         const int m_pos = eval_expression(payload.m_pos_stride, current);
         const int n_pos = eval_expression(payload.n_pos_stride, current);
@@ -1223,7 +1241,6 @@ impl BlockOp for TileMatmul {
         const int lane      = t & 31;
         const int warp_id   = t >> 5;
         const int num_warps = threads >> 5;
-        const int K = eval_expression(payload.iters, 0);
 
         constexpr int TILE_SIZE = {ts};
 
@@ -1247,7 +1264,7 @@ impl BlockOp for TileMatmul {
             for (int col_base = warp_id * COLS_PER_WARP; col_base < tile_n; col_base += num_warps * COLS_PER_WARP) {{
                 float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
 
-                // Stream all K elements from global memory
+                // Stream K elements from this chunk
                 for (int k = lane; k < K; k += 32) {{
                     float a_val = a[k];
                     #pragma unroll
@@ -1263,12 +1280,12 @@ impl BlockOp for TileMatmul {
                 for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
                     partial[ci] = warp_reduce_sum(partial[ci]);
                 }}
-                // Lane 0 writes results
+                // Lane 0 atomically adds results
                 if (lane == 0) {{
                     #pragma unroll
                     for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
                         if (col_base + ci < tile_n) {{
-                            c[col_base + ci] = partial[ci];
+                            atomicAdd(&c[col_base + ci], partial[ci]);
                         }}
                     }}
                 }}
@@ -1292,16 +1309,22 @@ impl BlockOp for TileMatmul {
                     acc += A0[k] * B0[k];
                 }}
 
-                *C0 = acc;
+                atomicAdd(C0, acc);
             }}
         }}
-        ", ts = TILE_SIZE)
+        ", ts = TILE_SIZE, kc = K_CHUNK_SIZE)
     }
 
     fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
         assert_eq!(self.untiled_range.len(), 2);
+        // Range layout: [k_chunks, batch..., tiled_m, tiled_n]
+        // k_chunk is at index 0
+        let mut k_chunk_stride = vec![0.into(); self.range.len()];
+        k_chunk_stride[0] = 1.into();
+        // m_pos (tiled_m) is at index len-2
         let mut m_pos_stride = vec![0.into(); self.range.len()];
         m_pos_stride[self.range.len() - 2] = 1.into();
+        // n_pos (tiled_n) is at index len-1
         let mut n_pos_stride = vec![0.into(); self.range.len()];
         n_pos_stride[self.range.len() - 1] = 1.into();
         CStruct::new()
@@ -1315,16 +1338,20 @@ impl BlockOp for TileMatmul {
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.out_stride)])
-            .int(expressions[&self.iters])
+            .int(expressions[&self.total_k])
             .int(expressions[&self.a_m_stride])
             .int(expressions[&self.b_n_stride])
             .int(expressions[&self.out_m_stride])
             .int(expressions[&flatten_mul_strides(&self.range, &m_pos_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &n_pos_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &k_chunk_stride)])
             .finish_struct()
     }
 
     fn expressions(&self) -> Vec<Expression> {
+        // Range layout: [k_chunks, batch..., tiled_m, tiled_n]
+        let mut k_chunk_stride = vec![0.into(); self.range.len()];
+        k_chunk_stride[0] = 1.into();
         let mut m_pos_stride = vec![0.into(); self.range.len()];
         m_pos_stride[self.range.len() - 2] = 1.into();
         let mut n_pos_stride = vec![0.into(); self.range.len()];
@@ -1335,12 +1362,13 @@ impl BlockOp for TileMatmul {
             flatten_mul_strides(&self.range, &self.a_stride),
             flatten_mul_strides(&self.range, &self.b_stride),
             flatten_mul_strides(&self.range, &self.out_stride),
-            self.iters,
+            self.total_k,
             self.a_m_stride,
             self.b_n_stride,
             self.out_m_stride,
             flatten_mul_strides(&self.range, &m_pos_stride),
             flatten_mul_strides(&self.range, &n_pos_stride),
+            flatten_mul_strides(&self.range, &k_chunk_stride),
         ]
     }
 }

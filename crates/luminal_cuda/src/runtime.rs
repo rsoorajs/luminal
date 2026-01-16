@@ -452,8 +452,10 @@ impl Runtime for CudaRuntime {
                 .any(|(d, v)| self.last_dyn_map.get(d).map(|n| *n != *v).unwrap_or(true))
         {
             self.last_dyn_map = dyn_map.clone();
-            self.allocate_intermediate_buffers(dyn_map);
         }
+        // Always reallocate intermediate buffers (using alloc_zeros) to ensure
+        // they are zeroed for atomicAdd operations in TileMatmulSplitK
+        self.allocate_intermediate_buffers(dyn_map);
         let mut llir_to_hlir: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
         for (hlir_node, llir_node) in self
             .llir_graph

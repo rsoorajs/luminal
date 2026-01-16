@@ -155,6 +155,11 @@ proptest! {
     }
 }
 
+// Note: TileMatmulSplitK is verified through the llama example (examples/llama)
+// Isolated matmul tests have graph extraction issues due to how the egglog
+// pattern matching requires specific stride configurations (contiguous K for B input)
+// and additional operations to form a valid extractable graph.
+
 /// Test that measures bandwidth utilization for a large element-wise add kernel.
 /// This demonstrates that KernelAdd can achieve reasonable bandwidth with large tensors.
 #[test]
