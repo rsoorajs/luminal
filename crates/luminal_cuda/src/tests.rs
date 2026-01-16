@@ -256,15 +256,3 @@ pub fn cuda_argsort_test() {
         );
     }
 }
-
-#[test]
-pub fn print_argsort_egglog_pattern() {
-    let mut cx = Graph::default();
-    let input = cx.tensor((10, 20));
-    let _sorted = input.argsort(1, true).output();
-    
-    let (egglog_program, _root) = hlir_to_egglog(&cx);
-    println!("=== ARGSORT EGGLOG PATTERN ===");
-    println!("{}", egglog_program);
-    println!("=== END PATTERN ===");
-}
