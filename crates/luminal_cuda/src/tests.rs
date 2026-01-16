@@ -241,3 +241,78 @@ pub fn kernel_add_bandwidth_test() {
         }
     }
 }
+
+#[test]
+pub fn cuda_argsort_test() {
+    let rows = 10;   // shmem tet
+    let cols = 5000; // no shmem test
+    let total = rows * cols;
+
+    let mut cx = Graph::default();
+    let input = cx.tensor((rows, cols));
+    let sorted_dim0 = input.argsort(0, true).output();   // descend
+    let sorted_dim1 = input.argsort(1, false).output();  // ascend
+
+    // random and unique data
+    let data: Vec<f32> = (0..total).map(|i| ((i * 73 + 17) % total) as f32).collect();
+
+    let sorted_cols: Vec<Vec<i32>> = (0..cols)
+        .map(|col| {
+            let mut indices: Vec<i32> = (0..rows as i32).collect();
+            indices.sort_by(|&a, &b| {
+                let va = data[(a as usize) * cols + col];
+                let vb = data[(b as usize) * cols + col];
+                vb.partial_cmp(&va).unwrap()
+            });
+            indices
+        })
+        .collect();
+
+    let expected_dim0: Vec<i32> = (0..rows)
+        .flat_map(|row| (0..cols).map(|col| sorted_cols[col][row]).collect::<Vec<_>>())
+        .collect();
+
+    let expected_dim1: Vec<i32> = (0..rows)
+        .flat_map(|row| {
+            let mut indices: Vec<i32> = (0..cols as i32).collect();
+            indices.sort_by(|&a, &b| {
+                let va = data[row * cols + (a as usize)];
+                let vb = data[row * cols + (b as usize)];
+                va.partial_cmp(&vb).unwrap()
+            });
+            indices
+        })
+        .collect();
+
+    let ctx = CudaContext::new(0).unwrap();
+    ctx.bind_to_thread().unwrap();
+    let stream = ctx.default_stream();
+    cx.build_search_space::<CudaRuntime>();
+    let mut rt = CudaRuntime::initialize((ctx, stream, FxHashMap::default()));
+    rt.set_data(input, data);
+    rt = cx.search(rt, 10);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out_dim0 = rt.get_i32(sorted_dim0.id).clone();
+    let out_dim1 = rt.get_i32(sorted_dim1.id).clone();
+
+    assert_eq!(out_dim0.len(), expected_dim0.len(), "dim0 length mismatch");
+    assert_eq!(out_dim1.len(), expected_dim1.len(), "dim1 length mismatch");
+
+    for i in 0..out_dim0.len() {
+        assert_eq!(
+            out_dim0[i], expected_dim0[i],
+            "dim0 mismatch at {i}: got {}, expected {}",
+            out_dim0[i], expected_dim0[i]
+        );
+    }
+
+    for i in 0..out_dim1.len() {
+        assert_eq!(
+            out_dim1[i], expected_dim1[i],
+            "dim1 mismatch at {i}: got {}, expected {}",
+            out_dim1[i], expected_dim1[i]
+        );
+    }
+}
