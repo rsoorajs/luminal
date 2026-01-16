@@ -98,6 +98,10 @@ impl BlockOp for RowAdd {
         self.range.iter().copied().product::<Expression>().max(1) * self.row_width
     }
 
+    fn producer_barriers_seperate(&self) -> Vec<bool> {
+        vec![true; self.range.len()]
+    }
+
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
         vec![vec![true; self.range.len()], vec![true; self.range.len()]]
     }
@@ -255,6 +259,10 @@ impl BlockOp for RowSwishMul {
 
     fn output_size(&self) -> Expression {
         self.range.iter().copied().product::<Expression>() * self.row_width
+    }
+
+    fn producer_barriers_seperate(&self) -> Vec<bool> {
+        vec![true; self.range.len()]
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
@@ -486,6 +494,10 @@ impl BlockOp for RowRMSNorm {
 
     fn output_size(&self) -> Expression {
         self.range.iter().copied().product::<Expression>() * self.row_width
+    }
+
+    fn producer_barriers_seperate(&self) -> Vec<bool> {
+        vec![true; self.range.len()]
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
@@ -889,6 +901,10 @@ impl BlockOp for RowRope {
         self.range.iter().copied().product::<Expression>() * self.row_width
     }
 
+    fn producer_barriers_seperate(&self) -> Vec<bool> {
+        vec![true; self.range.len()]
+    }
+
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
         vec![vec![true; self.range.len()], vec![true; self.range.len()]]
     }
@@ -1001,9 +1017,9 @@ impl EgglogOp for TileMatmul {
 
     fn rewrites(&self) -> Vec<String> {
         vec![
-        // Direct Mul -> Sum -> TileMatmul (A row-major, B col-major, C row-major)
-        // This matches the transposed B case which is the standard matmul layout
-        format!("
+            // Direct Mul -> Sum -> TileMatmul (A row-major, B col-major, C row-major)
+            format!(
+                "
         (rule
             (
                 ; Match Mul node
@@ -1083,7 +1099,10 @@ impl EgglogOp for TileMatmul {
                 (set (dtype ?tm) (F32))
             )
             :name \"tile matmul\"
-        )", ts = TILE_SIZE)]
+        )",
+                ts = TILE_SIZE
+            ),
+        ]
     }
 
     fn cleanup(&self) -> bool {
@@ -1130,6 +1149,10 @@ impl BlockOp for TileMatmul {
 
     fn output_size(&self) -> Expression {
         self.untiled_range.iter().copied().product::<Expression>()
+    }
+
+    fn producer_barriers_seperate(&self) -> Vec<bool> {
+        vec![true; self.range.len()]
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {

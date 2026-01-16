@@ -271,6 +271,10 @@ impl BlockOp for LlamaAttention {
         self.range.iter().copied().product::<Expression>() * self.head_dim
     }
 
+    fn producer_barriers_seperate(&self) -> Vec<bool> {
+        vec![true; self.range.len()]
+    }
+
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
         let mut q = vec![true; self.range.len()];
         q[self.range.len() - 1] = false;

@@ -41,9 +41,8 @@ pub trait BlockOp: Debug + as_any::AsAny {
     fn output_size(&self) -> Expression {
         unimplemented!()
     }
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
-        unimplemented!()
-    }
+    fn producer_barriers_seperate(&self) -> Vec<bool>;
+    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>>;
     /// C struct body
     fn cuda_struct(&self) -> String {
         "".to_string()
@@ -112,6 +111,7 @@ luminal::impl_into_ops!(BlockOp);
 #[tracing::instrument(skip_all)]
 fn compute_barrier_strides(
     mut prod_range: Vec<Expression>,
+    mut prod_shared: Vec<bool>,
     mut cons_range: Vec<Vec<Expression>>,
     mut cons_shared: Vec<Vec<bool>>,
 ) -> (Vec<Expression>, Vec<Vec<Expression>>) {
@@ -137,6 +137,7 @@ fn compute_barrier_strides(
     let prod_range_len = prod_range.len();
     let cons_range_lens = cons_range.iter().map(|c| c.len()).collect_vec();
     prod_range.append(&mut vec![1.into(); max_range_len - prod_range.len()]);
+    prod_shared.append(&mut vec![true; max_range_len - prod_shared.len()]);
     for v in &mut cons_range {
         v.append(&mut vec![1.into(); max_range_len - v.len()]);
     }
@@ -148,12 +149,13 @@ fn compute_barrier_strides(
     assert_eq!(cons_shared_t.len(), prod_range.len());
     let r = prod_range
         .iter()
+        .zip(&prod_shared)
         .zip(&cons_range_t)
         .zip(cons_shared_t)
         .rev()
-        .scan(Expression::from(1), |acc, ((pr, cr), cs)| {
+        .scan(Expression::from(1), |acc, (((pr, ps), cr), cs)| {
             let prev = *acc;
-            if cs.iter().all(|i| *i) {
+            if *ps && cs.iter().all(|i| *i) {
                 if cr.iter().all(|cr| *pr == *cr) {
                     *acc *= *pr;
                     Some((Expression::from('z') * prev, vec![prev * 'z'; cr.len()]))
@@ -255,10 +257,9 @@ fn get_barrier_strides(
             })
             .filter(|(n, _)| block_ops.contains(n))
             .collect_vec();
-        let prod_range = graph[*node]
-            .to_dialect::<dyn BlockOp>()
-            .unwrap()
-            .launch_range();
+        let prod_op = graph[*node].to_dialect::<dyn BlockOp>().unwrap();
+        let prod_range = prod_op.launch_range();
+        let prod_shared = prod_op.producer_barriers_seperate();
         let cons_range: Vec<Vec<Expression>> = consumers
             .iter()
             .map(|(n, _)| {
@@ -270,6 +271,7 @@ fn get_barrier_strides(
             .collect();
         let (producer_strides, consumer_strides) = compute_barrier_strides(
             prod_range.clone(),
+            prod_shared,
             cons_range.clone(),
             consumers
                 .iter()
