@@ -23,10 +23,10 @@ use luminal::prelude::{
 use memmap2::MmapOptions;
 use safetensors::SafeTensors;
 use std::{
-    collections::VecDeque, ffi::c_void, fmt::Debug, fs::File, io::Read, mem::size_of, sync::Arc,
+    collections::VecDeque, fmt::Debug, fs::File, mem::size_of, sync::Arc,
     time::Duration,
 };
-use tracing::{field, info, span, trace, Level};
+use tracing::{field, span, trace, Level};
 use uuid::Uuid;
 
 pub enum CudaInput {
@@ -1110,7 +1110,7 @@ impl CudaRuntime {
     pub fn print_execution_stats(&self) {
         let stats = &self.last_execution_stats;
         if stats.kernel_stats.is_empty() && stats.block_op_stats.is_empty() {
-            info!("No execution stats available.");
+            println!("No execution stats available.");
             return;
         }
 
@@ -1120,8 +1120,8 @@ impl CudaRuntime {
 
         // Print kernel stats if any
         if !stats.kernel_stats.is_empty() {
-            info!("\n=== Kernel Execution Statistics ===\n");
-            info!(
+            println!("\n=== Kernel Execution Statistics ===\n");
+            println!(
                 "{:<20} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
                 "Kernel",
                 "Time (us)",
@@ -1133,7 +1133,7 @@ impl CudaRuntime {
                 "MBU",
                 "MFU"
             );
-            info!("{}", "-".repeat(116));
+            println!("{}", "-".repeat(116));
 
             for stat in &stats.kernel_stats {
                 self.print_stat_row(
@@ -1149,7 +1149,7 @@ impl CudaRuntime {
                 );
             }
 
-            info!("{}", "-".repeat(116));
+            println!("{}", "-".repeat(116));
         }
 
         // Print block op stats if any
@@ -1200,22 +1200,32 @@ impl CudaRuntime {
                 let mfu = (stats.aggregate_tflops / peak_tf as f64) * 100.0;
                 (format!("{mbu:.1}%"), format!("{mfu:.1}%"))
             } else {
-                trace!(
-                    "{label} ({}): {:?}...{:?}",
-                    buf.len(),
-                    buf.iter().take(3).map(|f| format!("{f:.4}")).collect_vec(),
-                    buf.iter()
-                        .skip(buf.len() - 3)
-                        .map(|f| format!("{f:.4}"))
-                        .collect_vec(),
-                );
-            }
-            info!("");
-        }
-    }
-}
+                ("-".to_string(), "-".to_string())
+            };
 
-impl CudaRuntime {
+        println!(
+            "{:<20} {:>12.2} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
+            "Total",
+            stats.total_time_us,
+            format_size(stats.total_bytes_loaded),
+            format_size(stats.total_bytes_stored),
+            format_flops(stats.total_flops),
+            format!("{:.2}", stats.aggregate_bandwidth_gbps),
+            format!("{:.4}", stats.aggregate_tflops),
+            mbu_str,
+            mfu_str
+        );
+
+        // Print device info
+        if let (Some(peak_bw), Some(peak_tf)) = (peak_bandwidth_gbps, peak_tflops) {
+            println!(
+                "\nDevice peak: {} GB/s bandwidth, {} TFLOPS (F32)",
+                peak_bw, peak_tf
+            );
+        }
+        println!();
+    }
+
     fn print_stat_row(
         &self,
         name: &str,
