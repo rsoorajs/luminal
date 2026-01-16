@@ -290,7 +290,7 @@ impl CudaRuntime {
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
-                trace!("node: {:?} assigned to ptr: {:?}", node, ptr);
+                trace!("node: {:?} ptr: {:?}", self.llir_graph[node], ptr);
                 self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
                 self.intermediate_buffer_dims
@@ -302,7 +302,7 @@ impl CudaRuntime {
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
-                trace!("node: {:?} assigned to ptr: {:?}", node, ptr);
+                trace!("node: {:?} ptr: {:?}", self.llir_graph[node], ptr);
                 self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
                 self.buffers.insert(
@@ -312,7 +312,7 @@ impl CudaRuntime {
                         .unwrap(),
                 );
                 let ptr: u64 = self.buffers[&node].device_ptr(&self.cuda_stream).0;
-                trace!("node: {:?} assigned to ptr: {:?}", node, ptr);
+                trace!("node: {:?}  ptr: {:?}", self.llir_graph[node], ptr);
                 self.register_buffer(node, ptr);
             }
         }
