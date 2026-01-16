@@ -1536,7 +1536,7 @@ impl Runtime for NativeRuntime {
 }
 
 impl NativeRuntime {
-    fn get_data_id(&self, id: impl ToId) -> petgraph::graph::NodeIndex {
+    pub fn get_f32(&self, id: impl ToId) -> &Vec<f32> {
         let id = id.to_id();
         let output_id = self
             .graph
@@ -1550,26 +1550,15 @@ impl NativeRuntime {
                 }
             })
             .unwrap();
-        self.graph
+        let data_id = self
+            .graph
             .neighbors_directed(output_id, Direction::Incoming)
             .next()
-            .unwrap()
-    }
-
-    pub fn get_f32(&self, id: impl ToId) -> &Vec<f32> {
-        let data_id = self.get_data_id(id);
+            .unwrap();
         let NativeData::F32(f) = self.buffers.get(&data_id).unwrap() else {
             panic!()
         };
         f
-    }
-
-    pub fn get_i32(&self, id: impl ToId) -> &Vec<i32> {
-        let data_id = self.get_data_id(id);
-        let NativeData::Int(i) = self.buffers.get(&data_id).unwrap() else {
-            panic!()
-        };
-        i
     }
 }
 
