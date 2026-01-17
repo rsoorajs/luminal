@@ -21,7 +21,283 @@ pub type Ops = (
     // KernelSumReduce, // for some reason this prevents llama example from working. fairly certian there's an underlying bug in search or extraction.
     KernelMaxReduce,
     KernelMeanReduce,
+    KernelArgsort,
 );
+
+#[derive(Default, Debug, Clone)]
+pub struct KernelArgsort {
+    descending: bool,
+    shape: Vec<Expression>,
+    in_strides: Vec<Expression>,
+    out_strides: Vec<Expression>,
+    iters: Expression,
+    dtype: DType,
+}
+impl EgglogOp for KernelArgsort {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "KernelArgsort".to_string(),
+            // Input, descending, shape, in_strides_3d, out_strides, iters, dtype
+            vec![Input, Int, EList, EList, EList, Expr, Dty],
+        )
+    }
+
+    fn rewrites(&self) -> Vec<String> {
+        let inverse_perm_pattern = "
+            (= ?sum_cmp (Sum ?sum_shape ?sum_iters ?cmp ?sum_in_strides ?sum_iter_stride ?sum_out_strides))
+            (= ?cast (Cast ?sum_cmp (Int)))
+            (= ?cand_iota (Iota ?cand_expr ?cand_size))
+            (= ?pos_iota (Iota ?pos_expr ?pos_size))
+            (= ?lt1 (LessThan ?lt1_shape ?cast ?cast_str1 ?cand_iota ?cand_str1 ?lt1_out))
+            (= ?lt2 (LessThan ?lt2_shape ?cand_iota ?cand_str2 ?cast ?cast_str2 ?lt2_out))
+            (= ?ne (Add ?ne_shape ?lt1 ?lt1_str ?lt2 ?lt2_str ?ne_out))
+            (= ?neg1 (Constant -1.000000))
+            (= ?neg_ne (Mul ?neg_shape ?ne ?ne_str ?neg1 ?neg1_str ?neg_out))
+            (= ?one (Constant 1.000000))
+            (= ?eq (Add ?eq_shape ?neg_ne ?neg_str ?one ?one_str ?eq_out))
+            (= ?mul_pos (Mul ?mul_shape ?eq ?eq_str ?pos_iota ?pos_str ?mul_out))
+            (= ?result (Sum ?final_shape ?final_iters ?mul_pos ?mul_strides ?mul_iter_stride ?out_strides))
+            (= ?dty (dtype ?inp))
+        ";
+    
+        let ascending_rule = format!("
+    (rule
+        (
+            ; Ascending: LessThan(add_eps, input) means a.gt(b) in Rust
+            (= ?add_eps (Add ?add_shape ?inp ?inp_str1 ?eps ?eps_str ?add_out))
+            (= ?cmp (LessThan ?cmp_shape ?add_eps ?add_str ?inp ?inp_str2 ?cmp_out))
+            {inverse_perm_pattern}
+        )
+        (
+            (union ?result (KernelArgsort ?inp 0 ?final_shape ?inp_str2 ?out_strides ?sum_iters ?dty))
+        )
+        :name \"kernel argsort ascending\"
+    )");
+    
+        let descending_rule = format!("
+    (rule
+        (
+            ; Descending: LessThan(input, add_eps) means a.lt(b) in Rust
+            (= ?add_eps (Add ?add_shape ?inp ?inp_str1 ?eps ?eps_str ?add_out))
+            (= ?cmp (LessThan ?cmp_shape ?inp ?inp_str2 ?add_eps ?add_str ?cmp_out))
+            {inverse_perm_pattern}
+        )
+        (
+            (union ?result (KernelArgsort ?inp 1 ?final_shape ?inp_str2 ?out_strides ?sum_iters ?dty))
+        )
+        :name \"kernel argsort descending\"
+    )");
+    
+        vec![ascending_rule, descending_rule]
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn extract<'a>(
+        &self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        (
+            LLIROp::new::<dyn KernelOp>(Box::new(Self {
+                descending: egraph.enodes[children[1]].0.parse::<i32>().unwrap() != 0,
+                shape: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
+                in_strides: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
+                out_strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
+                iters: extract_expr(egraph, children[5], expr_cache).unwrap(),
+                dtype: extract_dtype(egraph, children[6]),
+            }) as Box<dyn KernelOp>),
+            vec![children[0]],
+        )
+    }
+}
+
+impl KernelOp for KernelArgsort {
+    fn compile(
+        &self,
+        ctx: &Arc<CudaContext>,
+        stream: &Arc<CudaStream>,
+    ) -> (
+        CudaFunction,
+        Arc<CudaModule>,
+        String,
+        (Expression, Expression, Expression),
+        (Expression, Expression, Expression),
+        Expression,
+        FxHashMap<char, CudaSlice<u8>>,
+    ) {
+        let sort_axis = self.shape.iter()
+            .position(|&s| s == self.iters)
+            .unwrap_or(self.shape.len() - 1);
+        
+        // Remove extra dim from in_strides to get the original input strides.
+        let in_strides: Vec<Expression> = self.in_strides.iter()
+            .enumerate()
+            .filter(|&(i, _)| i != sort_axis + 1)
+            .map(|(_, &s)| s)
+            .collect();
+        
+        let iter_stride = in_strides[sort_axis];
+        let out_stride = self.out_strides[sort_axis];
+        
+        // derive the batch dimensions from the sort_axis
+        let batch_shape: Vec<Expression> = self.shape.iter()
+            .enumerate()
+            .filter(|&(i, _)| i != sort_axis)
+            .map(|(_, &s)| s)
+            .collect();
+        let batch_in_strides: Vec<Expression> = in_strides.iter()
+            .enumerate()
+            .filter(|&(i, _)| i != sort_axis)
+            .map(|(_, &s)| s)
+            .collect();
+        let batch_out_strides: Vec<Expression> = self.out_strides.iter()
+            .enumerate()
+            .filter(|&(i, _)| i != sort_axis)
+            .map(|(_, &s)| s)
+            .collect();
+
+        let vars = batch_shape
+            .iter()
+            .flat_map(|e| e.dyn_vars())
+            .chain(batch_in_strides.iter().flat_map(|e| e.dyn_vars()))
+            .chain(batch_out_strides.iter().flat_map(|e| e.dyn_vars()))
+            .chain(out_stride.dyn_vars())
+            .chain(self.iters.dyn_vars())
+            .chain(iter_stride.dyn_vars())
+            .collect::<FxHashSet<_>>();
+
+        let dtype = cuda_dtype(self.dtype);
+        let n_blocks: Expression = batch_shape.iter().copied().product();
+        let in_index = flatten_mul_strides(&batch_shape, &batch_in_strides);
+        let out_index = flatten_mul_strides(&batch_shape, &batch_out_strides);
+
+        let threads_per_block = 1024;
+        let shmem_limit = 4096; // safe shmem limit for values + indices
+        
+        let kernel = format!(
+            "
+#define THREADS_PER_BLOCK {threads_per_block}
+#define SHMEM_LIMIT {shmem_limit}
+#define ASCENDING {ascending}
+{constants}
+extern \"C\" {{
+    __global__ void argsort_k(int *output, const {dtype} *data) {{
+        extern __shared__ char shared_mem[];
+        {dtype} *shmem_vals = ({dtype}*)shared_mem;
+        int *shmem_idx = (int*)(shmem_vals + SHMEM_LIMIT);
+        
+        int const_z = blockIdx.x;
+        int tid = threadIdx.x;
+        
+        int in_base = {in_index};
+        int out_base = {out_index};
+        int N = {iters};
+        int in_stride = {iter_stride};
+        int out_stride = {out_stride};
+        
+        {dtype} *vals;
+        int *idx;
+        int idx_stride;
+
+        int use_shmem = (N <= SHMEM_LIMIT);
+        if (use_shmem) {{
+            vals = shmem_vals;
+            idx = shmem_idx;
+            for (int i = tid; i < N; i += THREADS_PER_BLOCK) {{
+                vals[i] = data[in_base + i * in_stride];
+            }}
+            idx_stride = 1;
+            in_stride = 1;
+        }} else {{
+            vals = ({dtype}*)(data + in_base);
+            idx = output + out_base;
+            idx_stride = out_stride;
+        }}
+        
+        // init indices
+        for (int i = tid; i < N; i += THREADS_PER_BLOCK) {{
+            idx[i * idx_stride] = i;
+        }}
+        __syncthreads();
+        
+        // odd even transposition sort
+        // https://www.geeksforgeeks.org/dsa/odd-even-transposition-sort-brick-sort-using-pthreads/
+        for (int phase = 0; phase < N; phase++) {{
+            int p2 = phase % 2;
+            for (int i = tid; i < N / 2; i += THREADS_PER_BLOCK) {{
+                int left = 2 * i + p2;
+                int right = 2 * i + 1 + p2;
+                
+                if (right < N) {{
+                    int idx_l = idx[left * idx_stride];
+                    int idx_r = idx[right * idx_stride];
+                    {dtype} val_l = vals[idx_l * in_stride];
+                    {dtype} val_r = vals[idx_r * in_stride];
+                    bool cond = ASCENDING ? val_l > val_r : val_l < val_r;
+
+                    if (cond) {{
+                        idx[left * idx_stride] = idx_r;
+                        idx[right * idx_stride] = idx_l;
+                    }}
+                }}
+            }}
+            __syncthreads();
+        }}
+        
+        // only need to write back if using shmem
+        if (use_shmem) {{
+            for (int i = tid; i < N; i += THREADS_PER_BLOCK) {{
+                output[out_base + i * out_stride] = idx[i];
+            }}
+        }}
+    }}
+}}",
+            constants = vars
+                .iter()
+                .map(|i| format!("__constant__ int const_{i}[1];"))
+                .join("\n"),
+            dtype = dtype,
+            in_index = in_index.to_kernel(),
+            out_index = out_index.to_kernel(),
+            iters = self.iters.to_kernel(),
+            iter_stride = iter_stride.to_kernel(),
+            out_stride = out_stride.to_kernel(),
+            threads_per_block = threads_per_block,
+            shmem_limit = shmem_limit,
+            ascending = if self.descending { 0 } else { 1 },
+        );
+
+        let ptx = compile_ptx(&kernel).unwrap();
+        let module = ctx.load_module(ptx).unwrap();
+        let func = module.load_function("argsort_k").unwrap();
+
+        let constants = vars
+            .into_iter()
+            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
+            .collect();
+
+        let shmem_bytes = shmem_limit * 8; // safe for 4 bytes dtype (f32) + 4 bytes int indices 
+
+        (
+            func,
+            module,
+            kernel,
+            (n_blocks, 1.into(), 1.into()),                 // grid
+            (threads_per_block.into(), 1.into(), 1.into()), // threads
+            shmem_bytes.into(),                             // shmem
+            constants,
+        )
+    }
+
+    fn output_size(&self) -> Expression {
+        self.shape.iter().copied().product()
+    }
+}
 
 #[derive(Default, Debug, Clone)]
 

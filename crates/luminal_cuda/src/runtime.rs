@@ -203,7 +203,7 @@ impl CudaRuntime {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
+    fn get_output_data(&self, id: impl ToId) -> Vec<u8> {
         let id = id.to_id();
         let output_id = self
             .llir_graph
@@ -228,12 +228,30 @@ impl CudaRuntime {
                     .expect("Cannot find tensor in runtime!"),
             )
             .unwrap()
+    }
+
+    pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
+        self.get_output_data(id)
             .chunks_exact(4)
             .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
             .collect_vec()
     }
 
-    fn register_buffer(&mut self, llir_index: NodeIndex, ptr: u64) {
+    pub fn get_i32(&self, id: impl ToId) -> Vec<i32> {
+        self.get_output_data(id)
+            .chunks_exact(4)
+            .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect_vec()
+    }
+
+    pub fn get_i32(&self, id: impl ToId) -> Vec<i32> {
+        self.get_output_data(id)
+            .chunks_exact(4)
+            .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect_vec()
+    }
+
+    fn register_buffer(&mut self, llir_node: NodeIndex, ptr: u64) {
         // Remap pointers in work queue
         if let Some(ExecutableKernel::Megakernel {
             work_queue,
@@ -241,16 +259,16 @@ impl CudaRuntime {
             ..
         }) = self
             .node_to_exec
-            .get(&llir_index)
+            .get(&llir_node)
             .and_then(|n| self.exec_graph.node_weight_mut(*n))
         {
-            if self.llir_graph[llir_index].to_op::<Input>().is_none() {
-                work_queue.set_out_ptr(node_to_task_index[&llir_index], ptr as *mut f32);
+            if self.llir_graph[llir_node].to_op::<Input>().is_none() {
+                work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
             }
         }
         for edge in self
             .llir_graph
-            .edges_directed(llir_index, Direction::Outgoing)
+            .edges_directed(llir_node, Direction::Outgoing)
         {
             let dest = edge.target();
             let n_input = self
