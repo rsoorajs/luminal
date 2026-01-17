@@ -632,6 +632,7 @@ impl Runtime for CudaRuntime {
                         .context()
                         .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR)
                         .unwrap();
+                    println!("shared mem max: {}", shared_mem_max);
 
                     interpreter.set_attribute(
                         cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
