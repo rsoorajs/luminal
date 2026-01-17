@@ -110,6 +110,9 @@
 (rewrite (MAdd (MMul a b) (MMul a c)) (MMul a (MAdd b c)) :ruleset expr)
 (rewrite (MAdd a a) (MMul (MNum 2) a) :ruleset expr)
 
+; (a + const1) + const2 -> a + (const1 + const2)
+(rewrite (MAdd (MAdd ?a (MNum ?b)) (MNum ?c)) (MAdd ?a (MNum (+ ?b ?c))) :ruleset expr)
+
 ; ---- Replacement over expressions ----
 (rewrite (MReplace ?x ?y ?z) ?z :when ((= ?x ?y)) :ruleset expr)
 (rewrite (MReplace (MAdd ?a ?b) ?x ?y) (MAdd (MReplace ?a ?x ?y) (MReplace ?b ?x ?y)) :ruleset expr)

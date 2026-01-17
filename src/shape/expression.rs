@@ -997,7 +997,6 @@ mod tests {
         assert_eq!(expr.simplify().len(), 7);
     }
 
-    #[ignore] // ignore until we can add back in associativity
     #[test]
     fn test_simple_div() {
         let w = Expression::from('w');
@@ -1013,7 +1012,6 @@ mod tests {
         assert!(!(a + 1).egglog_equal(a + 2));
     }
 
-    #[ignore] // ignore until we can add back in associativity
     #[test]
     fn test_other() {
         let z = Expression::from('z');
@@ -1024,10 +1022,9 @@ mod tests {
                 * (-5 + (((9 + (4 * (-5 + ((((((153 + h) / 2) / 2) / 2) / 2) / 2)))) / 2) / 2))))
             % 64;
         let x = o.simplify();
-        assert!(x.len() <= 27); // Should be 21 if we can re-enable mul-div-associative-rev
+        assert!(x.len() <= 27);
     }
 
-    #[ignore] // ignore until we can add back in associativity
     #[test]
     fn test_final() {
         let z = Expression::from('z');
@@ -1035,7 +1032,7 @@ mod tests {
         let h = Expression::from('h');
         let x = z % (((((153 + h) / 8) + -31) * ((((w + 153) / 8) + -31) / 16)) * 64);
         let x = x.simplify();
-        assert_eq!(x.len(), 15); // Should be 11 if we can re-enable mul-div-associative-rev
+        assert!(x.len() < 15);
     }
 
     proptest! {
