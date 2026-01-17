@@ -117,7 +117,7 @@ pub struct CudaRuntime {
     cuda_stream: Arc<CudaStream>,
     exec_graph: StableGraph<ExecutableKernel, (), Directed>,
     node_to_exec: FxHashMap<NodeIndex, NodeIndex>,
-    pub(crate) timings: Vec<(Vec<SMEvent>, u64, Uuid)>,
+    pub(crate) timings: Vec<Vec<(Vec<SMEvent>, u64, Uuid)>>,
     last_dyn_map: FxHashMap<char, usize>,
     intermediate_buffer_dims: FxHashSet<char>,
     // Raw stats saved during execute, interpreted lazily in print_execution_stats
@@ -417,7 +417,7 @@ impl Runtime for CudaRuntime {
             .unwrap() as usize;
         let block_op_stats = Self::compute_block_op_stats(
             &self.llir_graph,
-            &self.timings,
+            self.timings.last().unwrap(),
             &self.last_dyn_map,
             sm_count,
         );
@@ -693,7 +693,7 @@ impl Runtime for CudaRuntime {
                 }
             }
         }
-        self.timings.extend(timings);
+        self.timings.push(timings);
 
         // Save raw stats for lazy interpretation in print_execution_stats
         self.last_kernel_stats = kernel_stats;
@@ -1001,7 +1001,7 @@ impl CudaRuntime {
             .unwrap() as usize;
         let block_op_stats = Self::compute_block_op_stats(
             &self.llir_graph,
-            &self.timings,
+            self.timings.last().map(|v| v.as_slice()).unwrap_or(&[]),
             &self.last_dyn_map,
             sm_count,
         );

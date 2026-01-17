@@ -759,6 +759,7 @@ impl CudaRuntime {
         let host_start_times: Vec<(u64, u32)> = self
             .timings
             .iter()
+            .flatten()
             .map(|(_, _, id)| {
                 trace
                     .packet
@@ -791,7 +792,7 @@ impl CudaRuntime {
         let mut extra_packets = Vec::new();
         let n_ops = ops.len();
         for ((device_timings, device_start_time, _span_id), (host_time, host_clock_id)) in
-            self.timings.iter().zip(host_start_times)
+            self.timings.iter().flatten().zip(host_start_times)
         {
             for (sm, sm_timings) in device_timings.chunks(1000).enumerate() {
                 let mut builder = ManualTrackBuilder::new(sm as u32, host_time, host_clock_id);
