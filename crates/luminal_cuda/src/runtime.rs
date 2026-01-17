@@ -23,7 +23,7 @@ use luminal::prelude::{
 use memmap2::MmapOptions;
 use safetensors::SafeTensors;
 use std::{
-    collections::VecDeque, fmt::Debug, fs::File, mem::size_of, sync::Arc,
+     collections::VecDeque, fmt::Debug, fs::File, mem::size_of, sync::Arc,
     time::Duration,
 };
 use tracing::{field, span, trace, Level};
