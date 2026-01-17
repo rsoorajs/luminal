@@ -22,10 +22,7 @@ use luminal::prelude::{
 
 use memmap2::MmapOptions;
 use safetensors::SafeTensors;
-use std::{
-     collections::VecDeque, fmt::Debug, fs::File, mem::size_of, sync::Arc,
-    time::Duration,
-};
+use std::{collections::VecDeque, fmt::Debug, fs::File, mem::size_of, sync::Arc, time::Duration};
 use tracing::{field, span, trace, Level};
 use uuid::Uuid;
 
@@ -504,11 +501,11 @@ impl Runtime for CudaRuntime {
         llir_graph: &LLIRGraph,
         dyn_map: &FxHashMap<char, usize>,
     ) -> (Self::ProfileMetric, String) {
-        trace!("clear buffers"); 
+        trace!("clear buffers");
         self.buffers.clear();
-        trace!("load llir"); 
+        trace!("load llir");
         self.load_llir(llir_graph);
-        trace!("execute"); 
+        trace!("execute");
         let start = std::time::Instant::now();
         self.execute(dyn_map);
         self.timings.clear();
@@ -542,7 +539,7 @@ impl Runtime for CudaRuntime {
                 .filter(|(d, _)| self.intermediate_buffer_dims.contains(*d))
                 .any(|(d, v)| self.last_dyn_map.get(d).map(|n| *n != *v).unwrap_or(true))
         {
-            trace!("re-assigning dynamic dimensions"); 
+            trace!("re-assigning dynamic dimensions");
             self.last_dyn_map = dyn_map.clone();
             trace!("reallocating intermediate buffers");
             self.allocate_intermediate_buffers(dyn_map);
@@ -559,7 +556,11 @@ impl Runtime for CudaRuntime {
                 CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
                 CudaInput::Ptr(p) => *p,
             };
-            trace!("llir_node: {:?} registered to ptr {:?}", self.llir_graph[llir_node], ptr);
+            trace!(
+                "llir_node: {:?} registered to ptr {:?}",
+                self.llir_graph[llir_node],
+                ptr
+            );
             self.register_buffer(llir_node, ptr);
         }
         let mut timings = Vec::new();
@@ -606,17 +607,26 @@ impl Runtime for CudaRuntime {
                     let mut ptrs = vec![];
                     for (i, inp) in inputs.iter().enumerate() {
                         if let Some(buf) = self.buffers.get(inp) {
-                            let ptr = buf.device_ptr(&self.cuda_stream).0; 
-                            trace!("buffer match: input {}: {:?}, {}", i, self.llir_graph[*inp], ptr);
+                            let ptr = buf.device_ptr(&self.cuda_stream).0;
+                            trace!(
+                                "buffer match: input {}: {:?}, {}",
+                                i,
+                                self.llir_graph[*inp],
+                                ptr
+                            );
                             ptrs.push(ptr);
                         } else {
                             let ptr = match &self.hlir_buffers[&llir_to_hlir[inp]] {
                                 CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
                                 CudaInput::Ptr(p) => *p,
                             };
-                            trace!("no buffer match. input {}: {:?}, {}", i, self.llir_graph[*inp], ptr);
+                            trace!(
+                                "no buffer match. input {}: {:?}, {}",
+                                i,
+                                self.llir_graph[*inp],
+                                ptr
+                            );
                             ptrs.push(ptr);
-                           
                         }
                     }
                     let mut lb = self.cuda_stream.launch_builder(kernel);
@@ -916,11 +926,14 @@ impl CudaRuntime {
                     op_flops[idx] += flops_val;
 
                     // Aggregate prologue metrics
-                    prologue_a_bytes_loaded[idx] += op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                    prologue_a_bytes_loaded[idx] +=
+                        op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
                     prologue_a_flops[idx] += op.prologue_a_flops().exec(dyn_map).unwrap_or(0);
-                    prologue_b_bytes_loaded[idx] += op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                    prologue_b_bytes_loaded[idx] +=
+                        op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
                     prologue_b_flops[idx] += op.prologue_b_flops().exec(dyn_map).unwrap_or(0);
-                    prologue_c_bytes_loaded[idx] += op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                    prologue_c_bytes_loaded[idx] +=
+                        op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
                     prologue_c_flops[idx] += op.prologue_c_flops().exec(dyn_map).unwrap_or(0);
                 }
             }

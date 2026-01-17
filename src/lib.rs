@@ -17,7 +17,6 @@ pub mod prelude {
     pub use crate::hlir::NativeRuntime;
     pub use crate::op::{DType, Runtime};
     pub use crate::shape::*;
-    pub use tracing; 
     pub use anyhow;
     pub use egglog;
     pub use egglog::ast as egglog_ast;
@@ -27,6 +26,7 @@ pub mod prelude {
     pub use petgraph::stable_graph::NodeIndex;
     pub use rustc_hash::{FxHashMap, FxHashSet};
     pub use tinyvec;
+    pub use tracing;
 }
 
 pub use paste::paste;

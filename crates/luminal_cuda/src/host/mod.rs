@@ -4,9 +4,7 @@ use crate::cudarc::driver::{CudaSlice, CudaStream};
 use luminal::{op::EgglogOp, prelude::*};
 mod host_matmul;
 
-pub type Ops = (
-    // host_matmul::HostMatmul,
-);
+pub type Ops = ();
 
 pub trait HostOp: Debug + as_any::AsAny + EgglogOp {
     /// With the convention, and this is a bad way to do it, that the first is the output buffer.

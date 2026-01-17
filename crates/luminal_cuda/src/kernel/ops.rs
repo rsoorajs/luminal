@@ -59,7 +59,7 @@ impl EgglogOp for KernelArgsort {
             (= ?result (Sum ?final_shape ?final_iters ?mul_pos ?mul_strides ?mul_iter_stride ?out_strides))
             (= ?dty (dtype ?inp))
         ";
-    
+
         let ascending_rule = format!("
     (rule
         (
@@ -73,7 +73,7 @@ impl EgglogOp for KernelArgsort {
         )
         :name \"kernel argsort ascending\"
     )");
-    
+
         let descending_rule = format!("
     (rule
         (
@@ -87,7 +87,7 @@ impl EgglogOp for KernelArgsort {
         )
         :name \"kernel argsort descending\"
     )");
-    
+
         vec![ascending_rule, descending_rule]
     }
 
@@ -107,7 +107,8 @@ impl EgglogOp for KernelArgsort {
                 descending: egraph.enodes[children[1]].0.parse::<i32>().unwrap() != 0,
                 shape: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
                 in_strides: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
-                out_strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
+                out_strides: extract_expr_list(egraph, children[4], list_cache, expr_cache)
+                    .unwrap(),
                 iters: extract_expr(egraph, children[5], expr_cache).unwrap(),
                 dtype: extract_dtype(egraph, children[6]),
             }) as Box<dyn KernelOp>),
@@ -130,32 +131,41 @@ impl KernelOp for KernelArgsort {
         Expression,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
-        let sort_axis = self.shape.iter()
+        let sort_axis = self
+            .shape
+            .iter()
             .position(|&s| s == self.iters)
             .unwrap_or(self.shape.len() - 1);
-        
+
         // Remove extra dim from in_strides to get the original input strides.
-        let in_strides: Vec<Expression> = self.in_strides.iter()
+        let in_strides: Vec<Expression> = self
+            .in_strides
+            .iter()
             .enumerate()
             .filter(|&(i, _)| i != sort_axis + 1)
             .map(|(_, &s)| s)
             .collect();
-        
+
         let iter_stride = in_strides[sort_axis];
         let out_stride = self.out_strides[sort_axis];
-        
+
         // derive the batch dimensions from the sort_axis
-        let batch_shape: Vec<Expression> = self.shape.iter()
+        let batch_shape: Vec<Expression> = self
+            .shape
+            .iter()
             .enumerate()
             .filter(|&(i, _)| i != sort_axis)
             .map(|(_, &s)| s)
             .collect();
-        let batch_in_strides: Vec<Expression> = in_strides.iter()
+        let batch_in_strides: Vec<Expression> = in_strides
+            .iter()
             .enumerate()
             .filter(|&(i, _)| i != sort_axis)
             .map(|(_, &s)| s)
             .collect();
-        let batch_out_strides: Vec<Expression> = self.out_strides.iter()
+        let batch_out_strides: Vec<Expression> = self
+            .out_strides
+            .iter()
             .enumerate()
             .filter(|&(i, _)| i != sort_axis)
             .map(|(_, &s)| s)
@@ -178,7 +188,7 @@ impl KernelOp for KernelArgsort {
 
         let threads_per_block = 1024;
         let shmem_limit = 4096; // safe shmem limit for values + indices
-        
+
         let kernel = format!(
             "
 #define THREADS_PER_BLOCK {threads_per_block}
@@ -281,7 +291,7 @@ extern \"C\" {{
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
             .collect();
 
-        let shmem_bytes = shmem_limit * 8; // safe for 4 bytes dtype (f32) + 4 bytes int indices 
+        let shmem_bytes = shmem_limit * 8; // safe for 4 bytes dtype (f32) + 4 bytes int indices
 
         (
             func,

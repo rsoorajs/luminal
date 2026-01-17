@@ -19,7 +19,7 @@ fn main() {
 
     info!(m);
     info!(n);
-    info!(k); 
+    info!(k);
 
     // Create compute graph
     let mut cx = Graph::new();
@@ -51,29 +51,23 @@ fn main() {
     debug!("a_candle: {:?}", a_candle);
     trace!("a_candle matrix:\n{}", a_candle);
 
-
     // B needs to be column-major for luminal, so create it as row-major (k x n)
     // then transpose to get column-major layout
     let b_candle_row_major = Tensor::from_vec(b_data_row_major.clone(), (k, n), &device).unwrap();
     debug!("b_candle: {:?}", b_candle_row_major);
-    trace!("b_candle:\n{}", b_candle_row_major); 
-
-
+    trace!("b_candle:\n{}", b_candle_row_major);
 
     // For luminal, we need B in column-major format, which means we store it as transposed
     // Convert row-major (k x n) to column-major by transposing to (n x k) then reading as flat
     let b_candle_transposed = b_candle_row_major.t().unwrap().contiguous().unwrap();
     debug!("b_candle.t(): {:?}", b_candle_transposed);
-    trace!("b_candle.t():\n{}", b_candle_transposed); 
-
+    trace!("b_candle.t():\n{}", b_candle_transposed);
 
     let b_data_col_major = b_candle_transposed
         .flatten_all()
         .unwrap()
         .to_vec1::<f32>()
         .unwrap();
-
-
 
     // Set input tensors for luminal
     // A is row-major as is
@@ -99,7 +93,6 @@ fn main() {
     let avg = luminal_result_data.iter().sum::<f32>() / luminal_result_data.len() as f32;
     debug!("Average value: {}", avg);
 
-
     // Compute matmul using candle for verification
     // a_candle is (m x k) row-major, b_candle_row_major is (k x n) row-major
     let candle_result = a_candle.matmul(&b_candle_row_major).unwrap();
@@ -120,9 +113,7 @@ fn main() {
 
     let max_diff = diff.iter().cloned().fold(0.0f32, f32::max);
 
-
     // Check if results match within tolerance
     // Use 0.1 tolerance for GPU vs CPU comparison (floating point precision differences)
     assert!(max_diff < 0.1, "max_diff = {}", max_diff);
-
 }

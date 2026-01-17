@@ -436,7 +436,7 @@ fn run_egglog(
         )
         .green()
     );
-    if enabled!(Level::DEBUG){
+    if enabled!(Level::DEBUG) {
         let log_dir = Path::new("egraph");
         if log_dir.exists() {
             fs::remove_dir_all(log_dir).unwrap();
@@ -450,7 +450,8 @@ fn run_egglog(
         fs::write(
             log_dir.join(format!("egraph.html",)),
             egraph.to_html().unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
     }
     let (sort, value) = egraph.eval_expr(&var!(root))?;
     let s = egraph.serialize(egglog::SerializeConfig {
@@ -829,8 +830,18 @@ pub fn egglog_to_llir(
             }
         }
         for (src, dest) in edges_to_place {
-            let src_node_id = *enode_to_node.get(&src).unwrap_or_else(|| panic!("Source enode {:?} not found in enode_to_node map during edge placement", src));
-            let dest_node_id = *enode_to_node.get(&dest).unwrap_or_else(|| panic!("Destination enode {:?} not found in enode_to_node map during edge placement", dest));
+            let src_node_id = *enode_to_node.get(&src).unwrap_or_else(|| {
+                panic!(
+                    "Source enode {:?} not found in enode_to_node map during edge placement",
+                    src
+                )
+            });
+            let dest_node_id = *enode_to_node.get(&dest).unwrap_or_else(|| {
+                panic!(
+                    "Destination enode {:?} not found in enode_to_node map during edge placement",
+                    dest
+                )
+            });
 
             tracing::trace!(
                 src_enode = ?src,
@@ -842,12 +853,12 @@ pub fn egglog_to_llir(
 
             graph.add_edge(src_node_id, dest_node_id, ());
         }
-        if enabled!(Level::TRACE){
+        if enabled!(Level::TRACE) {
             fs::write(
-                    format!("llir_graphs/llir_{}.dot", i),
-                    graph.clone().to_dot().unwrap(),
-                )
-                .unwrap();
+                format!("llir_graphs/llir_{}.dot", i),
+                graph.clone().to_dot().unwrap(),
+            )
+            .unwrap();
         }
 
         graphs.push(graph);

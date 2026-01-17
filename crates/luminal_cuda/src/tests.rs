@@ -244,14 +244,14 @@ pub fn kernel_add_bandwidth_test() {
 
 #[test]
 pub fn cuda_argsort_test() {
-    let rows = 10;   // shmem tet
+    let rows = 10; // shmem tet
     let cols = 5000; // no shmem test
     let total = rows * cols;
 
     let mut cx = Graph::default();
     let input = cx.tensor((rows, cols));
-    let sorted_dim0 = input.argsort(0, true).output();   // descend
-    let sorted_dim1 = input.argsort(1, false).output();  // ascend
+    let sorted_dim0 = input.argsort(0, true).output(); // descend
+    let sorted_dim1 = input.argsort(1, false).output(); // ascend
 
     // random and unique data
     let data: Vec<f32> = (0..total).map(|i| ((i * 73 + 17) % total) as f32).collect();
@@ -269,7 +269,11 @@ pub fn cuda_argsort_test() {
         .collect();
 
     let expected_dim0: Vec<i32> = (0..rows)
-        .flat_map(|row| (0..cols).map(|col| sorted_cols[col][row]).collect::<Vec<_>>())
+        .flat_map(|row| {
+            (0..cols)
+                .map(|col| sorted_cols[col][row])
+                .collect::<Vec<_>>()
+        })
         .collect();
 
     let expected_dim1: Vec<i32> = (0..rows)
