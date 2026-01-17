@@ -72,6 +72,7 @@ pub struct BlockOpStats {
     pub flops: usize,
     pub bandwidth_gbps: f64,
     pub tflops: f64,
+    pub count: usize,
 }
 
 /// Aggregated execution statistics
@@ -770,11 +771,14 @@ impl CudaRuntime {
                     op_flops[idx] += flops_val;
 
                     // Aggregate prologue metrics
-                    prologue_a_bytes_loaded[idx] += op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                    prologue_a_bytes_loaded[idx] +=
+                        op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
                     prologue_a_flops[idx] += op.prologue_a_flops().exec(dyn_map).unwrap_or(0);
-                    prologue_b_bytes_loaded[idx] += op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                    prologue_b_bytes_loaded[idx] +=
+                        op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
                     prologue_b_flops[idx] += op.prologue_b_flops().exec(dyn_map).unwrap_or(0);
-                    prologue_c_bytes_loaded[idx] += op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                    prologue_c_bytes_loaded[idx] +=
+                        op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
                     prologue_c_flops[idx] += op.prologue_c_flops().exec(dyn_map).unwrap_or(0);
                 }
             }
@@ -790,11 +794,17 @@ impl CudaRuntime {
         // 2 + n_ops + op_idx * 3 + 2: Prologue C
         let n_ops = op_names.len();
         let mut op_times_ns: Vec<u64> = vec![0; n_ops];
+        let mut op_counts: Vec<usize> = vec![0; n_ops];
         let mut prologue_a_times_ns: Vec<u64> = vec![0; n_ops];
+        let mut prologue_a_counts: Vec<usize> = vec![0; n_ops];
         let mut prologue_b_times_ns: Vec<u64> = vec![0; n_ops];
+        let mut prologue_b_counts: Vec<usize> = vec![0; n_ops];
         let mut prologue_c_times_ns: Vec<u64> = vec![0; n_ops];
+        let mut prologue_c_counts: Vec<usize> = vec![0; n_ops];
         let mut issue_time_ns: u64 = 0;
+        let mut issue_count: usize = 0;
         let mut wait_time_ns: u64 = 0;
+        let mut wait_count: usize = 0;
 
         for (sm_timings, _start_time, _) in timings {
             for sm_chunk in sm_timings.chunks(1000) {
@@ -811,12 +821,15 @@ impl CudaRuntime {
                     let event_code = event.event as usize;
                     if event_code == 0 {
                         issue_time_ns += duration;
+                        issue_count += 1;
                     } else if event_code == 1 {
                         wait_time_ns += duration;
+                        wait_count += 1;
                     } else if event_code >= 2 && event_code < 2 + n_ops {
                         // Main op
                         let op_idx = event_code - 2;
                         op_times_ns[op_idx] += duration;
+                        op_counts[op_idx] += 1;
                     } else if event_code >= 2 + n_ops {
                         // Prologue event
                         let prologue_event = event_code - 2 - n_ops;
@@ -824,9 +837,18 @@ impl CudaRuntime {
                         let prologue_type = prologue_event % 3;
                         if op_idx < n_ops {
                             match prologue_type {
-                                0 => prologue_a_times_ns[op_idx] += duration,
-                                1 => prologue_b_times_ns[op_idx] += duration,
-                                2 => prologue_c_times_ns[op_idx] += duration,
+                                0 => {
+                                    prologue_a_times_ns[op_idx] += duration;
+                                    prologue_a_counts[op_idx] += 1;
+                                }
+                                1 => {
+                                    prologue_b_times_ns[op_idx] += duration;
+                                    prologue_b_counts[op_idx] += 1;
+                                }
+                                2 => {
+                                    prologue_c_times_ns[op_idx] += duration;
+                                    prologue_c_counts[op_idx] += 1;
+                                }
                                 _ => {}
                             }
                         }
@@ -868,6 +890,7 @@ impl CudaRuntime {
                     flops: flop_count,
                     bandwidth_gbps,
                     tflops,
+                    count: op_counts[i],
                 }
             })
             .collect();
@@ -896,6 +919,7 @@ impl CudaRuntime {
                     flops: flop_count,
                     bandwidth_gbps,
                     tflops,
+                    count: prologue_a_counts[i],
                 });
             }
             if prologue_b_times_ns[i] > 0 {
@@ -920,6 +944,7 @@ impl CudaRuntime {
                     flops: flop_count,
                     bandwidth_gbps,
                     tflops,
+                    count: prologue_b_counts[i],
                 });
             }
             if prologue_c_times_ns[i] > 0 {
@@ -944,6 +969,7 @@ impl CudaRuntime {
                     flops: flop_count,
                     bandwidth_gbps,
                     tflops,
+                    count: prologue_c_counts[i],
                 });
             }
         }
@@ -959,6 +985,7 @@ impl CudaRuntime {
                 flops: 0,
                 bandwidth_gbps: 0.0,
                 tflops: 0.0,
+                count: issue_count,
             });
         }
         if wait_time_ns > 0 {
@@ -971,6 +998,7 @@ impl CudaRuntime {
                 flops: 0,
                 bandwidth_gbps: 0.0,
                 tflops: 0.0,
+                count: wait_count,
             });
         }
 
@@ -1011,6 +1039,7 @@ impl CudaRuntime {
                 self.print_stat_row(
                     stat.name,
                     stat.execution_time_us,
+                    None,
                     stat.bytes_loaded,
                     stat.bytes_stored,
                     stat.flops,
@@ -1028,9 +1057,10 @@ impl CudaRuntime {
         if !stats.block_op_stats.is_empty() {
             println!("\n=== Block Op Execution Statistics ===\n");
             println!(
-                "{:<20} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
+                "{:<20} {:>12} {:>8} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
                 "BlockOp",
                 "Time (us)",
+                "Count",
                 "Loaded",
                 "Stored",
                 "Agg FLOPS",
@@ -1039,12 +1069,13 @@ impl CudaRuntime {
                 "MBU",
                 "MFU"
             );
-            println!("{}", "-".repeat(116));
+            println!("{}", "-".repeat(124));
 
             for stat in &stats.block_op_stats {
                 self.print_stat_row(
                     stat.name,
                     stat.execution_time_us,
+                    Some(stat.count),
                     stat.bytes_loaded,
                     stat.bytes_stored,
                     stat.flops,
@@ -1055,7 +1086,7 @@ impl CudaRuntime {
                 );
             }
 
-            println!("{}", "-".repeat(116));
+            println!("{}", "-".repeat(124));
         }
 
         // Print aggregate stats
@@ -1101,70 +1132,55 @@ impl CudaRuntime {
     fn print_stat_row(
         &self,
         name: &str,
-        execution_time_us: f64,
-        bytes_loaded: usize,
-        bytes_stored: usize,
+        time_us: f64,
+        count: Option<usize>,
+        loaded: usize,
+        stored: usize,
         flops: usize,
-        bandwidth_gbps: f64,
-        tflops: f64,
-        peak_bandwidth_gbps: Option<usize>,
-        peak_tflops: Option<usize>,
+        bw: f64,
+        tf: f64,
+        peak_bw: Option<usize>,
+        peak_tf: Option<usize>,
     ) {
-        let total_bytes = bytes_loaded + bytes_stored;
-
-        // Show "-" if bytes are 0 (not specified)
-        let loaded_str = if bytes_loaded > 0 {
-            format_size(bytes_loaded)
+        let total = loaded + stored;
+        let ld = if loaded > 0 {
+            format_size(loaded)
         } else {
-            "-".to_string()
+            "-".into()
         };
-        let stored_str = if bytes_stored > 0 {
-            format_size(bytes_stored)
+        let st = if stored > 0 {
+            format_size(stored)
         } else {
-            "-".to_string()
+            "-".into()
         };
-        let flops_str = if flops > 0 {
+        let fl = if flops > 0 {
             format_flops(flops)
         } else {
-            "-".to_string()
+            "-".into()
         };
-        let bw_str = if total_bytes > 0 {
-            format!("{bandwidth_gbps:.2}")
+        let bw_s = if total > 0 {
+            format!("{bw:.2}")
         } else {
-            "-".to_string()
+            "-".into()
         };
-        let tflops_str = if flops > 0 {
-            format!("{tflops:.4}")
+        let tf_s = if flops > 0 {
+            format!("{tf:.4}")
         } else {
-            "-".to_string()
+            "-".into()
         };
+        let mbu = peak_bw
+            .filter(|_| total > 0)
+            .map(|p| format!("{:.1}%", bw / p as f64 * 100.0))
+            .unwrap_or("-".into());
+        let mfu = peak_tf
+            .filter(|_| flops > 0)
+            .map(|p| format!("{:.1}%", tf / p as f64 * 100.0))
+            .unwrap_or("-".into());
 
-        // Calculate MBU (Memory Bandwidth Utilization) and MFU (Model FLOPS Utilization)
-        let mbu_str = if let Some(peak_bw) = peak_bandwidth_gbps {
-            if total_bytes > 0 {
-                let mbu = (bandwidth_gbps / peak_bw as f64) * 100.0;
-                format!("{:.1}%", mbu)
-            } else {
-                "-".to_string()
-            }
-        } else {
-            "-".to_string()
-        };
-
-        let mfu_str = if let Some(peak_tf) = peak_tflops {
-            if flops > 0 {
-                let mfu = (tflops / peak_tf as f64) * 100.0;
-                format!("{:.1}%", mfu)
-            } else {
-                "-".to_string()
-            }
-        } else {
-            "-".to_string()
-        };
-
-        println!(
-            "{name:<20} {execution_time_us:>12.2} {loaded_str:>12} {stored_str:>12} {flops_str:>12} {bw_str:>12} {tflops_str:>12} {mbu_str:>8} {mfu_str:>8}"
-        );
+        match count {
+            Some(c) => println!("{name:<20} {time_us:>12.2} {c:>8} {ld:>12} {st:>12} {fl:>12} {bw_s:>12} {tf_s:>12} {mbu:>8} {mfu:>8}"),
+            None => println!("{name:<20} {time_us:>12.2} {ld:>12} {st:>12} {fl:>12} {bw_s:>12} {tf_s:>12} {mbu:>8} {mfu:>8}"),
+        }
     }
 }
 

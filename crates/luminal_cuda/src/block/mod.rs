@@ -968,14 +968,6 @@ pub(crate) fn make_megakernel_from_llir_graph(
             .get(&node)
             .map(|s| flatten_z_strides(&range, s))
             .unwrap_or(0.into());
-        println!(
-            "{} | {:?} | {:?}",
-            in_dep_a_stride,
-            producer_barrier_bases.get(&sources[0]),
-            producer_barrier_bases
-                .get(&sources[0])
-                .map(|e| e.simplify())
-        );
         node_to_task_index.insert(node, tasks.len());
         tasks.push_task(
             op_code as i32,
