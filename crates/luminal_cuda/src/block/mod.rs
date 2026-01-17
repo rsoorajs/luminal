@@ -4,16 +4,16 @@ pub use ops::*;
 
 use cudarc::{
     driver::{CudaFunction, CudaSlice, CudaStream, DeviceRepr, ValidAsZeroBits},
-    nvrtc::{compile_ptx_with_opts, CompileOptions},
+    nvrtc::{CompileOptions, compile_ptx_with_opts},
 };
 use luminal::{
     graph::LLIRGraph,
     hlir::Input,
     prelude::{
-        petgraph::{algo::toposort, visit::EdgeRef, Direction},
         FxHashMap, FxHashSet, NodeIndex,
+        petgraph::{Direction, algo::toposort, visit::EdgeRef},
     },
-    shape::{flatten_z_strides, Expression},
+    shape::{Expression, flatten_z_strides},
 };
 use prost::Message;
 use std::{
@@ -25,8 +25,8 @@ use std::{
     sync::Arc,
 };
 use tracing_perfetto_sdk_schema::{
-    self as schema, debug_annotation::NameField, trace_packet, track_descriptor, track_event,
-    TrackEvent,
+    self as schema, TrackEvent, debug_annotation::NameField, trace_packet, track_descriptor,
+    track_event,
 };
 
 use crate::runtime::CudaRuntime;

@@ -1,23 +1,23 @@
 use crate::{block::*, kernel::KernelOp};
 use cudarc::driver::{
-    sys::CUevent_flags, CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
+    CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg, sys::CUevent_flags,
 };
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
 use luminal::hlir::*;
 use luminal::prelude::{
     petgraph::{
-        algo::{toposort, Cycle},
+        Directed, Direction,
+        algo::{Cycle, toposort},
         prelude::StableGraph,
         visit::{EdgeRef, NodeIndexable},
-        Directed, Direction,
     },
     *,
 };
 use memmap2::MmapOptions;
 use safetensors::SafeTensors;
 use std::{collections::VecDeque, fmt::Debug, fs::File, sync::Arc, time::Duration};
-use tracing::{field, span, Level};
+use tracing::{Level, field, span};
 use uuid::Uuid;
 
 pub enum CudaInput {
@@ -779,11 +779,14 @@ impl CudaRuntime {
                     op_flops[idx] += flops_val;
 
                     // Aggregate prologue metrics
-                    prologue_a_bytes_loaded[idx] += op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                    prologue_a_bytes_loaded[idx] +=
+                        op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
                     prologue_a_flops[idx] += op.prologue_a_flops().exec(dyn_map).unwrap_or(0);
-                    prologue_b_bytes_loaded[idx] += op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                    prologue_b_bytes_loaded[idx] +=
+                        op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
                     prologue_b_flops[idx] += op.prologue_b_flops().exec(dyn_map).unwrap_or(0);
-                    prologue_c_bytes_loaded[idx] += op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                    prologue_c_bytes_loaded[idx] +=
+                        op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
                     prologue_c_flops[idx] += op.prologue_c_flops().exec(dyn_map).unwrap_or(0);
                 }
             }

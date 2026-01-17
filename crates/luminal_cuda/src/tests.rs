@@ -2,7 +2,7 @@ use candle_core::{Device, Tensor};
 use cudarc::driver::CudaContext;
 use luminal::prelude::*;
 use proptest::prelude::*;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 
 use crate::cuda_bandwidth_gbps;

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{cuda_dtype, kernel::KernelOp};
 use cudarc::{
     driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream},
-    nvrtc::{compile_ptx, CompileOptions},
+    nvrtc::{CompileOptions, compile_ptx},
 };
 use itertools::Itertools;
 use luminal::{
@@ -327,7 +327,8 @@ impl EgglogOp for KernelMaxReduce {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["
+        vec![
+            "
 (rule
     (
         (= ?a (Max ?out_shape ?iters ?inp ?in_stride ?iter_stride ?out_stride))
@@ -338,7 +339,8 @@ impl EgglogOp for KernelMaxReduce {
     )
     :name \"kernel max reduce\"
 )"
-        .to_string()]
+            .to_string(),
+        ]
     }
 
     fn cleanup(&self) -> bool {
@@ -705,7 +707,8 @@ impl EgglogOp for KernelSumReduce {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["
+        vec![
+            "
 (rule
     (
         (= ?a (Sum ?out_shape ?iters ?inp ?in_stride ?iter_stride ?out_stride))
@@ -716,7 +719,8 @@ impl EgglogOp for KernelSumReduce {
     )
     :name \"kernel sum reduce\"
 )"
-        .to_string()]
+            .to_string(),
+        ]
     }
 
     fn cleanup(&self) -> bool {
@@ -1290,7 +1294,8 @@ impl EgglogOp for KernelIota {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["
+        vec![
+            "
 (rule
     (
         (= ?a (Iota ?expr ?range))
@@ -1302,7 +1307,8 @@ impl EgglogOp for KernelIota {
     )
     :name \"kernel iota\"
 )"
-        .to_string()]
+            .to_string(),
+        ]
     }
 
     fn cleanup(&self) -> bool {
