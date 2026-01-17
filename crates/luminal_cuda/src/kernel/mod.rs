@@ -9,6 +9,7 @@ pub mod ops;
 pub use ops::Ops;
 
 pub trait KernelOp: luminal::op::EgglogOp {
+    #[allow(clippy::type_complexity)]
     fn compile(
         &self,
         stream: &Arc<CudaStream>,

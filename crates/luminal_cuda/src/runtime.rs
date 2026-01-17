@@ -150,17 +150,17 @@ impl CudaRuntime {
         let mmap = unsafe { MmapOptions::new().map(&f).unwrap() };
         let st = SafeTensors::deserialize(&mmap).unwrap();
         for node in cx.graph.node_indices() {
-            if let Some(Input { label, .. }) = (*cx.graph[node]).as_any().downcast_ref::<Input>() {
-                if let Ok(tensor) = st.tensor(label) {
-                    match tensor.dtype() {
-                        safetensors::Dtype::F32 => {
-                            let bytes = tensor.data();
-                            let f32s: &[f32] = bytemuck::cast_slice(bytes);
-                            let dev = f32s.to_cuda_input(&self.cuda_stream);
-                            self.hlir_buffers.insert(node, dev);
-                        }
-                        dtype => unimplemented!("{dtype} loading not supported yet"),
+            if let Some(Input { label, .. }) = (*cx.graph[node]).as_any().downcast_ref::<Input>()
+                && let Ok(tensor) = st.tensor(label)
+            {
+                match tensor.dtype() {
+                    safetensors::Dtype::F32 => {
+                        let bytes = tensor.data();
+                        let f32s: &[f32] = bytemuck::cast_slice(bytes);
+                        let dev = f32s.to_cuda_input(&self.cuda_stream);
+                        self.hlir_buffers.insert(node, dev);
                     }
+                    dtype => unimplemented!("{dtype} loading not supported yet"),
                 }
             }
         }
@@ -223,10 +223,9 @@ impl CudaRuntime {
             .node_to_exec
             .get(&llir_node)
             .and_then(|n| self.exec_graph.node_weight_mut(*n))
+            && self.llir_graph[llir_node].to_op::<Input>().is_none()
         {
-            if self.llir_graph[llir_node].to_op::<Input>().is_none() {
-                work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
-            }
+            work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
         }
         for edge in self
             .llir_graph
@@ -572,7 +571,7 @@ impl Runtime for CudaRuntime {
                     let tflops = (flop_count as f64) / (kernel_time_us * 1e-6) / 1e12;
 
                     kernel_stats.push(KernelStats {
-                        name: *kernel_name,
+                        name: kernel_name,
                         execution_time_us: kernel_time_us,
                         bytes_loaded: loaded,
                         bytes_stored: stored,
@@ -774,25 +773,25 @@ impl CudaRuntime {
         let mut prologue_c_flops: Vec<usize> = vec![0; op_names.len()];
 
         for node in llir_graph.node_indices() {
-            if let Some(op) = llir_graph[node].to_dialect::<dyn BlockOp>() {
-                if let Some(&idx) = op_name_to_idx.get(op.op_name()) {
-                    let flops_expr = op.flops();
-                    let flops_val = flops_expr.exec(dyn_map).unwrap();
-                    op_bytes_loaded[idx] += op.bytes_loaded().exec(dyn_map).unwrap();
-                    op_bytes_stored[idx] += op.bytes_stored().exec(dyn_map).unwrap();
-                    op_flops[idx] += flops_val;
+            if let Some(op) = llir_graph[node].to_dialect::<dyn BlockOp>()
+                && let Some(&idx) = op_name_to_idx.get(op.op_name())
+            {
+                let flops_expr = op.flops();
+                let flops_val = flops_expr.exec(dyn_map).unwrap();
+                op_bytes_loaded[idx] += op.bytes_loaded().exec(dyn_map).unwrap();
+                op_bytes_stored[idx] += op.bytes_stored().exec(dyn_map).unwrap();
+                op_flops[idx] += flops_val;
 
-                    // Aggregate prologue metrics
-                    prologue_a_bytes_loaded[idx] +=
-                        op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
-                    prologue_a_flops[idx] += op.prologue_a_flops().exec(dyn_map).unwrap_or(0);
-                    prologue_b_bytes_loaded[idx] +=
-                        op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
-                    prologue_b_flops[idx] += op.prologue_b_flops().exec(dyn_map).unwrap_or(0);
-                    prologue_c_bytes_loaded[idx] +=
-                        op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
-                    prologue_c_flops[idx] += op.prologue_c_flops().exec(dyn_map).unwrap_or(0);
-                }
+                // Aggregate prologue metrics
+                prologue_a_bytes_loaded[idx] +=
+                    op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                prologue_a_flops[idx] += op.prologue_a_flops().exec(dyn_map).unwrap_or(0);
+                prologue_b_bytes_loaded[idx] +=
+                    op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                prologue_b_flops[idx] += op.prologue_b_flops().exec(dyn_map).unwrap_or(0);
+                prologue_c_bytes_loaded[idx] +=
+                    op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                prologue_c_flops[idx] += op.prologue_c_flops().exec(dyn_map).unwrap_or(0);
             }
         }
 
@@ -1114,6 +1113,7 @@ impl CudaRuntime {
         println!();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn print_stat_row(
         &self,
         name: &str,
@@ -1433,10 +1433,10 @@ fn would_violate(
     // If p ∈ Px(x), block cannot contain any node in Sx(x)
     if let Some(ws) = px_witnesses.get(&p) {
         for &x in ws {
-            if let Some(sx) = sx_map.get(&x) {
-                if intersects(block_bits, sx) {
-                    return true;
-                }
+            if let Some(sx) = sx_map.get(&x)
+                && intersects(block_bits, sx)
+            {
+                return true;
             }
         }
     }
@@ -1444,10 +1444,10 @@ fn would_violate(
     // If p ∈ Sx(x), block cannot contain any node in Px(x)
     if let Some(ws) = sx_witnesses.get(&p) {
         for &x in ws {
-            if let Some(px) = px_map.get(&x) {
-                if intersects(block_bits, px) {
-                    return true;
-                }
+            if let Some(px) = px_map.get(&x)
+                && intersects(block_bits, px)
+            {
+                return true;
             }
         }
     }

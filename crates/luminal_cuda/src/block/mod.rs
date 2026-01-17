@@ -1,3 +1,4 @@
+#![allow(clippy::mutable_key_type)]
 mod ops;
 use itertools::Itertools;
 pub use ops::*;
@@ -162,10 +163,10 @@ fn compute_barrier_strides(
                     if !(*pr % *cr).to_usize().map(|i| i == 0).unwrap_or_default() {
                         return None;
                     }
-                    if let Some(prev) = acc {
-                        if prev != (*pr / *cr) {
-                            return None;
-                        }
+                    if let Some(prev) = acc
+                        && prev != (*pr / *cr)
+                    {
+                        return None;
                     }
                     Some(Some(*pr / *cr))
                 }) {
@@ -180,10 +181,10 @@ fn compute_barrier_strides(
                     if !(*cr % *pr).to_usize().map(|i| i == 0).unwrap_or_default() {
                         return None;
                     }
-                    if let Some(prev) = acc {
-                        if prev != (*cr / *pr) {
-                            return None;
-                        }
+                    if let Some(prev) = acc
+                        && prev != (*cr / *pr)
+                    {
+                        return None;
                     }
                     Some(Some(*cr / *pr))
                 }) {
@@ -212,6 +213,7 @@ fn compute_barrier_strides(
 }
 
 #[tracing::instrument(skip_all)]
+#[allow(clippy::type_complexity)]
 fn get_barrier_strides(
     graph: &LLIRGraph,
     block_ops: &FxHashSet<NodeIndex>,
@@ -346,6 +348,7 @@ impl TaskQueue {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn push_task(
         &mut self,
         op: i32,
@@ -847,6 +850,7 @@ impl CudaRuntime {
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) fn make_megakernel_from_llir_graph(
     llir_graph: &LLIRGraph,
     subgraph: &FxHashSet<NodeIndex>,
@@ -927,7 +931,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
         .unwrap_or(0);
 
     let (interpreter, expressions, interpreter_constants) =
-        compile_interpreter(&cuda_stream, &block_ops, &expressions, max_payload_size);
+        compile_interpreter(cuda_stream, &block_ops, &expressions, max_payload_size);
 
     // Build task queue with dynamic payload size
     let mut tasks = TaskQueue::new(max_payload_size);
@@ -975,19 +979,19 @@ pub(crate) fn make_megakernel_from_llir_graph(
             producer_barrier_bases
                 .get(&sources[0])
                 .map(|e| expressions[e])
-                .unwrap_or((-1).into()),
+                .unwrap_or(-1),
             expressions[&in_dep_b_stride],
             sources
                 .get(1)
                 .and_then(|n| producer_barrier_bases.get(n))
                 .map(|e| expressions[e])
-                .unwrap_or((-1).into()),
+                .unwrap_or(-1),
             expressions[&in_dep_c_stride],
             sources
                 .get(2)
                 .and_then(|n| producer_barrier_bases.get(n))
                 .map(|e| expressions[e])
-                .unwrap_or((-1).into()),
+                .unwrap_or(-1),
             expressions[&out_dep_stride],
             expressions[&producer_barrier_bases[&node]],
             [null(); 3],
