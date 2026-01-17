@@ -222,9 +222,8 @@ pub fn kernel_add_bandwidth_test() {
     }
 
     // Check bandwidth is reasonable (at least 50% of peak for large kernels)
-    let stats = &rt.last_execution_stats;
     if let Some(peak_bw) = cuda_bandwidth_gbps(&ctx) {
-        for stat in &stats.kernel_stats {
+        for stat in &rt.last_kernel_stats {
             let total_bytes = stat.bytes_loaded + stat.bytes_stored;
             if stat.name == "Add" && total_bytes > 0 {
                 let utilization = stat.bandwidth_gbps / peak_bw as f64 * 100.0;

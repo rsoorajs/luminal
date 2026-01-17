@@ -109,7 +109,10 @@ fn main() {
     println!("  TTFT: {:.2} ms", fwd_durations[0].as_secs_f64() * 1e3);
     println!(
         "  TPOT: {:.2} ms",
-        (fwd_durations.iter().sum::<Duration>() / fwd_durations.len() as u32).as_secs_f64() * 1e3
+        // Don't record prefill or first decode
+        (fwd_durations.iter().skip(2).sum::<Duration>() / (fwd_durations.len() - 2) as u32)
+            .as_secs_f64()
+            * 1_000.
     );
     runtime.print_execution_stats();
     // Dump cuda trace to timeline
