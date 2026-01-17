@@ -1,4 +1,5 @@
 use crate::{block::*, kernel::KernelOp};
+use cudarc::driver::sys::{CUdevice_attribute, CUfunction_attribute};
 use cudarc::driver::{
     CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg, sys::CUevent_flags,
 };
@@ -627,23 +628,25 @@ impl Runtime for CudaRuntime {
                         }
                     }
 
-                    let shared_mem_max = self
-                        .cuda_stream
-                        .context()
-                        .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR)
-                        .unwrap();
-                    println!("shared mem max: {}", shared_mem_max);
-
-                    interpreter.set_attribute(
-                        cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                        shared_mem_max / 2, // Half shared mem, half L2
+                    let per_block_optin = self.cuda_stream.context().attribute(
+                        CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
                     ).unwrap();
+                    let static_shared = interpreter
+                        .get_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)
+                        .unwrap();
+                    let max_dynamic_allowed = (per_block_optin - static_shared).max(0);
+                    interpreter
+                        .set_attribute(
+                            CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                            max_dynamic_allowed,
+                        )
+                        .unwrap();
 
                     // Launch kernel
                     let cfg = LaunchConfig {
                         grid_dim: (sm_count as u32, 1, 1), // One block per SM
                         block_dim: (256, 1, 1),            // 1024 threads (32 warps) per block
-                        shared_mem_bytes: (shared_mem_max / 2) as u32,
+                        shared_mem_bytes: max_dynamic_allowed as u32,
                     };
                     let mut lb = self.cuda_stream.launch_builder(interpreter);
                     let n_tasks = work_queue.len() as i32;
