@@ -1003,6 +1003,7 @@ pub struct TileMatmulSplitK {
     b_n_stride: Expression,
     out_stride: Vec<Expression>,
     out_m_stride: Expression,
+    k_chunk: Expression,
 }
 
 impl EgglogOp for TileMatmulSplitK {
@@ -1011,7 +1012,7 @@ impl EgglogOp for TileMatmulSplitK {
             "TileMatmulSplitK".to_string(),
             vec![
                 EList, EList, Expr, Input, EList, Expr, Expr, Input, EList, Expr, Expr, EList,
-                Expr, Expr,
+                Expr, Expr, Expr,
             ],
         )
     }
@@ -1064,6 +1065,8 @@ impl EgglogOp for TileMatmulSplitK {
                 ; Create tiled shape with K chunks
                 (let ?tiled_m (MCeilDiv ?m (MNum {ts})))
                 (let ?tiled_n (MCeilDiv ?n (MNum {ts})))
+                ;(let ?total_output_tiles (MMul ?tiled_m ?tiled_n))
+                ;(let ?k_chunk_size (MCeilDiv ))
                 (let ?k_chunks (MCeilDiv ?k (MNum {kc})))
                 (let ?tiled_shape
                     (ECons ?k_chunks
@@ -1098,7 +1101,7 @@ impl EgglogOp for TileMatmulSplitK {
                     ?tiled_shape ?out_shape ?k
                     ?a ?tiled_a_stride ?a_m_stride (MNum 1)
                     ?b ?tiled_b_stride (MNum 1) ?b_n_stride
-                    ?tiled_out_stride ?sum_out_m_stride (MNum 1)))
+                    ?tiled_out_stride ?sum_out_m_stride (MNum 1) (MNum {kc})))
                 (union ?sum ?tm)
                 (set (dtype ?tm) (F32))
             )
@@ -1134,6 +1137,7 @@ impl EgglogOp for TileMatmulSplitK {
                 out_stride: extract_expr_list(egraph, children[11], list_cache, expr_cache)
                     .unwrap(),
                 out_m_stride: extract_expr(egraph, children[12], expr_cache).unwrap(),
+                k_chunk: extract_expr(egraph, children[14], expr_cache).unwrap(),
             })),
             vec![children[3], children[7]],
         )
@@ -1199,7 +1203,7 @@ impl BlockOp for TileMatmulSplitK {
     }
 
     fn cuda_struct(&self) -> String {
-        "const int untiled_range[2]; const int a; const int b; const int c; int total_k; int a_width; int b_width; int c_width; int m_pos_stride; int n_pos_stride; int k_chunk_stride;".to_string()
+        "const int untiled_range[2]; const int a; const int b; const int c; int total_k; int a_width; int b_width; int c_width; int m_pos_stride; int n_pos_stride; int k_chunk_stride; int k_chunk_size;".to_string()
     }
 
     fn bytes_loaded(&self) -> Expression {
@@ -1224,9 +1228,10 @@ impl BlockOp for TileMatmulSplitK {
             return val;
         }};
         const int k_chunk = eval_expression(payload.k_chunk_stride, current);
+        const int k_chunk_size = eval_expression(payload.k_chunk_size, current);
         const int total_K = eval_expression(payload.total_k, 0);
-        const int k_start = k_chunk * {kc};
-        const int k_end = min(k_start + {kc}, total_K);
+        const int k_start = k_chunk * k_chunk_size;
+        const int k_end = min(k_start + k_chunk_size, total_K);
         const int K = k_end - k_start;
 
         if (K <= 0) return;
@@ -1312,7 +1317,7 @@ impl BlockOp for TileMatmulSplitK {
                 atomicAdd(C0, acc);
             }}
         }}
-        ", ts = TILE_SIZE, kc = K_CHUNK_SIZE)
+        ", ts = TILE_SIZE)
     }
 
     fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
@@ -1345,6 +1350,7 @@ impl BlockOp for TileMatmulSplitK {
             .int(expressions[&flatten_mul_strides(&self.range, &m_pos_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &n_pos_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &k_chunk_stride)])
+            .int(expressions[&self.k_chunk])
             .finish_struct()
     }
 
@@ -1369,6 +1375,7 @@ impl BlockOp for TileMatmulSplitK {
             flatten_mul_strides(&self.range, &m_pos_stride),
             flatten_mul_strides(&self.range, &n_pos_stride),
             flatten_mul_strides(&self.range, &k_chunk_stride),
+            self.k_chunk,
         ]
     }
 }
