@@ -320,7 +320,7 @@ impl GraphTensor {
     }
 
     /// Return a tensor of elements selected from either self or other, depending on condition.
-    pub fn where_cond(self, cond: GraphTensor, other: GraphTensor) -> GraphTensor {
+    pub fn cond(self, cond: GraphTensor, other: GraphTensor) -> GraphTensor {
         (cond * self) + ((1.0 - cond) * other)
     }
 }
@@ -616,17 +616,17 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn test_where_cond() {
+    fn test_cond() {
         test_binary(
             27,
             27,
             |a, b| {
                 let cond = a.gt(b.graph().constant_float(0.0).expand_rhs(a.shape));
-                a.where_cond(cond, b)
+                a.cond(cond, b)
             },
             |a, b| {
-                let cond = a.gt(&Tensor::zeros_like(&a).unwrap()).unwrap();
-                cond.where_cond(&a, &b).unwrap()
+                let refer = a.gt(&Tensor::zeros_like(&a).unwrap()).unwrap();
+                refer.where_cond(&a, &b).unwrap()
             },
         );
     }
