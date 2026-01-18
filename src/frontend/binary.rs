@@ -318,6 +318,11 @@ impl GraphTensor {
     pub fn clip(self, min: f32, max: f32) -> GraphTensor {
         self.maximum_f32(min).minimum_f32(max)
     }
+
+    /// Return a tensor of elements selected from either self or other, depending on condition.
+    pub fn where_cond(self, cond: GraphTensor, other: GraphTensor) -> GraphTensor {
+        (cond * self) + ((1.0 - cond) * other)
+    }
 }
 
 pub trait F32Pow {
@@ -607,6 +612,22 @@ pub(super) mod tests {
             },
             identity,
             identity,
+        );
+    }
+
+    #[test]
+    fn test_where_cond() {
+        test_binary(
+            27,
+            27,
+            |a, b| {
+                let cond = a.gt(b.graph().constant_float(0.0).expand_rhs(a.shape));
+                a.where_cond(cond, b)
+            },
+            |a, b| {
+                let cond = a.gt(&Tensor::zeros_like(&a).unwrap()).unwrap();
+                cond.where_cond(&a, &b).unwrap()
+            },
         );
     }
 }

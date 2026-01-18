@@ -166,6 +166,41 @@ impl GraphTensor {
         (x_equal * r.expand_to_shape_on_axes(self.shape, axes)).max(axis)
     }
 
+    /// Get the indices of the min elements along an axis
+    pub fn argmin(self, axis: usize) -> GraphTensor {
+        (-self).argmax(axis)
+    }
+
+    /// Compute the sample variance along axes
+    pub fn var(self, axes: impl ToAxes) -> GraphTensor {
+        self.var_options(axes, 1)
+    }
+
+    /// Compute the sample variance along an axes with options
+    pub fn var_options(self, axes: impl ToAxes, correction: usize) -> GraphTensor {
+        let axes = axes.to_axes();
+        let n = axes
+            .to_axes()
+            .into_iter()
+            .map(|i| self.dims()[i])
+            .product::<Expression>();
+        let mean = self
+            .mean(axes.to_axes())
+            .expand_to_shape_on_axes(self.shape, axes.to_axes());
+        let centered = self - mean;
+        (centered * centered).sum(axes) / (n - correction)
+    }
+
+    /// Compute the sample standard deviation along axes
+    pub fn std(self, axes: impl ToAxes) -> GraphTensor {
+        self.std_options(axes, 1)
+    }
+
+    /// Compute the standard deviation along axes with options
+    pub fn std_options(self, axes: impl ToAxes, correction: usize) -> GraphTensor {
+        self.var_options(axes, correction).sqrt()
+    }
+
     /// Take the absolute value
     pub fn abs(self) -> GraphTensor {
         self.relu() + (-self).relu()
@@ -454,6 +489,23 @@ pub(super) mod tests {
         fn test_argmax(rows in 1usize..16, cols in 1usize..16) {
             test_unary((rows, cols), |a| a.argmax(0).cast(DType::F32), |a| a.argmax(0).unwrap().to_dtype(candle_core::DType::F32).unwrap());
             test_unary((rows, cols), |a| a.argmax(1).cast(DType::F32), |a| a.argmax(1).unwrap().to_dtype(candle_core::DType::F32).unwrap());
+        }
+
+        #[test]
+        fn test_argmin(rows in 1usize..16, cols in 1usize..16) {
+            test_unary((rows, cols), |a| a.argmin(0).cast(DType::F32), |a| a.argmin(0).unwrap().to_dtype(candle_core::DType::F32).unwrap());
+            test_unary((rows, cols), |a| a.argmin(1).cast(DType::F32), |a| a.argmin(1).unwrap().to_dtype(candle_core::DType::F32).unwrap());
+        }
+
+        #[test]
+        fn test_var(rows in 2usize..16, cols in 2usize..16) {
+            test_unary((rows, cols), |a| a.var(1), |a| a.var(1).unwrap());
+            test_unary((rows, cols), |a| a.var(0), |a| a.var(0).unwrap());
+        }
+
+        #[test]
+        fn test_std(rows in 2usize..16, cols in 2usize..16) {
+            test_unary((rows, cols), |a| a.std(1), |a| a.var(1).unwrap().sqrt().unwrap());
         }
 
         #[test]
