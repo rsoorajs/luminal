@@ -5,7 +5,7 @@ use luminal::{op::EgglogOp, prelude::*};
 mod host_matmul;
 
 pub type Ops = (
-    // host_matmul::CuBlasSgemmV2TN,
+    host_matmul::CuBlasSgemmV2TN,
 );
 
 pub trait HostOp: Debug + as_any::AsAny + EgglogOp {

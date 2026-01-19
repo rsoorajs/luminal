@@ -27,7 +27,7 @@ pub struct CuBlasSgemmV2TN {
 impl EgglogOp for CuBlasSgemmV2TN {
     fn term(&self) -> (String, Vec<OpParam>) {
         (
-            "cuBLAS_SGEMM_V2_TN".to_string(),
+            "CuBlasSgemmV2TN".to_string(),
             //    A      B      m     n      k
             vec![Input, Input, Expr, Expr, Expr],
         )
