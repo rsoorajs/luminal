@@ -18,7 +18,7 @@ pub type Ops = (
     KernelMul,
     KernelIota,
     KernelGather,
-    // KernelSumReduce, // for some reason this prevents llama example from working. fairly certian there's an underlying bug in search or extraction.
+    KernelSumReduce,
     KernelMaxReduce,
     KernelMeanReduce,
     KernelArgsort,
