@@ -11,7 +11,13 @@ use luminal::{
 
 use crate::block::BlockOp;
 
-pub type Ops = (RowAdd, RowSwishMul, RowRMSNorm, RowRope, TileMatmulSplitK); // TileMatmulFullSplit disabled for testing
+pub type Ops = (
+    RowAdd,
+    RowSwishMul,
+    RowRMSNorm,
+    RowRope,
+    TileMatmulFullSplit,
+);
 
 #[derive(Debug, Default)]
 pub struct RowAdd {
@@ -1397,17 +1403,17 @@ pub struct TileMatmulFullSplit {
     n_tiles: Expression,
     total_k: Expression,
     #[allow(dead_code)]
-    a_stride: Vec<Expression>,   // Batch strides for A (reserved for batch support)
-    a_m_stride: Expression,      // A stride for m tile position (TILE_SIZE steps)
-    a_k_stride: Expression,      // A stride for k position (usually 1)
+    a_stride: Vec<Expression>, // Batch strides for A (reserved for batch support)
+    a_m_stride: Expression, // A stride for m tile position (TILE_SIZE steps)
+    a_k_stride: Expression, // A stride for k position (usually 1)
     #[allow(dead_code)]
-    b_stride: Vec<Expression>,   // Batch strides for B (reserved for batch support)
-    b_n_stride: Expression,      // B stride for n tile position (TILE_SIZE steps)
-    b_k_stride: Expression,      // B stride for k position (usually 1)
+    b_stride: Vec<Expression>, // Batch strides for B (reserved for batch support)
+    b_n_stride: Expression, // B stride for n tile position (TILE_SIZE steps)
+    b_k_stride: Expression, // B stride for k position (usually 1)
     #[allow(dead_code)]
     out_stride: Vec<Expression>, // Batch strides for output (reserved for batch support)
-    out_m_stride: Expression,    // Output stride for m position within tile
-    out_n_stride: Expression,    // Output stride for n position within tile
+    out_m_stride: Expression, // Output stride for m position within tile
+    out_n_stride: Expression, // Output stride for n position within tile
 }
 
 impl EgglogOp for TileMatmulFullSplit {
@@ -1520,7 +1526,7 @@ impl EgglogOp for TileMatmulFullSplit {
             :name \"tile matmul full split\"
         )",
                 ts = TILE_SIZE,
-                sm_count = 132 // Default SM count, will be runtime-evaluated
+                sm_count = 114 // Default SM count, will be runtime-evaluated
             ),
         ]
     }
@@ -1575,8 +1581,7 @@ impl BlockOp for TileMatmulFullSplit {
     }
 
     fn producer_barriers_seperate(&self) -> Vec<bool> {
-        // Only one dimension (sm index), and multiple SMs may write to same output tile
-        // via atomicAdd, so NOT separable
+        // Each SM processes exclusive output tiles, so barriers are separable
         vec![false]
     }
 
@@ -1611,8 +1616,11 @@ impl BlockOp for TileMatmulFullSplit {
     }
 
     fn cuda_function(&self) -> String {
-        format!(r#"
-        // TileMatmulFullSplit: Each SM handles a span of the flattened (m_tiles, n_tiles, k) space
+        format!(
+            r#"
+        // TileMatmulFullSplit: Linearize work over (m_tiles, n_tiles, k) with k varying fastest
+        // k_chunk_size = ceil((m_tiles * n_tiles * k) / num_sm)
+        // Each SM processes work items from work_start to work_end
         const int m_tiles = eval_expression(payload.m_tiles, 0);
         const int n_tiles = eval_expression(payload.n_tiles, 0);
         const int total_k = eval_expression(payload.total_k, 0);
@@ -1620,126 +1628,189 @@ impl BlockOp for TileMatmulFullSplit {
         const int M = eval_expression(payload.untiled_range[0], 0);
         const int N = eval_expression(payload.untiled_range[1], 0);
 
+        // Total work units in linearized (m_tiles, n_tiles, k) space
+        // Layout: k varies fastest, then n_tiles, then m_tiles
         const int total_work = m_tiles * n_tiles * total_k;
         const int k_chunk_size = (total_work + sm_count - 1) / sm_count;
-        const int k_start = current * k_chunk_size;
-        const int k_end = min(k_start + k_chunk_size, total_work);
 
-        if (k_start >= total_work) return;
+        const int work_start = current * k_chunk_size;
+        const int work_end = min(work_start + k_chunk_size, total_work);
 
-        const float* a_base = source_ptrs[0] + eval_expression(payload.a, current);
-        const float* b_base = source_ptrs[1] + eval_expression(payload.b, current);
-        float* c_base = out_ptr + eval_expression(payload.c, current);
+        if (work_start >= total_work) return;
+
+        const float* a_base = source_ptrs[0];
+        const float* b_base = source_ptrs[1];
+        float* c_base = out_ptr;
 
         const int a_m_stride = eval_expression(payload.a_m_stride, 0);
-        const int a_k_stride = eval_expression(payload.a_k_stride, 0);
         const int b_n_stride = eval_expression(payload.b_n_stride, 0);
-        const int b_k_stride = eval_expression(payload.b_k_stride, 0);
         const int c_m_stride = eval_expression(payload.c_m_stride, 0);
         const int c_n_stride = eval_expression(payload.c_n_stride, 0);
 
         constexpr int TILE_SIZE = {ts};
         const int threads = blockDim.x;
+        const int lane = t & 31;
+        const int warp_id = t >> 5;
+        const int num_warps = threads >> 5;
 
-        // Shared memory for accumulator tile and tile tracking
-        __shared__ float acc_tile[TILE_SIZE * TILE_SIZE];
-        __shared__ int shared_prev_m_tile;
-        __shared__ int shared_prev_n_tile;
+        auto warp_reduce_sum = [](float val) {{
+            for (int offset = 16; offset > 0; offset >>= 1) {{
+                val += __shfl_down_sync(0xffffffff, val, offset);
+            }}
+            return val;
+        }};
 
-        // Initialize shared state (thread 0 only)
-        if (t == 0) {{
-            shared_prev_m_tile = -1;
-            shared_prev_n_tile = -1;
-        }}
+        // Compute which tiles we touch (upfront, no div/mod in hot path)
+        const int first_tile = work_start / total_k;
+        const int last_tile = (work_end - 1) / total_k;
 
-        // Initialize accumulator
-        for (int i = t; i < TILE_SIZE * TILE_SIZE; i += threads) {{
-            acc_tile[i] = 0.0f;
-        }}
-        __syncthreads();
+        // Fast path: single tile
+        if (first_tile == last_tile) {{
+            const int tile_idx = first_tile;
+            const int tile_work_start = tile_idx * total_k;
 
-        // Process the assigned work span
-        for (int work_idx = k_start; work_idx < k_end; work_idx++) {{
-            // Decode work_idx into (m_tile, n_tile, k_pos)
-            // Layout: (m_tiles, n_tiles, k) with k varying fastest
-            const int k_pos = work_idx % total_k;
-            const int tile_idx = work_idx / total_k;
+            const int k_start = work_start - tile_work_start;
+            const int k_end = work_end - tile_work_start;
+            const int K = k_end - k_start;
+
             const int n_tile = tile_idx % n_tiles;
             const int m_tile = tile_idx / n_tiles;
 
-            // All threads read the shared tile state
-            const int prev_m_tile = shared_prev_m_tile;
-            const int prev_n_tile = shared_prev_n_tile;
-
-            // Check if we crossed a tile boundary
-            if (m_tile != prev_m_tile || n_tile != prev_n_tile) {{
-                // Store previous tile if we had one
-                if (prev_m_tile != -1) {{
-                    // Compute output tile bounds
-                    const int out_m0 = prev_m_tile * TILE_SIZE;
-                    const int out_n0 = prev_n_tile * TILE_SIZE;
-                    const int tile_m = min(TILE_SIZE, M - out_m0);
-                    const int tile_n = min(TILE_SIZE, N - out_n0);
-                    const int tile_elems = tile_m * tile_n;
-
-                    // Store with atomicAdd
-                    for (int i = t; i < tile_elems; i += threads) {{
-                        const int ty = i / tile_n;
-                        const int tx = i % tile_n;
-                        atomicAdd(&c_base[(out_m0 + ty) * c_m_stride + (out_n0 + tx) * c_n_stride], acc_tile[ty * TILE_SIZE + tx]);
-                    }}
-                    __syncthreads();
-
-                    // Reset accumulator
-                    for (int i = t; i < TILE_SIZE * TILE_SIZE; i += threads) {{
-                        acc_tile[i] = 0.0f;
-                    }}
-                }}
-
-                // Update shared tile state (thread 0 only)
-                if (t == 0) {{
-                    shared_prev_m_tile = m_tile;
-                    shared_prev_n_tile = n_tile;
-                }}
-                __syncthreads();
-            }}
-
-            // Compute pointers for this k position
             const int global_m0 = m_tile * TILE_SIZE;
             const int global_n0 = n_tile * TILE_SIZE;
             const int tile_m = min(TILE_SIZE, M - global_m0);
             const int tile_n = min(TILE_SIZE, N - global_n0);
 
-            // Accumulate outer product: A[:, k] * B[k, :]
-            // Each thread handles some elements of the tile
-            const int tile_elems = tile_m * tile_n;
-            for (int i = t; i < tile_elems; i += threads) {{
-                const int ty = i / tile_n;
-                const int tx = i % tile_n;
-                const float a_val = a_base[(global_m0 + ty) * a_m_stride + k_pos * a_k_stride];
-                const float b_val = b_base[(global_n0 + tx) * b_n_stride + k_pos * b_k_stride];
-                acc_tile[ty * TILE_SIZE + tx] += a_val * b_val;
+            const float* a = a_base + global_m0 * a_m_stride + k_start;
+            const float* b = b_base + global_n0 * b_n_stride + k_start;
+            float* c = c_base + global_m0 * c_m_stride + global_n0 * c_n_stride;
+
+            if (tile_m == 1 && num_warps > 0) {{
+                constexpr int COLS_PER_WARP = 4;
+                for (int col_base = warp_id * COLS_PER_WARP; col_base < tile_n; col_base += num_warps * COLS_PER_WARP) {{
+                    float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
+
+                    for (int k = lane; k < K; k += 32) {{
+                        float a_val = a[k];
+                        #pragma unroll
+                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                            if (col_base + ci < tile_n) {{
+                                partial[ci] += a_val * b[(col_base + ci) * b_n_stride + k];
+                            }}
+                        }}
+                    }}
+
+                    #pragma unroll
+                    for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                        partial[ci] = warp_reduce_sum(partial[ci]);
+                    }}
+
+                    if (lane == 0) {{
+                        #pragma unroll
+                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                            if (col_base + ci < tile_n) {{
+                                atomicAdd(&c[(col_base + ci) * c_n_stride], partial[ci]);
+                            }}
+                        }}
+                    }}
+                }}
+            }} else {{
+                const int tile_elems = tile_m * tile_n;
+                for (int idx = t; idx < tile_elems; idx += threads) {{
+                    const int ty = idx / tile_n;
+                    const int tx = idx % tile_n;
+                    const float* A0 = a + ty * a_m_stride;
+                    const float* B0 = b + tx * b_n_stride;
+                    float acc = 0.f;
+                    for (int k = 0; k < K; ++k) {{
+                        acc += A0[k] * B0[k];
+                    }}
+                    atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
+                }}
             }}
-            __syncthreads();  // Sync after each k iteration
+            return;
         }}
 
-        // Store final tile
-        const int final_prev_m = shared_prev_m_tile;
-        const int final_prev_n = shared_prev_n_tile;
-        if (final_prev_m != -1) {{
-            const int out_m0 = final_prev_m * TILE_SIZE;
-            const int out_n0 = final_prev_n * TILE_SIZE;
-            const int tile_m = min(TILE_SIZE, M - out_m0);
-            const int tile_n = min(TILE_SIZE, N - out_n0);
-            const int tile_elems = tile_m * tile_n;
+        // Slow path: multiple tiles
+        for (int tile_idx = first_tile; tile_idx <= last_tile; tile_idx++) {{
+            // Compute k range for this tile
+            const int tile_work_start = tile_idx * total_k;
+            const int tile_work_end = tile_work_start + total_k;
 
-            for (int i = t; i < tile_elems; i += threads) {{
-                const int ty = i / tile_n;
-                const int tx = i % tile_n;
-                atomicAdd(&c_base[(out_m0 + ty) * c_m_stride + (out_n0 + tx) * c_n_stride], acc_tile[ty * TILE_SIZE + tx]);
+            // Our k range within this tile
+            const int k_start = (work_start > tile_work_start) ? (work_start - tile_work_start) : 0;
+            const int k_end = (work_end < tile_work_end) ? (work_end - tile_work_start) : total_k;
+            const int K = k_end - k_start;
+
+            const int n_tile = tile_idx % n_tiles;
+            const int m_tile = tile_idx / n_tiles;
+
+            const int global_m0 = m_tile * TILE_SIZE;
+            const int global_n0 = n_tile * TILE_SIZE;
+            const int tile_m = min(TILE_SIZE, M - global_m0);
+            const int tile_n = min(TILE_SIZE, N - global_n0);
+
+            // Pre-compute pointers like TileMatmulSplitK for better codegen
+            const float* a = a_base + global_m0 * a_m_stride + k_start;
+            const float* b = b_base + global_n0 * b_n_stride + k_start;
+            float* c = c_base + global_m0 * c_m_stride + global_n0 * c_n_stride;
+
+            // Fast path for M=1 decode: direct atomicAdd like TileMatmulSplitK
+            if (tile_m == 1 && num_warps > 0) {{
+                constexpr int COLS_PER_WARP = 4;
+                for (int col_base = warp_id * COLS_PER_WARP; col_base < tile_n; col_base += num_warps * COLS_PER_WARP) {{
+                    float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
+
+                    // Stream K elements - tight loop matching TileMatmulSplitK structure
+                    for (int k = lane; k < K; k += 32) {{
+                        float a_val = a[k];
+                        #pragma unroll
+                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                            if (col_base + ci < tile_n) {{
+                                partial[ci] += a_val * b[(col_base + ci) * b_n_stride + k];
+                            }}
+                        }}
+                    }}
+
+                    // Warp reduction
+                    #pragma unroll
+                    for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                        partial[ci] = warp_reduce_sum(partial[ci]);
+                    }}
+
+                    // Lane 0 atomically adds to global output
+                    if (lane == 0) {{
+                        #pragma unroll
+                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                            if (col_base + ci < tile_n) {{
+                                atomicAdd(&c[(col_base + ci) * c_n_stride], partial[ci]);
+                            }}
+                        }}
+                    }}
+                }}
+            }} else {{
+                // Generic path for M>1: each thread handles multiple output elements
+                const int tile_elems = tile_m * tile_n;
+
+                for (int idx = t; idx < tile_elems; idx += threads) {{
+                    const int ty = idx / tile_n;
+                    const int tx = idx % tile_n;
+
+                    const float* A0 = a + ty * a_m_stride;
+                    const float* B0 = b + tx * b_n_stride;
+
+                    float acc = 0.f;
+                    for (int k = 0; k < K; ++k) {{
+                        acc += A0[k] * B0[k];
+                    }}
+
+                    atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
+                }}
             }}
         }}
-        "#, ts = TILE_SIZE)
+        "#,
+            ts = TILE_SIZE
+        )
     }
 
     fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
