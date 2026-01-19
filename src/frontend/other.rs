@@ -77,9 +77,9 @@ impl Graph {
     pub fn stack(&mut self, tensors: &[GraphTensor], axis: usize) -> GraphTensor {
         assert!(!tensors.is_empty(), "Cannot stack empty tensor list");
         let first = tensors[0].unsqueeze(axis);
-        tensors[1..].iter().fold(first, |acc, t| {
-            acc.concat_along(t.unsqueeze(axis), axis)
-        })
+        tensors[1..]
+            .iter()
+            .fold(first, |acc, t| acc.concat_along(t.unsqueeze(axis), axis))
     }
 }
 
@@ -215,9 +215,18 @@ mod tests {
         rt.set_data(c.id, c_data.clone());
         rt.execute(&cx.dyn_map);
 
-        let ref_a = Tensor::new(a_data, &Device::Cpu).unwrap().reshape((2, 3)).unwrap();
-        let ref_b = Tensor::new(b_data, &Device::Cpu).unwrap().reshape((2, 3)).unwrap();
-        let ref_c = Tensor::new(c_data, &Device::Cpu).unwrap().reshape((2, 3)).unwrap();
+        let ref_a = Tensor::new(a_data, &Device::Cpu)
+            .unwrap()
+            .reshape((2, 3))
+            .unwrap();
+        let ref_b = Tensor::new(b_data, &Device::Cpu)
+            .unwrap()
+            .reshape((2, 3))
+            .unwrap();
+        let ref_c = Tensor::new(c_data, &Device::Cpu)
+            .unwrap()
+            .reshape((2, 3))
+            .unwrap();
         let ref_stacked = Tensor::stack(&[&ref_a, &ref_b, &ref_c], 0).unwrap();
 
         assert_close(
