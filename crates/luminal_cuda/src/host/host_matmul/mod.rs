@@ -18,23 +18,23 @@ use crate::{cudarc::driver::CudaSlice, host::HostOp};
 
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
-pub struct HostMatmul {
+pub struct CuBlasSgemmV2TN {
     m: Expression,
     n: Expression,
     k: Expression,
 }
 
-impl EgglogOp for HostMatmul {
+impl EgglogOp for CuBlasSgemmV2TN {
     fn term(&self) -> (String, Vec<OpParam>) {
         (
-            "HostMatmul".to_string(),
+            "cuBLAS_SGEMM_V2_TN".to_string(),
             //    A      B      m     n      k
             vec![Input, Input, Expr, Expr, Expr],
         )
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec![include_str!["rewrite.egg"].to_string()]
+        vec![include_str!["cuBLAS_SGEMM_V2_TN_rewrite.egg"].to_string()]
     }
 
     #[allow(unused_variables)]
@@ -51,7 +51,7 @@ impl EgglogOp for HostMatmul {
 
         let _span = span!(
             Level::TRACE,
-            "host_matmul_extract",
+            "cuBLAS_SGEMM_V2_TN_extract",
             m = ?m_extract,
             n = ?n_extract,
             k = ?k_extract,
@@ -75,7 +75,7 @@ impl EgglogOp for HostMatmul {
     }
 }
 
-impl HostOp for HostMatmul {
+impl HostOp for CuBlasSgemmV2TN {
     fn execute(
         &self,
         stream: &Arc<CudaStream>,
@@ -123,7 +123,7 @@ impl HostOp for HostMatmul {
         stream.synchronize()?;
         let _sgemm_span = span!(
             Level::INFO,
-            "cublas_sgemm",
+            "cuBLAS_SGEMM_V2_TN",
             m = m,
             n = n,
             k = k,
@@ -158,7 +158,7 @@ impl HostOp for HostMatmul {
 
         if status != cublasStatus_t::CUBLAS_STATUS_SUCCESS {
             return Err(anyhow::anyhow!(
-                "cuBLAS SGEMM failed with status: {:?}",
+                "cuBLAS SGEMM TN failed with status: {:?}",
                 status
             ));
         }

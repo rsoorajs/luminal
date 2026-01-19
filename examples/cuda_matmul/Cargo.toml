@@ -11,5 +11,5 @@ tracing = "0.1.43"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 log = "*"
 env_logger = "0.11"
-rand = "*"
+rand = "0.9"
 candle-core = "0.8"

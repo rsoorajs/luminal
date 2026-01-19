@@ -443,12 +443,12 @@ fn run_egglog(
         }
         fs::create_dir(log_dir).unwrap();
         fs::write(
-            log_dir.join(format!("egraph.dot",)),
+            log_dir.join("egraph.dot"),
             egraph.to_dot().unwrap(),
         )
         .unwrap();
         fs::write(
-            log_dir.join(format!("egraph.html",)),
+            log_dir.join("egraph.html"),
             egraph.to_html().unwrap(),
         )
         .unwrap();

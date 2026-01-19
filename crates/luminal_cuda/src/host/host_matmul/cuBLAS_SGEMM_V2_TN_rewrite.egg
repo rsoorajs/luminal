@@ -1,4 +1,4 @@
-; TileMatmul -> HostMatmul (row major) [M,K] x [K,N] (column Major) -> [M,N] (row major) 
+; TileMatmul -> CuBlasSgemmV2TN (row major) [M,K] x [K,N] (column Major) -> [M,N] (row major) 
 (rule
     (
         ; get TileMatmul
@@ -10,7 +10,7 @@
     )
     (   
         ; make KernelMatmul
-        (let ?hm (HostMatmul ?a ?b m n ?tm_iters))
+        (let ?hm (CuBlasSgemmV2TN ?a ?b m n ?tm_iters))
         (union ?tm ?hm)
         (set (dtype ?hm) (F32))
     )

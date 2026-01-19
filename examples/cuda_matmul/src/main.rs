@@ -9,13 +9,13 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 fn main() {
     // Initialize tracing
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap())
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("cuda_matmul=info,luminal=info,luminal_cuda=info")))
         .with(fmt::layer())
         .init();
 
-    let m = (2 as usize).pow(12);
-    let n = (2 as usize).pow(12);
-    let k = (2 as usize).pow(12);
+    let m = (2_usize).pow(6);
+    let n = (2_usize).pow(6);
+    let k = (2_usize).pow(6);
 
     info!(m);
     info!(n);
@@ -116,4 +116,5 @@ fn main() {
     // Check if results match within tolerance
     // Use 0.1 tolerance for GPU vs CPU comparison (floating point precision differences)
     assert!(max_diff < 0.1, "max_diff = {}", max_diff);
+    println!("results matched");
 }

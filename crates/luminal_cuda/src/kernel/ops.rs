@@ -120,7 +120,6 @@ impl EgglogOp for KernelArgsort {
 impl KernelOp for KernelArgsort {
     fn compile(
         &self,
-        ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
     ) -> (
         CudaFunction,
@@ -283,7 +282,7 @@ extern \"C\" {{
         );
 
         let ptx = compile_ptx(&kernel).unwrap();
-        let module = ctx.load_module(ptx).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
         let func = module.load_function("argsort_k").unwrap();
 
         let constants = vars

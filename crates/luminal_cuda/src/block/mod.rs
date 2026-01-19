@@ -211,6 +211,7 @@ fn compute_barrier_strides(
     (p, c)
 }
 
+#[allow(clippy::type_complexity)]
 #[tracing::instrument(skip_all)]
 fn get_barrier_strides(
     graph: &LLIRGraph,
@@ -927,7 +928,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
         .unwrap_or(0);
 
     let (interpreter, expressions, interpreter_constants) =
-        compile_interpreter(&cuda_stream, &block_ops, &expressions, max_payload_size);
+        compile_interpreter(cuda_stream, &block_ops, &expressions, max_payload_size);
 
     // Build task queue with dynamic payload size
     let mut tasks = TaskQueue::new(max_payload_size);
@@ -975,19 +976,19 @@ pub(crate) fn make_megakernel_from_llir_graph(
             producer_barrier_bases
                 .get(&sources[0])
                 .map(|e| expressions[e])
-                .unwrap_or((-1).into()),
+                .unwrap_or(-1),
             expressions[&in_dep_b_stride],
             sources
                 .get(1)
                 .and_then(|n| producer_barrier_bases.get(n))
                 .map(|e| expressions[e])
-                .unwrap_or((-1).into()),
+                .unwrap_or(-1),
             expressions[&in_dep_c_stride],
             sources
                 .get(2)
                 .and_then(|n| producer_barrier_bases.get(n))
                 .map(|e| expressions[e])
-                .unwrap_or((-1).into()),
+                .unwrap_or(-1),
             expressions[&out_dep_stride],
             expressions[&producer_barrier_bases[&node]],
             [null(); 3],
