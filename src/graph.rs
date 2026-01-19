@@ -19,7 +19,7 @@ use std::{
     path::Path,
     sync::Arc,
 };
-use tracing::{self, Level, enabled, info};
+use tracing::{self, Level, enabled, info, trace};
 
 pub type LLIRGraph = StableGraph<LLIROp, ()>;
 pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ShapeTracker>;
@@ -407,6 +407,7 @@ fn run_egglog(
     let (program, root) = termdag_to_egglog(termdag, termdag.lookup(term));
     let code = egglog_utils::full_egglog(&program, ops, cleanup);
     let mut egraph = egglog::EGraph::default();
+    println!("{}", code);
     let commands = egraph.parser.get_program_from_string(None, &code)?;
     println!("{}", "Egglog running...".green());
     let _outputs = egraph.run_program(commands)?;
@@ -799,14 +800,14 @@ pub fn egglog_to_llir(
                     .unwrap();
                 let r = graph.add_node(custom_ops[id].to_llir_op());
                 enode_to_node.insert(node, r);
-                // Add all sibling e-nodes in the same e-class to point to same graph node
-                // This handles cases where union creates multiple e-nodes in the same e-class
-                let eclass = &egraph.node_to_class[node];
-                for sibling_node in &egraph.eclasses[eclass].1 {
-                    if sibling_node != node {
-                        enode_to_node.insert(sibling_node, r);
-                    }
-                }
+                // // Add all sibling e-nodes in the same e-class to point to same graph node
+                // // This handles cases where union creates multiple e-nodes in the same e-class
+                // let eclass = &egraph.node_to_class[node];
+                // for sibling_node in &egraph.eclasses[eclass].1 {
+                //     if sibling_node != node {
+                //         enode_to_node.insert(sibling_node, r);
+                //     }
+                // }
                 for source in inputs {
                     edges_to_place.push((source, node));
                 }
@@ -821,14 +822,14 @@ pub fn egglog_to_llir(
                 let (op_instance, sources) = op.extract(egraph, &ch, &mut lc, &mut c);
                 let r = graph.add_node(op_instance);
                 enode_to_node.insert(node, r);
-                // Add all sibling e-nodes in the same e-class to point to same graph node
-                // This handles cases where union creates multiple e-nodes in the same e-class
-                let eclass = &egraph.node_to_class[node];
-                for sibling_node in &egraph.eclasses[eclass].1 {
-                    if sibling_node != node {
-                        enode_to_node.insert(sibling_node, r);
-                    }
-                }
+                // // Add all sibling e-nodes in the same e-class to point to same graph node
+                // // This handles cases where union creates multiple e-nodes in the same e-class
+                // let eclass = &egraph.node_to_class[node];
+                // for sibling_node in &egraph.eclasses[eclass].1 {
+                //     if sibling_node != node {
+                //         enode_to_node.insert(sibling_node, r);
+                //     }
+                // }
                 for source in sources {
                     edges_to_place.push((source, node));
                 }
