@@ -79,27 +79,6 @@ fn main() {
 
         // Set runtime dimensions
         let seq_len = sentence.len();
-        let is_prefill = i == 0;
-
-        let _span = if is_prefill {
-            span!(
-                Level::INFO,
-                "prefill",
-                iteration = i,
-                seq_len = seq_len,
-                prev_seq = prev_seq
-            )
-            .entered()
-        } else {
-            span!(
-                Level::INFO,
-                "decode",
-                iteration = i,
-                seq_len = seq_len,
-                prev_seq = prev_seq
-            )
-            .entered()
-        };
 
         cx.set_dim('s', seq_len);
         cx.set_dim('p', prev_seq);
