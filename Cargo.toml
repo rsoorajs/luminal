@@ -46,6 +46,5 @@ members = [
     "examples/*",
     "crates/luminal_nn",
     "crates/luminal_cuda",
-    "crates/luminal_training",
     "crates/luminal_tracing",
 ]

@@ -236,7 +236,7 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
       __syncthreads();
       if (stop_wait_loop)
         break;
-      nanosleep(32);
+      // nanosleep removed - rely on __syncthreads for throttling
     }
     if (threadIdx.x == 0)
       record_event(timings, &recorded_event,

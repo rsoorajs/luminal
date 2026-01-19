@@ -170,7 +170,7 @@ pub struct RowSwishMul {
     a_stride: Vec<Expression>,
     b_stride: Vec<Expression>,
     row_width: Expression,
-    n_chunks: Expression,
+    sm_count: Expression,
 }
 
 impl EgglogOp for RowSwishMul {
@@ -182,6 +182,7 @@ impl EgglogOp for RowSwishMul {
     }
 
     fn rewrites(&self) -> Vec<String> {
+        // Use 4 parallel chunks per row - balances parallelism with work per chunk
         vec!["(rule
             (
                 (= ?sigmoid (Sigmoid
@@ -209,7 +210,6 @@ impl EgglogOp for RowSwishMul {
                 ;(= (F32) (dtype ?self))
             )
             (
-                (let ?n_chunks (MDiv (MAdd ?width (MNum 127)) (MNum 128)))
                 (let ?rsm (RowSwishMul
                     (ECons ?batch (ENil))
                     ?self
@@ -217,7 +217,7 @@ impl EgglogOp for RowSwishMul {
                     ?other
                     (ECons ?width (ENil))
                     ?width
-                    ?n_chunks
+                    (MNum 4)
                 ))
                 (union ?swishmul ?rsm)
                 (set (dtype ?rsm) (F32))
@@ -244,7 +244,7 @@ impl EgglogOp for RowSwishMul {
                 a_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
                 b_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
                 row_width: extract_expr(egraph, children[5], expr_cache).unwrap(),
-                n_chunks: extract_expr(egraph, children[6], expr_cache).unwrap(),
+                sm_count: extract_expr(egraph, children[6], expr_cache).unwrap(),
             })),
             vec![children[1], children[3]],
         )
@@ -257,59 +257,68 @@ impl BlockOp for RowSwishMul {
     }
 
     fn launch_range(&self) -> Vec<Expression> {
-        // Add n_chunks as inner dimension: [batch..., n_chunks]
+        // Split across SMs: [batch..., sm_count]
         let mut range = self.range.clone();
-        range.push(self.n_chunks);
-        range
+        range.push(self.sm_count);
+        if range.is_empty() {
+            vec![self.sm_count]
+        } else {
+            range
+        }
     }
 
     fn output_size(&self) -> Expression {
-        self.range.iter().copied().product::<Expression>() * self.row_width
+        self.range.iter().copied().product::<Expression>().max(1) * self.row_width
     }
 
     fn producer_barriers_seperate(&self) -> Vec<bool> {
-        vec![true; self.launch_range().len()]
+        // Batch dims separate, SM dim shared (all SMs contribute to same output)
+        let mut barriers = vec![true; self.range.len()];
+        barriers.push(false); // SM dimension - shared barrier
+        barriers
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
-        // All batch dimensions separate barriers, plus chunk dimension
-        let launch_dims = self.range.len() + 1;
-        vec![vec![true; launch_dims], vec![true; launch_dims]]
+        let launch_len = self.launch_range().len();
+        vec![vec![true; launch_len], vec![true; launch_len]]
     }
 
     fn bytes_loaded(&self) -> Expression {
-        // Load 2 input rows (a + b) per launch (total across all chunks)
-        self.range.iter().copied().product::<Expression>() * self.row_width * 2 * 4
+        // Load 2 input rows (a + b) per launch
+        self.range.iter().copied().product::<Expression>().max(1) * self.row_width * 2 * 4
     }
 
     fn bytes_stored(&self) -> Expression {
-        // Store 1 output row per launch (total across all chunks)
-        self.range.iter().copied().product::<Expression>() * self.row_width * 4
+        // Store 1 output row per launch
+        self.range.iter().copied().product::<Expression>().max(1) * self.row_width * 4
     }
 
     fn flops(&self) -> Expression {
         // swish(x) * b[idx] = x / (1 + exp(-x)) * b
         // ~5 ops per element: neg, exp, add, div, mul
-        self.range.iter().copied().product::<Expression>() * self.row_width * 5
+        self.range.iter().copied().product::<Expression>().max(1) * self.row_width * 5
     }
 
     fn cuda_struct(&self) -> String {
-        "const int a; const int b; const int out; int row_width; int chunk_idx;".to_string()
+        "const int a; const int b; const int out; int row_width; int sm_count;".to_string()
     }
 
     fn cuda_function(&self) -> String {
         "
-        const int chunk_idx = eval_expression(payload.chunk_idx, current);
         const int row_width = eval_expression(payload.row_width, 0);
-        const int chunk_start = chunk_idx * 128;
-        const int chunk_end = min(chunk_start + 128, row_width);
+        const int sm_count = eval_expression(payload.sm_count, 0);
+        const float* a = source_ptrs[0] + eval_expression(payload.a, current);
+        const float* b = source_ptrs[1] + eval_expression(payload.b, current);
+        float* out = out_ptr + eval_expression(payload.out, current);
 
-        const float* a = source_ptrs[0] + eval_expression(payload.a, current) + chunk_start;
-        const float* b = source_ptrs[1] + eval_expression(payload.b, current) + chunk_start;
-        float* out = out_ptr + eval_expression(payload.out, current) + chunk_start;
+        // Split row across SMs
+        const int sm_idx = current % sm_count;
+        const int elems_per_sm = (row_width + sm_count - 1) / sm_count;
+        const int start = sm_idx * elems_per_sm;
+        const int end = min(start + elems_per_sm, row_width);
 
-        const int chunk_size = chunk_end - chunk_start;
-        for (int idx = t; idx < chunk_size; idx += blockDim.x) {
+        // Process assigned slice
+        for (int idx = start + t; idx < end; idx += blockDim.x) {
             float x = a[idx];
             float sw = x / (1.0f + __expf(-x)); // swish(x)
             out[idx] = sw * b[idx];
@@ -319,16 +328,11 @@ impl BlockOp for RowSwishMul {
     }
 
     fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
-        // Extend a_stride and b_stride with 0 for the chunk dimension
-        // so batch offset doesn't change when chunk changes
+        // Extend strides with 0 for the SM dimension
         let mut a_stride_ext = self.a_stride.clone();
         a_stride_ext.push(0.into());
         let mut b_stride_ext = self.b_stride.clone();
         b_stride_ext.push(0.into());
-
-        // Stride for extracting chunk index: [0, 0, ..., 1]
-        let mut chunk_stride = vec![0.into(); self.range.len() + 1];
-        chunk_stride[self.range.len()] = 1.into();
 
         let launch_range = self.launch_range();
         CStruct::new()
@@ -336,26 +340,22 @@ impl BlockOp for RowSwishMul {
             .int(expressions[&flatten_mul_strides(&launch_range, &b_stride_ext)])
             .int(expressions[&flatten_mul_strides(&launch_range, &a_stride_ext)])
             .int(expressions[&self.row_width])
-            .int(expressions[&flatten_mul_strides(&launch_range, &chunk_stride)])
+            .int(expressions[&self.sm_count])
             .finish_struct()
     }
 
     fn expressions(&self) -> Vec<Expression> {
-        // Extend strides with 0 for the chunk dimension
         let mut a_stride_ext = self.a_stride.clone();
         a_stride_ext.push(0.into());
         let mut b_stride_ext = self.b_stride.clone();
         b_stride_ext.push(0.into());
-
-        let mut chunk_stride = vec![0.into(); self.range.len() + 1];
-        chunk_stride[self.range.len()] = 1.into();
 
         let launch_range = self.launch_range();
         vec![
             flatten_mul_strides(&launch_range, &a_stride_ext),
             flatten_mul_strides(&launch_range, &b_stride_ext),
             self.row_width,
-            flatten_mul_strides(&launch_range, &chunk_stride),
+            self.sm_count,
         ]
     }
 }
@@ -1618,25 +1618,13 @@ impl BlockOp for TileMatmulFullSplit {
     fn cuda_function(&self) -> String {
         format!(
             r#"
-        // TileMatmulFullSplit: Linearize work over (m_tiles, n_tiles, k) with k varying fastest
-        // k_chunk_size = ceil((m_tiles * n_tiles * k) / num_sm)
-        // Each SM processes work items from work_start to work_end
+        // TileMatmulFullSplit: Optimized for both M=1 decode and general matmul
         const int m_tiles = eval_expression(payload.m_tiles, 0);
         const int n_tiles = eval_expression(payload.n_tiles, 0);
         const int total_k = eval_expression(payload.total_k, 0);
         const int sm_count = eval_expression(payload.sm_count, 0);
         const int M = eval_expression(payload.untiled_range[0], 0);
         const int N = eval_expression(payload.untiled_range[1], 0);
-
-        // Total work units in linearized (m_tiles, n_tiles, k) space
-        // Layout: k varies fastest, then n_tiles, then m_tiles
-        const int total_work = m_tiles * n_tiles * total_k;
-        const int k_chunk_size = (total_work + sm_count - 1) / sm_count;
-
-        const int work_start = current * k_chunk_size;
-        const int work_end = min(work_start + k_chunk_size, total_work);
-
-        if (work_start >= total_work) return;
 
         const float* a_base = source_ptrs[0];
         const float* b_base = source_ptrs[1];
@@ -1660,7 +1648,84 @@ impl BlockOp for TileMatmulFullSplit {
             return val;
         }};
 
-        // Compute which tiles we touch (upfront, no div/mod in hot path)
+        // ============== M=1 DECODE PATH (NO K-SPLITTING, NO ATOMICS) ==============
+        // For M=1, we split by N columns instead of K. Each SM handles complete dot products.
+        if (M == 1) {{
+            // Split N columns across SMs
+            const int cols_per_sm = (N + sm_count - 1) / sm_count;
+            const int col_start = current * cols_per_sm;
+            const int col_end = min(col_start + cols_per_sm, N);
+
+            if (col_start >= N) return;
+
+            const float* a = a_base;
+            const int K = total_k;
+
+            // Each warp handles 4 columns, threads parallelize over K
+            constexpr int COLS_PER_WARP = 4;
+
+            for (int col_base = col_start + warp_id * COLS_PER_WARP; col_base < col_end; col_base += num_warps * COLS_PER_WARP) {{
+                float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
+
+                // Compute base pointers for B columns
+                const float* b0 = b_base + col_base * b_n_stride;
+                const float* b1 = b_base + (col_base + 1) * b_n_stride;
+                const float* b2 = b_base + (col_base + 2) * b_n_stride;
+                const float* b3 = b_base + (col_base + 3) * b_n_stride;
+
+                const int valid_cols = min(COLS_PER_WARP, col_end - col_base);
+
+                // Main K loop - unroll by 4 for ILP
+                int k = lane;
+                for (; k + 96 < K; k += 128) {{
+                    float a0 = a[k];
+                    float a1 = a[k + 32];
+                    float a2 = a[k + 64];
+                    float a3 = a[k + 96];
+
+                    if (valid_cols > 0) partial[0] += a0 * b0[k] + a1 * b0[k + 32] + a2 * b0[k + 64] + a3 * b0[k + 96];
+                    if (valid_cols > 1) partial[1] += a0 * b1[k] + a1 * b1[k + 32] + a2 * b1[k + 64] + a3 * b1[k + 96];
+                    if (valid_cols > 2) partial[2] += a0 * b2[k] + a1 * b2[k + 32] + a2 * b2[k + 64] + a3 * b2[k + 96];
+                    if (valid_cols > 3) partial[3] += a0 * b3[k] + a1 * b3[k + 32] + a2 * b3[k + 64] + a3 * b3[k + 96];
+                }}
+
+                // Handle remaining K
+                for (; k < K; k += 32) {{
+                    float a_val = a[k];
+                    if (valid_cols > 0) partial[0] += a_val * b0[k];
+                    if (valid_cols > 1) partial[1] += a_val * b1[k];
+                    if (valid_cols > 2) partial[2] += a_val * b2[k];
+                    if (valid_cols > 3) partial[3] += a_val * b3[k];
+                }}
+
+                // Warp reduction
+                #pragma unroll
+                for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                    partial[ci] = warp_reduce_sum(partial[ci]);
+                }}
+
+                // Direct write
+                if (lane == 0) {{
+                    if (valid_cols > 0) c_base[col_base] = partial[0];
+                    if (valid_cols > 1) c_base[col_base + 1] = partial[1];
+                    if (valid_cols > 2) c_base[col_base + 2] = partial[2];
+                    if (valid_cols > 3) c_base[col_base + 3] = partial[3];
+                }}
+            }}
+            return;
+        }}
+
+        // ============== GENERAL PATH (M > 1) ==============
+        // Total work units in linearized (m_tiles, n_tiles, k) space
+        const int total_work = m_tiles * n_tiles * total_k;
+        const int k_chunk_size = (total_work + sm_count - 1) / sm_count;
+
+        const int work_start = current * k_chunk_size;
+        const int work_end = min(work_start + k_chunk_size, total_work);
+
+        if (work_start >= total_work) return;
+
+        // Compute which tiles we touch
         const int first_tile = work_start / total_k;
         const int last_tile = (work_end - 1) / total_k;
 
@@ -1685,59 +1750,26 @@ impl BlockOp for TileMatmulFullSplit {
             const float* b = b_base + global_n0 * b_n_stride + k_start;
             float* c = c_base + global_m0 * c_m_stride + global_n0 * c_n_stride;
 
-            if (tile_m == 1 && num_warps > 0) {{
-                constexpr int COLS_PER_WARP = 4;
-                for (int col_base = warp_id * COLS_PER_WARP; col_base < tile_n; col_base += num_warps * COLS_PER_WARP) {{
-                    float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
-
-                    for (int k = lane; k < K; k += 32) {{
-                        float a_val = a[k];
-                        #pragma unroll
-                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
-                            if (col_base + ci < tile_n) {{
-                                partial[ci] += a_val * b[(col_base + ci) * b_n_stride + k];
-                            }}
-                        }}
-                    }}
-
-                    #pragma unroll
-                    for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
-                        partial[ci] = warp_reduce_sum(partial[ci]);
-                    }}
-
-                    if (lane == 0) {{
-                        #pragma unroll
-                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
-                            if (col_base + ci < tile_n) {{
-                                atomicAdd(&c[(col_base + ci) * c_n_stride], partial[ci]);
-                            }}
-                        }}
-                    }}
+            const int tile_elems = tile_m * tile_n;
+            for (int idx = t; idx < tile_elems; idx += threads) {{
+                const int ty = idx / tile_n;
+                const int tx = idx % tile_n;
+                const float* A0 = a + ty * a_m_stride;
+                const float* B0 = b + tx * b_n_stride;
+                float acc = 0.f;
+                for (int k = 0; k < K; ++k) {{
+                    acc += A0[k] * B0[k];
                 }}
-            }} else {{
-                const int tile_elems = tile_m * tile_n;
-                for (int idx = t; idx < tile_elems; idx += threads) {{
-                    const int ty = idx / tile_n;
-                    const int tx = idx % tile_n;
-                    const float* A0 = a + ty * a_m_stride;
-                    const float* B0 = b + tx * b_n_stride;
-                    float acc = 0.f;
-                    for (int k = 0; k < K; ++k) {{
-                        acc += A0[k] * B0[k];
-                    }}
-                    atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
-                }}
+                atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
             }}
             return;
         }}
 
         // Slow path: multiple tiles
         for (int tile_idx = first_tile; tile_idx <= last_tile; tile_idx++) {{
-            // Compute k range for this tile
             const int tile_work_start = tile_idx * total_k;
             const int tile_work_end = tile_work_start + total_k;
 
-            // Our k range within this tile
             const int k_start = (work_start > tile_work_start) ? (work_start - tile_work_start) : 0;
             const int k_end = (work_end < tile_work_end) ? (work_end - tile_work_start) : total_k;
             const int K = k_end - k_start;
@@ -1750,62 +1782,21 @@ impl BlockOp for TileMatmulFullSplit {
             const int tile_m = min(TILE_SIZE, M - global_m0);
             const int tile_n = min(TILE_SIZE, N - global_n0);
 
-            // Pre-compute pointers like TileMatmulSplitK for better codegen
             const float* a = a_base + global_m0 * a_m_stride + k_start;
             const float* b = b_base + global_n0 * b_n_stride + k_start;
             float* c = c_base + global_m0 * c_m_stride + global_n0 * c_n_stride;
 
-            // Fast path for M=1 decode: direct atomicAdd like TileMatmulSplitK
-            if (tile_m == 1 && num_warps > 0) {{
-                constexpr int COLS_PER_WARP = 4;
-                for (int col_base = warp_id * COLS_PER_WARP; col_base < tile_n; col_base += num_warps * COLS_PER_WARP) {{
-                    float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
-
-                    // Stream K elements - tight loop matching TileMatmulSplitK structure
-                    for (int k = lane; k < K; k += 32) {{
-                        float a_val = a[k];
-                        #pragma unroll
-                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
-                            if (col_base + ci < tile_n) {{
-                                partial[ci] += a_val * b[(col_base + ci) * b_n_stride + k];
-                            }}
-                        }}
-                    }}
-
-                    // Warp reduction
-                    #pragma unroll
-                    for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
-                        partial[ci] = warp_reduce_sum(partial[ci]);
-                    }}
-
-                    // Lane 0 atomically adds to global output
-                    if (lane == 0) {{
-                        #pragma unroll
-                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
-                            if (col_base + ci < tile_n) {{
-                                atomicAdd(&c[(col_base + ci) * c_n_stride], partial[ci]);
-                            }}
-                        }}
-                    }}
+            const int tile_elems = tile_m * tile_n;
+            for (int idx = t; idx < tile_elems; idx += threads) {{
+                const int ty = idx / tile_n;
+                const int tx = idx % tile_n;
+                const float* A0 = a + ty * a_m_stride;
+                const float* B0 = b + tx * b_n_stride;
+                float acc = 0.f;
+                for (int k = 0; k < K; ++k) {{
+                    acc += A0[k] * B0[k];
                 }}
-            }} else {{
-                // Generic path for M>1: each thread handles multiple output elements
-                const int tile_elems = tile_m * tile_n;
-
-                for (int idx = t; idx < tile_elems; idx += threads) {{
-                    const int ty = idx / tile_n;
-                    const int tx = idx % tile_n;
-
-                    const float* A0 = a + ty * a_m_stride;
-                    const float* B0 = b + tx * b_n_stride;
-
-                    float acc = 0.f;
-                    for (int k = 0; k < K; ++k) {{
-                        acc += A0[k] * B0[k];
-                    }}
-
-                    atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
-                }}
+                atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
             }}
         }}
         "#,
