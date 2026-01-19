@@ -336,9 +336,16 @@ pub(crate) struct TaskQueue {
 
 impl TaskQueue {
     pub fn new(payload_size: usize) -> Self {
-        // Task layout: 11 ints (44 bytes) + 3 pointers (24 bytes) + 1 pointer (8 bytes) + payload
-        // = 76 bytes + payload_size, aligned to 8 bytes
-        let base_size = size_of::<i32>() * 11 + size_of::<*const f32>() * 3 + size_of::<*mut f32>();
+        // Task layout (must match C struct with alignment):
+        // - 11 ints (44 bytes at offset 0)
+        // - 4 bytes padding for 8-byte alignment of pointers
+        // - 3 pointers (24 bytes at offset 48)
+        // - 1 pointer (8 bytes at offset 72)
+        // = 80 bytes base + payload_size, aligned to 8 bytes
+        let int_section = size_of::<i32>() * 11; // 44 bytes
+        let int_section_aligned = (int_section + 7) & !7; // 48 bytes (aligned for pointers)
+        let ptr_section = size_of::<*const f32>() * 3 + size_of::<*mut f32>(); // 32 bytes
+        let base_size = int_section_aligned + ptr_section; // 80 bytes
         let total = base_size + payload_size;
         let task_stride = (total + 7) & !7; // Align to 8 bytes
         Self {
@@ -970,29 +977,39 @@ pub(crate) fn make_megakernel_from_llir_graph(
             .map(|s| flatten_z_strides(&range, s))
             .unwrap_or(0.into());
         node_to_task_index.insert(node, tasks.len());
+        let task_range = expressions[&range.iter().copied().product()];
+        let in_dep_a_stride_val = expressions[&in_dep_a_stride];
+        let in_dep_a_base_val = producer_barrier_bases
+            .get(&sources[0])
+            .map(|e| expressions[e])
+            .unwrap_or((-1).into());
+        let in_dep_b_stride_val = expressions[&in_dep_b_stride];
+        let in_dep_b_base_val = sources
+            .get(1)
+            .and_then(|n| producer_barrier_bases.get(n))
+            .map(|e| expressions[e])
+            .unwrap_or((-1).into());
+        let in_dep_c_stride_val = expressions[&in_dep_c_stride];
+        let in_dep_c_base_val = sources
+            .get(2)
+            .and_then(|n| producer_barrier_bases.get(n))
+            .map(|e| expressions[e])
+            .unwrap_or((-1).into());
+        let out_dep_stride_val = expressions[&out_dep_stride];
+        let out_dep_base_val = expressions[&producer_barrier_bases[&node]];
+
         tasks.push_task(
             op_code as i32,
-            expressions[&range.iter().copied().product()],
+            task_range,
             -1,
-            expressions[&in_dep_a_stride],
-            producer_barrier_bases
-                .get(&sources[0])
-                .map(|e| expressions[e])
-                .unwrap_or((-1).into()),
-            expressions[&in_dep_b_stride],
-            sources
-                .get(1)
-                .and_then(|n| producer_barrier_bases.get(n))
-                .map(|e| expressions[e])
-                .unwrap_or((-1).into()),
-            expressions[&in_dep_c_stride],
-            sources
-                .get(2)
-                .and_then(|n| producer_barrier_bases.get(n))
-                .map(|e| expressions[e])
-                .unwrap_or((-1).into()),
-            expressions[&out_dep_stride],
-            expressions[&producer_barrier_bases[&node]],
+            in_dep_a_stride_val,
+            in_dep_a_base_val,
+            in_dep_b_stride_val,
+            in_dep_b_base_val,
+            in_dep_c_stride_val,
+            in_dep_c_base_val,
+            out_dep_stride_val,
+            out_dep_base_val,
             [null(); 3],
             null_mut(),
             &payload,

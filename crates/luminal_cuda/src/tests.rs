@@ -153,12 +153,18 @@ proptest! {
     fn test_mean(rows in 1usize..8, cols in 1usize..8) {
         test_unary((rows, cols), |a| a.mean(1), |a| a.mean(1).unwrap());
     }
-}
 
-// Note: TileMatmulSplitK is verified through the llama example (examples/llama)
-// Isolated matmul tests have graph extraction issues due to how the egglog
-// pattern matching requires specific stride configurations (contiguous K for B input)
-// and additional operations to form a valid extractable graph.
+    #[test]
+    fn test_matmul(m in 1usize..128, n in 1usize..128, k in 1usize..128) {
+        // a_shape: (m, k), b_shape: (n, k) - b gets transposed to (k, n) with k-contiguous strides
+        test_binary(
+            (m, k),
+            (n, k),
+            |a, b| a.matmul(b.t()),
+            |a, b| a.matmul(&b.t().unwrap()).unwrap(),
+        );
+    }
+}
 
 /// Test that measures bandwidth utilization for a large element-wise add kernel.
 /// This demonstrates that KernelAdd can achieve reasonable bandwidth with large tensors.

@@ -11,7 +11,7 @@ use luminal::{
 
 use crate::block::BlockOp;
 
-pub type Ops = (RowAdd, RowSwishMul, RowRMSNorm, RowRope, TileMatmulSplitK);
+pub type Ops = (RowAdd, RowSwishMul, RowRMSNorm, RowRope, TileMatmulSplitK); // TileMatmulFullSplit disabled for testing
 
 #[derive(Debug, Default)]
 pub struct RowAdd {
@@ -1236,9 +1236,12 @@ impl BlockOp for TileMatmulSplitK {
 
         if (K <= 0) return;
 
-        const float* a = source_ptrs[0] + eval_expression(payload.a, current) + k_start;
-        const float* b = source_ptrs[1] + eval_expression(payload.b, current) + k_start;
-        float*       c = out_ptr + eval_expression(payload.c, current);
+        const int a_offset = eval_expression(payload.a, current);
+        const int b_offset = eval_expression(payload.b, current);
+        const int c_offset = eval_expression(payload.c, current);
+        const float* a = source_ptrs[0] + a_offset + k_start;
+        const float* b = source_ptrs[1] + b_offset + k_start;
+        float*       c = out_ptr + c_offset;
         const int m_pos = eval_expression(payload.m_pos_stride, current);
         const int n_pos = eval_expression(payload.n_pos_stride, current);
 
@@ -1376,6 +1379,412 @@ impl BlockOp for TileMatmulSplitK {
             flatten_mul_strides(&self.range, &n_pos_stride),
             flatten_mul_strides(&self.range, &k_chunk_stride),
             self.k_chunk,
+        ]
+    }
+}
+
+/// TileMatmulFullSplit: Optimally splits matmul work across SMs by computing a dynamic k_chunk_size.
+/// Unlike TileMatmulSplitK which has fixed k-chunks, this operation:
+/// 1. Computes k_chunk_size = ceil((m_tiles * n_tiles * k) / num_sm)
+/// 2. Flattens the iteration space as (m_tiles, n_tiles, k)
+/// 3. Each SM handles a contiguous span that may cross output tile boundaries
+/// 4. The kernel accumulates and stores when crossing tile boundaries
+#[derive(Debug, Default)]
+pub struct TileMatmulFullSplit {
+    sm_count: Expression,           // Number of work units (num_sm)
+    untiled_range: Vec<Expression>, // [M, N]
+    m_tiles: Expression,
+    n_tiles: Expression,
+    total_k: Expression,
+    #[allow(dead_code)]
+    a_stride: Vec<Expression>,   // Batch strides for A (reserved for batch support)
+    a_m_stride: Expression,      // A stride for m tile position (TILE_SIZE steps)
+    a_k_stride: Expression,      // A stride for k position (usually 1)
+    #[allow(dead_code)]
+    b_stride: Vec<Expression>,   // Batch strides for B (reserved for batch support)
+    b_n_stride: Expression,      // B stride for n tile position (TILE_SIZE steps)
+    b_k_stride: Expression,      // B stride for k position (usually 1)
+    #[allow(dead_code)]
+    out_stride: Vec<Expression>, // Batch strides for output (reserved for batch support)
+    out_m_stride: Expression,    // Output stride for m position within tile
+    out_n_stride: Expression,    // Output stride for n position within tile
+}
+
+impl EgglogOp for TileMatmulFullSplit {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "TileMatmulFullSplit".to_string(),
+            vec![
+                Expr,  // sm_count
+                EList, // untiled_range
+                Expr,  // m_tiles
+                Expr,  // n_tiles
+                Expr,  // total_k
+                Input, // a
+                EList, // a_stride
+                Expr,  // a_m_stride
+                Expr,  // a_k_stride
+                Input, // b
+                EList, // b_stride
+                Expr,  // b_n_stride
+                Expr,  // b_k_stride
+                EList, // out_stride
+                Expr,  // out_m_stride
+                Expr,  // out_n_stride
+            ],
+        )
+    }
+
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            // Match Mul -> Sum pattern for matmul (A row-major, B col-major)
+            format!(
+                "
+        (rule
+            (
+                ; Match Mul node
+                (= ?mul (Mul ?mul_shape ?a ?a_stride ?b ?b_stride ?mul_out_stride))
+
+                ; Match Sum that reduces the Mul (k dimension)
+                (= ?sum (Sum ?out_shape ?k ?mul ?sum_in_stride ?k_stride ?sum_out_stride))
+
+                ; Get dimensions from output shape
+                (= ?m (nth_from_end ?out_shape 1))
+                (= ?n (nth_from_end ?out_shape 0))
+                (!= ?m (MNum 0))
+                (!= ?n (MNum 0))
+
+                ; Get output strides
+                (= ?sum_out_m_stride (nth_from_end ?sum_out_stride 1))
+                (= ?sum_out_n_stride (nth_from_end ?sum_out_stride 0))
+
+                ; Get A strides
+                (= ?a_m_stride (nth_from_end ?a_stride 2))
+                (= ?a_n_stride (nth_from_end ?a_stride 1))
+                (= ?a_k_stride (nth_from_end ?a_stride 0))
+
+                ; Get B strides
+                (= ?b_m_stride (nth_from_end ?b_stride 2))
+                (= ?b_n_stride (nth_from_end ?b_stride 1))
+                (= ?b_k_stride (nth_from_end ?b_stride 0))
+
+                ; Assert contiguous k stride on output (required for reduction)
+                (= ?k_stride (MNum 1))
+
+                ; Assert A has contiguous k (row-major A)
+                (= ?a_k_stride (MNum 1))
+
+                ; Assert B has contiguous k (col-major B / transposed)
+                (= ?b_k_stride (MNum 1))
+
+                (= (F32) (dtype ?a))
+            )
+            (
+                ; Compute tiled dimensions
+                (let ?tiled_m (MCeilDiv ?m (MNum {ts})))
+                (let ?tiled_n (MCeilDiv ?n (MNum {ts})))
+
+                ; Create batch strides for A (remove k dim, scale m and n by TILE_SIZE)
+                (let ?scaled_a_stride
+                    (ReplaceNthFromEnd
+                        (ReplaceNthFromEnd ?a_stride
+                            (MMul ?a_n_stride (MNum {ts})) 1)
+                        (MMul ?a_m_stride (MNum {ts})) 2))
+                (let ?tiled_a_stride (RemoveNthFromEnd ?scaled_a_stride 0))
+
+                ; Create batch strides for B (remove k dim, scale m and n by TILE_SIZE)
+                (let ?scaled_b_stride
+                    (ReplaceNthFromEnd
+                        (ReplaceNthFromEnd ?b_stride
+                            (MMul ?b_n_stride (MNum {ts})) 1)
+                        (MMul ?b_m_stride (MNum {ts})) 2))
+                (let ?tiled_b_stride (RemoveNthFromEnd ?scaled_b_stride 0))
+
+                ; Create batch strides for output (scale m and n by TILE_SIZE)
+                (let ?tiled_out_stride
+                    (ReplaceNthFromEnd
+                        (ReplaceNthFromEnd ?sum_out_stride
+                            (MMul ?sum_out_n_stride (MNum {ts})) 0)
+                        (MMul ?sum_out_m_stride (MNum {ts})) 1))
+
+                (let ?tm (TileMatmulFullSplit
+                    (MNum {sm_count})
+                    ?out_shape
+                    ?tiled_m ?tiled_n ?k
+                    ?a ?tiled_a_stride ?a_m_stride (MNum 1)
+                    ?b ?tiled_b_stride ?b_n_stride (MNum 1)
+                    ?tiled_out_stride ?sum_out_m_stride ?sum_out_n_stride))
+                (union ?sum ?tm)
+                (set (dtype ?tm) (F32))
+            )
+            :name \"tile matmul full split\"
+        )",
+                ts = TILE_SIZE,
+                sm_count = 132 // Default SM count, will be runtime-evaluated
+            ),
+        ]
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn extract<'a>(
+        &self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        (
+            LLIROp::new::<dyn BlockOp>(Box::new(Self {
+                sm_count: extract_expr(egraph, children[0], expr_cache).unwrap(),
+                untiled_range: extract_expr_list(egraph, children[1], list_cache, expr_cache)
+                    .unwrap(),
+                m_tiles: extract_expr(egraph, children[2], expr_cache).unwrap(),
+                n_tiles: extract_expr(egraph, children[3], expr_cache).unwrap(),
+                total_k: extract_expr(egraph, children[4], expr_cache).unwrap(),
+                a_stride: extract_expr_list(egraph, children[6], list_cache, expr_cache).unwrap(),
+                a_m_stride: extract_expr(egraph, children[7], expr_cache).unwrap(),
+                a_k_stride: extract_expr(egraph, children[8], expr_cache).unwrap(),
+                b_stride: extract_expr_list(egraph, children[10], list_cache, expr_cache).unwrap(),
+                b_n_stride: extract_expr(egraph, children[11], expr_cache).unwrap(),
+                b_k_stride: extract_expr(egraph, children[12], expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, children[13], list_cache, expr_cache)
+                    .unwrap(),
+                out_m_stride: extract_expr(egraph, children[14], expr_cache).unwrap(),
+                out_n_stride: extract_expr(egraph, children[15], expr_cache).unwrap(),
+            })),
+            vec![children[5], children[9]],
+        )
+    }
+}
+
+impl BlockOp for TileMatmulFullSplit {
+    fn op_name(&self) -> &'static str {
+        "TileMatmulFullSplit"
+    }
+
+    fn launch_range(&self) -> Vec<Expression> {
+        // Launch exactly sm_count work units
+        vec![self.sm_count]
+    }
+
+    fn output_size(&self) -> Expression {
+        self.untiled_range.iter().copied().product::<Expression>()
+    }
+
+    fn producer_barriers_seperate(&self) -> Vec<bool> {
+        // Only one dimension (sm index), and multiple SMs may write to same output tile
+        // via atomicAdd, so NOT separable
+        vec![false]
+    }
+
+    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+        // Each SM reads potentially all of A and B
+        // Not separable since work assignment crosses tile boundaries
+        vec![vec![false], vec![false]]
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        let m = self.untiled_range[0];
+        let n = self.untiled_range[1];
+        m * n * 4
+    }
+
+    fn flops(&self) -> Expression {
+        let m = self.untiled_range[0];
+        let n = self.untiled_range[1];
+        let k = self.total_k;
+        m * n * k * 2
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        let m = self.untiled_range[0];
+        let n = self.untiled_range[1];
+        let k = self.total_k;
+        (m * k + k * n) * 4
+    }
+
+    fn cuda_struct(&self) -> String {
+        "const int untiled_range[2]; int m_tiles; int n_tiles; int total_k; int sm_count; const int a; int a_m_stride; int a_k_stride; int a_width; const int b; int b_n_stride; int b_k_stride; int b_width; const int c; int c_m_stride; int c_n_stride; int c_width;".to_string()
+    }
+
+    fn cuda_function(&self) -> String {
+        format!(r#"
+        // TileMatmulFullSplit: Each SM handles a span of the flattened (m_tiles, n_tiles, k) space
+        const int m_tiles = eval_expression(payload.m_tiles, 0);
+        const int n_tiles = eval_expression(payload.n_tiles, 0);
+        const int total_k = eval_expression(payload.total_k, 0);
+        const int sm_count = eval_expression(payload.sm_count, 0);
+        const int M = eval_expression(payload.untiled_range[0], 0);
+        const int N = eval_expression(payload.untiled_range[1], 0);
+
+        const int total_work = m_tiles * n_tiles * total_k;
+        const int k_chunk_size = (total_work + sm_count - 1) / sm_count;
+        const int k_start = current * k_chunk_size;
+        const int k_end = min(k_start + k_chunk_size, total_work);
+
+        if (k_start >= total_work) return;
+
+        const float* a_base = source_ptrs[0] + eval_expression(payload.a, current);
+        const float* b_base = source_ptrs[1] + eval_expression(payload.b, current);
+        float* c_base = out_ptr + eval_expression(payload.c, current);
+
+        const int a_m_stride = eval_expression(payload.a_m_stride, 0);
+        const int a_k_stride = eval_expression(payload.a_k_stride, 0);
+        const int b_n_stride = eval_expression(payload.b_n_stride, 0);
+        const int b_k_stride = eval_expression(payload.b_k_stride, 0);
+        const int c_m_stride = eval_expression(payload.c_m_stride, 0);
+        const int c_n_stride = eval_expression(payload.c_n_stride, 0);
+
+        constexpr int TILE_SIZE = {ts};
+        const int threads = blockDim.x;
+
+        // Shared memory for accumulator tile and tile tracking
+        __shared__ float acc_tile[TILE_SIZE * TILE_SIZE];
+        __shared__ int shared_prev_m_tile;
+        __shared__ int shared_prev_n_tile;
+
+        // Initialize shared state (thread 0 only)
+        if (t == 0) {{
+            shared_prev_m_tile = -1;
+            shared_prev_n_tile = -1;
+        }}
+
+        // Initialize accumulator
+        for (int i = t; i < TILE_SIZE * TILE_SIZE; i += threads) {{
+            acc_tile[i] = 0.0f;
+        }}
+        __syncthreads();
+
+        // Process the assigned work span
+        for (int work_idx = k_start; work_idx < k_end; work_idx++) {{
+            // Decode work_idx into (m_tile, n_tile, k_pos)
+            // Layout: (m_tiles, n_tiles, k) with k varying fastest
+            const int k_pos = work_idx % total_k;
+            const int tile_idx = work_idx / total_k;
+            const int n_tile = tile_idx % n_tiles;
+            const int m_tile = tile_idx / n_tiles;
+
+            // All threads read the shared tile state
+            const int prev_m_tile = shared_prev_m_tile;
+            const int prev_n_tile = shared_prev_n_tile;
+
+            // Check if we crossed a tile boundary
+            if (m_tile != prev_m_tile || n_tile != prev_n_tile) {{
+                // Store previous tile if we had one
+                if (prev_m_tile != -1) {{
+                    // Compute output tile bounds
+                    const int out_m0 = prev_m_tile * TILE_SIZE;
+                    const int out_n0 = prev_n_tile * TILE_SIZE;
+                    const int tile_m = min(TILE_SIZE, M - out_m0);
+                    const int tile_n = min(TILE_SIZE, N - out_n0);
+                    const int tile_elems = tile_m * tile_n;
+
+                    // Store with atomicAdd
+                    for (int i = t; i < tile_elems; i += threads) {{
+                        const int ty = i / tile_n;
+                        const int tx = i % tile_n;
+                        atomicAdd(&c_base[(out_m0 + ty) * c_m_stride + (out_n0 + tx) * c_n_stride], acc_tile[ty * TILE_SIZE + tx]);
+                    }}
+                    __syncthreads();
+
+                    // Reset accumulator
+                    for (int i = t; i < TILE_SIZE * TILE_SIZE; i += threads) {{
+                        acc_tile[i] = 0.0f;
+                    }}
+                }}
+
+                // Update shared tile state (thread 0 only)
+                if (t == 0) {{
+                    shared_prev_m_tile = m_tile;
+                    shared_prev_n_tile = n_tile;
+                }}
+                __syncthreads();
+            }}
+
+            // Compute pointers for this k position
+            const int global_m0 = m_tile * TILE_SIZE;
+            const int global_n0 = n_tile * TILE_SIZE;
+            const int tile_m = min(TILE_SIZE, M - global_m0);
+            const int tile_n = min(TILE_SIZE, N - global_n0);
+
+            // Accumulate outer product: A[:, k] * B[k, :]
+            // Each thread handles some elements of the tile
+            const int tile_elems = tile_m * tile_n;
+            for (int i = t; i < tile_elems; i += threads) {{
+                const int ty = i / tile_n;
+                const int tx = i % tile_n;
+                const float a_val = a_base[(global_m0 + ty) * a_m_stride + k_pos * a_k_stride];
+                const float b_val = b_base[(global_n0 + tx) * b_n_stride + k_pos * b_k_stride];
+                acc_tile[ty * TILE_SIZE + tx] += a_val * b_val;
+            }}
+            __syncthreads();  // Sync after each k iteration
+        }}
+
+        // Store final tile
+        const int final_prev_m = shared_prev_m_tile;
+        const int final_prev_n = shared_prev_n_tile;
+        if (final_prev_m != -1) {{
+            const int out_m0 = final_prev_m * TILE_SIZE;
+            const int out_n0 = final_prev_n * TILE_SIZE;
+            const int tile_m = min(TILE_SIZE, M - out_m0);
+            const int tile_n = min(TILE_SIZE, N - out_n0);
+            const int tile_elems = tile_m * tile_n;
+
+            for (int i = t; i < tile_elems; i += threads) {{
+                const int ty = i / tile_n;
+                const int tx = i % tile_n;
+                atomicAdd(&c_base[(out_m0 + ty) * c_m_stride + (out_n0 + tx) * c_n_stride], acc_tile[ty * TILE_SIZE + tx]);
+            }}
+        }}
+        "#, ts = TILE_SIZE)
+    }
+
+    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+        CStruct::new()
+            .ints(
+                &self
+                    .untiled_range
+                    .iter()
+                    .map(|e| expressions[e])
+                    .collect_vec(),
+            )
+            .int(expressions[&self.m_tiles])
+            .int(expressions[&self.n_tiles])
+            .int(expressions[&self.total_k])
+            .int(expressions[&self.sm_count])
+            .int(expressions[&flatten_mul_strides(&[self.sm_count], &[0.into()])])
+            .int(expressions[&self.a_m_stride])
+            .int(expressions[&self.a_k_stride])
+            .int(expressions[&self.a_m_stride]) // a_width = a_m_stride for row-major
+            .int(expressions[&flatten_mul_strides(&[self.sm_count], &[0.into()])])
+            .int(expressions[&self.b_n_stride])
+            .int(expressions[&self.b_k_stride])
+            .int(expressions[&self.b_n_stride]) // b_width = b_n_stride for col-major
+            .int(expressions[&flatten_mul_strides(&[self.sm_count], &[0.into()])])
+            .int(expressions[&self.out_m_stride])
+            .int(expressions[&self.out_n_stride])
+            .int(expressions[&self.out_m_stride]) // c_width = c_m_stride
+            .finish_struct()
+    }
+
+    fn expressions(&self) -> Vec<Expression> {
+        vec![
+            self.untiled_range[0],
+            self.untiled_range[1],
+            self.m_tiles,
+            self.n_tiles,
+            self.total_k,
+            self.sm_count,
+            flatten_mul_strides(&[self.sm_count], &[0.into()]),
+            self.a_m_stride,
+            self.a_k_stride,
+            self.b_n_stride,
+            self.b_k_stride,
+            self.out_m_stride,
+            self.out_n_stride,
         ]
     }
 }

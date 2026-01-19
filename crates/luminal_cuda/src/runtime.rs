@@ -199,10 +199,11 @@ impl CudaRuntime {
                 work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
             }
         }
-        for edge in self
+        let outgoing_edges: Vec<_> = self
             .llir_graph
             .edges_directed(llir_node, Direction::Outgoing)
-        {
+            .collect();
+        for edge in outgoing_edges {
             let dest = edge.target();
             let n_input = self
                 .llir_graph
@@ -322,6 +323,9 @@ impl Runtime for CudaRuntime {
 
     #[tracing::instrument(skip_all)]
     fn load_llir(&mut self, llir_graph: &LLIRGraph) {
+        // Clear intermediate buffers when loading new graph - they need to be
+        // reallocated and re-registered with the new work_queue
+        self.buffers.clear();
         self.exec_graph.clear();
         let block_ops_in_graph = llir_graph
             .node_indices()
