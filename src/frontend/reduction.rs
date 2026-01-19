@@ -54,6 +54,11 @@ impl GraphTensor {
         GraphTensor::from_id(id, shape.contiguous(), self.graph_ref, self.dtype)
     }
 
+    /// Reduce a dimension of the tensor by taking the minimum of all elements along that axis.
+    pub fn min(self, axes: impl ToAxes) -> GraphTensor {
+        -(-self).max(axes)
+    }
+
     /// Reduce a dimension of the tensor by taking the mean of all elements along that axis.
     pub fn mean(self, axes: impl ToAxes) -> GraphTensor {
         let reduced_elements = axes
@@ -94,6 +99,14 @@ mod tests {
         #[test]
         fn test_max(rows in 1usize..8, cols in 1usize..8) {
             test_unary((rows, cols), |a| a.max(1), |a| a.max(1).unwrap());
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+        #[test]
+        fn test_min(rows in 1usize..8, cols in 1usize..8) {
+            test_unary((rows, cols), |a| a.min(1), |a| a.min(1).unwrap());
         }
     }
 
