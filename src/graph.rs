@@ -779,12 +779,17 @@ pub fn egglog_to_llir(
             if egraph.enodes[node].0.as_str() == "CustomOpHLIR" {
                 // Extract custom op inputs and id
                 let mut inputs = vec![];
-                let mut ch = &egraph.eclasses[&egraph.enodes[node].1[0]].1[0];
+                // Walk through the IList to get inputs - use choice[] for IR eclasses to get the chosen enode
+                let ilist_eclass = &egraph.enodes[node].1[0];
+                let mut ch = &egraph.eclasses[ilist_eclass].1[0];
                 loop {
                     if egraph.enodes[ch].0 == "INil" {
                         break;
                     } else {
-                        inputs.push(&egraph.eclasses[&egraph.enodes[ch].1[0]].1[0]);
+                        // The first child of ICons is an IR node - use choice[] to get the chosen enode
+                        let input_eclass = &egraph.enodes[ch].1[0];
+                        inputs.push(choice[input_eclass]);
+                        // The second child of ICons is the rest of the IList
                         ch = &egraph.eclasses[&egraph.enodes[ch].1[1]].1[0];
                     }
                 }

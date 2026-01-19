@@ -198,7 +198,8 @@ impl EgglogOp for RowSwishMul {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["(rule
+        vec![
+            "(rule
             (
                 (= ?sigmoid (Sigmoid
                     (ECons ?batch (ECons ?width (ENil)))
@@ -238,7 +239,8 @@ impl EgglogOp for RowSwishMul {
             )
             :name \"row swish mul\"
         )"
-        .to_string()]
+            .to_string(),
+        ]
     }
 
     fn cleanup(&self) -> bool {
@@ -350,7 +352,8 @@ impl EgglogOp for RowRMSNorm {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["(rule
+        vec![
+            "(rule
             (
                 (= ?square (Mul ?inp_range ?x ?inp_stride ?x ?inp_stride ?square_stride))
                 (= ?width (nth_from_end ?inp_range 0))
@@ -438,7 +441,8 @@ impl EgglogOp for RowRMSNorm {
             )
             :name \"row rms norm\"
         )"
-        .to_string()]
+            .to_string(),
+        ]
     }
 
     fn cleanup(&self) -> bool {
@@ -602,14 +606,16 @@ impl EgglogOp for RowRope {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["(rule
+        vec![
+            "(rule
            (
                 (= ?e (RowRope ?shape ?inp ?stride ?row_width ?pos_ids))
                 (= (F32) (dtype ?inp))
             )
            ((set (dtype ?e) (F32)))
         )"
-        .to_string()]
+            .to_string(),
+        ]
     }
 
     fn early_rewrites(&self) -> Vec<String> {
@@ -1013,6 +1019,9 @@ impl EgglogOp for TileMatmul {
                 (let ?tm (TileMatmul ?sum_shape ?untiled_sum_shape ?iters ?a ?new_a_stride (MMul ?t_k (MNum {ts})) (MNum 1) ?b ?new_b_stride (MNum 1) (MMul ?t_n (MNum {ts})) ?sum_out_stride (MMul ?t_n (MNum {ts})) (MNum 1)))
                 (union ?ts ?tm)
                 (set (dtype ?tm) (F32))
+                ; Subsume TileSum and CubeMul so they aren't chosen over TileMatmul
+                (subsume (TileSum ?sum_shape ?untiled_sum_shape ?iters ?cm ?sum_in_stride ?sum_in_m_stride ?sum_in_n_stride ?sum_in_k_stride ?sum_out_stride ?sum_out_m_stride ?sum_out_n_stride))
+                (subsume (CubeMul ?mul_shape ?untiled_mul_shape ?a ?a_stride ?a_m_stride ?a_n_stride ?a_k_stride ?b ?b_stride ?b_m_stride ?b_n_stride ?b_k_stride ?out_stride ?out_m_stride ?out_n_stride ?out_k_stride))
             )
         )", ts = TILE_SIZE),
         format!("
@@ -1059,6 +1068,9 @@ impl EgglogOp for TileMatmul {
                             ?sum_out_stride (MMul ?t_n (MNum {ts})) (MNum 1)))
                 (union ?ts ?tm)
                 (set (dtype ?tm) (F32))
+                ; Subsume TileSum and CubeMul so they aren't chosen over TileMatmul
+                (subsume (TileSum ?sum_shape ?untiled_sum_shape ?iters ?cm ?sum_in_stride ?sum_in_m_stride ?sum_in_n_stride ?sum_in_k_stride ?sum_out_stride ?sum_out_m_stride ?sum_out_n_stride))
+                (subsume (CubeMul ?mul_shape ?untiled_mul_shape ?a ?a_stride ?a_m_stride ?a_n_stride ?a_k_stride ?b ?b_stride ?b_m_stride ?b_n_stride ?b_k_stride ?out_stride ?out_m_stride ?out_n_stride ?out_k_stride))
             )
             :name \"cube mul\"
         )

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{cuda_dtype, kernel::KernelOp};
 use cudarc::{
     driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream},
-    nvrtc::{compile_ptx, CompileOptions},
+    nvrtc::{CompileOptions, compile_ptx},
 };
 use itertools::Itertools;
 use luminal::{
@@ -18,7 +18,7 @@ pub type Ops = (
     KernelMul,
     KernelIota,
     KernelGather,
-    // KernelSumReduce, // for some reason this prevents llama example from working. fairly certian there's an underlying bug in search or extraction.
+    KernelSumReduce,
     KernelMaxReduce,
     KernelMeanReduce,
     KernelArgsort,
@@ -199,16 +199,16 @@ extern \"C\" {{
         extern __shared__ char shared_mem[];
         {dtype} *shmem_vals = ({dtype}*)shared_mem;
         int *shmem_idx = (int*)(shmem_vals + SHMEM_LIMIT);
-        
+
         int const_z = blockIdx.x;
         int tid = threadIdx.x;
-        
+
         int in_base = {in_index};
         int out_base = {out_index};
         int N = {iters};
         int in_stride = {iter_stride};
         int out_stride = {out_stride};
-        
+
         {dtype} *vals;
         int *idx;
         int idx_stride;
@@ -227,13 +227,13 @@ extern \"C\" {{
             idx = output + out_base;
             idx_stride = out_stride;
         }}
-        
+
         // init indices
         for (int i = tid; i < N; i += THREADS_PER_BLOCK) {{
             idx[i * idx_stride] = i;
         }}
         __syncthreads();
-        
+
         // odd even transposition sort
         // https://www.geeksforgeeks.org/dsa/odd-even-transposition-sort-brick-sort-using-pthreads/
         for (int phase = 0; phase < N; phase++) {{
@@ -241,7 +241,7 @@ extern \"C\" {{
             for (int i = tid; i < N / 2; i += THREADS_PER_BLOCK) {{
                 int left = 2 * i + p2;
                 int right = 2 * i + 1 + p2;
-                
+
                 if (right < N) {{
                     int idx_l = idx[left * idx_stride];
                     int idx_r = idx[right * idx_stride];
@@ -257,7 +257,7 @@ extern \"C\" {{
             }}
             __syncthreads();
         }}
-        
+
         // only need to write back if using shmem
         if (use_shmem) {{
             for (int i = tid; i < N; i += THREADS_PER_BLOCK) {{
@@ -327,7 +327,8 @@ impl EgglogOp for KernelMaxReduce {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["
+        vec![
+            "
 (rule
     (
         (= ?a (Max ?out_shape ?iters ?inp ?in_stride ?iter_stride ?out_stride))
@@ -338,7 +339,8 @@ impl EgglogOp for KernelMaxReduce {
     )
     :name \"kernel max reduce\"
 )"
-        .to_string()]
+            .to_string(),
+        ]
     }
 
     fn cleanup(&self) -> bool {
@@ -705,7 +707,8 @@ impl EgglogOp for KernelSumReduce {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["
+        vec![
+            "
 (rule
     (
         (= ?a (Sum ?out_shape ?iters ?inp ?in_stride ?iter_stride ?out_stride))
@@ -716,7 +719,8 @@ impl EgglogOp for KernelSumReduce {
     )
     :name \"kernel sum reduce\"
 )"
-        .to_string()]
+            .to_string(),
+        ]
     }
 
     fn cleanup(&self) -> bool {
@@ -1290,7 +1294,8 @@ impl EgglogOp for KernelIota {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["
+        vec![
+            "
 (rule
     (
         (= ?a (Iota ?expr ?range))
@@ -1302,7 +1307,8 @@ impl EgglogOp for KernelIota {
     )
     :name \"kernel iota\"
 )"
-        .to_string()]
+            .to_string(),
+        ]
     }
 
     fn cleanup(&self) -> bool {

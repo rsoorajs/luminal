@@ -2,7 +2,7 @@ use candle_core::{Device, Tensor};
 use cudarc::driver::CudaContext;
 use luminal::prelude::*;
 use proptest::prelude::*;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 
 use crate::cuda_bandwidth_gbps;
@@ -292,10 +292,9 @@ pub fn cuda_argsort_test() {
     ctx.bind_to_thread().unwrap();
     let stream = ctx.default_stream();
     cx.build_search_space::<CudaRuntime>();
-    let mut rt = CudaRuntime::initialize((ctx, stream, FxHashMap::default()));
+    let mut rt = CudaRuntime::initialize(stream);
     rt.set_data(input, data);
     rt = cx.search(rt, 10);
-    rt.allocate_intermediate_buffers(&cx.dyn_map);
     rt.execute(&cx.dyn_map);
 
     let out_dim0 = rt.get_i32(sorted_dim0.id).clone();

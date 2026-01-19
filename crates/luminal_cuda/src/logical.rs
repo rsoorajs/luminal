@@ -170,7 +170,8 @@ impl EgglogOp for Exp {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec!["(rule
+        vec![
+            "(rule
             (
                 (= ?exp_const (Constant 1.442695))
                 (= ?mul (Mul ?shape ?x ?x_stride ?exp_const ?const_stride ?intermediate_stride))
@@ -183,7 +184,8 @@ impl EgglogOp for Exp {
                 (set (dtype ?exp) ?dt)
             )
         )"
-        .to_string()]
+            .to_string(),
+        ]
     }
 }
 

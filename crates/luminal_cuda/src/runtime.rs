@@ -4,7 +4,7 @@ use crate::{
     kernel::KernelOp,
 };
 use cudarc::driver::{
-    sys::CUevent_flags, CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
+    CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg, sys::CUevent_flags,
 };
 
 use fixedbitset::FixedBitSet;
@@ -12,10 +12,10 @@ use itertools::Itertools;
 use luminal::hlir::*;
 use luminal::prelude::{
     petgraph::{
-        algo::{toposort, Cycle},
+        Directed, Direction,
+        algo::{Cycle, toposort},
         prelude::StableGraph,
         visit::{EdgeRef, NodeIndexable},
-        Directed, Direction,
     },
     *,
 };
@@ -178,17 +178,17 @@ impl CudaRuntime {
         let mmap = unsafe { MmapOptions::new().map(&f).unwrap() };
         let st = SafeTensors::deserialize(&mmap).unwrap();
         for node in cx.graph.node_indices() {
-            if let Some(Input { label, .. }) = (*cx.graph[node]).as_any().downcast_ref::<Input>() {
-                if let Ok(tensor) = st.tensor(label) {
-                    match tensor.dtype() {
-                        safetensors::Dtype::F32 => {
-                            let bytes = tensor.data();
-                            let f32s: &[f32] = bytemuck::cast_slice(bytes);
-                            let dev = f32s.to_cuda_input(&self.cuda_stream);
-                            self.hlir_buffers.insert(node, dev);
-                        }
-                        dtype => unimplemented!("{dtype} loading not supported yet"),
+            if let Some(Input { label, .. }) = (*cx.graph[node]).as_any().downcast_ref::<Input>()
+                && let Ok(tensor) = st.tensor(label)
+            {
+                match tensor.dtype() {
+                    safetensors::Dtype::F32 => {
+                        let bytes = tensor.data();
+                        let f32s: &[f32] = bytemuck::cast_slice(bytes);
+                        let dev = f32s.to_cuda_input(&self.cuda_stream);
+                        self.hlir_buffers.insert(node, dev);
                     }
+                    dtype => unimplemented!("{dtype} loading not supported yet"),
                 }
             }
         }
@@ -251,10 +251,9 @@ impl CudaRuntime {
             .node_to_exec
             .get(&llir_node)
             .and_then(|n| self.exec_graph.node_weight_mut(*n))
+            && self.llir_graph[llir_node].to_op::<Input>().is_none()
         {
-            if self.llir_graph[llir_node].to_op::<Input>().is_none() {
-                work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
-            }
+            work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
         }
         for edge in self
             .llir_graph
@@ -726,44 +725,26 @@ impl Runtime for CudaRuntime {
                             }
                         }
 
-                        let shared_mem_max = self
-                            .cuda_stream.context()
-                            .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR)
-                            .unwrap();
-
-                        interpreter.set_attribute(
-                            cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                            shared_mem_max / 2, // Half shared mem, half L2
-                        ).unwrap();
-
-                        // Launch kernel config
-                        let cfg = LaunchConfig {
-                            grid_dim: (sm_count as u32, 1, 1), // One block per SM
-                            block_dim: (1024, 1, 1),           // 1024 threads (32 warps) per block
-                            shared_mem_bytes: (shared_mem_max / 2) as u32,
-                        };
-
-                        (
-                            d_barriers,
-                            d_tasks,
-                            d_head,
-                            queue_lock,
-                            timing_buffer,
-                            start_time,
-                            cfg,
+                    let per_block_optin = self.cuda_stream.context().attribute(
+                        CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
+                    ).unwrap();
+                    let static_shared = interpreter
+                        .get_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)
+                        .unwrap();
+                    let max_dynamic_allowed = (per_block_optin - static_shared).max(0);
+                    interpreter
+                        .set_attribute(
+                            CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                            max_dynamic_allowed,
                         )
+                        .unwrap();
+
+                    // Launch kernel
+                    let cfg = LaunchConfig {
+                        grid_dim: (sm_count as u32, 1, 1), // One block per SM
+                        block_dim: (256, 1, 1),            // 1024 threads (32 warps) per block
+                        shared_mem_bytes: max_dynamic_allowed as u32,
                     };
-
-                    let _span = span!(
-                        Level::INFO,
-                        "megakernel_execute",
-                        sm_count = sm_count,
-                        grid_dim = ?(cfg.grid_dim.0, cfg.grid_dim.1, cfg.grid_dim.2),
-                        block_dim = ?(cfg.block_dim.0, cfg.block_dim.1, cfg.block_dim.2),
-                        shared_mem_bytes = cfg.shared_mem_bytes
-                    )
-                    .entered();
-
                     let mut lb = self.cuda_stream.launch_builder(interpreter);
                     let n_tasks = work_queue.len() as i32;
                     lb.arg(&d_tasks);
@@ -909,25 +890,25 @@ impl CudaRuntime {
         let mut prologue_c_flops: Vec<usize> = vec![0; op_names.len()];
 
         for node in llir_graph.node_indices() {
-            if let Some(op) = llir_graph[node].to_dialect::<dyn BlockOp>() {
-                if let Some(&idx) = op_name_to_idx.get(op.op_name()) {
-                    let flops_expr = op.flops();
-                    let flops_val = flops_expr.exec(dyn_map).unwrap();
-                    op_bytes_loaded[idx] += op.bytes_loaded().exec(dyn_map).unwrap();
-                    op_bytes_stored[idx] += op.bytes_stored().exec(dyn_map).unwrap();
-                    op_flops[idx] += flops_val;
+            if let Some(op) = llir_graph[node].to_dialect::<dyn BlockOp>()
+                && let Some(&idx) = op_name_to_idx.get(op.op_name())
+            {
+                let flops_expr = op.flops();
+                let flops_val = flops_expr.exec(dyn_map).unwrap();
+                op_bytes_loaded[idx] += op.bytes_loaded().exec(dyn_map).unwrap();
+                op_bytes_stored[idx] += op.bytes_stored().exec(dyn_map).unwrap();
+                op_flops[idx] += flops_val;
 
-                    // Aggregate prologue metrics
-                    prologue_a_bytes_loaded[idx] +=
-                        op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
-                    prologue_a_flops[idx] += op.prologue_a_flops().exec(dyn_map).unwrap_or(0);
-                    prologue_b_bytes_loaded[idx] +=
-                        op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
-                    prologue_b_flops[idx] += op.prologue_b_flops().exec(dyn_map).unwrap_or(0);
-                    prologue_c_bytes_loaded[idx] +=
-                        op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
-                    prologue_c_flops[idx] += op.prologue_c_flops().exec(dyn_map).unwrap_or(0);
-                }
+                // Aggregate prologue metrics
+                prologue_a_bytes_loaded[idx] +=
+                    op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                prologue_a_flops[idx] += op.prologue_a_flops().exec(dyn_map).unwrap_or(0);
+                prologue_b_bytes_loaded[idx] +=
+                    op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                prologue_b_flops[idx] += op.prologue_b_flops().exec(dyn_map).unwrap_or(0);
+                prologue_c_bytes_loaded[idx] +=
+                    op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                prologue_c_flops[idx] += op.prologue_c_flops().exec(dyn_map).unwrap_or(0);
             }
         }
 
@@ -1249,6 +1230,7 @@ impl CudaRuntime {
         println!();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn print_stat_row(
         &self,
         name: &str,
@@ -1568,10 +1550,10 @@ fn would_violate(
     // If p ∈ Px(x), block cannot contain any node in Sx(x)
     if let Some(ws) = px_witnesses.get(&p) {
         for &x in ws {
-            if let Some(sx) = sx_map.get(&x) {
-                if intersects(block_bits, sx) {
-                    return true;
-                }
+            if let Some(sx) = sx_map.get(&x)
+                && intersects(block_bits, sx)
+            {
+                return true;
             }
         }
     }
@@ -1579,10 +1561,10 @@ fn would_violate(
     // If p ∈ Sx(x), block cannot contain any node in Px(x)
     if let Some(ws) = sx_witnesses.get(&p) {
         for &x in ws {
-            if let Some(px) = px_map.get(&x) {
-                if intersects(block_bits, px) {
-                    return true;
-                }
+            if let Some(px) = px_map.get(&x)
+                && intersects(block_bits, px)
+            {
+                return true;
             }
         }
     }
