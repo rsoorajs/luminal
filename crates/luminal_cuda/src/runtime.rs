@@ -241,13 +241,6 @@ impl CudaRuntime {
             .collect_vec()
     }
 
-    pub fn get_i32(&self, id: impl ToId) -> Vec<i32> {
-        self.get_output_data(id)
-            .chunks_exact(4)
-            .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-            .collect_vec()
-    }
-
     fn register_buffer(&mut self, llir_node: NodeIndex, ptr: u64) {
         // Remap pointers in work queue
         if let Some(ExecutableKernel::Megakernel {
@@ -532,7 +525,6 @@ impl Runtime for CudaRuntime {
     #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
         if self.buffers.is_empty()
-            || true
             || dyn_map.len() != self.last_dyn_map.len()
             || dyn_map
                 .iter()
@@ -670,7 +662,7 @@ impl Runtime for CudaRuntime {
                     let tflops = (flop_count as f64) / (kernel_time_us * 1e-6) / 1e12;
 
                     kernel_stats.push(KernelStats {
-                        name: *kernel_name,
+                        name: kernel_name,
                         execution_time_us: kernel_time_us,
                         bytes_loaded: loaded,
                         bytes_stored: stored,
@@ -725,7 +717,7 @@ impl Runtime for CudaRuntime {
 
                         // Set up dyn dims
                         for (dyn_dim, val) in dyn_map {
-                            if let Some(global) = interpreter_constants.get_mut(&dyn_dim) {
+                            if let Some(global) = interpreter_constants.get_mut(dyn_dim) {
                                 let mut view = global.as_view_mut();
                                 let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
                                 self.cuda_stream
