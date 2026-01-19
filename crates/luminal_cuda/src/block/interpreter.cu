@@ -160,8 +160,7 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
 
     // Thread 0 calculates dependencies and waits for inputs
     if (threadIdx.x == 0) {
-      __threadfence();
-
+      // Note: atomic_load_acquire provides visibility for ready array
       dep_a = (t->in_dep_a_base == -1
                    ? 0
                    : (eval_expression(t->in_dep_a_base, 0) +
@@ -191,22 +190,47 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
     __syncthreads();
 
     bool a_done = false, b_done = false, c_done = false, tmp;
+    // Optimize: if deps are same, reuse atomic load result
+    const bool ab_same = (dep_a == dep_b);
+    const bool ac_same = (dep_a == dep_c);
+    const bool bc_same = (dep_b == dep_c);
+
     while (true) {
       if (threadIdx.x == 0) {
-        // Derive x_done and run_x_prologue
-        tmp = !a_done && atomic_load_acquire(&ready[dep_a]) <= 0;
-        run_a_prologue = tmp;
-        a_done |= tmp;
-        tmp = !b_done && atomic_load_acquire(&ready[dep_b]) <= 0;
-        run_b_prologue = tmp;
-        b_done |= tmp;
-        tmp = !c_done && atomic_load_acquire(&ready[dep_c]) <= 0;
-        run_c_prologue = tmp;
-        c_done |= tmp;
+        // Derive x_done and run_x_prologue with optimized atomic loads
+        if (!a_done) {
+          tmp = atomic_load_acquire(&ready[dep_a]) <= 0;
+          if (tmp) {
+            run_a_prologue = true;
+            a_done = true;
+            // Propagate to same deps
+            if (ab_same) { run_b_prologue = true; b_done = true; }
+            if (ac_same) { run_c_prologue = true; c_done = true; }
+          }
+        }
+        if (!b_done && !ab_same) {
+          tmp = atomic_load_acquire(&ready[dep_b]) <= 0;
+          if (tmp) {
+            run_b_prologue = true;
+            b_done = true;
+            if (bc_same) { run_c_prologue = true; c_done = true; }
+          }
+        }
+        if (!c_done && !ac_same && !bc_same) {
+          tmp = atomic_load_acquire(&ready[dep_c]) <= 0;
+          if (tmp) {
+            run_c_prologue = true;
+            c_done = true;
+          }
+        }
         if (a_done && b_done && c_done)
           stop_wait_loop = true;
       }
       __syncthreads();
+
+      // Early exit if all dependencies satisfied (skip prologue checks)
+      if (stop_wait_loop)
+        break;
 
       if (run_a_prologue) {
         switch (t->op) {
@@ -234,9 +258,6 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
       }
 
       __syncthreads();
-      if (stop_wait_loop)
-        break;
-      // nanosleep removed - rely on __syncthreads for throttling
     }
     if (threadIdx.x == 0)
       record_event(timings, &recorded_event,

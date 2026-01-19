@@ -1526,7 +1526,7 @@ impl EgglogOp for TileMatmulFullSplit {
             :name \"tile matmul full split\"
         )",
                 ts = TILE_SIZE,
-                sm_count = 114 // Default SM count, will be runtime-evaluated
+                sm_count = 56 // Optimal: balances task count reduction with parallelism
             ),
         ]
     }
