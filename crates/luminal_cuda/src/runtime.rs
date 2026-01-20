@@ -123,6 +123,9 @@ pub struct CudaRuntime {
     // Raw stats saved during execute, interpreted lazily in print_execution_stats
     pub last_kernel_stats: Vec<KernelStats>,
     pub last_total_time_us: f64,
+    // Coordination buffer for TileMatmulFullSplit to avoid pre-zeroing outputs
+    coordination_buffer: Option<CudaSlice<u32>>,
+    matmul_output_sizes: Vec<Expression>,
 }
 
 impl CudaRuntime {
@@ -324,6 +327,8 @@ impl Runtime for CudaRuntime {
             intermediate_buffer_dims: FxHashSet::default(),
             last_kernel_stats: vec![],
             last_total_time_us: 0.0,
+            coordination_buffer: None,
+            matmul_output_sizes: vec![],
         }
     }
 
@@ -403,6 +408,23 @@ impl Runtime for CudaRuntime {
         self.exec_graph = exec_graph;
         self.llir_graph = llir_graph.clone();
         self.node_to_exec = node_to_exec;
+
+        // Collect all matmul output sizes for coordination buffer
+        self.matmul_output_sizes = llir_graph
+            .node_indices()
+            .filter_map(|n| {
+                llir_graph[n]
+                    .to_dialect::<dyn crate::block::BlockOp>()
+                    .and_then(|op| {
+                        if op.op_name() == "TileMatmulFullSplit" {
+                            // Get the untiled_range [M, N] to calculate M * N output elements
+                            Some(op.output_size())
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .collect();
     }
 
     #[tracing::instrument(skip_all)]
@@ -483,11 +505,28 @@ impl Runtime for CudaRuntime {
         {
             self.last_dyn_map = dyn_map.clone();
             self.allocate_intermediate_buffers(dyn_map);
-        } else {
-            // Always ensure intermediate buffers are zero to ensure for any atomicAdd operations (such as TileMatmulSplitK)
-            let _span = span!(Level::TRACE, "memset_intermedates").entered();
-            for (_, buffer) in &mut self.buffers {
-                self.cuda_stream.memset_zeros(buffer).unwrap();
+        }
+
+        // Allocate and clear coordination buffer for TileMatmulFullSplit
+        let coord_size = self.matmul_output_sizes
+            .iter()
+            .filter_map(|expr| expr.exec(dyn_map))
+            .max()
+            .unwrap_or(0);
+        if coord_size > 0 {
+            let _span = span!(Level::TRACE, "prepare_coordination_buffer").entered();
+            if self.coordination_buffer.as_ref().map_or(true, |buf| buf.len() < coord_size) {
+                // Allocate or resize coordination buffer
+                self.coordination_buffer = Some(
+                    self.cuda_stream
+                        .alloc_zeros::<u32>(coord_size)
+                        .unwrap()
+                );
+            } else {
+                // Clear existing coordination buffer
+                self.cuda_stream
+                    .memset_zeros(self.coordination_buffer.as_mut().unwrap())
+                    .unwrap();
             }
         }
         let mut llir_to_hlir: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
@@ -674,6 +713,11 @@ impl Runtime for CudaRuntime {
                     lb.arg(&queue_lock);
                     lb.arg(&timing_buffer);
                     lb.arg(&start_time);
+                    // Pass coordination buffer pointer (or null if not allocated)
+                    let coord_ptr = self.coordination_buffer.as_ref()
+                        .map(|buf| buf.device_ptr(&self.cuda_stream).0)
+                        .unwrap_or(0);
+                    lb.arg(&coord_ptr);
                     drop(span);
                     let mk_span_id = Uuid::new_v4();
                     {

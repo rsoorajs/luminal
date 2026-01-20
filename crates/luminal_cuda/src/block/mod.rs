@@ -597,7 +597,7 @@ fn compile_interpreter(
                 let op_name = op.op_name();
                 let op_body = op.cuda_function();
                 format!(
-                    "__device__ __forceinline__ void {op_name}_function({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t, float* scratchpad) {{
+                    "__device__ __forceinline__ void {op_name}_function({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t, float* scratchpad, unsigned int* coordination_buffer) {{
 {op_body}
 }}"
                 )
@@ -619,7 +619,7 @@ fn compile_interpreter(
     );
     kernel = kernel.replace("//%extra_op_calls%", &ops.iter().map(|op| {
             let op_name = op.op_name();
-            format!("case OpCode::{op_name}Op: {op_name}_function(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); break;")
+            format!("case OpCode::{op_name}Op: {op_name}_function(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad, coordination_buffer); break;")
         }).join("\n"));
 
     // Generate prologue functions (only for non-empty prologues)

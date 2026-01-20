@@ -1761,7 +1761,15 @@ impl BlockOp for TileMatmulFullSplit {
                 for (int k = 0; k < K; ++k) {{
                     acc += A0[k] * B0[k];
                 }}
-                atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
+                // Use coordination buffer to determine if this is the first write
+                const int out_idx = (global_m0 + ty) * N + (global_n0 + tx);
+                if (atomicCAS(&coordination_buffer[out_idx], 0, 1) == 0) {{
+                    // First write - direct store
+                    c[ty * c_m_stride + tx * c_n_stride] = acc;
+                }} else {{
+                    // Subsequent write - accumulate
+                    atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
+                }}
             }}
             return;
         }}
@@ -1797,7 +1805,15 @@ impl BlockOp for TileMatmulFullSplit {
                 for (int k = 0; k < K; ++k) {{
                     acc += A0[k] * B0[k];
                 }}
-                atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
+                // Use coordination buffer to determine if this is the first write
+                const int out_idx = (global_m0 + ty) * N + (global_n0 + tx);
+                if (atomicCAS(&coordination_buffer[out_idx], 0, 1) == 0) {{
+                    // First write - direct store
+                    c[ty * c_m_stride + tx * c_n_stride] = acc;
+                }} else {{
+                    // Subsequent write - accumulate
+                    atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
+                }}
             }}
         }}
         "#,
