@@ -10,7 +10,7 @@
     )
     (   
         ; make KernelMatmul
-        (let ?hm (CuBlasSgemmV2TN ?a ?b m n ?tm_iters))
+        (let ?hm (cublasSgemmV2TN ?a ?b m n ?tm_iters))
         (union ?tm ?hm)
         (set (dtype ?hm) (F32))
     )

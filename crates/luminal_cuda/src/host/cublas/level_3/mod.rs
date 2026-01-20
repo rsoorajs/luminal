@@ -18,23 +18,25 @@ use crate::{cudarc::driver::CudaSlice, host::HostOp};
 
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
-pub struct CuBlasSgemmV2TN {
+pub struct CuBlasSgemmV2 {
     m: Expression,
     n: Expression,
     k: Expression,
+    a_layout: cublasOperation_t,
+    b_layout: cublasOperation_t,
 }
 
-impl EgglogOp for CuBlasSgemmV2TN {
+impl EgglogOp for CuBlasSgemmV2 {
     fn term(&self) -> (String, Vec<OpParam>) {
         (
-            "CuBlasSgemmV2TN".to_string(),
-            //    A      B      m     n      k
-            vec![Input, Input, Expr, Expr, Expr],
+            "cublasSgemm_V2".to_string(),
+            //    A      B      m     n      k  , A input Layout, B input Layout, 
+            vec![Input, Input, Expr, Expr, Expr, Str, Str],
         )
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec![include_str!["cuBLAS_SGEMM_V2_TN_rewrite.egg"].to_string()]
+        vec![include_str!["sgemm_v2_rewrites.egg"].to_string()]
     }
 
     #[allow(unused_variables)]
@@ -48,6 +50,8 @@ impl EgglogOp for CuBlasSgemmV2TN {
         let m_extract = extract_expr(egraph, children[2], expr_cache).unwrap();
         let n_extract = extract_expr(egraph, children[3], expr_cache).unwrap();
         let k_extract = extract_expr(egraph, children[4], expr_cache).unwrap();
+        let a_layout_extract = cublasOperation_t::CUBLAS_OP_N; 
+        let b_layout_extract = cublasOperation_t::CUBLAS_OP_N; 
 
         let _span = span!(
             Level::TRACE,
@@ -56,7 +60,9 @@ impl EgglogOp for CuBlasSgemmV2TN {
             n = ?n_extract,
             k = ?k_extract,
             input_a = ?children[0],
-            input_b = ?children[1]
+            input_b = ?children[1],
+            a_layout = ?a_layout_extract,
+            b_layout = ?b_layout_extract,
         )
         .entered();
 
@@ -97,6 +103,7 @@ impl HostOp for CuBlasSgemmV2TN {
         let (b_ptr, _b_guard) = inputs[2].device_ptr(stream);
         let (c_ptr, _c_guard) = inputs[0].device_ptr(stream);
 
+        let z = cublasOperation_t::CUBLAS_OP_T; 
         // Debug: Check buffer sizes
         let _buffer_span = span!(
             Level::TRACE,
