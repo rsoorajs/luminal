@@ -155,6 +155,7 @@ impl CudaRuntime {
 
     #[tracing::instrument(skip_all)]
     pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
+        let span = span!(Level::TRACE, "get_output").entered();
         let id = id.to_id();
         let output_id = self
             .llir_graph
@@ -172,16 +173,21 @@ impl CudaRuntime {
             .neighbors_directed(output_id, Direction::Incoming)
             .next()
             .unwrap();
-        self.cuda_stream
+        drop(span);
+        let _span = span!(Level::TRACE, "dtoh").entered();
+        let bytes = self
+            .cuda_stream
             .memcpy_dtov(
                 self.buffers
                     .get(&data_id)
                     .expect("Cannot find tensor in runtime!"),
             )
-            .unwrap()
-            .chunks_exact(4)
-            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-            .collect_vec()
+            .unwrap();
+        let bytes = bytes.leak();
+        let n_bytes = bytes.len();
+        let bytes_ptr = bytes.as_mut_ptr();
+        let float_ptr = bytes_ptr as *mut f32;
+        unsafe { Vec::from_raw_parts(float_ptr, n_bytes / 4, n_bytes / 4) }
     }
 
     fn register_buffer(&mut self, llir_node: NodeIndex, ptr: u64) {
@@ -479,8 +485,7 @@ impl Runtime for CudaRuntime {
             self.allocate_intermediate_buffers(dyn_map);
         } else {
             // Always ensure intermediate buffers are zero to ensure for any atomicAdd operations (such as TileMatmulSplitK)
-            let span = span!(Level::TRACE, "memset_intermedates");
-            let _entered = span.enter();
+            let _span = span!(Level::TRACE, "memset_intermedates").entered();
             for (_, buffer) in &mut self.buffers {
                 self.cuda_stream.memset_zeros(buffer).unwrap();
             }
@@ -599,9 +604,6 @@ impl Runtime for CudaRuntime {
                         bandwidth_gbps,
                         tflops,
                     });
-
-                    drop(_entered);
-                    drop(span);
                 }
                 ExecutableKernel::Megakernel {
                     interpreter,
@@ -616,7 +618,6 @@ impl Runtime for CudaRuntime {
                         .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
                         .unwrap();
                     let span = span!(Level::INFO, "megakernel_setup");
-                    let _entered = span.enter();
                     // Upload queue, barriers and program counter
                     let d_barriers = self
                         .cuda_stream
@@ -661,7 +662,7 @@ impl Runtime for CudaRuntime {
                     // Launch kernel
                     let cfg = LaunchConfig {
                         grid_dim: (sm_count as u32, 1, 1), // One block per SM
-                        block_dim: (1024, 1, 1),           // 1024 threads (32 warps) for max latency hiding
+                        block_dim: (1024, 1, 1), // 1024 threads (32 warps) for max latency hiding
                         shared_mem_bytes: (shared_mem_max / 2) as u32,
                     };
                     let mut lb = self.cuda_stream.launch_builder(interpreter);
@@ -673,27 +674,29 @@ impl Runtime for CudaRuntime {
                     lb.arg(&queue_lock);
                     lb.arg(&timing_buffer);
                     lb.arg(&start_time);
-                    drop(_entered);
                     drop(span);
                     let mk_span_id = Uuid::new_v4();
-                    let span = span!(Level::INFO, "megakernel", id = field::Empty);
-                    // Record fields after span creation to work around tracing-perfetto-sdk-layer sync span bug
-                    span.record("id", format!("{}", mk_span_id).as_str());
-                    let _entered = span.enter();
-                    unsafe { lb.launch(cfg) }.unwrap();
-                    self.cuda_stream.synchronize().unwrap();
-                    drop(_entered);
-                    drop(span);
-                    timings.push((
-                        self.cuda_stream.memcpy_dtov(&timing_buffer).unwrap(),
-                        self.cuda_stream
-                            .memcpy_dtov(&start_time)
-                            .unwrap()
-                            .into_iter()
-                            .min()
-                            .unwrap(),
-                        mk_span_id,
-                    ));
+                    {
+                        let span = span!(Level::INFO, "megakernel", id = field::Empty);
+                        // Record fields after span creation to work around tracing-perfetto-sdk-layer sync span bug
+                        span.record("id", mk_span_id.to_string().as_str());
+                        let _entered = span.enter();
+                        unsafe { lb.launch(cfg) }.unwrap();
+                        self.cuda_stream.synchronize().unwrap();
+                    }
+                    {
+                        let _span = span!(Level::INFO, "mk_timings").entered();
+                        timings.push((
+                            self.cuda_stream.memcpy_dtov(&timing_buffer).unwrap(),
+                            self.cuda_stream
+                                .memcpy_dtov(&start_time)
+                                .unwrap()
+                                .into_iter()
+                                .min()
+                                .unwrap(),
+                            mk_span_id,
+                        ));
+                    }
                 }
             }
         }

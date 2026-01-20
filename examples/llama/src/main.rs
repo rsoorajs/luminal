@@ -68,12 +68,12 @@ fn main() {
     let mut fwd_durations = vec![];
     for i in 0..gen_tokens {
         let start = std::time::Instant::now();
-        let span = if i == 0 {
+        let _span = if i == 0 {
             span!(Level::INFO, "prefill")
         } else {
             span!(Level::INFO, "decode")
-        };
-        let _entered = span.enter();
+        }
+        .entered();
 
         // Set runtime dimensions
         let seq_len = sentence.len();
@@ -95,8 +95,7 @@ fn main() {
         let logits_data = runtime.get_f32(logits);
 
         // Sample next token
-        let sample_span = span!(Level::INFO, "sample");
-        let _sample_entered = sample_span.enter();
+        let _sample_span = span!(Level::INFO, "sample_full").entered();
         sentence = vec![*sample(&logits_data, VOCAB_SIZE).last().unwrap()];
         prev_seq += seq_len;
         print!("{}", tokenizer.decode(&sentence, true).unwrap());
