@@ -1002,19 +1002,19 @@ pub(crate) fn make_megakernel_from_llir_graph(
         let in_dep_a_base_val = producer_barrier_bases
             .get(&sources[0])
             .map(|e| expressions[e])
-            .unwrap_or((-1).into());
+            .unwrap_or(-1);
         let in_dep_b_stride_val = expressions[&in_dep_b_stride];
         let in_dep_b_base_val = sources
             .get(1)
             .and_then(|n| producer_barrier_bases.get(n))
             .map(|e| expressions[e])
-            .unwrap_or((-1).into());
+            .unwrap_or(-1);
         let in_dep_c_stride_val = expressions[&in_dep_c_stride];
         let in_dep_c_base_val = sources
             .get(2)
             .and_then(|n| producer_barrier_bases.get(n))
             .map(|e| expressions[e])
-            .unwrap_or((-1).into());
+            .unwrap_or(-1);
         let out_dep_stride_val = expressions[&out_dep_stride];
         let out_dep_base_val = expressions[&producer_barrier_bases[&node]];
 

@@ -136,18 +136,18 @@ impl CudaRuntime {
         let mmap = unsafe { MmapOptions::new().map(&f).unwrap() };
         let st = SafeTensors::deserialize(&mmap).unwrap();
         for node in cx.graph.node_indices() {
-            if let Some(Input { label, .. }) = (*cx.graph[node]).as_any().downcast_ref::<Input>() {
-                if let Ok(tensor) = st.tensor(label) {
-                    match tensor.dtype() {
-                        safetensors::Dtype::F32 => {
-                            let bytes = tensor.data();
-                            let f32s: &[f32] = bytemuck::cast_slice(bytes);
-                            let dev = f32s.to_cuda_input(&self.cuda_stream);
-                            self.hlir_buffers.insert(node, dev);
-                            self.changed_hlir.insert(node);
-                        }
-                        dtype => unimplemented!("{dtype} loading not supported yet"),
+            if let Some(Input { label, .. }) = (*cx.graph[node]).as_any().downcast_ref::<Input>()
+                && let Ok(tensor) = st.tensor(label)
+            {
+                match tensor.dtype() {
+                    safetensors::Dtype::F32 => {
+                        let bytes = tensor.data();
+                        let f32s: &[f32] = bytemuck::cast_slice(bytes);
+                        let dev = f32s.to_cuda_input(&self.cuda_stream);
+                        self.hlir_buffers.insert(node, dev);
+                        self.changed_hlir.insert(node);
                     }
+                    dtype => unimplemented!("{dtype} loading not supported yet"),
                 }
             }
         }
@@ -518,7 +518,7 @@ impl Runtime for CudaRuntime {
 
         // Always clear intermediate buffers to ensure correctness for operations using atomicAdd
         // TODO: this is very expensive. Need to eliminate ops that require zeroed outputs
-        for (_, buffer) in &mut self.buffers {
+        for buffer in self.buffers.values_mut() {
             self.cuda_stream.memset_zeros(buffer).unwrap();
         }
         self.cuda_stream.synchronize().unwrap();
@@ -781,25 +781,25 @@ impl CudaRuntime {
         let mut prologue_c_flops: Vec<usize> = vec![0; op_names.len()];
 
         for node in llir_graph.node_indices() {
-            if let Some(op) = llir_graph[node].to_dialect::<dyn BlockOp>() {
-                if let Some(&idx) = op_name_to_idx.get(op.op_name()) {
-                    let flops_expr = op.flops();
-                    let flops_val = flops_expr.exec(dyn_map).unwrap();
-                    op_bytes_loaded[idx] += op.bytes_loaded().exec(dyn_map).unwrap();
-                    op_bytes_stored[idx] += op.bytes_stored().exec(dyn_map).unwrap();
-                    op_flops[idx] += flops_val;
+            if let Some(op) = llir_graph[node].to_dialect::<dyn BlockOp>()
+                && let Some(&idx) = op_name_to_idx.get(op.op_name())
+            {
+                let flops_expr = op.flops();
+                let flops_val = flops_expr.exec(dyn_map).unwrap();
+                op_bytes_loaded[idx] += op.bytes_loaded().exec(dyn_map).unwrap();
+                op_bytes_stored[idx] += op.bytes_stored().exec(dyn_map).unwrap();
+                op_flops[idx] += flops_val;
 
-                    // Aggregate prologue metrics
-                    prologue_a_bytes_loaded[idx] +=
-                        op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
-                    prologue_a_flops[idx] += op.prologue_a_flops().exec(dyn_map).unwrap_or(0);
-                    prologue_b_bytes_loaded[idx] +=
-                        op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
-                    prologue_b_flops[idx] += op.prologue_b_flops().exec(dyn_map).unwrap_or(0);
-                    prologue_c_bytes_loaded[idx] +=
-                        op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
-                    prologue_c_flops[idx] += op.prologue_c_flops().exec(dyn_map).unwrap_or(0);
-                }
+                // Aggregate prologue metrics
+                prologue_a_bytes_loaded[idx] +=
+                    op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                prologue_a_flops[idx] += op.prologue_a_flops().exec(dyn_map).unwrap_or(0);
+                prologue_b_bytes_loaded[idx] +=
+                    op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                prologue_b_flops[idx] += op.prologue_b_flops().exec(dyn_map).unwrap_or(0);
+                prologue_c_bytes_loaded[idx] +=
+                    op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
+                prologue_c_flops[idx] += op.prologue_c_flops().exec(dyn_map).unwrap_or(0);
             }
         }
 
