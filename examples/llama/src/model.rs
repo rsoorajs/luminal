@@ -271,6 +271,10 @@ impl BlockOp for LlamaAttention {
         self.range.iter().copied().product::<Expression>() * self.head_dim
     }
 
+    fn producer_barriers_seperate(&self) -> Vec<bool> {
+        vec![true; self.range.len()]
+    }
+
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
         let mut q = vec![true; self.range.len()];
         q[self.range.len() - 1] = false;
@@ -482,7 +486,11 @@ impl BlockOp for LlamaAttention {
         .to_string()
     }
 
-    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(
+        &self,
+        _: &Arc<CudaStream>,
+        expressions: &FxHashMap<Expression, i32>,
+    ) -> Vec<u8> {
         let mut q_pos_stride = vec![0.into(); self.range.len()];
         q_pos_stride[self.range.len() - 1] = 1.into();
         let mut group_pos_stride = vec![0.into(); self.range.len()];

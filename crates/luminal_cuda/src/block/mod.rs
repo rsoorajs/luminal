@@ -42,15 +42,19 @@ pub trait BlockOp: Debug + as_any::AsAny {
     fn output_size(&self) -> Expression {
         unimplemented!()
     }
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
-        unimplemented!()
-    }
+    fn producer_barriers_seperate(&self) -> Vec<bool>;
+    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>>;
     /// C struct body
     fn cuda_struct(&self) -> String {
         "".to_string()
     }
     /// C function body
     fn cuda_function(&self) -> String {
+        "".to_string()
+    }
+
+    /// Device-global variable declarations (e.g., "__device__ int my_global;")
+    fn device_globals(&self) -> String {
         "".to_string()
     }
 
@@ -71,7 +75,7 @@ pub trait BlockOp: Debug + as_any::AsAny {
     #[allow(clippy::mutable_key_type)]
     fn schedule_op(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
         unimplemented!()
@@ -113,6 +117,7 @@ luminal::impl_into_ops!(BlockOp);
 #[tracing::instrument(skip_all)]
 fn compute_barrier_strides(
     mut prod_range: Vec<Expression>,
+    mut prod_shared: Vec<bool>,
     mut cons_range: Vec<Vec<Expression>>,
     mut cons_shared: Vec<Vec<bool>>,
 ) -> (Vec<Expression>, Vec<Vec<Expression>>) {
@@ -138,6 +143,7 @@ fn compute_barrier_strides(
     let prod_range_len = prod_range.len();
     let cons_range_lens = cons_range.iter().map(|c| c.len()).collect_vec();
     prod_range.append(&mut vec![1.into(); max_range_len - prod_range.len()]);
+    prod_shared.append(&mut vec![true; max_range_len - prod_shared.len()]);
     for v in &mut cons_range {
         v.append(&mut vec![1.into(); max_range_len - v.len()]);
     }
@@ -149,12 +155,13 @@ fn compute_barrier_strides(
     assert_eq!(cons_shared_t.len(), prod_range.len());
     let r = prod_range
         .iter()
+        .zip(&prod_shared)
         .zip(&cons_range_t)
         .zip(cons_shared_t)
         .rev()
-        .scan(Expression::from(1), |acc, ((pr, cr), cs)| {
+        .scan(Expression::from(1), |acc, (((pr, ps), cr), cs)| {
             let prev = *acc;
-            if cs.iter().all(|i| *i) {
+            if *ps && cs.iter().all(|i| *i) {
                 if cr.iter().all(|cr| *pr == *cr) {
                     *acc *= *pr;
                     Some((Expression::from('z') * prev, vec![prev * 'z'; cr.len()]))
@@ -257,10 +264,9 @@ fn get_barrier_strides(
             })
             .filter(|(n, _)| block_ops.contains(n))
             .collect_vec();
-        let prod_range = graph[*node]
-            .to_dialect::<dyn BlockOp>()
-            .unwrap()
-            .launch_range();
+        let prod_op = graph[*node].to_dialect::<dyn BlockOp>().unwrap();
+        let prod_range = prod_op.launch_range();
+        let prod_shared = prod_op.producer_barriers_seperate();
         let cons_range: Vec<Vec<Expression>> = consumers
             .iter()
             .map(|(n, _)| {
@@ -272,6 +278,7 @@ fn get_barrier_strides(
             .collect();
         let (producer_strides, consumer_strides) = compute_barrier_strides(
             prod_range.clone(),
+            prod_shared,
             cons_range.clone(),
             consumers
                 .iter()
@@ -336,9 +343,16 @@ pub(crate) struct TaskQueue {
 
 impl TaskQueue {
     pub fn new(payload_size: usize) -> Self {
-        // Task layout: 11 ints (44 bytes) + 3 pointers (24 bytes) + 1 pointer (8 bytes) + payload
-        // = 76 bytes + payload_size, aligned to 8 bytes
-        let base_size = size_of::<i32>() * 11 + size_of::<*const f32>() * 3 + size_of::<*mut f32>();
+        // Task layout (must match C struct with alignment):
+        // - 11 ints (44 bytes at offset 0)
+        // - 4 bytes padding for 8-byte alignment of pointers
+        // - 3 pointers (24 bytes at offset 48)
+        // - 1 pointer (8 bytes at offset 72)
+        // = 80 bytes base + payload_size, aligned to 8 bytes
+        let int_section = size_of::<i32>() * 11; // 44 bytes
+        let int_section_aligned = (int_section + 7) & !7; // 48 bytes (aligned for pointers)
+        let ptr_section = size_of::<*const f32>() * 3 + size_of::<*mut f32>(); // 32 bytes
+        let base_size = int_section_aligned + ptr_section; // 80 bytes
         let total = base_size + payload_size;
         let task_stride = (total + 7) & !7; // Align to 8 bytes
         Self {
@@ -714,10 +728,21 @@ fn compile_interpreter(
     let lambdas = expression_map
         .iter()
         .sorted_by_key(|(_, i)| **i)
-        .map(|(e, i)| format!("case {i}: return {};", e.to_kernel()))
+        .map(|(e, i)| format!("case {i}: return {};", e.simplify().to_kernel()))
         .join("\n");
     kernel = kernel.replace("//%expr_fns%", &lambdas);
-    kernel = kernel.replace("//%constants%", &constant_string);
+
+    // Collect device globals from all ops
+    let device_globals = ops
+        .iter()
+        .map(|op| op.device_globals())
+        .filter(|s| !s.is_empty())
+        .join("\n");
+
+    kernel = kernel.replace(
+        "//%constants%",
+        &format!("{constant_string}{device_globals}"),
+    );
 
     let ptx = compile_ptx_with_opts(
         &kernel,
@@ -760,6 +785,7 @@ impl CudaRuntime {
         let host_start_times: Vec<(u64, u32)> = self
             .timings
             .iter()
+            .flatten()
             .map(|(_, _, id)| {
                 trace
                     .packet
@@ -792,7 +818,7 @@ impl CudaRuntime {
         let mut extra_packets = Vec::new();
         let n_ops = ops.len();
         for ((device_timings, device_start_time, _span_id), (host_time, host_clock_id)) in
-            self.timings.iter().zip(host_start_times)
+            self.timings.iter().flatten().zip(host_start_times)
         {
             for (sm, sm_timings) in device_timings.chunks(1000).enumerate() {
                 let mut builder = ManualTrackBuilder::new(sm as u32, host_time, host_clock_id);
@@ -971,29 +997,39 @@ pub(crate) fn make_megakernel_from_llir_graph(
             .map(|s| flatten_z_strides(&range, s))
             .unwrap_or(0.into());
         node_to_task_index.insert(node, tasks.len());
+        let task_range = expressions[&range.iter().copied().product()];
+        let in_dep_a_stride_val = expressions[&in_dep_a_stride];
+        let in_dep_a_base_val = producer_barrier_bases
+            .get(&sources[0])
+            .map(|e| expressions[e])
+            .unwrap_or(-1);
+        let in_dep_b_stride_val = expressions[&in_dep_b_stride];
+        let in_dep_b_base_val = sources
+            .get(1)
+            .and_then(|n| producer_barrier_bases.get(n))
+            .map(|e| expressions[e])
+            .unwrap_or(-1);
+        let in_dep_c_stride_val = expressions[&in_dep_c_stride];
+        let in_dep_c_base_val = sources
+            .get(2)
+            .and_then(|n| producer_barrier_bases.get(n))
+            .map(|e| expressions[e])
+            .unwrap_or(-1);
+        let out_dep_stride_val = expressions[&out_dep_stride];
+        let out_dep_base_val = expressions[&producer_barrier_bases[&node]];
+
         tasks.push_task(
             op_code as i32,
-            expressions[&range.iter().copied().product()],
+            task_range,
             -1,
-            expressions[&in_dep_a_stride],
-            producer_barrier_bases
-                .get(&sources[0])
-                .map(|e| expressions[e])
-                .unwrap_or(-1),
-            expressions[&in_dep_b_stride],
-            sources
-                .get(1)
-                .and_then(|n| producer_barrier_bases.get(n))
-                .map(|e| expressions[e])
-                .unwrap_or(-1),
-            expressions[&in_dep_c_stride],
-            sources
-                .get(2)
-                .and_then(|n| producer_barrier_bases.get(n))
-                .map(|e| expressions[e])
-                .unwrap_or(-1),
-            expressions[&out_dep_stride],
-            expressions[&producer_barrier_bases[&node]],
+            in_dep_a_stride_val,
+            in_dep_a_base_val,
+            in_dep_b_stride_val,
+            in_dep_b_base_val,
+            in_dep_c_stride_val,
+            in_dep_c_base_val,
+            out_dep_stride_val,
+            out_dep_base_val,
             [null(); 3],
             null_mut(),
             &payload,

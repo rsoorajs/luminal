@@ -964,29 +964,22 @@ fn egglog_simplify(e: Expression) -> Expression {
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    #[test]
-    fn test_expressions() {
-        let n = Expression::from('x') + (256 - (Expression::from('x') % 256));
-        assert_eq!(
-            n.simplify()
-                .exec(&[('x', 767)].into_iter().collect())
-                .unwrap(),
-            768
-        );
-    }
 
     #[test]
-    fn test_minimizations() {
-        let expr = ((Expression::from('a') * 1) + 0) / 1 + (1 - 1);
-        let reduced_expr = expr.simplify();
-        assert_eq!(reduced_expr, 'a');
+    fn test_basic_simplifications() {
+        let x = Expression::from('x');
+        let a = Expression::from('a');
+        // Identity operations simplify away
+        assert_eq!(((a * 1) + 0) / 1 + (1 - 1), a);
+        // Evaluation after simplification
+        let n = (x + (256 - (x % 256))).simplify();
+        assert_eq!(n.exec(&[('x', 767)].into_iter().collect()).unwrap(), 768);
     }
 
     #[test]
     fn test_substitution() {
-        let main = Expression::from('x') - 255;
-        let sub = Expression::from('x') / 2;
-        let new = main.substitute('x', sub).simplify();
+        let x = Expression::from('x');
+        let new = (x - 255).substitute('x', x / 2).simplify();
         assert_eq!(new.len(), 5);
     }
 
@@ -997,14 +990,6 @@ mod tests {
         assert_eq!(expr.simplify().len(), 7);
     }
 
-    #[ignore] // ignore until we can add back in associativity
-    #[test]
-    fn test_simple_div() {
-        let w = Expression::from('w');
-        let s = ((((w + 3) / 2) + 2) / 2).simplify();
-        assert_eq!(s, (w + 7) / 4);
-    }
-
     #[test]
     fn test_egglog_equality() {
         let a = Expression::from('a');
@@ -1013,66 +998,61 @@ mod tests {
         assert!(!(a + 1).egglog_equal(a + 2));
     }
 
-    #[ignore] // ignore until we can add back in associativity
     #[test]
-    fn test_other() {
-        let z = Expression::from('z');
-        let w = Expression::from('w');
-        let h = Expression::from('h');
+    fn test_simplify() {
+        let (z, w, h, s) = (
+            Expression::from('z'),
+            Expression::from('w'),
+            Expression::from('h'),
+            Expression::from('s'),
+        );
+        // Nested divisions combine: ((((w + 3) / 2) + 2) / 2) -> (w + 7) / 4
+        assert_eq!(((((w + 3) / 2) + 2) / 2).simplify(), (w + 7) / 4);
+        // Complex division simplification
         let o = (z
             / ((-5 + (((((-5 + ((((((w + 153) / 2) / 2) / 2) / 2) / 2)) * 4) + 9) / 2) / 2))
                 * (-5 + (((9 + (4 * (-5 + ((((((153 + h) / 2) / 2) / 2) / 2) / 2)))) / 2) / 2))))
             % 64;
-        let x = o.simplify();
-        assert!(x.len() <= 27); // Should be 21 if we can re-enable mul-div-associative-rev
+        assert!(o.simplify().len() <= 27);
+        // // Mul-div simplification
+        // let x = z % (((((153 + h) / 8) + -31) * ((((w + 153) / 8) + -31) / 16)) * 64);
+        // assert!(x.simplify().len() < 15);
+        // Like-term combining: 1+s+8+s+12+s+1+s+3+s+8+s+3+s+11+s+15+s+8+s+19 -> 10*s + 89
+        let x: Expression =
+            (((((((((((((((((((1 + s) + 8) + s) + 12) + s) + 1) + s) + 3) + s) + 8) + s)
+                + 3)
+                + s)
+                + 11)
+                + s)
+                + 15)
+                + s)
+                + 8)
+                + s)
+                + 19;
+        assert!(x.simplify().egglog_equal((s * 10) + 89));
     }
 
-    #[ignore] // ignore until we can add back in associativity
     #[test]
-    fn test_final() {
-        let z = Expression::from('z');
-        let w = Expression::from('w');
-        let h = Expression::from('h');
-        let x = z % (((((153 + h) / 8) + -31) * ((((w + 153) / 8) + -31) / 16)) * 64);
-        let x = x.simplify();
-        assert_eq!(x.len(), 15); // Should be 11 if we can re-enable mul-div-associative-rev
+    fn test_no_explode() {
+        // This expression previously caused e-graph explosion with naive associativity rules
+        let x: Expression = 1 + ((8 / Expression::from(32)) + 27);
+        x.simplify();
     }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
         fn test_simplify_preserves_eval(x_val in 0usize..100, y_val in 0usize..100, z_val in 0usize..100) {
-            let x = Expression::from('x');
-            let y = Expression::from('y');
+            let (x, y, z) = (Expression::from('x'), Expression::from('y'), Expression::from('z'));
+            // Simplification preserves evaluation
             let expr = ((x + 3) * 2) - (x * 2) + (y % 5);
-            let simplified = expr.simplify();
             let env = [('x', x_val), ('y', y_val)].into_iter().collect();
-            assert_eq!(expr.exec(&env).unwrap(), simplified.exec(&env).unwrap());
-            let x = Expression::from('x');
-            let y = Expression::from('y');
-            let z = Expression::from('z');
+            assert_eq!(expr.exec(&env).unwrap(), expr.simplify().exec(&env).unwrap());
+            // Substitution + simplification preserves evaluation
             let expr = (x + y) * (y - x);
             let substituted = expr.substitute('x', z + 1).substitute('y', z - 1);
-            let simplified = substituted.simplify();
             let env = [('z', z_val)].into_iter().collect();
-            assert_eq!(
-                substituted.exec(&env).unwrap(),
-                simplified.exec(&env).unwrap()
-            );
+            assert_eq!(substituted.exec(&env).unwrap(), substituted.simplify().exec(&env).unwrap());
         }
-    }
-
-    #[test]
-    fn test_no_explode() {
-        let r = Expression::new(vec![
-            Term::Num(1),
-            Term::Num(8),
-            Term::Num(32),
-            Term::Div,
-            Term::Num(27),
-            Term::Add,
-            Term::Add,
-        ]);
-        r.simplify();
     }
 }

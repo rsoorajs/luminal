@@ -45,12 +45,12 @@
 
 ; ---- Algebraic rewrites ----
 ;(rewrite (MAdd a b) (MAdd b a) :ruleset expr) ; communativity leads to some explosions
-;(rewrite (MMul a b) (MMul b a) :ruleset expr)
+(rewrite (MMul a b) (MMul b a) :ruleset expr)
 
 ;(rewrite (MAdd (MAdd a b) c) (MAdd a (MAdd b c)) :ruleset expr) ; explodes weirdly, see no_explode test in symbolic.rs
 ;(rewrite (MMul (MMul a b) c) (MMul a (MMul b c)) :ruleset expr)
 
-(rewrite (MAdd (MNum a) (MNum b)) (MNum (+ a b)) :ruleset expr)
+(rule ((= ?e (MAdd (MNum a) (MNum b))) (= ?ans (+ a b))) ((union ?e (MNum ?ans))) :ruleset expr)
 (rewrite (MSub (MNum a) (MNum b)) (MNum (- a b)) :ruleset expr)
 ; multiply const folding
 (rule
@@ -87,28 +87,37 @@
 (rewrite (MAdd a (MSub b a)) b :ruleset expr)
 (rewrite (MAdd (MSub b a) a) b :ruleset expr)
 (rewrite (MSub a a) (MNum 0) :ruleset expr)
-(rewrite
-    (MAdd (MSub a (MNum ?b)) (MNum ?c))
-    (MSub a (MNum (- ?b ?c)))
-    :ruleset expr
-)
-(rewrite
-    (MAdd (MNum ?c) (MSub a (MNum ?b)))
-    (MSub a (MNum (- ?b ?c)))
-    :ruleset expr
-)
-(rewrite
-    (MSub (MAdd a (MNum ?b)) (MNum ?c))
-    (MAdd a (MNum (- ?b ?c)))
-    :ruleset expr
-)
-(rewrite
-    (MSub (MSub a (MNum ?b)) (MNum ?c))
-    (MSub a (MNum (+ ?b ?c)))
-    :ruleset expr
-)
+(rewrite (MAdd (MSub a (MNum ?b)) (MNum ?c)) (MSub a (MNum (- ?b ?c))) :ruleset expr)
+(rewrite (MAdd (MNum ?c) (MSub a (MNum ?b))) (MSub a (MNum (- ?b ?c))) :ruleset expr)
+(rewrite (MSub (MAdd a (MNum ?b)) (MNum ?c)) (MAdd a (MNum (- ?b ?c))) :ruleset expr)
+(rewrite (MSub (MSub a (MNum ?b)) (MNum ?c)) (MSub a (MNum (+ ?b ?c))) :ruleset expr)
 (rewrite (MAdd (MMul a b) (MMul a c)) (MMul a (MAdd b c)) :ruleset expr)
 (rewrite (MAdd a a) (MMul (MNum 2) a) :ruleset expr)
+
+; Simplify (a/b)*c -> a/(b/c) when c divides b TODO: Not allowed because of integer division.
+;(rewrite (MMul (MDiv ?a (MNum ?b)) (MNum ?c)) (MDiv ?a (MNum (/ ?b ?c))) :when ((= 0 (% ?b ?c))) :ruleset expr)
+;(rewrite (MMul (MNum ?c) (MDiv ?a (MNum ?b))) (MDiv ?a (MNum (/ ?b ?c))) :when ((= 0 (% ?b ?c))) :ruleset expr)
+;(rewrite (MMul (MMul ?a (MDiv ?x (MNum ?b))) (MNum ?c)) (MMul ?a (MDiv ?x (MNum (/ ?b ?c)))) :when ((= 0 (% ?b ?c))) :ruleset expr)
+;(rewrite (MMul (MMul (MDiv ?x (MNum ?b)) ?a) (MNum ?c)) (MMul (MDiv ?x (MNum (/ ?b ?c))) ?a) :when ((= 0 (% ?b ?c))) :ruleset expr)
+
+; Constant folding through associativity: ((a + c1) + c2) -> (a + (c1+c2))
+(rule ((= ?e (MAdd (MAdd ?a (MNum ?b)) (MNum ?c))) (= ?ans (+ ?b ?c))) ((union ?e (MAdd ?a (MNum ?ans)))) :ruleset expr)
+(rewrite (MAdd (MAdd (MNum ?b) (MVar ?v)) (MNum ?c)) (MAdd (MVar ?v) (MNum (+ ?b ?c))) :ruleset expr)
+(rewrite (MAdd (MAdd (MNum ?b) (MMul ?n ?a)) (MNum ?c)) (MAdd (MMul ?n ?a) (MNum (+ ?b ?c))) :ruleset expr)
+
+; Combine like terms: (n*a) + a -> (n+1)*a
+(rewrite (MAdd (MMul (MNum ?n) ?a) ?a) (MMul (MNum (+ ?n 1)) ?a) :subsume :ruleset expr)
+(rewrite (MAdd ?a (MMul (MNum ?n) ?a)) (MMul (MNum (+ ?n 1)) ?a) :subsume :ruleset expr)
+(rewrite (MAdd (MMul ?a (MNum ?n)) ?a) (MMul (MNum (+ ?n 1)) ?a) :subsume :ruleset expr)
+(rewrite (MAdd ?a (MMul ?a (MNum ?n))) (MMul (MNum (+ ?n 1)) ?a) :subsume :ruleset expr)
+
+; Combine repeated variables: ((a + v) + v) -> (a + 2*v)
+(rewrite (MAdd (MAdd ?a (MVar ?v)) (MVar ?v)) (MAdd ?a (MMul (MNum 2) (MVar ?v))) :subsume :ruleset expr)
+(rewrite (MAdd (MAdd (MVar ?v) ?a) (MVar ?v)) (MAdd ?a (MMul (MNum 2) (MVar ?v))) :subsume :ruleset expr)
+
+; Accumulate: ((n*a + b) + a) -> ((n+1)*a + b)
+(rewrite (MAdd (MAdd (MMul (MNum ?n) ?a) ?b) ?a) (MAdd (MMul (MNum (+ ?n 1)) ?a) ?b) :subsume :ruleset expr)
+(rewrite (MAdd (MAdd ?b (MMul (MNum ?n) ?a)) ?a) (MAdd ?b (MMul (MNum (+ ?n 1)) ?a)) :subsume :ruleset expr)
 
 ; ---- Replacement over expressions ----
 (rewrite (MReplace ?x ?y ?z) ?z :when ((= ?x ?y)) :ruleset expr)

@@ -773,55 +773,24 @@ impl KernelOp for KernelSumReduce {
 
         let dtype = cuda_dtype(self.dtype);
         let n_outputs: Expression = self.out_shape.iter().copied().product();
-        let threads_per_block = 256; // 8 warps per block
 
         let kernel = format!(
             "
-#define WARP_SIZE 32
-#define THREADS_PER_BLOCK 256
-#define FULL_MASK 0xffffffff
 {constants}
 extern \"C\" {{
     __global__ void reduce_sum_k({dtype} *out, const {dtype} *in) {{
-        __shared__ {dtype} warp_sums[THREADS_PER_BLOCK / WARP_SIZE];
         int const_z = blockIdx.x;
-
-        int tid = threadIdx.x;
-        int lane_id = tid % WARP_SIZE;
-        int warp_id = tid / WARP_SIZE;
 
         int in_start = {in_index};
         int iters = {iters};
         int iter_stride = {iter_stride};
 
         {dtype} sum = 0;
-        for (int i = tid; i < iters; i += THREADS_PER_BLOCK) {{
+        for (int i = 0; i < iters; i++) {{
             sum += in[in_start + i * iter_stride];
         }}
 
-        #pragma unroll
-        for (int s = WARP_SIZE / 2; s > 0; s /= 2) {{
-            sum += __shfl_down_sync(FULL_MASK, sum, s);
-        }}
-
-        if (lane_id == 0) {{
-            warp_sums[warp_id] = sum;
-        }}
-        __syncthreads();
-
-        if (warp_id == 0) {{
-            int cnt = THREADS_PER_BLOCK / WARP_SIZE;
-            {dtype} block_sum = tid < cnt ? warp_sums[tid] : 0;
-
-            #pragma unroll
-            for (int s = cnt / 2; s > 0; s /= 2) {{
-                block_sum += __shfl_down_sync(FULL_MASK, block_sum, s);
-            }}
-
-            if (tid == 0) {{
-                out[{out_index}] = block_sum;
-            }}
-        }}
+        out[{out_index}] = sum;
     }}
 }}",
             constants = vars
@@ -843,14 +812,13 @@ extern \"C\" {{
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
             .collect();
-
         (
             func,
             module,
             kernel,
-            (n_outputs, 1.into(), 1.into()),                // grid
-            (threads_per_block.into(), 1.into(), 1.into()), // blocks
-            32.into(),                                      // shmem size
+            (n_outputs, 1.into(), 1.into()), // grid
+            (1.into(), 1.into(), 1.into()),  // blocks (single-threaded)
+            0.into(),                        // shmem size
             constants,
         )
     }
