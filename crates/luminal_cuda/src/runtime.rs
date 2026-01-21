@@ -120,6 +120,9 @@ pub struct CudaRuntime {
     pub(crate) timings: Vec<Vec<(Vec<SMEvent>, u64, Uuid)>>,
     last_dyn_map: FxHashMap<char, usize>,
     intermediate_buffer_dims: FxHashSet<char>,
+    llir_to_hlir: FxHashMap<NodeIndex, NodeIndex>,
+    hlir_to_llir: FxHashMap<NodeIndex, NodeIndex>,
+    changed_hlir: FxHashSet<NodeIndex>,
     // Raw stats saved during execute, interpreted lazily in print_execution_stats
     pub last_kernel_stats: Vec<KernelStats>,
     pub last_total_time_us: f64,
@@ -144,6 +147,7 @@ impl CudaRuntime {
                             let f32s: &[f32] = bytemuck::cast_slice(bytes);
                             let dev = f32s.to_cuda_input(&self.cuda_stream);
                             self.hlir_buffers.insert(node, dev);
+                            self.changed_hlir.insert(node);
                         }
                         dtype => unimplemented!("{dtype} loading not supported yet"),
                     }
@@ -155,6 +159,7 @@ impl CudaRuntime {
     pub fn set_data(&mut self, id: impl ToId, data: impl ToCudaInput) {
         self.hlir_buffers
             .insert(id.to_id(), data.to_cuda_input(&self.cuda_stream));
+        self.changed_hlir.insert(id.to_id());
     }
 
     #[tracing::instrument(skip_all)]
@@ -323,6 +328,9 @@ impl Runtime for CudaRuntime {
             llir_graph: StableGraph::default(),
             exec_graph: StableGraph::default(),
             node_to_exec: FxHashMap::default(),
+            hlir_to_llir: FxHashMap::default(),
+            llir_to_hlir: FxHashMap::default(),
+            changed_hlir: FxHashSet::default(),
             timings: vec![],
             last_dyn_map: FxHashMap::default(),
             intermediate_buffer_dims: FxHashSet::default(),
@@ -410,6 +418,21 @@ impl Runtime for CudaRuntime {
         self.exec_graph = exec_graph;
         self.llir_graph = llir_graph.clone();
         self.node_to_exec = node_to_exec;
+        self.hlir_to_llir.clear();
+        self.llir_to_hlir.clear();
+        self.changed_hlir.clear();
+        for (hlir_node, llir_node) in self
+            .llir_graph
+            .node_indices()
+            .filter_map(|n| self.llir_graph[n].to_op::<Input>().map(|op| (op.node, n)))
+            .collect_vec()
+        {
+            self.llir_to_hlir
+                .insert(llir_node, NodeIndex::new(hlir_node));
+            self.hlir_to_llir
+                .insert(NodeIndex::new(hlir_node), llir_node);
+            self.changed_hlir.insert(NodeIndex::new(hlir_node));
+        }
 
         // Collect all matmul output sizes for coordination buffer
         self.matmul_output_sizes = llir_graph
@@ -510,34 +533,34 @@ impl Runtime for CudaRuntime {
         }
 
         // Allocate coordination buffer for TileMatmulFullSplit (uses generation counter, no memset needed)
-        let coord_size = self.matmul_output_sizes
+        let coord_size = self
+            .matmul_output_sizes
             .iter()
             .filter_map(|expr| expr.exec(dyn_map))
             .max()
             .unwrap_or(0);
-        if coord_size > 0 && self.coordination_buffer.as_ref().map_or(true, |buf| buf.len() < coord_size) {
+        if coord_size > 0
+            && self
+                .coordination_buffer
+                .as_ref()
+                .map_or(true, |buf| buf.len() < coord_size)
+        {
             let _span = span!(Level::TRACE, "allocate_coordination_buffer").entered();
             // Allocate coordination buffer (initial zeros)
             // Uses generation counter approach - no memset needed!
-            self.coordination_buffer = Some(
-                self.cuda_stream
-                    .alloc_zeros::<u32>(coord_size)
-                    .unwrap()
-            );
+            self.coordination_buffer =
+                Some(self.cuda_stream.alloc_zeros::<u32>(coord_size).unwrap());
         }
-        let mut llir_to_hlir: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
-        for (hlir_node, llir_node) in self
-            .llir_graph
-            .node_indices()
-            .filter_map(|n| self.llir_graph[n].to_op::<Input>().map(|op| (op.node, n)))
-            .collect_vec()
-        {
-            llir_to_hlir.insert(llir_node, NodeIndex::new(hlir_node));
-            let ptr = match &self.hlir_buffers[&NodeIndex::new(hlir_node)] {
-                CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
-                CudaInput::Ptr(p) => *p,
-            };
-            self.register_buffer(llir_node, ptr);
+        if !self.changed_hlir.is_empty() {
+            for hlir_node in self.changed_hlir.clone() {
+                let llir_node = self.hlir_to_llir[&hlir_node];
+                let ptr = match &self.hlir_buffers[&hlir_node] {
+                    CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
+                    CudaInput::Ptr(p) => *p,
+                };
+                self.register_buffer(llir_node, ptr);
+            }
+            self.changed_hlir.clear();
         }
         let mut timings = vec![];
         let mut kernel_stats = Vec::new();
@@ -584,7 +607,7 @@ impl Runtime for CudaRuntime {
                         if let Some(buf) = self.buffers.get(inp) {
                             ptrs.push(buf.device_ptr(&self.cuda_stream).0);
                         } else {
-                            ptrs.push(match &self.hlir_buffers[&llir_to_hlir[inp]] {
+                            ptrs.push(match &self.hlir_buffers[&self.llir_to_hlir[inp]] {
                                 CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
                                 CudaInput::Ptr(p) => *p,
                             });
@@ -710,7 +733,9 @@ impl Runtime for CudaRuntime {
                     lb.arg(&timing_buffer);
                     lb.arg(&start_time);
                     // Pass coordination buffer pointer (or null if not allocated)
-                    let coord_ptr = self.coordination_buffer.as_ref()
+                    let coord_ptr = self
+                        .coordination_buffer
+                        .as_ref()
                         .map(|buf| buf.device_ptr(&self.cuda_stream).0)
                         .unwrap_or(0);
                     lb.arg(&coord_ptr);
