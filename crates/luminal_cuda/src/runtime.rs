@@ -1,23 +1,24 @@
 use crate::{block::*, kernel::KernelOp};
+use cudarc::driver::sys::{CUdevice_attribute, CUfunction_attribute};
 use cudarc::driver::{
-    sys::CUevent_flags, CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
+    CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg, sys::CUevent_flags,
 };
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
 use luminal::hlir::*;
 use luminal::prelude::{
     petgraph::{
-        algo::{toposort, Cycle},
+        Directed, Direction,
+        algo::{Cycle, toposort},
         prelude::StableGraph,
         visit::{EdgeRef, NodeIndexable},
-        Directed, Direction,
     },
     *,
 };
 use memmap2::MmapOptions;
 use safetensors::SafeTensors;
 use std::{collections::VecDeque, fmt::Debug, fs::File, sync::Arc, time::Duration};
-use tracing::{field, span, Level};
+use tracing::{Level, field, span};
 use uuid::Uuid;
 
 pub enum CudaInput {
@@ -147,6 +148,7 @@ impl CudaRuntime {
                         }
                         dtype => unimplemented!("{dtype} loading not supported yet"),
                     }
+                    dtype => unimplemented!("{dtype} loading not supported yet"),
                 }
             }
         }
@@ -159,8 +161,7 @@ impl CudaRuntime {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
-        let span = span!(Level::TRACE, "get_output").entered();
+    fn get_output_data(&self, id: impl ToId) -> Vec<u8> {
         let id = id.to_id();
         let output_id = self
             .llir_graph
@@ -180,19 +181,30 @@ impl CudaRuntime {
             .unwrap();
         drop(span);
         let _span = span!(Level::TRACE, "dtoh").entered();
-        let bytes = self
+        self
             .cuda_stream
             .memcpy_dtov(
                 self.buffers
                     .get(&data_id)
                     .expect("Cannot find tensor in runtime!"),
             )
-            .unwrap();
+            .unwrap()
+    }
+
+    pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
+        let bytes = self.get_output_data(id);
         let bytes = bytes.leak();
         let n_bytes = bytes.len();
         let bytes_ptr = bytes.as_mut_ptr();
         let float_ptr = bytes_ptr as *mut f32;
         unsafe { Vec::from_raw_parts(float_ptr, n_bytes / 4, n_bytes / 4) }
+    }
+
+    pub fn get_i32(&self, id: impl ToId) -> Vec<i32> {
+        self.get_output_data(id)
+            .chunks_exact(4)
+            .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect_vec()
     }
 
     fn register_buffer(&mut self, llir_node: NodeIndex, ptr: u64) {
@@ -205,10 +217,9 @@ impl CudaRuntime {
             .node_to_exec
             .get(&llir_node)
             .and_then(|n| self.exec_graph.node_weight_mut(*n))
+            && self.llir_graph[llir_node].to_op::<Input>().is_none()
         {
-            if self.llir_graph[llir_node].to_op::<Input>().is_none() {
-                work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
-            }
+            work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
         }
         let outgoing_edges: Vec<_> = self
             .llir_graph
@@ -618,7 +629,7 @@ impl Runtime for CudaRuntime {
                     let tflops = (flop_count as f64) / (kernel_time_us * 1e-6) / 1e12;
 
                     kernel_stats.push(KernelStats {
-                        name: *kernel_name,
+                        name: kernel_name,
                         execution_time_us: kernel_time_us,
                         bytes_loaded: loaded,
                         bytes_stored: stored,
@@ -670,16 +681,19 @@ impl Runtime for CudaRuntime {
                         }
                     }
 
-                    let shared_mem_max = self
-                        .cuda_stream
-                        .context()
-                        .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR)
-                        .unwrap();
-
-                    interpreter.set_attribute(
-                        cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                        shared_mem_max / 2, // Half shared mem, half L2
+                    let per_block_optin = self.cuda_stream.context().attribute(
+                        CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
                     ).unwrap();
+                    let static_shared = interpreter
+                        .get_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)
+                        .unwrap();
+                    let max_dynamic_allowed = (per_block_optin - static_shared).max(0);
+                    interpreter
+                        .set_attribute(
+                            CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                            max_dynamic_allowed,
+                        )
+                        .unwrap();
 
                     // Launch kernel
                     let cfg = LaunchConfig {
@@ -1169,6 +1183,7 @@ impl CudaRuntime {
         println!();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn print_stat_row(
         &self,
         name: &str,
@@ -1473,10 +1488,10 @@ fn would_violate(
     // If p ∈ Px(x), block cannot contain any node in Sx(x)
     if let Some(ws) = px_witnesses.get(&p) {
         for &x in ws {
-            if let Some(sx) = sx_map.get(&x) {
-                if intersects(block_bits, sx) {
-                    return true;
-                }
+            if let Some(sx) = sx_map.get(&x)
+                && intersects(block_bits, sx)
+            {
+                return true;
             }
         }
     }
@@ -1484,10 +1499,10 @@ fn would_violate(
     // If p ∈ Sx(x), block cannot contain any node in Px(x)
     if let Some(ws) = sx_witnesses.get(&p) {
         for &x in ws {
-            if let Some(px) = px_map.get(&x) {
-                if intersects(block_bits, px) {
-                    return true;
-                }
+            if let Some(px) = px_map.get(&x)
+                && intersects(block_bits, px)
+            {
+                return true;
             }
         }
     }

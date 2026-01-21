@@ -72,6 +72,15 @@ impl Graph {
         let vertical = self.arange(size).expand_dim(1, size);
         (horizontal - (diagonal as f32 - 1.)).gt(vertical)
     }
+
+    /// Stack tensors along a new dimension
+    pub fn stack(&mut self, tensors: &[GraphTensor], axis: usize) -> GraphTensor {
+        assert!(!tensors.is_empty(), "Cannot stack empty tensor list");
+        let first = tensors[0].unsqueeze(axis);
+        tensors[1..]
+            .iter()
+            .fold(first, |acc, t| acc.concat_along(t.unsqueeze(axis), axis))
+    }
 }
 
 impl GraphTensor {
@@ -183,5 +192,46 @@ mod tests {
                 |dev| Tensor::triu2(size, candle_core::DType::F32, dev).unwrap(),
             );
         }
+    }
+
+    #[test]
+    fn test_stack() {
+        use crate::tests::random_vec;
+
+        let mut cx = Graph::new();
+        let a = cx.tensor((2, 3));
+        let b = cx.tensor((2, 3));
+        let c = cx.tensor((2, 3));
+        let stacked = cx.stack(&[a, b, c], 0).output();
+
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
+
+        let a_data = random_vec(6);
+        let b_data = random_vec(6);
+        let c_data = random_vec(6);
+        rt.set_data(a.id, a_data.clone());
+        rt.set_data(b.id, b_data.clone());
+        rt.set_data(c.id, c_data.clone());
+        rt.execute(&cx.dyn_map);
+
+        let ref_a = Tensor::new(a_data, &Device::Cpu)
+            .unwrap()
+            .reshape((2, 3))
+            .unwrap();
+        let ref_b = Tensor::new(b_data, &Device::Cpu)
+            .unwrap()
+            .reshape((2, 3))
+            .unwrap();
+        let ref_c = Tensor::new(c_data, &Device::Cpu)
+            .unwrap()
+            .reshape((2, 3))
+            .unwrap();
+        let ref_stacked = Tensor::stack(&[&ref_a, &ref_b, &ref_c], 0).unwrap();
+
+        assert_close(
+            rt.get_f32(stacked.id),
+            &ref_stacked.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+        );
     }
 }

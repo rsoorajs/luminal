@@ -1,19 +1,20 @@
+#![allow(clippy::mutable_key_type)]
 mod ops;
 use itertools::Itertools;
 pub use ops::*;
 
 use cudarc::{
     driver::{CudaFunction, CudaSlice, CudaStream, DeviceRepr, ValidAsZeroBits},
-    nvrtc::{compile_ptx_with_opts, CompileOptions},
+    nvrtc::{CompileOptions, compile_ptx_with_opts},
 };
 use luminal::{
     graph::LLIRGraph,
     hlir::Input,
     prelude::{
-        petgraph::{algo::toposort, visit::EdgeRef, Direction},
         FxHashMap, FxHashSet, NodeIndex,
+        petgraph::{Direction, algo::toposort, visit::EdgeRef},
     },
-    shape::{flatten_z_strides, Expression},
+    shape::{Expression, flatten_z_strides},
 };
 use prost::Message;
 use std::{
@@ -25,8 +26,8 @@ use std::{
     sync::Arc,
 };
 use tracing_perfetto_sdk_schema::{
-    self as schema, debug_annotation::NameField, trace_packet, track_descriptor, track_event,
-    TrackEvent,
+    self as schema, TrackEvent, debug_annotation::NameField, trace_packet, track_descriptor,
+    track_event,
 };
 
 use crate::runtime::CudaRuntime;
@@ -169,10 +170,10 @@ fn compute_barrier_strides(
                     if !(*pr % *cr).to_usize().map(|i| i == 0).unwrap_or_default() {
                         return None;
                     }
-                    if let Some(prev) = acc {
-                        if prev != (*pr / *cr) {
-                            return None;
-                        }
+                    if let Some(prev) = acc
+                        && prev != (*pr / *cr)
+                    {
+                        return None;
                     }
                     Some(Some(*pr / *cr))
                 }) {
@@ -187,10 +188,10 @@ fn compute_barrier_strides(
                     if !(*cr % *pr).to_usize().map(|i| i == 0).unwrap_or_default() {
                         return None;
                     }
-                    if let Some(prev) = acc {
-                        if prev != (*cr / *pr) {
-                            return None;
-                        }
+                    if let Some(prev) = acc
+                        && prev != (*cr / *pr)
+                    {
+                        return None;
                     }
                     Some(Some(*cr / *pr))
                 }) {
@@ -219,6 +220,7 @@ fn compute_barrier_strides(
 }
 
 #[tracing::instrument(skip_all)]
+#[allow(clippy::type_complexity)]
 fn get_barrier_strides(
     graph: &LLIRGraph,
     block_ops: &FxHashSet<NodeIndex>,
@@ -360,6 +362,7 @@ impl TaskQueue {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn push_task(
         &mut self,
         op: i32,
@@ -873,6 +876,7 @@ impl CudaRuntime {
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) fn make_megakernel_from_llir_graph(
     llir_graph: &LLIRGraph,
     subgraph: &FxHashSet<NodeIndex>,
@@ -953,7 +957,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
         .unwrap_or(0);
 
     let (interpreter, expressions, interpreter_constants) =
-        compile_interpreter(&cuda_stream, &block_ops, &expressions, max_payload_size);
+        compile_interpreter(cuda_stream, &block_ops, &expressions, max_payload_size);
 
     // Build task queue with dynamic payload size
     let mut tasks = TaskQueue::new(max_payload_size);

@@ -103,8 +103,8 @@ impl Llama {
             x = layer.forward(
                 x,
                 pos_ids,
-                k_cache.device_ptr(&v_cache.stream()).0,
-                v_cache.device_ptr(&k_cache.stream()).0,
+                k_cache.device_ptr(v_cache.stream()).0,
+                v_cache.device_ptr(k_cache.stream()).0,
             );
         }
         self.lm_norm.forward(x).matmul(self.lm_head.t())

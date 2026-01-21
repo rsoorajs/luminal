@@ -1,0 +1,18 @@
+[package]
+name = "luminal_metal"
+version = "0.2.0"
+edition = "2021"
+description = "Metal backend for luminal"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+luminal = { path = "../.." }
+metal = "0.31"
+objc = "0.2"
+as-any = "0.3.2"
+itertools = "0.12.1"
+half = "2.7.1"
+tracing = "0.1.43"
+
+[dev-dependencies]
+proptest = "1.9.0"
