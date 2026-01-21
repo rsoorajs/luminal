@@ -126,10 +126,6 @@ pub struct CudaRuntime {
     // Raw stats saved during execute, interpreted lazily in print_execution_stats
     pub last_kernel_stats: Vec<KernelStats>,
     pub last_total_time_us: f64,
-    // Coordination buffer for TileMatmulFullSplit to avoid pre-zeroing outputs
-    coordination_buffer: Option<CudaSlice<u32>>,
-    matmul_output_sizes: Vec<Expression>,
-    coordination_generation: u32,
 }
 
 impl CudaRuntime {
@@ -336,9 +332,6 @@ impl Runtime for CudaRuntime {
             intermediate_buffer_dims: FxHashSet::default(),
             last_kernel_stats: vec![],
             last_total_time_us: 0.0,
-            coordination_buffer: None,
-            matmul_output_sizes: vec![],
-            coordination_generation: 1,
         }
     }
 
@@ -433,23 +426,6 @@ impl Runtime for CudaRuntime {
                 .insert(NodeIndex::new(hlir_node), llir_node);
             self.changed_hlir.insert(NodeIndex::new(hlir_node));
         }
-
-        // Collect all matmul output sizes for coordination buffer
-        self.matmul_output_sizes = llir_graph
-            .node_indices()
-            .filter_map(|n| {
-                llir_graph[n]
-                    .to_dialect::<dyn crate::block::BlockOp>()
-                    .and_then(|op| {
-                        if op.op_name() == "TileMatmulFullSplit" {
-                            // Get the untiled_range [M, N] to calculate M * N output elements
-                            Some(op.output_size())
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .collect();
     }
 
     #[tracing::instrument(skip_all)]
@@ -530,26 +506,6 @@ impl Runtime for CudaRuntime {
         {
             self.last_dyn_map = dyn_map.clone();
             self.allocate_intermediate_buffers(dyn_map);
-        }
-
-        // Allocate coordination buffer for TileMatmulFullSplit (uses generation counter, no memset needed)
-        let coord_size = self
-            .matmul_output_sizes
-            .iter()
-            .filter_map(|expr| expr.exec(dyn_map))
-            .max()
-            .unwrap_or(0);
-        if coord_size > 0
-            && self
-                .coordination_buffer
-                .as_ref()
-                .map_or(true, |buf| buf.len() < coord_size)
-        {
-            let _span = span!(Level::TRACE, "allocate_coordination_buffer").entered();
-            // Allocate coordination buffer (initial zeros)
-            // Uses generation counter approach - no memset needed!
-            self.coordination_buffer =
-                Some(self.cuda_stream.alloc_zeros::<u32>(coord_size).unwrap());
         }
         if !self.changed_hlir.is_empty() {
             for hlir_node in self.changed_hlir.clone() {
@@ -732,15 +688,6 @@ impl Runtime for CudaRuntime {
                     lb.arg(&queue_lock);
                     lb.arg(&timing_buffer);
                     lb.arg(&start_time);
-                    // Pass coordination buffer pointer (or null if not allocated)
-                    let coord_ptr = self
-                        .coordination_buffer
-                        .as_ref()
-                        .map(|buf| buf.device_ptr(&self.cuda_stream).0)
-                        .unwrap_or(0);
-                    lb.arg(&coord_ptr);
-                    // Pass current generation counter
-                    lb.arg(&self.coordination_generation);
                     drop(span);
                     let mk_span_id = Uuid::new_v4();
                     {
@@ -768,15 +715,6 @@ impl Runtime for CudaRuntime {
             }
         }
         self.timings.push(timings);
-
-        // Increment generation counter for next execution (no memset needed!)
-        if self.coordination_buffer.is_some() {
-            self.coordination_generation = self.coordination_generation.wrapping_add(1);
-            // Avoid 0 as it's the initial state
-            if self.coordination_generation == 0 {
-                self.coordination_generation = 1;
-            }
-        }
 
         // Save raw stats for lazy interpretation in print_execution_stats
         self.last_kernel_stats = kernel_stats;

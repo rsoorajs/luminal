@@ -52,6 +52,11 @@ pub trait BlockOp: Debug + as_any::AsAny {
         "".to_string()
     }
 
+    /// Device-global variable declarations (e.g., "__device__ int my_global;")
+    fn device_globals(&self) -> String {
+        "".to_string()
+    }
+
     /// Returns the number of bytes this op will load from global memory.
     fn bytes_loaded(&self) -> Expression {
         0.into()
@@ -597,7 +602,7 @@ fn compile_interpreter(
                 let op_name = op.op_name();
                 let op_body = op.cuda_function();
                 format!(
-                    "__device__ __forceinline__ void {op_name}_function({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t, float* scratchpad, unsigned int* coordination_buffer, unsigned int coordination_generation) {{
+                    "__device__ __forceinline__ void {op_name}_function({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t, float* scratchpad) {{
 {op_body}
 }}"
                 )
@@ -619,7 +624,7 @@ fn compile_interpreter(
     );
     kernel = kernel.replace("//%extra_op_calls%", &ops.iter().map(|op| {
             let op_name = op.op_name();
-            format!("case OpCode::{op_name}Op: {op_name}_function(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad, coordination_buffer, coordination_generation); break;")
+            format!("case OpCode::{op_name}Op: {op_name}_function(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); break;")
         }).join("\n"));
 
     // Generate prologue functions (only for non-empty prologues)
@@ -723,7 +728,15 @@ fn compile_interpreter(
         .map(|(e, i)| format!("case {i}: return {};", e.simplify().to_kernel()))
         .join("\n");
     kernel = kernel.replace("//%expr_fns%", &lambdas);
-    kernel = kernel.replace("//%constants%", &constant_string);
+
+    // Collect device globals from all ops
+    let device_globals = ops
+        .iter()
+        .map(|op| op.device_globals())
+        .filter(|s| !s.is_empty())
+        .join("\n");
+
+    kernel = kernel.replace("//%constants%", &format!("{}{}", constant_string, device_globals));
 
     let ptx = compile_ptx_with_opts(
         &kernel,

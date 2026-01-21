@@ -1592,6 +1592,27 @@ impl BlockOp for TileMatmulFullSplit {
         vec![vec![false], vec![false]]
     }
 
+    fn device_globals(&self) -> String {
+        "
+// TileMatmulFullSplit coordination state (max 1M elements = 4MB)
+__device__ unsigned int TileMatmulFullSplit_coordination_buffer[1048576];
+__device__ unsigned int TileMatmulFullSplit_generation = 1;
+".to_string()
+    }
+
+    fn prologue_a(&self) -> String {
+        "
+        // Increment generation counter once per execution (thread 0 of first SM only)
+        if (current == 0 && t == 0) {
+            unsigned int old_gen = atomicAdd(&TileMatmulFullSplit_generation, 1);
+            // Wrap around, avoiding 0
+            if (old_gen == 0xFFFFFFFF) {
+                TileMatmulFullSplit_generation = 1;
+            }
+        }
+        ".to_string()
+    }
+
     fn bytes_stored(&self) -> Expression {
         let m = self.untiled_range[0];
         let n = self.untiled_range[1];
@@ -1626,6 +1647,9 @@ impl BlockOp for TileMatmulFullSplit {
         const int sm_count = eval_expression(payload.sm_count, 0);
         const int M = eval_expression(payload.untiled_range[0], 0);
         const int N = eval_expression(payload.untiled_range[1], 0);
+
+        // Read current generation from device global
+        const unsigned int coordination_generation = TileMatmulFullSplit_generation;
 
         const float* a_base = source_ptrs[0];
         const float* b_base = source_ptrs[1];
@@ -1763,13 +1787,13 @@ impl BlockOp for TileMatmulFullSplit {
                 }}
                 // Use coordination buffer with generation counter to determine first write
                 const int out_idx = (global_m0 + ty) * N + (global_n0 + tx);
-                unsigned int old_gen = atomicCAS(&coordination_buffer[out_idx], 0, coordination_generation);
+                unsigned int old_gen = atomicCAS(&TileMatmulFullSplit_coordination_buffer[out_idx], 0, coordination_generation);
                 if (old_gen != coordination_generation) {{
                     // First write for this generation - direct store
                     c[ty * c_m_stride + tx * c_n_stride] = acc;
                     if (old_gen != 0) {{
                         // Update to current generation if it was from a previous generation
-                        atomicCAS(&coordination_buffer[out_idx], old_gen, coordination_generation);
+                        atomicCAS(&TileMatmulFullSplit_coordination_buffer[out_idx], old_gen, coordination_generation);
                     }}
                 }} else {{
                     // Subsequent write in this generation - accumulate
@@ -1812,13 +1836,13 @@ impl BlockOp for TileMatmulFullSplit {
                 }}
                 // Use coordination buffer with generation counter to determine first write
                 const int out_idx = (global_m0 + ty) * N + (global_n0 + tx);
-                unsigned int old_gen = atomicCAS(&coordination_buffer[out_idx], 0, coordination_generation);
+                unsigned int old_gen = atomicCAS(&TileMatmulFullSplit_coordination_buffer[out_idx], 0, coordination_generation);
                 if (old_gen != coordination_generation) {{
                     // First write for this generation - direct store
                     c[ty * c_m_stride + tx * c_n_stride] = acc;
                     if (old_gen != 0) {{
                         // Update to current generation if it was from a previous generation
-                        atomicCAS(&coordination_buffer[out_idx], old_gen, coordination_generation);
+                        atomicCAS(&TileMatmulFullSplit_coordination_buffer[out_idx], old_gen, coordination_generation);
                     }}
                 }} else {{
                     // Subsequent write in this generation - accumulate
