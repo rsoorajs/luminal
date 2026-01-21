@@ -1761,13 +1761,18 @@ impl BlockOp for TileMatmulFullSplit {
                 for (int k = 0; k < K; ++k) {{
                     acc += A0[k] * B0[k];
                 }}
-                // Use coordination buffer to determine if this is the first write
+                // Use coordination buffer with generation counter to determine first write
                 const int out_idx = (global_m0 + ty) * N + (global_n0 + tx);
-                if (atomicCAS(&coordination_buffer[out_idx], 0, 1) == 0) {{
-                    // First write - direct store
+                unsigned int old_gen = atomicCAS(&coordination_buffer[out_idx], 0, coordination_generation);
+                if (old_gen != coordination_generation) {{
+                    // First write for this generation - direct store
                     c[ty * c_m_stride + tx * c_n_stride] = acc;
+                    if (old_gen != 0) {{
+                        // Update to current generation if it was from a previous generation
+                        atomicCAS(&coordination_buffer[out_idx], old_gen, coordination_generation);
+                    }}
                 }} else {{
-                    // Subsequent write - accumulate
+                    // Subsequent write in this generation - accumulate
                     atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
                 }}
             }}
@@ -1805,13 +1810,18 @@ impl BlockOp for TileMatmulFullSplit {
                 for (int k = 0; k < K; ++k) {{
                     acc += A0[k] * B0[k];
                 }}
-                // Use coordination buffer to determine if this is the first write
+                // Use coordination buffer with generation counter to determine first write
                 const int out_idx = (global_m0 + ty) * N + (global_n0 + tx);
-                if (atomicCAS(&coordination_buffer[out_idx], 0, 1) == 0) {{
-                    // First write - direct store
+                unsigned int old_gen = atomicCAS(&coordination_buffer[out_idx], 0, coordination_generation);
+                if (old_gen != coordination_generation) {{
+                    // First write for this generation - direct store
                     c[ty * c_m_stride + tx * c_n_stride] = acc;
+                    if (old_gen != 0) {{
+                        // Update to current generation if it was from a previous generation
+                        atomicCAS(&coordination_buffer[out_idx], old_gen, coordination_generation);
+                    }}
                 }} else {{
-                    // Subsequent write - accumulate
+                    // Subsequent write in this generation - accumulate
                     atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
                 }}
             }}

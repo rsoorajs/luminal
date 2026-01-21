@@ -131,7 +131,8 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
                               int *__restrict__ queue_lock,
                               SMEvent *__restrict__ timings,
                               unsigned long long *__restrict__ start_times,
-                              unsigned int *__restrict__ coordination_buffer) {
+                              unsigned int *__restrict__ coordination_buffer,
+                              unsigned int coordination_generation) {
   __shared__ NextTask nt;
   __shared__ int done;
   __shared__ int dep_out;

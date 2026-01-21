@@ -126,6 +126,7 @@ pub struct CudaRuntime {
     // Coordination buffer for TileMatmulFullSplit to avoid pre-zeroing outputs
     coordination_buffer: Option<CudaSlice<u32>>,
     matmul_output_sizes: Vec<Expression>,
+    coordination_generation: u32,
 }
 
 impl CudaRuntime {
@@ -329,6 +330,7 @@ impl Runtime for CudaRuntime {
             last_total_time_us: 0.0,
             coordination_buffer: None,
             matmul_output_sizes: vec![],
+            coordination_generation: 1,
         }
     }
 
@@ -507,27 +509,21 @@ impl Runtime for CudaRuntime {
             self.allocate_intermediate_buffers(dyn_map);
         }
 
-        // Allocate and clear coordination buffer for TileMatmulFullSplit
+        // Allocate coordination buffer for TileMatmulFullSplit (uses generation counter, no memset needed)
         let coord_size = self.matmul_output_sizes
             .iter()
             .filter_map(|expr| expr.exec(dyn_map))
             .max()
             .unwrap_or(0);
-        if coord_size > 0 {
-            let _span = span!(Level::TRACE, "prepare_coordination_buffer").entered();
-            if self.coordination_buffer.as_ref().map_or(true, |buf| buf.len() < coord_size) {
-                // Allocate or resize coordination buffer
-                self.coordination_buffer = Some(
-                    self.cuda_stream
-                        .alloc_zeros::<u32>(coord_size)
-                        .unwrap()
-                );
-            } else {
-                // Clear existing coordination buffer
+        if coord_size > 0 && self.coordination_buffer.as_ref().map_or(true, |buf| buf.len() < coord_size) {
+            let _span = span!(Level::TRACE, "allocate_coordination_buffer").entered();
+            // Allocate coordination buffer (initial zeros)
+            // Uses generation counter approach - no memset needed!
+            self.coordination_buffer = Some(
                 self.cuda_stream
-                    .memset_zeros(self.coordination_buffer.as_mut().unwrap())
-                    .unwrap();
-            }
+                    .alloc_zeros::<u32>(coord_size)
+                    .unwrap()
+            );
         }
         let mut llir_to_hlir: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
         for (hlir_node, llir_node) in self
@@ -718,6 +714,8 @@ impl Runtime for CudaRuntime {
                         .map(|buf| buf.device_ptr(&self.cuda_stream).0)
                         .unwrap_or(0);
                     lb.arg(&coord_ptr);
+                    // Pass current generation counter
+                    lb.arg(&self.coordination_generation);
                     drop(span);
                     let mk_span_id = Uuid::new_v4();
                     {
@@ -745,6 +743,15 @@ impl Runtime for CudaRuntime {
             }
         }
         self.timings.push(timings);
+
+        // Increment generation counter for next execution (no memset needed!)
+        if self.coordination_buffer.is_some() {
+            self.coordination_generation = self.coordination_generation.wrapping_add(1);
+            // Avoid 0 as it's the initial state
+            if self.coordination_generation == 0 {
+                self.coordination_generation = 1;
+            }
+        }
 
         // Save raw stats for lazy interpretation in print_execution_stats
         self.last_kernel_stats = kernel_stats;
