@@ -17,7 +17,7 @@ pub type Ops = (
     RowRMSNorm,
     RowRope,
     TileMatmulFullSplit,
-    // TileMatmulSplitK, // TODO: Why does this cause an error in the llama example? Extraction bug I think
+    // TileMatmulSplitK, // TODO: Fix rewrite rule to not use TileSum and CubeMul
     RowEmbed,
 );
 
@@ -1203,7 +1203,7 @@ impl BlockOp for TileMatmulSplitK {
         // For input A: all dims except n (at index len-1)
         let mut a = vec![true; self.range.len()];
         a[self.range.len() - 1] = false; // n dimension
-                                         // For input B: all dims except m (at index len-2)
+        // For input B: all dims except m (at index len-2)
         let mut b = vec![true; self.range.len()];
         b[self.range.len() - 2] = false; // m dimension
         vec![a, b]

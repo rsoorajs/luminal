@@ -148,7 +148,6 @@ impl CudaRuntime {
                         }
                         dtype => unimplemented!("{dtype} loading not supported yet"),
                     }
-                    dtype => unimplemented!("{dtype} loading not supported yet"),
                 }
             }
         }
@@ -179,10 +178,8 @@ impl CudaRuntime {
             .neighbors_directed(output_id, Direction::Incoming)
             .next()
             .unwrap();
-        drop(span);
         let _span = span!(Level::TRACE, "dtoh").entered();
-        self
-            .cuda_stream
+        self.cuda_stream
             .memcpy_dtov(
                 self.buffers
                     .get(&data_id)
@@ -699,7 +696,7 @@ impl Runtime for CudaRuntime {
                     let cfg = LaunchConfig {
                         grid_dim: (sm_count as u32, 1, 1), // One block per SM
                         block_dim: (1024, 1, 1), // 1024 threads (32 warps) for max latency hiding
-                        shared_mem_bytes: (shared_mem_max / 2) as u32,
+                        shared_mem_bytes: (max_dynamic_allowed / 2) as u32,
                     };
                     let mut lb = self.cuda_stream.launch_builder(interpreter);
                     let n_tasks = work_queue.len() as i32;
@@ -1233,8 +1230,12 @@ impl CudaRuntime {
             .unwrap_or("-".into());
 
         match count {
-            Some(c) => println!("{name:<20} {time_us:>12.2} {c:>8} {ld:>12} {st:>12} {fl:>12} {bw_s:>12} {tf_s:>12} {mbu:>8} {mfu:>8}"),
-            None => println!("{name:<20} {time_us:>12.2} {ld:>12} {st:>12} {fl:>12} {bw_s:>12} {tf_s:>12} {mbu:>8} {mfu:>8}"),
+            Some(c) => println!(
+                "{name:<20} {time_us:>12.2} {c:>8} {ld:>12} {st:>12} {fl:>12} {bw_s:>12} {tf_s:>12} {mbu:>8} {mfu:>8}"
+            ),
+            None => println!(
+                "{name:<20} {time_us:>12.2} {ld:>12} {st:>12} {fl:>12} {bw_s:>12} {tf_s:>12} {mbu:>8} {mfu:>8}"
+            ),
         }
     }
 }
