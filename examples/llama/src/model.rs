@@ -486,7 +486,11 @@ impl BlockOp for LlamaAttention {
         .to_string()
     }
 
-    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(
+        &self,
+        _: &Arc<CudaStream>,
+        expressions: &FxHashMap<Expression, i32>,
+    ) -> Vec<u8> {
         let mut q_pos_stride = vec![0.into(); self.range.len()];
         q_pos_stride[self.range.len() - 1] = 1.into();
         let mut group_pos_stride = vec![0.into(); self.range.len()];

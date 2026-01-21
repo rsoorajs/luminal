@@ -74,7 +74,7 @@ pub trait BlockOp: Debug + as_any::AsAny {
     #[allow(clippy::mutable_key_type)]
     fn schedule_op(
         &self,
-        stream: &CudaStream,
+        stream: &Arc<CudaStream>,
         expressions: &FxHashMap<Expression, i32>,
     ) -> Vec<u8> {
         unimplemented!()
@@ -736,7 +736,10 @@ fn compile_interpreter(
         .filter(|s| !s.is_empty())
         .join("\n");
 
-    kernel = kernel.replace("//%constants%", &format!("{}{}", constant_string, device_globals));
+    kernel = kernel.replace(
+        "//%constants%",
+        &format!("{constant_string}{device_globals}"),
+    );
 
     let ptx = compile_ptx_with_opts(
         &kernel,

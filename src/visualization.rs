@@ -61,8 +61,8 @@ where
 
 #[allow(unused)]
 /// View a debug graph in the browser
-pub fn display_graph<E: ToString>(
-    graph: &StableGraph<impl Debug, E, Directed, u32>,
+pub fn display_graph(
+    graph: &StableGraph<impl Debug, impl Debug, Directed, u32>,
     mark_nodes: Option<Vec<NodeIndex>>,
     file_name: &str,
 ) {
@@ -71,8 +71,8 @@ pub fn display_graph<E: ToString>(
         .unwrap();
 }
 
-fn display_graph_text<E: ToString>(
-    graph: &StableGraph<impl Debug, E, Directed, u32>,
+fn display_graph_text(
+    graph: &StableGraph<impl Debug, impl Debug, Directed, u32>,
     mark_nodes: Option<Vec<NodeIndex>>,
 ) -> String {
     let mut new_graph = StableGraph::new();
@@ -92,7 +92,7 @@ fn display_graph_text<E: ToString>(
     for edge in graph.edge_indices() {
         let (src, dest) = graph.edge_endpoints(edge).unwrap();
         if let (Some(src), Some(dest)) = (map.get(&src), map.get(&dest)) {
-            let label = graph.edge_weight(edge).unwrap().to_string();
+            let label = format!("{:?}", graph.edge_weight(edge).unwrap());
             new_graph.add_edge(*src, *dest, label);
         }
     }

@@ -1,6 +1,6 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc, cell::RefCell};
 
-use cudarc::driver::CudaStream;
+use cudarc::driver::{CudaSlice, CudaStream, DevicePtr};
 use itertools::Itertools;
 use luminal::{
     graph::{extract_expr, extract_expr_list},
@@ -146,7 +146,7 @@ impl BlockOp for RowAdd {
         .to_string()
     }
 
-    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(&self, _: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
         CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
@@ -328,7 +328,7 @@ impl BlockOp for RowSwishMul {
         .to_string()
     }
 
-    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(&self, _: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
         // Extend strides with 0 for the SM dimension
         let mut a_stride_ext = self.a_stride.clone();
         a_stride_ext.push(0.into());
@@ -580,7 +580,7 @@ impl BlockOp for RowRMSNorm {
         .to_string()
     }
 
-    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(&self, _: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
         CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
@@ -978,7 +978,7 @@ impl BlockOp for RowRope {
         .to_string()
     }
 
-    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(&self, _: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
         CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
@@ -1330,7 +1330,7 @@ impl BlockOp for TileMatmulSplitK {
         ", ts = TILE_SIZE)
     }
 
-    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(&self, _: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
         assert_eq!(self.untiled_range.len(), 2);
         // Range layout: [k_chunks, batch..., tiled_m, tiled_n]
         // k_chunk is at index 0
@@ -1415,6 +1415,9 @@ pub struct TileMatmulFullSplit {
     out_stride: Vec<Expression>, // Batch strides for output (reserved for batch support)
     out_m_stride: Expression, // Output stride for m position within tile
     out_n_stride: Expression, // Output stride for n position within tile
+    // Coordination buffers allocated once in schedule_op
+    coordination_buffer: RefCell<Option<CudaSlice<u32>>>,
+    coordination_generation_buffer: RefCell<Option<CudaSlice<u32>>>,
 }
 
 impl EgglogOp for TileMatmulFullSplit {
@@ -1561,6 +1564,8 @@ impl EgglogOp for TileMatmulFullSplit {
                     .unwrap(),
                 out_m_stride: extract_expr(egraph, children[14], expr_cache).unwrap(),
                 out_n_stride: extract_expr(egraph, children[15], expr_cache).unwrap(),
+                coordination_buffer: RefCell::new(None),
+                coordination_generation_buffer: RefCell::new(None),
             })),
             vec![children[5], children[9]],
         )
@@ -1592,22 +1597,15 @@ impl BlockOp for TileMatmulFullSplit {
         vec![vec![false], vec![false]]
     }
 
-    fn device_globals(&self) -> String {
-        "
-// TileMatmulFullSplit coordination state (max 1M elements = 4MB)
-__device__ unsigned int TileMatmulFullSplit_coordination_buffer[1048576];
-__device__ unsigned int TileMatmulFullSplit_generation = 1;
-".to_string()
-    }
-
     fn prologue_a(&self) -> String {
         "
         // Increment generation counter once per execution (thread 0 of first SM only)
         if (current == 0 && t == 0) {
-            unsigned int old_gen = atomicAdd(&TileMatmulFullSplit_generation, 1);
+            unsigned int* generation_ptr = (unsigned int*)payload.gen_buffer_ptr;
+            unsigned int old_gen = atomicAdd(generation_ptr, 1);
             // Wrap around, avoiding 0
             if (old_gen == 0xFFFFFFFF) {
-                TileMatmulFullSplit_generation = 1;
+                *generation_ptr = 1;
             }
         }
         ".to_string()
@@ -1634,7 +1632,7 @@ __device__ unsigned int TileMatmulFullSplit_generation = 1;
     }
 
     fn cuda_struct(&self) -> String {
-        "const int untiled_range[2]; int m_tiles; int n_tiles; int total_k; int sm_count; const int a; int a_m_stride; int a_k_stride; int a_width; const int b; int b_n_stride; int b_k_stride; int b_width; const int c; int c_m_stride; int c_n_stride; int c_width;".to_string()
+        "const int untiled_range[2]; int m_tiles; int n_tiles; int total_k; int sm_count; const int a; int a_m_stride; int a_k_stride; int a_width; const int b; int b_n_stride; int b_k_stride; int b_width; const int c; int c_m_stride; int c_n_stride; int c_width; long long coord_buffer_ptr; long long gen_buffer_ptr;".to_string()
     }
 
     fn cuda_function(&self) -> String {
@@ -1648,8 +1646,10 @@ __device__ unsigned int TileMatmulFullSplit_generation = 1;
         const int M = eval_expression(payload.untiled_range[0], 0);
         const int N = eval_expression(payload.untiled_range[1], 0);
 
-        // Read current generation from device global
-        const unsigned int coordination_generation = TileMatmulFullSplit_generation;
+        // Read coordination buffers from payload
+        unsigned int* coordination_buffer = (unsigned int*)payload.coord_buffer_ptr;
+        unsigned int* generation_ptr = (unsigned int*)payload.gen_buffer_ptr;
+        const unsigned int coordination_generation = *generation_ptr;
 
         const float* a_base = source_ptrs[0];
         const float* b_base = source_ptrs[1];
@@ -1787,13 +1787,13 @@ __device__ unsigned int TileMatmulFullSplit_generation = 1;
                 }}
                 // Use coordination buffer with generation counter to determine first write
                 const int out_idx = (global_m0 + ty) * N + (global_n0 + tx);
-                unsigned int old_gen = atomicCAS(&TileMatmulFullSplit_coordination_buffer[out_idx], 0, coordination_generation);
+                unsigned int old_gen = atomicCAS(&coordination_buffer[out_idx], 0, coordination_generation);
                 if (old_gen != coordination_generation) {{
                     // First write for this generation - direct store
                     c[ty * c_m_stride + tx * c_n_stride] = acc;
                     if (old_gen != 0) {{
                         // Update to current generation if it was from a previous generation
-                        atomicCAS(&TileMatmulFullSplit_coordination_buffer[out_idx], old_gen, coordination_generation);
+                        atomicCAS(&coordination_buffer[out_idx], old_gen, coordination_generation);
                     }}
                 }} else {{
                     // Subsequent write in this generation - accumulate
@@ -1836,13 +1836,13 @@ __device__ unsigned int TileMatmulFullSplit_generation = 1;
                 }}
                 // Use coordination buffer with generation counter to determine first write
                 const int out_idx = (global_m0 + ty) * N + (global_n0 + tx);
-                unsigned int old_gen = atomicCAS(&TileMatmulFullSplit_coordination_buffer[out_idx], 0, coordination_generation);
+                unsigned int old_gen = atomicCAS(&coordination_buffer[out_idx], 0, coordination_generation);
                 if (old_gen != coordination_generation) {{
                     // First write for this generation - direct store
                     c[ty * c_m_stride + tx * c_n_stride] = acc;
                     if (old_gen != 0) {{
                         // Update to current generation if it was from a previous generation
-                        atomicCAS(&TileMatmulFullSplit_coordination_buffer[out_idx], old_gen, coordination_generation);
+                        atomicCAS(&coordination_buffer[out_idx], old_gen, coordination_generation);
                     }}
                 }} else {{
                     // Subsequent write in this generation - accumulate
@@ -1855,7 +1855,34 @@ __device__ unsigned int TileMatmulFullSplit_generation = 1;
         )
     }
 
-    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(&self, stream: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+        // Allocate/reallocate coordination buffers if size changed
+        let m = expressions[&self.untiled_range[0]] as usize;
+        let n = expressions[&self.untiled_range[1]] as usize;
+        let coord_size = m * n;
+
+        // Check if we need to (re)allocate coordination buffer
+        // Allocate at least 1 element to ensure valid pointer even for empty matrices
+        let mut coord_buf_ref = self.coordination_buffer.borrow_mut();
+        let current_size = coord_buf_ref.as_ref().map(|buf| buf.len());
+        let alloc_size = coord_size.max(1);
+        let needs_alloc = current_size.map_or(true, |size| size != alloc_size);
+        if needs_alloc {
+            *coord_buf_ref = Some(stream.alloc_zeros::<u32>(alloc_size).unwrap());
+        }
+        let coord_ptr = coord_buf_ref.as_ref().unwrap().device_ptr(stream).0 as i64;
+        drop(coord_buf_ref);
+
+        // Allocate generation counter buffer once (single u32, initialized to 1)
+        let mut gen_buf_ref = self.coordination_generation_buffer.borrow_mut();
+        if gen_buf_ref.is_none() {
+            let mut buf = stream.alloc_zeros::<u32>(1).unwrap();
+            stream.memcpy_htod(std::slice::from_ref(&1u32), &mut buf).unwrap();
+            *gen_buf_ref = Some(buf);
+        }
+        let gen_ptr = gen_buf_ref.as_ref().unwrap().device_ptr(stream).0 as i64;
+        drop(gen_buf_ref);
+
         CStruct::new()
             .ints(
                 &self
@@ -1880,6 +1907,8 @@ __device__ unsigned int TileMatmulFullSplit_generation = 1;
             .int(expressions[&self.out_m_stride])
             .int(expressions[&self.out_n_stride])
             .int(expressions[&self.out_m_stride]) // c_width = c_m_stride
+            .long(coord_ptr) // coordination buffer pointer
+            .long(gen_ptr)   // generation counter pointer
             .finish_struct()
     }
 
@@ -1944,6 +1973,12 @@ impl CStruct {
         for &v in vs {
             self.buf.extend_from_slice(&v.to_ne_bytes());
         }
+        self
+    }
+
+    pub fn long(mut self, v: i64) -> Self {
+        self.align_to(8);
+        self.buf.extend_from_slice(&v.to_ne_bytes());
         self
     }
 
@@ -2202,7 +2237,7 @@ impl BlockOp for RowEmbed {
         .to_string()
     }
 
-    fn schedule_op(&self, _: &CudaStream, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(&self, _: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
         CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.token_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.out_stride)])
