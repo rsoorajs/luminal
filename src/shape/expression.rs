@@ -312,6 +312,19 @@ impl Expression {
         if self.terms.read().len() == 1 {
             return self;
         }
+
+        // Early exit for ((M*X)+N) pattern where M and N are integers, X is var
+        {
+            let terms = self.terms.read();
+            if terms.len() == 5 {
+                if let (Term::Num(_), Term::Var(_), Term::Num(_), Term::Mul, Term::Add) =
+                    (terms[0], terms[1], terms[2], terms[3], terms[4])
+                {
+                    return self;
+                }
+            }
+        }
+
         egglog_simplify(self)
     }
     pub fn as_num(&self) -> Option<i32> {
@@ -715,6 +728,21 @@ impl<E: Into<Expression>> Add<E> for Expression {
         if let (Some(a), Some(b)) = (self.as_num(), rhs.as_num()) {
             return (a + b).into();
         }
+
+        // Shortcut: if we're adding an integer to an Add expression with an integer operand, fold them together: ((...)+X)+Y -> (...+(X+Y))
+        if let Some(z) = rhs.as_num() {
+            let self_terms = self.terms.read();
+            if self_terms.last() == Some(&Term::Add) {
+                if let Some(Term::Num(n)) = self_terms.first() {
+                    if let Some(folded) = n.checked_add(z) {
+                        let mut new_terms = self_terms.clone();
+                        new_terms[0] = Term::Num(folded);
+                        return Expression::new(new_terms);
+                    }
+                }
+            }
+        }
+
         let mut terms = rhs.terms.read().clone();
         terms.extend(self.terms.read().iter().copied());
         terms.push(Term::Add);

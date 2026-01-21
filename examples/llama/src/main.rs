@@ -7,11 +7,11 @@ use std::{io::Write, time::Duration};
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
 
-// This example compiles and runs Llama 3 8B on CUDA.
+// This example compiles and runs Llama 3 8B on CUDA. On an H100, this should hit >75% MBU
 
 fn main() {
     let max_seq_len = 4096;
-    let gen_tokens = 5;
+    let gen_tokens = 10;
     let search_graphs = 5; // the number of graphs we want to search during compilation
     let prompt = "Hello, how are you";
 

@@ -4,7 +4,7 @@ use itertools::Itertools;
 pub use ops::*;
 
 use cudarc::{
-    driver::{CudaFunction, CudaSlice, CudaStream, DeviceRepr, ValidAsZeroBits},
+    driver::{CudaFunction, CudaModule, CudaSlice, CudaStream, DeviceRepr, ValidAsZeroBits},
     nvrtc::{CompileOptions, compile_ptx_with_opts},
 };
 use luminal::{
@@ -25,6 +25,7 @@ use std::{
     ptr::{null, null_mut},
     sync::Arc,
 };
+use tracing::{Level, span};
 use tracing_perfetto_sdk_schema::{
     self as schema, TrackEvent, debug_annotation::NameField, trace_packet, track_descriptor,
     track_event,
@@ -572,6 +573,7 @@ fn compile_interpreter(
     ops: &Vec<Arc<Box<dyn BlockOp>>>,
     expressions: &FxHashSet<Expression>,
     payload_size: usize,
+    kernel_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
 ) -> (
     CudaFunction,
     FxHashMap<Expression, i32>,
@@ -631,7 +633,9 @@ fn compile_interpreter(
         }).join("\n"));
 
     // Generate prologue functions (only for non-empty prologues)
-    kernel = kernel.replace(
+    {
+        let _span = span!(Level::TRACE, "render_prologue_functions").entered();
+        kernel = kernel.replace(
         "//%extra_prologue_functions%",
         &ops
             .iter()
@@ -667,8 +671,8 @@ fn compile_interpreter(
             .join("\n"),
     );
 
-    // Generate prologue A calls (only for non-empty prologues, with event recording)
-    kernel = kernel.replace(
+        // Generate prologue A calls (only for non-empty prologues, with event recording)
+        kernel = kernel.replace(
         "//%prologue_a_calls%",
         &ops.iter().enumerate().filter_map(|(i, op)| {
             let op_name = op.op_name();
@@ -682,8 +686,8 @@ fn compile_interpreter(
         }).join("\n"),
     );
 
-    // Generate prologue B calls (only for non-empty prologues, with event recording)
-    kernel = kernel.replace(
+        // Generate prologue B calls (only for non-empty prologues, with event recording)
+        kernel = kernel.replace(
         "//%prologue_b_calls%",
         &ops.iter().enumerate().filter_map(|(i, op)| {
             let op_name = op.op_name();
@@ -697,8 +701,8 @@ fn compile_interpreter(
         }).join("\n"),
     );
 
-    // Generate prologue C calls (only for non-empty prologues, with event recording)
-    kernel = kernel.replace(
+        // Generate prologue C calls (only for non-empty prologues, with event recording)
+        kernel = kernel.replace(
         "//%prologue_c_calls%",
         &ops.iter().enumerate().filter_map(|(i, op)| {
             let op_name = op.op_name();
@@ -711,7 +715,9 @@ fn compile_interpreter(
             }
         }).join("\n"),
     );
+    }
 
+    let span = span!(Level::TRACE, "render_expressions").entered();
     let constants = expressions
         .iter()
         .flat_map(|e| e.dyn_vars())
@@ -743,17 +749,25 @@ fn compile_interpreter(
         "//%constants%",
         &format!("{constant_string}{device_globals}"),
     );
+    drop(span);
 
-    let ptx = compile_ptx_with_opts(
-        &kernel,
-        CompileOptions {
-            arch: Some("sm_75"),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let module = cuda_stream.context().load_module(ptx).unwrap();
-    let func = module.load_function("worker_kernel").unwrap();
+    let (module, func) = if let Some((module, kernel)) = kernel_cache.get(&kernel) {
+        (module.clone(), kernel.clone())
+    } else {
+        let _span = span!(Level::TRACE, "nvrtc").entered();
+        let ptx = compile_ptx_with_opts(
+            &kernel,
+            CompileOptions {
+                arch: Some("sm_75"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let module = cuda_stream.context().load_module(ptx).unwrap();
+        let func = module.load_function("worker_kernel").unwrap();
+        kernel_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+        (module, func)
+    };
     let constants = constants
         .into_iter()
         .map(|d| {
@@ -881,6 +895,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
     llir_graph: &LLIRGraph,
     subgraph: &FxHashSet<NodeIndex>,
     cuda_stream: &Arc<CudaStream>,
+    kernel_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
 ) -> (
     CudaFunction,
     FxHashMap<char, CudaSlice<u8>>,
@@ -956,8 +971,13 @@ pub(crate) fn make_megakernel_from_llir_graph(
         .max()
         .unwrap_or(0);
 
-    let (interpreter, expressions, interpreter_constants) =
-        compile_interpreter(cuda_stream, &block_ops, &expressions, max_payload_size);
+    let (interpreter, expressions, interpreter_constants) = compile_interpreter(
+        cuda_stream,
+        &block_ops,
+        &expressions,
+        max_payload_size,
+        kernel_cache,
+    );
 
     // Build task queue with dynamic payload size
     let mut tasks = TaskQueue::new(max_payload_size);

@@ -1,4 +1,5 @@
 use crate::{block::*, kernel::KernelOp};
+use cudarc::driver::CudaModule;
 use cudarc::driver::sys::{CUdevice_attribute, CUfunction_attribute};
 use cudarc::driver::{
     CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg, sys::CUevent_flags,
@@ -127,6 +128,7 @@ pub struct CudaRuntime {
     // Raw stats saved during execute, interpreted lazily in print_execution_stats
     pub last_kernel_stats: Vec<KernelStats>,
     pub last_total_time_us: f64,
+    kernel_cache: FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
 }
 
 impl CudaRuntime {
@@ -340,6 +342,7 @@ impl Runtime for CudaRuntime {
             intermediate_buffer_dims: FxHashSet::default(),
             last_kernel_stats: vec![],
             last_total_time_us: 0.0,
+            kernel_cache: FxHashMap::default(),
         }
     }
 
@@ -360,7 +363,12 @@ impl Runtime for CudaRuntime {
         let mut node_to_exec = FxHashMap::default();
         for subgraph in block_subgraphs {
             let (interpreter, constants, n_barriers, tasks, node_to_task_index) =
-                make_megakernel_from_llir_graph(llir_graph, &subgraph, &self.cuda_stream);
+                make_megakernel_from_llir_graph(
+                    llir_graph,
+                    &subgraph,
+                    &self.cuda_stream,
+                    &mut self.kernel_cache,
+                );
             let exec_node = exec_graph.add_node(ExecutableKernel::Megakernel {
                 interpreter,
                 interpreter_constants: constants,

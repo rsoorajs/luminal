@@ -50,7 +50,7 @@
 ;(rewrite (MAdd (MAdd a b) c) (MAdd a (MAdd b c)) :ruleset expr) ; explodes weirdly, see no_explode test in symbolic.rs
 ;(rewrite (MMul (MMul a b) c) (MMul a (MMul b c)) :ruleset expr)
 
-(rule ((= ?e (MAdd (MNum a) (MNum b))) (= ?ans (+ a b))) ((union ?e (MNum ?ans))) :ruleset expr)
+(rule ((= ?e (MAdd (MNum a) (MNum b))) (= ?ans (+ a b))) ((union ?e (MNum ?ans)) (subsume (MAdd (MNum a) (MNum b)))) :ruleset expr)
 (rewrite (MSub (MNum a) (MNum b)) (MNum (- a b)) :ruleset expr)
 ; multiply const folding
 (rule
@@ -101,7 +101,7 @@
 ;(rewrite (MMul (MMul (MDiv ?x (MNum ?b)) ?a) (MNum ?c)) (MMul (MDiv ?x (MNum (/ ?b ?c))) ?a) :when ((= 0 (% ?b ?c))) :ruleset expr)
 
 ; Constant folding through associativity: ((a + c1) + c2) -> (a + (c1+c2))
-(rule ((= ?e (MAdd (MAdd ?a (MNum ?b)) (MNum ?c))) (= ?ans (+ ?b ?c))) ((union ?e (MAdd ?a (MNum ?ans)))) :ruleset expr)
+(rule ((= ?e (MAdd (MAdd ?a (MNum ?b)) (MNum ?c))) (= ?ans (+ ?b ?c))) ((union ?e (MAdd ?a (MNum ?ans))) (subsume (MAdd (MAdd ?a (MNum ?b)) (MNum ?c)))) :ruleset expr)
 (rewrite (MAdd (MAdd (MNum ?b) (MVar ?v)) (MNum ?c)) (MAdd (MVar ?v) (MNum (+ ?b ?c))) :ruleset expr)
 (rewrite (MAdd (MAdd (MNum ?b) (MMul ?n ?a)) (MNum ?c)) (MAdd (MMul ?n ?a) (MNum (+ ?b ?c))) :ruleset expr)
 
