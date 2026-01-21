@@ -507,6 +507,14 @@ impl Runtime for CudaRuntime {
             self.last_dyn_map = dyn_map.clone();
             self.allocate_intermediate_buffers(dyn_map);
         }
+
+        // Always clear intermediate buffers to ensure correctness for operations using atomicAdd
+        // TODO: this is very expensive. Need to eliminate ops that require zeroed outputs
+        for (_, buffer) in &mut self.buffers {
+            self.cuda_stream.memset_zeros(buffer).unwrap();
+        }
+        self.cuda_stream.synchronize().unwrap();
+
         if !self.changed_hlir.is_empty() {
             for hlir_node in self.changed_hlir.clone() {
                 let llir_node = self.hlir_to_llir[&hlir_node];

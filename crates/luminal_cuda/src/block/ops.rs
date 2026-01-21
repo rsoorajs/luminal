@@ -1,6 +1,6 @@
-use std::{fmt::Debug, sync::Arc, cell::RefCell};
+use std::{fmt::Debug, sync::Arc};
 
-use cudarc::driver::{CudaSlice, CudaStream, DevicePtr};
+use cudarc::driver::CudaStream;
 use itertools::Itertools;
 use luminal::{
     graph::{extract_expr, extract_expr_list},
@@ -17,7 +17,7 @@ pub type Ops = (
     RowRMSNorm,
     RowRope,
     TileMatmulFullSplit,
-    RowEmbed,  // Working but with slight numerical differences - needs investigation
+    RowEmbed, // Working but with slight numerical differences - needs investigation
 );
 
 #[derive(Debug, Default)]
@@ -146,7 +146,11 @@ impl BlockOp for RowAdd {
         .to_string()
     }
 
-    fn schedule_op(&self, _: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(
+        &self,
+        _: &Arc<CudaStream>,
+        expressions: &FxHashMap<Expression, i32>,
+    ) -> Vec<u8> {
         CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.b_stride)])
@@ -328,7 +332,11 @@ impl BlockOp for RowSwishMul {
         .to_string()
     }
 
-    fn schedule_op(&self, _: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(
+        &self,
+        _: &Arc<CudaStream>,
+        expressions: &FxHashMap<Expression, i32>,
+    ) -> Vec<u8> {
         // Extend strides with 0 for the SM dimension
         let mut a_stride_ext = self.a_stride.clone();
         a_stride_ext.push(0.into());
@@ -580,7 +588,11 @@ impl BlockOp for RowRMSNorm {
         .to_string()
     }
 
-    fn schedule_op(&self, _: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(
+        &self,
+        _: &Arc<CudaStream>,
+        expressions: &FxHashMap<Expression, i32>,
+    ) -> Vec<u8> {
         CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
@@ -978,7 +990,11 @@ impl BlockOp for RowRope {
         .to_string()
     }
 
-    fn schedule_op(&self, _: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(
+        &self,
+        _: &Arc<CudaStream>,
+        expressions: &FxHashMap<Expression, i32>,
+    ) -> Vec<u8> {
         CStruct::new()
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
             .int(expressions[&flatten_mul_strides(&self.range, &self.a_stride)])
@@ -1330,7 +1346,11 @@ impl BlockOp for TileMatmulSplitK {
         ", ts = TILE_SIZE)
     }
 
-    fn schedule_op(&self, _: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
+    fn schedule_op(
+        &self,
+        _: &Arc<CudaStream>,
+        expressions: &FxHashMap<Expression, i32>,
+    ) -> Vec<u8> {
         assert_eq!(self.untiled_range.len(), 2);
         // Range layout: [k_chunks, batch..., tiled_m, tiled_n]
         // k_chunk is at index 0
@@ -1415,9 +1435,6 @@ pub struct TileMatmulFullSplit {
     out_stride: Vec<Expression>, // Batch strides for output (reserved for batch support)
     out_m_stride: Expression, // Output stride for m position within tile
     out_n_stride: Expression, // Output stride for n position within tile
-    // Coordination buffers allocated once in schedule_op
-    coordination_buffer: RefCell<Option<CudaSlice<u32>>>,
-    coordination_generation_buffer: RefCell<Option<CudaSlice<u32>>>,
 }
 
 impl EgglogOp for TileMatmulFullSplit {
@@ -1564,8 +1581,6 @@ impl EgglogOp for TileMatmulFullSplit {
                     .unwrap(),
                 out_m_stride: extract_expr(egraph, children[14], expr_cache).unwrap(),
                 out_n_stride: extract_expr(egraph, children[15], expr_cache).unwrap(),
-                coordination_buffer: RefCell::new(None),
-                coordination_generation_buffer: RefCell::new(None),
             })),
             vec![children[5], children[9]],
         )
@@ -1592,23 +1607,7 @@ impl BlockOp for TileMatmulFullSplit {
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
-        // Each SM reads potentially all of A and B
-        // Not separable since work assignment crosses tile boundaries
         vec![vec![false], vec![false]]
-    }
-
-    fn prologue_a(&self) -> String {
-        "
-        // Increment generation counter once per execution (thread 0 of first SM only)
-        if (current == 0 && t == 0) {
-            unsigned int* generation_ptr = (unsigned int*)payload.gen_buffer_ptr;
-            unsigned int old_gen = atomicAdd(generation_ptr, 1);
-            // Wrap around, avoiding 0
-            if (old_gen == 0xFFFFFFFF) {
-                *generation_ptr = 1;
-            }
-        }
-        ".to_string()
     }
 
     fn bytes_stored(&self) -> Expression {
@@ -1632,7 +1631,7 @@ impl BlockOp for TileMatmulFullSplit {
     }
 
     fn cuda_struct(&self) -> String {
-        "const int untiled_range[2]; int m_tiles; int n_tiles; int total_k; int sm_count; const int a; int a_m_stride; int a_k_stride; int a_width; const int b; int b_n_stride; int b_k_stride; int b_width; const int c; int c_m_stride; int c_n_stride; int c_width; long long coord_buffer_ptr; long long gen_buffer_ptr;".to_string()
+        "const int untiled_range[2]; int m_tiles; int n_tiles; int total_k; int sm_count; const int a; int a_m_stride; int a_k_stride; int a_width; const int b; int b_n_stride; int b_k_stride; int b_width; const int c; int c_m_stride; int c_n_stride; int c_width;".to_string()
     }
 
     fn cuda_function(&self) -> String {
@@ -1645,11 +1644,6 @@ impl BlockOp for TileMatmulFullSplit {
         const int sm_count = eval_expression(payload.sm_count, 0);
         const int M = eval_expression(payload.untiled_range[0], 0);
         const int N = eval_expression(payload.untiled_range[1], 0);
-
-        // Read coordination buffers from payload
-        unsigned int* coordination_buffer = (unsigned int*)payload.coord_buffer_ptr;
-        unsigned int* generation_ptr = (unsigned int*)payload.gen_buffer_ptr;
-        const unsigned int coordination_generation = *generation_ptr;
 
         const float* a_base = source_ptrs[0];
         const float* b_base = source_ptrs[1];
@@ -1785,20 +1779,8 @@ impl BlockOp for TileMatmulFullSplit {
                 for (int k = 0; k < K; ++k) {{
                     acc += A0[k] * B0[k];
                 }}
-                // Use coordination buffer with generation counter to determine first write
-                const int out_idx = (global_m0 + ty) * N + (global_n0 + tx);
-                unsigned int old_gen = atomicCAS(&coordination_buffer[out_idx], 0, coordination_generation);
-                if (old_gen != coordination_generation) {{
-                    // First write for this generation - direct store
-                    c[ty * c_m_stride + tx * c_n_stride] = acc;
-                    if (old_gen != 0) {{
-                        // Update to current generation if it was from a previous generation
-                        atomicCAS(&coordination_buffer[out_idx], old_gen, coordination_generation);
-                    }}
-                }} else {{
-                    // Subsequent write in this generation - accumulate
-                    atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
-                }}
+                // Output buffer is zeroed by runtime before execution, so use atomicAdd
+                atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
             }}
             return;
         }}
@@ -1834,20 +1816,8 @@ impl BlockOp for TileMatmulFullSplit {
                 for (int k = 0; k < K; ++k) {{
                     acc += A0[k] * B0[k];
                 }}
-                // Use coordination buffer with generation counter to determine first write
-                const int out_idx = (global_m0 + ty) * N + (global_n0 + tx);
-                unsigned int old_gen = atomicCAS(&coordination_buffer[out_idx], 0, coordination_generation);
-                if (old_gen != coordination_generation) {{
-                    // First write for this generation - direct store
-                    c[ty * c_m_stride + tx * c_n_stride] = acc;
-                    if (old_gen != 0) {{
-                        // Update to current generation if it was from a previous generation
-                        atomicCAS(&coordination_buffer[out_idx], old_gen, coordination_generation);
-                    }}
-                }} else {{
-                    // Subsequent write in this generation - accumulate
-                    atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
-                }}
+                // Output buffer is zeroed by runtime before execution, so use atomicAdd
+                atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
             }}
         }}
         "#,
@@ -1855,34 +1825,11 @@ impl BlockOp for TileMatmulFullSplit {
         )
     }
 
-    fn schedule_op(&self, stream: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
-        // Allocate/reallocate coordination buffers if size changed
-        let m = expressions[&self.untiled_range[0]] as usize;
-        let n = expressions[&self.untiled_range[1]] as usize;
-        let coord_size = m * n;
-
-        // Check if we need to (re)allocate coordination buffer
-        // Allocate at least 1 element to ensure valid pointer even for empty matrices
-        let mut coord_buf_ref = self.coordination_buffer.borrow_mut();
-        let current_size = coord_buf_ref.as_ref().map(|buf| buf.len());
-        let alloc_size = coord_size.max(1);
-        let needs_alloc = current_size.map_or(true, |size| size != alloc_size);
-        if needs_alloc {
-            *coord_buf_ref = Some(stream.alloc_zeros::<u32>(alloc_size).unwrap());
-        }
-        let coord_ptr = coord_buf_ref.as_ref().unwrap().device_ptr(stream).0 as i64;
-        drop(coord_buf_ref);
-
-        // Allocate generation counter buffer once (single u32, initialized to 1)
-        let mut gen_buf_ref = self.coordination_generation_buffer.borrow_mut();
-        if gen_buf_ref.is_none() {
-            let mut buf = stream.alloc_zeros::<u32>(1).unwrap();
-            stream.memcpy_htod(std::slice::from_ref(&1u32), &mut buf).unwrap();
-            *gen_buf_ref = Some(buf);
-        }
-        let gen_ptr = gen_buf_ref.as_ref().unwrap().device_ptr(stream).0 as i64;
-        drop(gen_buf_ref);
-
+    fn schedule_op(
+        &self,
+        _stream: &Arc<CudaStream>,
+        expressions: &FxHashMap<Expression, i32>,
+    ) -> Vec<u8> {
         CStruct::new()
             .ints(
                 &self
@@ -1907,8 +1854,6 @@ impl BlockOp for TileMatmulFullSplit {
             .int(expressions[&self.out_m_stride])
             .int(expressions[&self.out_n_stride])
             .int(expressions[&self.out_m_stride]) // c_width = c_m_stride
-            .long(coord_ptr) // coordination buffer pointer
-            .long(gen_ptr)   // generation counter pointer
             .finish_struct()
     }
 
@@ -1927,6 +1872,211 @@ impl BlockOp for TileMatmulFullSplit {
             self.b_k_stride,
             self.out_m_stride,
             self.out_n_stride,
+        ]
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct RowEmbed {
+    range: Vec<Expression>, // batch dimensions (e.g., [s] for sequence length)
+    token_stride: Vec<Expression>, // stride for token_ids input
+    out_stride: Vec<Expression>, // stride for output
+    embed_dim: Expression,  // embedding dimension (e.g., HIDDEN)
+}
+
+impl EgglogOp for RowEmbed {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "RowEmbed".to_string(),
+            vec![EList, Input, EList, Input, EList, Expr],
+        )
+    }
+
+    fn rewrites(&self) -> Vec<String> {
+        vec![
+            // Match Gather with Add(Mul(Cast(token_ids), const), Iota) indices
+            "(rule
+                (
+                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
+                    (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
+                    (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
+                    (= ?token_ids_cast (Cast ?token_ids ?cast_dtype))
+                    (= ?embed_dim (nth_from_end ?embed_shape 0))
+                    (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
+                    (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
+                )
+                (
+                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (union ?gather ?re)
+                    (set (dtype ?re) (F32))
+                )
+                :name \"row embed with cast mul\"
+            )".to_string(),
+            // Match Gather with Add(Iota, Mul(Cast(token_ids), const)) indices (reversed order)
+            "(rule
+                (
+                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
+                    (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
+                    (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
+                    (= ?token_ids_cast (Cast ?token_ids ?cast_dtype))
+                    (= ?embed_dim (nth_from_end ?embed_shape 0))
+                    (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
+                    (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
+                )
+                (
+                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (union ?gather ?re)
+                    (set (dtype ?re) (F32))
+                )
+                :name \"row embed with cast mul reversed\"
+            )".to_string(),
+            // Match Gather with Add(Mul(token_ids, const), Iota) indices (no Cast)
+            "(rule
+                (
+                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
+                    (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
+                    (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
+                    (= ?embed_dim (nth_from_end ?embed_shape 0))
+                    (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
+                    (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
+                )
+                (
+                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (union ?gather ?re)
+                    (set (dtype ?re) (F32))
+                )
+                :name \"row embed with mul\"
+            )".to_string(),
+            // Match Gather with Add(Iota, Mul(token_ids, const)) indices (reversed order, no Cast)
+            "(rule
+                (
+                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
+                    (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
+                    (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
+                    (= ?embed_dim (nth_from_end ?embed_shape 0))
+                    (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
+                    (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
+                )
+                (
+                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (union ?gather ?re)
+                    (set (dtype ?re) (F32))
+                )
+                :name \"row embed with mul reversed\"
+            )".to_string(),
+        ]
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn extract<'a>(
+        &self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        (
+            LLIROp::new::<dyn BlockOp>(Box::new(Self {
+                range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
+                token_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache)
+                    .unwrap(),
+                out_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
+                embed_dim: extract_expr(egraph, children[5], expr_cache).unwrap(),
+            })),
+            vec![children[1], children[3]], // token_ids, embedding_table
+        )
+    }
+}
+
+impl BlockOp for RowEmbed {
+    fn op_name(&self) -> &'static str {
+        "RowEmbed"
+    }
+
+    fn launch_range(&self) -> Vec<Expression> {
+        if self.range.is_empty() {
+            vec![1.into()]
+        } else {
+            self.range.clone()
+        }
+    }
+
+    fn output_size(&self) -> Expression {
+        self.range.iter().copied().product::<Expression>().max(1) * self.embed_dim
+    }
+
+    fn producer_barriers_seperate(&self) -> Vec<bool> {
+        vec![true; self.range.len()]
+    }
+
+    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+        vec![vec![true; self.range.len()], vec![true; self.range.len()]]
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        // Load: 1 token ID (4 bytes) + 1 embedding row (embed_dim * 4 bytes)
+        self.range.iter().copied().product::<Expression>().max(1) * (4 + self.embed_dim * 4)
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        // Store: 1 embedding row per launch
+        self.range.iter().copied().product::<Expression>().max(1) * self.embed_dim * 4
+    }
+
+    fn flops(&self) -> Expression {
+        // No FLOPs - just memory copy
+        0.into()
+    }
+
+    fn cuda_struct(&self) -> String {
+        "const int token_stride; const int out_stride; int embed_dim;".to_string()
+    }
+
+    fn cuda_function(&self) -> String {
+        "
+        int embed_dim = eval_expression(payload.embed_dim, 0);
+
+        // Get stride offsets
+        int token_offset = eval_expression(payload.token_stride, current);
+        int out_offset = eval_expression(payload.out_stride, current);
+
+        // Get pointers
+        const int* token_ids = (const int*)(source_ptrs[0]) + token_offset;
+        const float* embed_table = source_ptrs[1];
+        float* out_row = out_ptr + out_offset;
+
+        // Read token ID (stored as int)
+        int token_id = token_ids[0];
+
+        // Lookup and copy embedding row
+        const float* embed_row = embed_table + (long long)token_id * embed_dim;
+        for (int i = t; i < embed_dim; i += blockDim.x) {
+            out_row[i] = embed_row[i];
+        }
+        "
+        .to_string()
+    }
+
+    fn schedule_op(
+        &self,
+        _: &Arc<CudaStream>,
+        expressions: &FxHashMap<Expression, i32>,
+    ) -> Vec<u8> {
+        CStruct::new()
+            .int(expressions[&flatten_mul_strides(&self.range, &self.token_stride)])
+            .int(expressions[&flatten_mul_strides(&self.range, &self.out_stride)])
+            .int(expressions[&self.embed_dim])
+            .finish_struct()
+    }
+
+    fn expressions(&self) -> Vec<Expression> {
+        vec![
+            flatten_mul_strides(&self.range, &self.token_stride),
+            flatten_mul_strides(&self.range, &self.out_stride),
+            self.embed_dim,
         ]
     }
 }
@@ -2051,205 +2201,5 @@ impl CStruct {
         self.align_to(align);
         self.buf.extend_from_slice(data);
         self
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct RowEmbed {
-    range: Vec<Expression>,            // batch dimensions (e.g., [s] for sequence length)
-    token_stride: Vec<Expression>,     // stride for token_ids input
-    out_stride: Vec<Expression>,       // stride for output
-    embed_dim: Expression,             // embedding dimension (e.g., HIDDEN)
-}
-
-impl EgglogOp for RowEmbed {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        (
-            "RowEmbed".to_string(),
-            vec![EList, Input, EList, Input, EList, Expr],
-        )
-    }
-
-    fn rewrites(&self) -> Vec<String> {
-        vec![
-            // Match Gather with Add(Mul(Cast(token_ids), const), Iota) indices
-            "(rule
-                (
-                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
-                    (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
-                    (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
-                    (= ?token_ids_cast (Cast ?token_ids ?cast_dtype))
-                    (= ?embed_dim (nth_from_end ?embed_shape 0))
-                    (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
-                    (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
-                )
-                (
-                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
-                    (union ?gather ?re)
-                    (set (dtype ?re) (F32))
-                )
-                :name \"row embed with cast mul\"
-            )".to_string(),
-            // Match Gather with Add(Iota, Mul(Cast(token_ids), const)) indices (reversed order)
-            "(rule
-                (
-                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
-                    (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
-                    (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
-                    (= ?token_ids_cast (Cast ?token_ids ?cast_dtype))
-                    (= ?embed_dim (nth_from_end ?embed_shape 0))
-                    (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
-                    (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
-                )
-                (
-                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
-                    (union ?gather ?re)
-                    (set (dtype ?re) (F32))
-                )
-                :name \"row embed with cast mul reversed\"
-            )".to_string(),
-            // Match Gather with Add(Mul(token_ids, const), Iota) indices (no Cast)
-            "(rule
-                (
-                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
-                    (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
-                    (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
-                    (= ?embed_dim (nth_from_end ?embed_shape 0))
-                    (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
-                    (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
-                )
-                (
-                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_stride ?embed_table ?out_stride_batch ?embed_dim))
-                    (union ?gather ?re)
-                    (set (dtype ?re) (F32))
-                )
-                :name \"row embed with mul\"
-            )".to_string(),
-            // Match Gather with Add(Iota, Mul(token_ids, const)) indices (reversed order, no Cast)
-            "(rule
-                (
-                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
-                    (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
-                    (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
-                    (= ?embed_dim (nth_from_end ?embed_shape 0))
-                    (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
-                    (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
-                )
-                (
-                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_stride ?embed_table ?out_stride_batch ?embed_dim))
-                    (union ?gather ?re)
-                    (set (dtype ?re) (F32))
-                )
-                :name \"row embed with mul reversed\"
-            )".to_string(),
-        ]
-    }
-
-    fn cleanup(&self) -> bool {
-        false
-    }
-
-    fn extract<'a>(
-        &self,
-        egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a ENodeId>) {
-        (
-            LLIROp::new::<dyn BlockOp>(Box::new(Self {
-                range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                token_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                embed_dim: extract_expr(egraph, children[5], expr_cache).unwrap(),
-            })),
-            vec![children[1], children[3]], // token_ids, embedding_table
-        )
-    }
-}
-
-impl BlockOp for RowEmbed {
-    fn op_name(&self) -> &'static str {
-        "RowEmbed"
-    }
-
-    fn launch_range(&self) -> Vec<Expression> {
-        if self.range.is_empty() {
-            vec![1.into()]
-        } else {
-            self.range.clone()
-        }
-    }
-
-    fn output_size(&self) -> Expression {
-        self.range.iter().copied().product::<Expression>().max(1) * self.embed_dim
-    }
-
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
-        vec![true; self.range.len()]
-    }
-
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
-        vec![vec![true; self.range.len()], vec![true; self.range.len()]]
-    }
-
-    fn bytes_loaded(&self) -> Expression {
-        // Load: 1 token ID (4 bytes) + 1 embedding row (embed_dim * 4 bytes)
-        self.range.iter().copied().product::<Expression>().max(1) * (4 + self.embed_dim * 4)
-    }
-
-    fn bytes_stored(&self) -> Expression {
-        // Store: 1 embedding row per launch
-        self.range.iter().copied().product::<Expression>().max(1) * self.embed_dim * 4
-    }
-
-    fn flops(&self) -> Expression {
-        // No FLOPs - just memory copy
-        0.into()
-    }
-
-    fn cuda_struct(&self) -> String {
-        "const int token_stride; const int out_stride; int embed_dim;".to_string()
-    }
-
-    fn cuda_function(&self) -> String {
-        "
-        int embed_dim = eval_expression(payload.embed_dim, 0);
-
-        // Get stride offsets
-        int token_offset = eval_expression(payload.token_stride, current);
-        int out_offset = eval_expression(payload.out_stride, current);
-
-        // Get pointers
-        const int* token_ids = (const int*)(source_ptrs[0]) + token_offset;
-        const float* embed_table = source_ptrs[1];
-        float* out_row = out_ptr + out_offset;
-
-        // Read token ID (stored as int)
-        int token_id = token_ids[0];
-
-        // Lookup and copy embedding row
-        const float* embed_row = embed_table + (long long)token_id * embed_dim;
-        for (int i = t; i < embed_dim; i += blockDim.x) {
-            out_row[i] = embed_row[i];
-        }
-        "
-        .to_string()
-    }
-
-    fn schedule_op(&self, _: &Arc<CudaStream>, expressions: &FxHashMap<Expression, i32>) -> Vec<u8> {
-        CStruct::new()
-            .int(expressions[&flatten_mul_strides(&self.range, &self.token_stride)])
-            .int(expressions[&flatten_mul_strides(&self.range, &self.out_stride)])
-            .int(expressions[&self.embed_dim])
-            .finish_struct()
-    }
-
-    fn expressions(&self) -> Vec<Expression> {
-        vec![
-            flatten_mul_strides(&self.range, &self.token_stride),
-            flatten_mul_strides(&self.range, &self.out_stride),
-            self.embed_dim,
-        ]
     }
 }
