@@ -17,7 +17,8 @@ pub type Ops = (
     RowRMSNorm,
     RowRope,
     TileMatmulFullSplit,
-    RowEmbed, // Working but with slight numerical differences - needs investigation
+    // TileMatmulSplitK, // TODO: Why does this cause an error in the llama example? Extraction bug I think
+    RowEmbed,
 );
 
 #[derive(Debug, Default)]
