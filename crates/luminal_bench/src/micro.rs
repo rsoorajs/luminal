@@ -1,7 +1,34 @@
 //! L1 Micro Benchmarks - Single operator performance tests
+//!
+//! These benchmarks cover all 12 HLIR primitive operators:
+//!
+//! ## Unary operators (5)
+//! - `Exp2`: 2^x
+//! - `Log2`: log2(x)
+//! - `Sin`: sin(x)
+//! - `Recip`: 1/x
+//! - `Sqrt`: sqrt(x)
+//!
+//! ## Binary operators (4)
+//! - `Add`: a + b
+//! - `Mul`: a * b
+//! - `Mod`: a % b
+//! - `LessThan`: a < b
+//!
+//! ## Indexing operators (2)
+//! - `Gather`: gather(data, indices)
+//! - `Cast`: type conversion
+//!
+//! ## Reduction operators (2)
+//! - `SumReduce`: sum along axis
+//! - `MaxReduce`: max along axis
 
 use crate::{BenchSize, BenchmarkPattern, MICRO_SIZES};
 use luminal::prelude::*;
+
+// ============================================================================
+// Binary Operators
+// ============================================================================
 
 /// Vector addition benchmark: a + b
 #[derive(Debug, Default)]
@@ -43,6 +70,50 @@ impl BenchmarkPattern for MulVec {
     }
 }
 
+/// Vector modulo benchmark: a % b
+#[derive(Debug, Default)]
+pub struct ModVec;
+
+impl BenchmarkPattern for ModVec {
+    fn name(&self) -> &'static str {
+        "mod_vec"
+    }
+
+    fn sizes(&self) -> &[BenchSize] {
+        MICRO_SIZES
+    }
+
+    fn build_graph(&self, cx: &mut Graph, size: BenchSize) {
+        let a = cx.tensor(size.value);
+        let b = cx.tensor(size.value);
+        let _ = (a % b).output();
+    }
+}
+
+/// Vector less-than comparison benchmark: a < b
+#[derive(Debug, Default)]
+pub struct LessThanVec;
+
+impl BenchmarkPattern for LessThanVec {
+    fn name(&self) -> &'static str {
+        "less_than_vec"
+    }
+
+    fn sizes(&self) -> &[BenchSize] {
+        MICRO_SIZES
+    }
+
+    fn build_graph(&self, cx: &mut Graph, size: BenchSize) {
+        let a = cx.tensor(size.value);
+        let b = cx.tensor(size.value);
+        let _ = a.lt(b).output();
+    }
+}
+
+// ============================================================================
+// Reduction Operators
+// ============================================================================
+
 /// Sum reduction benchmark: sum(a)
 #[derive(Debug, Default)]
 pub struct SumReduce;
@@ -81,6 +152,10 @@ impl BenchmarkPattern for MaxReduce {
     }
 }
 
+// ============================================================================
+// Unary Operators
+// ============================================================================
+
 /// Exp2 benchmark: 2^x
 #[derive(Debug, Default)]
 pub struct Exp2Bench;
@@ -100,14 +175,156 @@ impl BenchmarkPattern for Exp2Bench {
     }
 }
 
-/// Get all micro benchmark patterns
+/// Log2 benchmark: log2(x)
+#[derive(Debug, Default)]
+pub struct Log2Bench;
+
+impl BenchmarkPattern for Log2Bench {
+    fn name(&self) -> &'static str {
+        "log2"
+    }
+
+    fn sizes(&self) -> &[BenchSize] {
+        MICRO_SIZES
+    }
+
+    fn build_graph(&self, cx: &mut Graph, size: BenchSize) {
+        let a = cx.tensor(size.value);
+        let _ = a.log2().output();
+    }
+}
+
+/// Sin benchmark: sin(x)
+#[derive(Debug, Default)]
+pub struct SinBench;
+
+impl BenchmarkPattern for SinBench {
+    fn name(&self) -> &'static str {
+        "sin"
+    }
+
+    fn sizes(&self) -> &[BenchSize] {
+        MICRO_SIZES
+    }
+
+    fn build_graph(&self, cx: &mut Graph, size: BenchSize) {
+        let a = cx.tensor(size.value);
+        let _ = a.sin().output();
+    }
+}
+
+/// Recip benchmark: 1/x
+#[derive(Debug, Default)]
+pub struct RecipBench;
+
+impl BenchmarkPattern for RecipBench {
+    fn name(&self) -> &'static str {
+        "recip"
+    }
+
+    fn sizes(&self) -> &[BenchSize] {
+        MICRO_SIZES
+    }
+
+    fn build_graph(&self, cx: &mut Graph, size: BenchSize) {
+        let a = cx.tensor(size.value);
+        let _ = a.reciprocal().output();
+    }
+}
+
+/// Sqrt benchmark: sqrt(x)
+#[derive(Debug, Default)]
+pub struct SqrtBench;
+
+impl BenchmarkPattern for SqrtBench {
+    fn name(&self) -> &'static str {
+        "sqrt"
+    }
+
+    fn sizes(&self) -> &[BenchSize] {
+        MICRO_SIZES
+    }
+
+    fn build_graph(&self, cx: &mut Graph, size: BenchSize) {
+        let a = cx.tensor(size.value);
+        let _ = a.sqrt().output();
+    }
+}
+
+// ============================================================================
+// Indexing Operators
+// ============================================================================
+
+/// Gather benchmark: gather(data, indices)
+#[derive(Debug, Default)]
+pub struct GatherBench;
+
+impl BenchmarkPattern for GatherBench {
+    fn name(&self) -> &'static str {
+        "gather"
+    }
+
+    fn sizes(&self) -> &[BenchSize] {
+        MICRO_SIZES
+    }
+
+    fn build_graph(&self, cx: &mut Graph, size: BenchSize) {
+        // Data tensor: (vocab_size, embedding_dim)
+        // For simplicity, use size as vocab and fixed embedding dim
+        let vocab_size = (size.value / 128).max(1);
+        let embed_dim = 128;
+        let num_indices = 1024.min(vocab_size);
+
+        let data = cx.tensor((vocab_size, embed_dim));
+        let indices = cx.tensor(num_indices);
+        let _ = data.gather(indices).output();
+    }
+}
+
+/// Cast benchmark: type conversion (f32 -> f16 -> f32)
+#[derive(Debug, Default)]
+pub struct CastBench;
+
+impl BenchmarkPattern for CastBench {
+    fn name(&self) -> &'static str {
+        "cast"
+    }
+
+    fn sizes(&self) -> &[BenchSize] {
+        MICRO_SIZES
+    }
+
+    fn build_graph(&self, cx: &mut Graph, size: BenchSize) {
+        let a = cx.tensor(size.value);
+        // Cast to f16 then back to f32 to measure round-trip cost
+        let _ = a.cast(luminal::op::DType::F16).cast(luminal::op::DType::F32).output();
+    }
+}
+
+// ============================================================================
+// Pattern Registry
+// ============================================================================
+
+/// Get all micro benchmark patterns (all 12 HLIR primitives)
 pub fn all_micro_patterns() -> Vec<Box<dyn BenchmarkPattern>> {
     vec![
+        // Binary operators
         Box::new(AddVec),
         Box::new(MulVec),
+        Box::new(ModVec),
+        Box::new(LessThanVec),
+        // Reduction operators
         Box::new(SumReduce),
         Box::new(MaxReduce),
+        // Unary operators
         Box::new(Exp2Bench),
+        Box::new(Log2Bench),
+        Box::new(SinBench),
+        Box::new(RecipBench),
+        Box::new(SqrtBench),
+        // Indexing operators
+        Box::new(GatherBench),
+        Box::new(CastBench),
     ]
 }
 
@@ -115,18 +332,30 @@ pub fn all_micro_patterns() -> Vec<Box<dyn BenchmarkPattern>> {
 pub fn bytes_for_pattern(pattern_name: &str, size: usize) -> usize {
     let elem_size = std::mem::size_of::<f32>();
     match pattern_name {
-        "add_vec" | "mul_vec" => {
-            // Read 2 inputs + write 1 output = 3 * size * 4 bytes
-            3 * size * elem_size
+        // Binary operators: read 2 inputs + write 1 output = 3 * size * 4 bytes
+        "add_vec" | "mul_vec" | "mod_vec" | "less_than_vec" => 3 * size * elem_size,
+
+        // Reduction operators: read 1 input + write 1 output (scalar)
+        "sum_reduce" | "max_reduce" => size * elem_size + elem_size,
+
+        // Unary operators: read 1 input + write 1 output = 2 * size * 4 bytes
+        "exp2" | "log2" | "sin" | "recip" | "sqrt" => 2 * size * elem_size,
+
+        // Cast: read 1 input (f32) + write intermediate (f16) + read (f16) + write output (f32)
+        // Simplified: 2 * size * 4 bytes (f32 in + f32 out)
+        "cast" => 2 * size * elem_size,
+
+        // Gather: read indices + read gathered data + write output
+        // For gather, data access is irregular, approximate as:
+        // indices (num_indices * 4) + output (num_indices * embed_dim * 4)
+        "gather" => {
+            let vocab_size = (size / 128).max(1);
+            let embed_dim = 128;
+            let num_indices = 1024.min(vocab_size);
+            // Read indices + read data (worst case: all unique) + write output
+            num_indices * elem_size + num_indices * embed_dim * elem_size + num_indices * embed_dim * elem_size
         }
-        "sum_reduce" | "max_reduce" => {
-            // Read 1 input + write 1 output (scalar)
-            size * elem_size + elem_size
-        }
-        "exp2" => {
-            // Read 1 input + write 1 output = 2 * size * 4 bytes
-            2 * size * elem_size
-        }
+
         _ => 0,
     }
 }
