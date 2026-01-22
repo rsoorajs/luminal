@@ -269,14 +269,14 @@ impl BenchmarkPattern for GatherBench {
     }
 
     fn build_graph(&self, cx: &mut Graph, size: BenchSize) {
-        // Data tensor: (vocab_size, embedding_dim)
-        // For simplicity, use size as vocab and fixed embedding dim
-        let vocab_size = (size.value / 128).max(1);
-        let embed_dim = 128;
-        let num_indices = 1024.min(vocab_size);
+        // Simple 1D gather: data[indices]
+        // data: 1D tensor of size.value elements
+        // indices: 1D tensor selecting num_indices elements
+        let num_indices = 1024.min(size.value);
 
-        let data = cx.tensor((vocab_size, embed_dim));
-        let indices = cx.tensor(num_indices);
+        let data = cx.tensor(size.value);
+        // Indices must be integer type for gather operation
+        let indices = cx.tensor(num_indices).as_dtype(luminal::op::DType::Int);
         let _ = data.gather(indices).output();
     }
 }
@@ -305,7 +305,7 @@ impl BenchmarkPattern for CastBench {
 // Pattern Registry
 // ============================================================================
 
-/// Get all micro benchmark patterns (all 12 HLIR primitives)
+/// Get all micro benchmark patterns (HLIR primitives supported by Metal)
 pub fn all_micro_patterns() -> Vec<Box<dyn BenchmarkPattern>> {
     vec![
         // Binary operators
@@ -324,7 +324,7 @@ pub fn all_micro_patterns() -> Vec<Box<dyn BenchmarkPattern>> {
         Box::new(SqrtBench),
         // Indexing operators
         Box::new(GatherBench),
-        Box::new(CastBench),
+        // Note: CastBench removed - Metal backend does not implement Cast yet
     ]
 }
 
@@ -346,14 +346,11 @@ pub fn bytes_for_pattern(pattern_name: &str, size: usize) -> usize {
         "cast" => 2 * size * elem_size,
 
         // Gather: read indices + read gathered data + write output
-        // For gather, data access is irregular, approximate as:
-        // indices (num_indices * 4) + output (num_indices * embed_dim * 4)
+        // Simple 1D gather: indices (num_indices * 4) + read data + write output
         "gather" => {
-            let vocab_size = (size / 128).max(1);
-            let embed_dim = 128;
-            let num_indices = 1024.min(vocab_size);
-            // Read indices + read data (worst case: all unique) + write output
-            num_indices * elem_size + num_indices * embed_dim * elem_size + num_indices * embed_dim * elem_size
+            let num_indices = 1024.min(size);
+            // Read indices (i32) + read data (random access, ~num_indices elements) + write output
+            num_indices * elem_size + num_indices * elem_size + num_indices * elem_size
         }
 
         _ => 0,
