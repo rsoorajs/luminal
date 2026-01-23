@@ -4,20 +4,31 @@
 //! ```bash
 //! cargo bench -p luminal_bench --features metal --bench micro
 //! ```
+//!
+//! After running, find:
+//! - Time results: target/criterion/report/index.html
+//! - Metrics mapping: target/criterion/bench_metrics.json
+//!
+//! Use the metrics mapping + Criterion time to compute MBU/MFU.
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::time::Duration;
 
 #[cfg(feature = "metal")]
 use luminal_bench::{
     BenchmarkBackend, BenchmarkPattern, MetalBenchmark, all_micro_patterns,
+    BenchMetricsMap, BenchMetrics, HardwareSpec,
 };
 
 #[cfg(feature = "metal")]
 use luminal::prelude::*;
 
 #[cfg(feature = "metal")]
-fn run_metal_pattern_benchmark(c: &mut Criterion, pattern: &dyn BenchmarkPattern, hw: &luminal_bench::HardwareInfo) {
+fn run_metal_pattern_benchmark(
+    c: &mut Criterion,
+    pattern: &dyn BenchmarkPattern,
+    metrics_map: &mut BenchMetricsMap,
+) {
     use luminal::hlir::Input;
     use luminal::op::Runtime;
     use luminal_metal::runtime::MetalRuntime;
@@ -51,39 +62,26 @@ fn run_metal_pattern_benchmark(c: &mut Criterion, pattern: &dyn BenchmarkPattern
             rt = cx.search(rt, 5);
             rt.allocate_intermediate_buffers(&cx.dyn_map);
 
-            // Use iter_custom for precise timing with stats
+            // Collect metrics once and add to mapping
+            if let Some(stats) = rt.execute_with_stats(&cx.dyn_map) {
+                metrics_map.add(
+                    pattern_name,
+                    size.name,
+                    BenchMetrics::new(stats.bytes_loaded, stats.bytes_stored, stats.flops),
+                );
+            }
+
+            // Benchmark using iter_custom for precise timing
             b.iter_custom(|iters| {
                 let mut total_time = Duration::ZERO;
-                let mut last_stats = None;
 
                 for _ in 0..iters {
                     if let Some(stats) = rt.execute_with_stats(&cx.dyn_map) {
                         total_time += Duration::from_secs_f64(stats.execution_time_us / 1_000_000.0);
-                        last_stats = Some(stats);
                     } else {
-                        // Fallback to regular execute
                         let start = std::time::Instant::now();
                         rt.execute(&cx.dyn_map);
                         total_time += start.elapsed();
-                    }
-                }
-
-                // Print MBU/MFU on first iteration (avoid spam)
-                if iters == 1 {
-                    if let Some(stats) = last_stats {
-                        let peak_bw = hw.peak_bandwidth_gbps.unwrap_or(100.0);
-                        let peak_tf = hw.peak_tflops.unwrap_or(1.0);
-                        let mbu = stats.mbu(peak_bw);
-                        let mfu = stats.mfu(peak_tf);
-                        println!(
-                            "\n  {} [{}]: {:.2} GB/s ({:.1}% MBU), {:.3} TFLOPS ({:.1}% MFU)",
-                            pattern_name,
-                            size.name,
-                            stats.bandwidth_gbps(),
-                            mbu,
-                            stats.tflops(),
-                            mfu
-                        );
                     }
                 }
 
@@ -97,8 +95,10 @@ fn run_metal_pattern_benchmark(c: &mut Criterion, pattern: &dyn BenchmarkPattern
 
 #[cfg(feature = "metal")]
 fn metal_micro_benchmarks(c: &mut Criterion) {
-    // Print hardware info
+    // Get hardware info
     let hw = MetalBenchmark::hardware_info();
+
+    // Print hardware info
     println!("\n=== Metal Benchmark ===");
     println!("Device: {}", hw.device_name);
     println!("Memory: {:.1} GB", hw.memory_gb);
@@ -110,9 +110,29 @@ fn metal_micro_benchmarks(c: &mut Criterion) {
     }
     println!();
 
+    // Create metrics map
+    let mut metrics_map = BenchMetricsMap::new(HardwareSpec {
+        device_name: hw.device_name.clone(),
+        memory_gb: hw.memory_gb,
+        peak_bandwidth_gbps: hw.peak_bandwidth_gbps.unwrap_or(100.0),
+        peak_tflops: hw.peak_tflops.unwrap_or(1.0),
+    });
+
     // Run all micro patterns
     for pattern in all_micro_patterns() {
-        run_metal_pattern_benchmark(c, pattern.as_ref(), &hw);
+        run_metal_pattern_benchmark(c, pattern.as_ref(), &mut metrics_map);
+    }
+
+    // Save metrics mapping to file
+    let metrics_path = std::path::Path::new("target/criterion/bench_metrics.json");
+    if let Some(parent) = metrics_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = metrics_map.save(metrics_path) {
+        eprintln!("Warning: Failed to save metrics mapping: {}", e);
+    } else {
+        println!("\n=== Metrics saved to {} ===", metrics_path.display());
+        println!("Use this with Criterion time results to compute MBU/MFU");
     }
 }
 

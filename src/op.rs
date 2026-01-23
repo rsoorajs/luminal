@@ -11,6 +11,27 @@ use rustc_hash::FxHashMap;
 // Execution Statistics for Benchmarking
 // ============================================================================
 
+/// Timing method used for execution statistics
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimingMethod {
+    /// GPU-side timing using Metal timestamps or CUDA events
+    /// Most accurate for measuring kernel performance
+    GpuTimestamp,
+    /// Wall-clock timing using CPU Instant
+    /// Includes CPU-GPU synchronization overhead
+    #[default]
+    WallClock,
+}
+
+impl std::fmt::Display for TimingMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimingMethod::GpuTimestamp => write!(f, "GPU"),
+            TimingMethod::WallClock => write!(f, "Wall"),
+        }
+    }
+}
+
 /// Detailed execution statistics from a single run
 ///
 /// This struct captures precise metrics for computing MBU (Memory Bandwidth
@@ -25,16 +46,36 @@ pub struct ExecutionStats {
     pub bytes_stored: usize,
     /// Total floating-point operations
     pub flops: usize,
+    /// Timing method used for this measurement
+    pub timing_method: TimingMethod,
 }
 
 impl ExecutionStats {
-    /// Create new execution stats
+    /// Create new execution stats with GPU timing
     pub fn new(execution_time_us: f64, bytes_loaded: usize, bytes_stored: usize, flops: usize) -> Self {
         Self {
             execution_time_us,
             bytes_loaded,
             bytes_stored,
             flops,
+            timing_method: TimingMethod::GpuTimestamp,
+        }
+    }
+
+    /// Create new execution stats with explicit timing method
+    pub fn with_timing_method(
+        execution_time_us: f64,
+        bytes_loaded: usize,
+        bytes_stored: usize,
+        flops: usize,
+        timing_method: TimingMethod,
+    ) -> Self {
+        Self {
+            execution_time_us,
+            bytes_loaded,
+            bytes_stored,
+            flops,
+            timing_method,
         }
     }
 

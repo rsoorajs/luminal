@@ -3,13 +3,14 @@ use itertools::Itertools;
 use luminal::{
     graph::LLIRGraph,
     hlir::{Input, Output},
-    op::{ExecutionStats, Runtime},
+    op::{ExecutionStats, Runtime, TimingMethod},
     prelude::{
         petgraph::{algo::toposort, prelude::StableGraph, visit::EdgeRef, Direction},
         FxHashMap, NodeIndex, ToId,
     },
 };
 use metal::{Buffer, CommandQueue, ComputePipelineState, Device, MTLResourceOptions};
+use objc::runtime::Object;
 use std::time::Duration;
 
 pub struct MetalRuntime {
@@ -192,6 +193,9 @@ impl Runtime for MetalRuntime {
     }
 
     /// Execute and return detailed statistics for MBU/MFU calculation
+    ///
+    /// Uses Metal GPU timestamps for precise timing (not wall-clock time).
+    /// This eliminates CPU-GPU synchronization overhead from measurements.
     fn execute_with_stats(&mut self, dyn_map: &FxHashMap<char, usize>) -> Option<ExecutionStats> {
         // Collect metrics from all kernels before execution
         let mut total_bytes_loaded = 0usize;
@@ -206,16 +210,15 @@ impl Runtime for MetalRuntime {
             }
         }
 
-        // Execute with timing
-        let start = std::time::Instant::now();
-        self.execute(dyn_map);
-        let elapsed = start.elapsed();
+        // Execute with GPU-side timing
+        let (time_us, timing_method) = self.execute_timed(dyn_map);
 
-        Some(ExecutionStats::new(
-            elapsed.as_secs_f64() * 1_000_000.0, // Convert to microseconds
+        Some(ExecutionStats::with_timing_method(
+            time_us,
             total_bytes_loaded,
             total_bytes_stored,
             total_flops,
+            timing_method,
         ))
     }
 }
@@ -236,5 +239,92 @@ impl MetalRuntime {
                 self.buffers.insert(node, buffer);
             }
         }
+    }
+
+    /// Execute and return GPU-side execution time in microseconds.
+    ///
+    /// Uses `MTLCommandBuffer::gpuStartTime` and `gpuEndTime` for precise
+    /// GPU timing that excludes CPU-GPU synchronization overhead.
+    fn execute_timed(&mut self, dyn_map: &FxHashMap<char, usize>) -> (f64, TimingMethod) {
+        let llir_to_hlir: FxHashMap<NodeIndex, NodeIndex> = self
+            .llir_graph
+            .node_indices()
+            .filter_map(|n| {
+                if let Some(Input { node, .. }) = self.llir_graph[n].to_op::<Input>() {
+                    Some((n, NodeIndex::new(*node)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let topo_order = toposort(&self.llir_graph, None).expect("Graph has cycles!");
+
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        for node in topo_order {
+            if self.llir_graph[node].to_op::<Input>().is_some()
+                || self.llir_graph[node].to_op::<Output>().is_some()
+            {
+                continue;
+            }
+
+            if let Some(kernel_op) = self.llir_graph[node].to_dialect::<dyn MetalKernelOp>() {
+                let pipeline = self.pipelines.get(&node).expect("Pipeline not compiled!");
+
+                let input_nodes: Vec<NodeIndex> = self
+                    .llir_graph
+                    .edges_directed(node, Direction::Incoming)
+                    .sorted_by_key(|e| e.id())
+                    .map(|e| e.source())
+                    .collect();
+
+                let input_buffers: Vec<&Buffer> = input_nodes
+                    .iter()
+                    .map(|&n| {
+                        if let Some(hlir_node) = llir_to_hlir.get(&n) {
+                            self.hlir_buffers
+                                .get(hlir_node)
+                                .expect("Input buffer not set!")
+                        } else {
+                            self.buffers
+                                .get(&n)
+                                .expect("Intermediate buffer not found!")
+                        }
+                    })
+                    .collect();
+
+                let output_buffer = self
+                    .buffers
+                    .get(&node)
+                    .expect("Output buffer not allocated!");
+
+                kernel_op.encode(encoder, pipeline, &input_buffers, output_buffer, dyn_map);
+            }
+        }
+
+        encoder.end_encoding();
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Use Metal GPU timestamps for precise timing (in seconds)
+        // gpuStartTime and gpuEndTime are available on macOS 10.15+
+        // metal-rs doesn't wrap these yet, so we use objc directly
+        let gpu_start: f64 = unsafe {
+            use objc::{msg_send, sel, sel_impl};
+            let ptr = command_buffer as *const _ as *mut Object;
+            msg_send![ptr, GPUStartTime]
+        };
+        let gpu_end: f64 = unsafe {
+            use objc::{msg_send, sel, sel_impl};
+            let ptr = command_buffer as *const _ as *mut Object;
+            msg_send![ptr, GPUEndTime]
+        };
+
+        let gpu_time_seconds = gpu_end - gpu_start;
+        let gpu_time_us = gpu_time_seconds * 1_000_000.0;
+
+        (gpu_time_us, TimingMethod::GpuTimestamp)
     }
 }

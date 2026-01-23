@@ -1351,4 +1351,22 @@ impl MetalKernelOp for MetalGather {
         let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
+
+    // Gather metrics: read indices + read gathered data + write output
+    fn bytes_loaded(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let n = self.output_size().exec(dyn_map).unwrap_or(0);
+        // Read n indices (i32 = 4 bytes) + n data elements (f32 = 4 bytes)
+        n * std::mem::size_of::<i32>() + n * std::mem::size_of::<f32>()
+    }
+
+    fn bytes_stored(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let n = self.output_size().exec(dyn_map).unwrap_or(0);
+        // Write n output elements (f32)
+        n * std::mem::size_of::<f32>()
+    }
+
+    fn flops(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {
+        // Gather is memory-bound, no significant FLOPs
+        0
+    }
 }
