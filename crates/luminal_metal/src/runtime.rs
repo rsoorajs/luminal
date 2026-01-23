@@ -3,7 +3,7 @@ use itertools::Itertools;
 use luminal::{
     graph::LLIRGraph,
     hlir::{Input, Output},
-    op::Runtime,
+    op::{ExecutionStats, Runtime},
     prelude::{
         petgraph::{algo::toposort, prelude::StableGraph, visit::EdgeRef, Direction},
         FxHashMap, NodeIndex, ToId,
@@ -189,6 +189,34 @@ impl Runtime for MetalRuntime {
         encoder.end_encoding();
         command_buffer.commit();
         command_buffer.wait_until_completed();
+    }
+
+    /// Execute and return detailed statistics for MBU/MFU calculation
+    fn execute_with_stats(&mut self, dyn_map: &FxHashMap<char, usize>) -> Option<ExecutionStats> {
+        // Collect metrics from all kernels before execution
+        let mut total_bytes_loaded = 0usize;
+        let mut total_bytes_stored = 0usize;
+        let mut total_flops = 0usize;
+
+        for node in self.llir_graph.node_indices() {
+            if let Some(kernel_op) = self.llir_graph[node].to_dialect::<dyn MetalKernelOp>() {
+                total_bytes_loaded += kernel_op.bytes_loaded(dyn_map);
+                total_bytes_stored += kernel_op.bytes_stored(dyn_map);
+                total_flops += kernel_op.flops(dyn_map);
+            }
+        }
+
+        // Execute with timing
+        let start = std::time::Instant::now();
+        self.execute(dyn_map);
+        let elapsed = start.elapsed();
+
+        Some(ExecutionStats::new(
+            elapsed.as_secs_f64() * 1_000_000.0, // Convert to microseconds
+            total_bytes_loaded,
+            total_bytes_stored,
+            total_flops,
+        ))
     }
 }
 

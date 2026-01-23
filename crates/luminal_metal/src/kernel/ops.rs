@@ -37,6 +37,70 @@ fn compile_shader(device: &Device, source: &str, function_name: &str) -> Compute
         .expect("Failed to create compute pipeline state")
 }
 
+// ============================================================================
+// Performance Metrics Macros
+// ============================================================================
+
+/// Generate metrics methods for unary ops: 1 input read, 1 output write, 1 flop per element
+macro_rules! impl_unary_metrics {
+    ($self:ident, $dyn_map:ident) => {
+        fn bytes_loaded(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n = $self.output_size().exec($dyn_map).unwrap_or(0);
+            n * std::mem::size_of::<f32>()
+        }
+
+        fn bytes_stored(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n = $self.output_size().exec($dyn_map).unwrap_or(0);
+            n * std::mem::size_of::<f32>()
+        }
+
+        fn flops(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            $self.output_size().exec($dyn_map).unwrap_or(0)
+        }
+    };
+}
+
+/// Generate metrics methods for binary ops: 2 inputs read, 1 output write, flops_per_elem per element
+macro_rules! impl_binary_metrics {
+    ($self:ident, $dyn_map:ident, $flops_per_elem:expr) => {
+        fn bytes_loaded(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n = $self.output_size().exec($dyn_map).unwrap_or(0);
+            n * 2 * std::mem::size_of::<f32>()
+        }
+
+        fn bytes_stored(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n = $self.output_size().exec($dyn_map).unwrap_or(0);
+            n * std::mem::size_of::<f32>()
+        }
+
+        fn flops(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            $self.output_size().exec($dyn_map).unwrap_or(0) * $flops_per_elem
+        }
+    };
+}
+
+/// Generate metrics methods for reduce ops
+macro_rules! impl_reduce_metrics {
+    ($self:ident, $dyn_map:ident) => {
+        fn bytes_loaded(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n_outputs = $self.output_size().exec($dyn_map).unwrap_or(0);
+            let iters = $self.iters.exec($dyn_map).unwrap_or(0);
+            n_outputs * iters * std::mem::size_of::<f32>()
+        }
+
+        fn bytes_stored(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n = $self.output_size().exec($dyn_map).unwrap_or(0);
+            n * std::mem::size_of::<f32>()
+        }
+
+        fn flops(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n_outputs = $self.output_size().exec($dyn_map).unwrap_or(0);
+            let iters = $self.iters.exec($dyn_map).unwrap_or(0);
+            n_outputs * iters
+        }
+    };
+}
+
 macro_rules! metal_unary_op {
     ($name:ident, $op_name:expr, $metal_op:expr) => {
         #[derive(Debug, Default, Clone)]
@@ -165,6 +229,9 @@ macro_rules! metal_unary_op {
                 let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
                 encoder.dispatch_thread_groups(thread_groups, thread_group_size);
             }
+
+            // Performance metrics for MBU/MFU (unary: 1 read, 1 write, 1 flop per element)
+            impl_unary_metrics!(self, dyn_map);
         }
     };
 }
@@ -292,6 +359,9 @@ impl MetalKernelOp for MetalAdd {
         let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
+
+    // Performance metrics for MBU/MFU (binary: 2 reads, 1 write, 1 flop per element)
+    impl_binary_metrics!(self, dyn_map, 1);
 }
 
 #[derive(Debug, Default, Clone)]
@@ -409,6 +479,9 @@ impl MetalKernelOp for MetalMul {
         let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
+
+    // Performance metrics (binary: 2 reads, 1 write, 1 flop per element)
+    impl_binary_metrics!(self, dyn_map, 1);
 }
 
 // MetalMod: a % b using fmod
@@ -527,6 +600,9 @@ impl MetalKernelOp for MetalMod {
         let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
+
+    // Performance metrics (binary: 2 reads, 1 write, ~10 flops for fmod)
+    impl_binary_metrics!(self, dyn_map, 10);
 }
 
 // MetalLessThan: a < b ? 1.0 : 0.0
@@ -645,6 +721,9 @@ impl MetalKernelOp for MetalLessThan {
         let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
+
+    // Performance metrics (binary: 2 reads, 1 write, 1 comparison per element)
+    impl_binary_metrics!(self, dyn_map, 1);
 }
 
 // ============================================================================
@@ -802,6 +881,9 @@ impl MetalKernelOp for MetalSumReduce {
         let thread_groups = MTLSize::new(n_outputs as u64, 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
+
+    // Performance metrics for reduce ops
+    impl_reduce_metrics!(self, dyn_map);
 }
 
 #[derive(Debug, Default, Clone)]
@@ -955,6 +1037,9 @@ impl MetalKernelOp for MetalMaxReduce {
         let thread_groups = MTLSize::new(n_outputs as u64, 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
+
+    // Performance metrics for reduce ops
+    impl_reduce_metrics!(self, dyn_map);
 }
 
 // ============================================================================

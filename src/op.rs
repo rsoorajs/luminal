@@ -7,6 +7,100 @@ use crate::prelude::*;
 use as_any::{AsAny, Downcast};
 use rustc_hash::FxHashMap;
 
+// ============================================================================
+// Execution Statistics for Benchmarking
+// ============================================================================
+
+/// Detailed execution statistics from a single run
+///
+/// This struct captures precise metrics for computing MBU (Memory Bandwidth
+/// Utilization) and MFU (Model FLOPs Utilization).
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionStats {
+    /// GPU-side execution time in microseconds
+    pub execution_time_us: f64,
+    /// Total bytes loaded from memory
+    pub bytes_loaded: usize,
+    /// Total bytes stored to memory
+    pub bytes_stored: usize,
+    /// Total floating-point operations
+    pub flops: usize,
+}
+
+impl ExecutionStats {
+    /// Create new execution stats
+    pub fn new(execution_time_us: f64, bytes_loaded: usize, bytes_stored: usize, flops: usize) -> Self {
+        Self {
+            execution_time_us,
+            bytes_loaded,
+            bytes_stored,
+            flops,
+        }
+    }
+
+    /// Total bytes transferred (loaded + stored)
+    pub fn total_bytes(&self) -> usize {
+        self.bytes_loaded + self.bytes_stored
+    }
+
+    /// Achieved memory bandwidth in GB/s
+    pub fn bandwidth_gbps(&self) -> f64 {
+        if self.execution_time_us <= 0.0 {
+            return 0.0;
+        }
+        let total_bytes = self.total_bytes() as f64;
+        // bytes / us = MB/s, so divide by 1000 to get GB/s
+        total_bytes / self.execution_time_us / 1000.0
+    }
+
+    /// Achieved compute throughput in TFLOPS
+    pub fn tflops(&self) -> f64 {
+        if self.execution_time_us <= 0.0 {
+            return 0.0;
+        }
+        // flops / us = MFLOPS, so divide by 1_000_000 to get TFLOPS
+        self.flops as f64 / self.execution_time_us / 1_000_000.0
+    }
+
+    /// Memory Bandwidth Utilization (MBU) as percentage
+    pub fn mbu(&self, peak_bandwidth_gbps: f64) -> f64 {
+        if peak_bandwidth_gbps <= 0.0 {
+            return 0.0;
+        }
+        self.bandwidth_gbps() / peak_bandwidth_gbps * 100.0
+    }
+
+    /// Model FLOPs Utilization (MFU) as percentage
+    pub fn mfu(&self, peak_tflops: f64) -> f64 {
+        if peak_tflops <= 0.0 {
+            return 0.0;
+        }
+        self.tflops() / peak_tflops * 100.0
+    }
+
+    /// Merge stats from another execution (for accumulating across multiple kernels)
+    pub fn merge(&mut self, other: &ExecutionStats) {
+        self.execution_time_us += other.execution_time_us;
+        self.bytes_loaded += other.bytes_loaded;
+        self.bytes_stored += other.bytes_stored;
+        self.flops += other.flops;
+    }
+}
+
+impl std::fmt::Display for ExecutionStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ExecutionStats {{ time: {:.2}µs, bytes: {:.2}MB, flops: {:.2}M, bw: {:.2}GB/s, compute: {:.3}TFLOPS }}",
+            self.execution_time_us,
+            self.total_bytes() as f64 / 1_000_000.0,
+            self.flops as f64 / 1_000_000.0,
+            self.bandwidth_gbps(),
+            self.tflops()
+        )
+    }
+}
+
 pub trait Runtime {
     type Ops: IntoEgglogOp;
     type CompileArg;
@@ -20,6 +114,20 @@ pub trait Runtime {
         llir_graph: &LLIRGraph,
         dyn_map: &FxHashMap<char, usize>,
     ) -> (Self::ProfileMetric, String);
+
+    /// Execute and return detailed execution statistics for benchmarking.
+    ///
+    /// This method provides precise metrics for computing MBU/MFU:
+    /// - GPU-side timing (not wall-clock)
+    /// - Actual bytes loaded/stored per kernel
+    /// - Actual FLOPs per kernel
+    ///
+    /// Default implementation returns None. Backends should override this
+    /// to provide accurate statistics.
+    fn execute_with_stats(&mut self, dyn_map: &FxHashMap<char, usize>) -> Option<ExecutionStats> {
+        self.execute(dyn_map);
+        None
+    }
 }
 
 pub trait EgglogOp: Debug {
