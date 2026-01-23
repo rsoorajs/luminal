@@ -6,20 +6,26 @@
 //!
 //! - **BenchmarkBackend**: Trait that backends implement to enable benchmarking
 //! - **BenchmarkPattern**: Trait for defining benchmark workloads
-//! - **Micro benchmarks**: Single-operator performance tests
+//! - **Micro benchmarks (L1)**: Single-operator performance tests (HLIR primitives)
+//! - **Pattern benchmarks (L2)**: Composite operator performance tests
 //!
 //! ## Usage
 //!
 //! ```bash
-//! # Run Metal benchmarks
-//! cargo bench -p luminal_bench --features metal
+//! # Run Metal micro benchmarks
+//! cargo bench -p luminal_bench --features metal --bench micro
+//!
+//! # Run Metal pattern benchmarks
+//! cargo bench -p luminal_bench --features metal --bench patterns
 //! ```
 
 mod metrics;
 mod micro;
+mod patterns;
 
 pub use metrics::*;
 pub use micro::*;
+pub use patterns::*;
 
 use luminal::op::Runtime;
 use luminal::prelude::*;
