@@ -311,11 +311,13 @@ impl MetalRuntime {
         // Use Metal GPU timestamps for precise timing (in seconds)
         // gpuStartTime and gpuEndTime are available on macOS 10.15+
         // metal-rs doesn't wrap these yet, so we use objc directly
+        #[allow(unexpected_cfgs)]
         let gpu_start: f64 = unsafe {
             use objc::{msg_send, sel, sel_impl};
             let ptr = command_buffer as *const _ as *mut Object;
             msg_send![ptr, GPUStartTime]
         };
+        #[allow(unexpected_cfgs)]
         let gpu_end: f64 = unsafe {
             use objc::{msg_send, sel, sel_impl};
             let ptr = command_buffer as *const _ as *mut Object;

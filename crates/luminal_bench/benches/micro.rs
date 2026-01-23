@@ -75,13 +75,11 @@ fn run_metal_pattern_benchmark(
             // Benchmark using iter_custom for precise timing
             b.iter_custom(|iters| {
                 let mut total_time = Duration::ZERO;
-                let mut last_time_us = 0.0;
 
                 for _ in 0..iters {
                     if let Some(stats) = rt.execute_with_stats(&cx.dyn_map) {
                         let time_us = stats.execution_time_us;
                         total_time += Duration::from_secs_f64(time_us / 1_000_000.0);
-                        last_time_us = time_us;
                     } else {
                         let start = std::time::Instant::now();
                         rt.execute(&cx.dyn_map);
