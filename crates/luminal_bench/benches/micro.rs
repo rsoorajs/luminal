@@ -8,6 +8,7 @@
 //! After running, find:
 //! - Time results: target/criterion/report/index.html
 //! - Metrics mapping: target/criterion/bench_metrics.json
+//! - Full report: target/criterion/bench_report.json
 //!
 //! Use the metrics mapping + Criterion time to compute MBU/MFU.
 
@@ -17,7 +18,7 @@ use std::time::Duration;
 #[cfg(feature = "metal")]
 use luminal_bench::{
     BenchmarkBackend, BenchmarkPattern, MetalBenchmark, all_micro_patterns,
-    BenchMetricsMap, BenchMetrics, HardwareSpec,
+    BenchMetricsMap, BenchMetrics, HardwareSpec, BenchResultCollector,
 };
 
 #[cfg(feature = "metal")]
@@ -28,6 +29,7 @@ fn run_metal_pattern_benchmark(
     c: &mut Criterion,
     pattern: &dyn BenchmarkPattern,
     metrics_map: &mut BenchMetricsMap,
+    collector: &BenchResultCollector,
 ) {
     use luminal::hlir::Input;
     use luminal::op::Runtime;
@@ -63,26 +65,34 @@ fn run_metal_pattern_benchmark(
             rt.allocate_intermediate_buffers(&cx.dyn_map);
 
             // Collect metrics once and add to mapping
+            let mut bench_metrics = None;
             if let Some(stats) = rt.execute_with_stats(&cx.dyn_map) {
-                metrics_map.add(
-                    pattern_name,
-                    size.name,
-                    BenchMetrics::new(stats.bytes_loaded, stats.bytes_stored, stats.flops),
-                );
+                let metrics = BenchMetrics::new(stats.bytes_loaded, stats.bytes_stored, stats.flops);
+                metrics_map.add(pattern_name, size.name, metrics.clone());
+                bench_metrics = Some(metrics);
             }
 
             // Benchmark using iter_custom for precise timing
             b.iter_custom(|iters| {
                 let mut total_time = Duration::ZERO;
+                let mut last_time_us = 0.0;
 
                 for _ in 0..iters {
                     if let Some(stats) = rt.execute_with_stats(&cx.dyn_map) {
-                        total_time += Duration::from_secs_f64(stats.execution_time_us / 1_000_000.0);
+                        let time_us = stats.execution_time_us;
+                        total_time += Duration::from_secs_f64(time_us / 1_000_000.0);
+                        last_time_us = time_us;
                     } else {
                         let start = std::time::Instant::now();
                         rt.execute(&cx.dyn_map);
                         total_time += start.elapsed();
                     }
+                }
+
+                // Record result for final report (use average time)
+                if let Some(ref metrics) = bench_metrics {
+                    let avg_time_us = total_time.as_secs_f64() * 1_000_000.0 / iters as f64;
+                    collector.add(pattern_name, size.name, size.value, avg_time_us, metrics);
                 }
 
                 total_time
@@ -110,17 +120,20 @@ fn metal_micro_benchmarks(c: &mut Criterion) {
     }
     println!();
 
-    // Create metrics map
-    let mut metrics_map = BenchMetricsMap::new(HardwareSpec {
+    let hardware_spec = HardwareSpec {
         device_name: hw.device_name.clone(),
         memory_gb: hw.memory_gb,
         peak_bandwidth_gbps: hw.peak_bandwidth_gbps.unwrap_or(100.0),
         peak_tflops: hw.peak_tflops.unwrap_or(1.0),
-    });
+    };
+
+    // Create metrics map and result collector
+    let mut metrics_map = BenchMetricsMap::new(hardware_spec.clone());
+    let collector = BenchResultCollector::new(hardware_spec);
 
     // Run all micro patterns
     for pattern in all_micro_patterns() {
-        run_metal_pattern_benchmark(c, pattern.as_ref(), &mut metrics_map);
+        run_metal_pattern_benchmark(c, pattern.as_ref(), &mut metrics_map, &collector);
     }
 
     // Save metrics mapping to file
@@ -130,9 +143,20 @@ fn metal_micro_benchmarks(c: &mut Criterion) {
     }
     if let Err(e) = metrics_map.save(metrics_path) {
         eprintln!("Warning: Failed to save metrics mapping: {}", e);
+    }
+
+    // Generate and print full report
+    let report = collector.into_report();
+    report.print_summary();
+
+    // Save full report to file
+    let report_path = std::path::Path::new("target/criterion/bench_report.json");
+    if let Err(e) = report.save(report_path) {
+        eprintln!("Warning: Failed to save full report: {}", e);
     } else {
-        println!("\n=== Metrics saved to {} ===", metrics_path.display());
-        println!("Use this with Criterion time results to compute MBU/MFU");
+        println!("\nReports saved to:");
+        println!("  - {}", metrics_path.display());
+        println!("  - {}", report_path.display());
     }
 }
 

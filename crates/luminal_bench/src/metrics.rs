@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Constant metrics for a single benchmark configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,5 +182,140 @@ impl BenchReport {
     /// Export to JSON (for CI integration)
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
+    }
+}
+
+// ============================================================================
+// Full Report with Derived Metrics
+// ============================================================================
+
+/// Single benchmark result with all metrics (constant + derived)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FullBenchResult {
+    pub pattern: String,
+    pub size: String,
+    pub size_value: usize,
+    /// Execution time in microseconds
+    pub time_us: f64,
+    /// Bytes transferred
+    pub bytes: usize,
+    /// Floating-point operations
+    pub flops: usize,
+    /// Throughput in GB/s
+    pub throughput_gbps: f64,
+    /// Memory Bandwidth Utilization (%)
+    pub mbu_percent: f64,
+    /// Compute in TFLOPS
+    pub tflops: f64,
+    /// Model FLOPs Utilization (%)
+    pub mfu_percent: f64,
+}
+
+/// Full benchmark report with derived metrics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FullBenchReport {
+    pub hardware: HardwareSpec,
+    pub timestamp: String,
+    pub results: Vec<FullBenchResult>,
+}
+
+impl FullBenchReport {
+    pub fn new(hardware: HardwareSpec) -> Self {
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        Self {
+            hardware,
+            timestamp,
+            results: Vec::new(),
+        }
+    }
+
+    pub fn add_result(&mut self, result: FullBenchResult) {
+        self.results.push(result);
+    }
+
+    /// Save to JSON file
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(self).unwrap_or_default();
+        std::fs::write(path, json)
+    }
+
+    /// Print summary table to terminal
+    pub fn print_summary(&self) {
+        println!("\n{}", "=".repeat(100));
+        println!("BENCHMARK RESULTS - {}", self.hardware.device_name);
+        println!("Peak Bandwidth: {:.0} GB/s | Peak Compute: {:.1} TFLOPS",
+            self.hardware.peak_bandwidth_gbps, self.hardware.peak_tflops);
+        println!("{}", "=".repeat(100));
+        println!(
+            "{:<20} {:>8} {:>12} {:>10} {:>8} {:>10} {:>8}",
+            "Pattern", "Size", "Time(μs)", "GB/s", "MBU%", "TFLOPS", "MFU%"
+        );
+        println!("{}", "-".repeat(100));
+
+        for r in &self.results {
+            println!(
+                "{:<20} {:>8} {:>12.2} {:>10.2} {:>7.1}% {:>10.4} {:>7.1}%",
+                r.pattern, r.size, r.time_us, r.throughput_gbps,
+                r.mbu_percent, r.tflops, r.mfu_percent
+            );
+        }
+        println!("{}", "=".repeat(100));
+    }
+}
+
+/// Thread-safe collector for benchmark results
+#[derive(Clone)]
+pub struct BenchResultCollector {
+    hardware: HardwareSpec,
+    results: Arc<Mutex<Vec<FullBenchResult>>>,
+}
+
+impl BenchResultCollector {
+    pub fn new(hardware: HardwareSpec) -> Self {
+        Self {
+            hardware,
+            results: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Add a benchmark result
+    pub fn add(
+        &self,
+        pattern: &str,
+        size: &str,
+        size_value: usize,
+        time_us: f64,
+        metrics: &BenchMetrics,
+    ) {
+        let throughput_gbps = metrics.throughput_gbps(time_us);
+        let tflops = metrics.tflops(time_us);
+        let mbu_percent = metrics.mbu(time_us, self.hardware.peak_bandwidth_gbps);
+        let mfu_percent = metrics.mfu(time_us, self.hardware.peak_tflops);
+
+        let result = FullBenchResult {
+            pattern: pattern.to_string(),
+            size: size.to_string(),
+            size_value,
+            time_us,
+            bytes: metrics.bytes,
+            flops: metrics.flops,
+            throughput_gbps,
+            mbu_percent,
+            tflops,
+            mfu_percent,
+        };
+
+        self.results.lock().unwrap().push(result);
+    }
+
+    /// Generate full report
+    pub fn into_report(self) -> FullBenchReport {
+        let mut report = FullBenchReport::new(self.hardware);
+        report.results = self.results.lock().unwrap().clone();
+        // Sort by pattern name, then by size
+        report.results.sort_by(|a, b| {
+            a.pattern.cmp(&b.pattern).then_with(|| a.size_value.cmp(&b.size_value))
+        });
+        report
     }
 }
