@@ -1093,6 +1093,13 @@ impl EgglogOp for MetalConstant {
 
 impl MetalKernelOp for MetalConstant {
     fn compile(&self, device: &Device) -> ComputePipelineState {
+        // Ensure value is formatted with decimal point for Metal (e.g., -1.0f not -1f)
+        let value_str = if self.value.fract() == 0.0 {
+            format!("{:.1}", self.value)
+        } else {
+            format!("{}", self.value)
+        };
+
         let source = format!(
             r#"
             #include <metal_stdlib>
@@ -1107,7 +1114,7 @@ impl MetalKernelOp for MetalConstant {
                 }}
             }}
             "#,
-            value = self.value
+            value = value_str
         );
         compile_shader(device, &source, "mkernel")
     }

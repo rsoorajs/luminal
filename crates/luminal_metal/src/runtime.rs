@@ -193,11 +193,8 @@ impl Runtime for MetalRuntime {
     }
 
     /// Execute and return detailed statistics for MBU/MFU calculation
-    ///
     /// Uses Metal GPU timestamps for precise timing (not wall-clock time).
-    /// This eliminates CPU-GPU synchronization overhead from measurements.
     fn execute_with_stats(&mut self, dyn_map: &FxHashMap<char, usize>) -> Option<ExecutionStats> {
-        // Collect metrics from all kernels before execution
         let mut total_bytes_loaded = 0usize;
         let mut total_bytes_stored = 0usize;
         let mut total_flops = 0usize;
@@ -209,8 +206,6 @@ impl Runtime for MetalRuntime {
                 total_flops += kernel_op.flops(dyn_map);
             }
         }
-
-        // Execute with GPU-side timing
         let (time_us, timing_method) = self.execute_timed(dyn_map);
 
         Some(ExecutionStats::with_timing_method(
@@ -242,9 +237,6 @@ impl MetalRuntime {
     }
 
     /// Execute and return GPU-side execution time in microseconds.
-    ///
-    /// Uses `MTLCommandBuffer::gpuStartTime` and `gpuEndTime` for precise
-    /// GPU timing that excludes CPU-GPU synchronization overhead.
     fn execute_timed(&mut self, dyn_map: &FxHashMap<char, usize>) -> (f64, TimingMethod) {
         let llir_to_hlir: FxHashMap<NodeIndex, NodeIndex> = self
             .llir_graph
@@ -308,9 +300,7 @@ impl MetalRuntime {
         command_buffer.commit();
         command_buffer.wait_until_completed();
 
-        // Use Metal GPU timestamps for precise timing (in seconds)
         // gpuStartTime and gpuEndTime are available on macOS 10.15+
-        // metal-rs doesn't wrap these yet, so we use objc directly
         #[allow(unexpected_cfgs)]
         let gpu_start: f64 = unsafe {
             use objc::{msg_send, sel, sel_impl};

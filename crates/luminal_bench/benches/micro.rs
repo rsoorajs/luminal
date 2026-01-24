@@ -17,8 +17,8 @@ use std::time::Duration;
 
 #[cfg(feature = "metal")]
 use luminal_bench::{
-    BenchmarkBackend, BenchmarkPattern, MetalBenchmark, all_micro_patterns,
-    BenchMetricsMap, BenchMetrics, HardwareSpec, BenchResultCollector,
+    all_micro_patterns, BenchMetrics, BenchMetricsMap, BenchResultCollector, BenchmarkBackend,
+    BenchmarkPattern, HardwareSpec, MetalBenchmark,
 };
 
 #[cfg(feature = "metal")]
@@ -43,47 +43,45 @@ fn run_metal_pattern_benchmark(
     let mut group = c.benchmark_group(&group_name);
 
     for size in pattern.sizes() {
+        // === Setup: Build graph and search ONCE per size ===
+        let mut cx = Graph::default();
+        pattern.build_graph(&mut cx, *size);
+
+        cx.build_search_space::<MetalRuntime>();
+        let mut rt = MetalRuntime::initialize(());
+
+        // Set up dummy input data
+        let mut rng = rand::rng();
+        for node in cx.graph.node_indices() {
+            if let Some(Input { .. }) = (*cx.graph[node]).as_any().downcast_ref::<Input>() {
+                let data: Vec<f32> = (0..size.value).map(|_| rng.random::<f32>()).collect();
+                rt.set_data(node, &data);
+            }
+        }
+
+        // Search for best implementation (expensive, done once)
+        let mut rt = cx.search(rt, 5);
+        rt.allocate_intermediate_buffers(&cx.dyn_map);
+
+        // Collect metrics once
+        let mut bench_metrics = None;
+        if let Some(stats) = rt.execute_with_stats(&cx.dyn_map) {
+            let metrics = BenchMetrics::new(stats.bytes_loaded, stats.bytes_stored, stats.flops);
+            metrics_map.add(pattern_name, size.name, metrics.clone());
+            bench_metrics = Some(metrics);
+        }
+
+        // Clone dyn_map for use in closure
+        let dyn_map = cx.dyn_map.clone();
+
+        // === Benchmark: Only timing, no search ===
         group.bench_with_input(BenchmarkId::from_parameter(size.name), size, |b, size| {
-            // Setup: build graph and compile once
-            let mut cx = Graph::default();
-            pattern.build_graph(&mut cx, *size);
-
-            cx.build_search_space::<MetalRuntime>();
-            let mut rt = MetalRuntime::initialize(());
-
-            // Set up dummy input data
-            let mut rng = rand::rng();
-            for node in cx.graph.node_indices() {
-                if let Some(Input { .. }) = (*cx.graph[node]).as_any().downcast_ref::<Input>() {
-                    let data: Vec<f32> = (0..size.value).map(|_| rng.random::<f32>()).collect();
-                    rt.set_data(node, &data);
-                }
-            }
-
-            // Search for best implementation
-            rt = cx.search(rt, 5);
-            rt.allocate_intermediate_buffers(&cx.dyn_map);
-
-            // Collect metrics once and add to mapping
-            let mut bench_metrics = None;
-            if let Some(stats) = rt.execute_with_stats(&cx.dyn_map) {
-                let metrics = BenchMetrics::new(stats.bytes_loaded, stats.bytes_stored, stats.flops);
-                metrics_map.add(pattern_name, size.name, metrics.clone());
-                bench_metrics = Some(metrics);
-            }
-
-            // Benchmark using iter_custom for precise timing
             b.iter_custom(|iters| {
                 let mut total_time = Duration::ZERO;
 
                 for _ in 0..iters {
-                    if let Some(stats) = rt.execute_with_stats(&cx.dyn_map) {
-                        let time_us = stats.execution_time_us;
-                        total_time += Duration::from_secs_f64(time_us / 1_000_000.0);
-                    } else {
-                        let start = std::time::Instant::now();
-                        rt.execute(&cx.dyn_map);
-                        total_time += start.elapsed();
+                    if let Some(stats) = rt.execute_with_stats(&dyn_map) {
+                        total_time += Duration::from_secs_f64(stats.execution_time_us / 1_000_000.0);
                     }
                 }
 

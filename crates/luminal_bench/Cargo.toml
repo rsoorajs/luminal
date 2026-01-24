@@ -26,3 +26,7 @@ metal = ["dep:luminal_metal", "dep:metal"]
 [[bench]]
 name = "micro"
 harness = false
+
+[[bench]]
+name = "patterns"
+harness = false

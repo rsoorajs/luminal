@@ -44,23 +44,23 @@ pub const MATMUL_SIZES: &[MatMulSize] = &[
     MatMulSize::new("1024x1024", 1024, 1024, 1024),
     // LLM-like shapes (batch=1, hidden_dim, ffn_dim)
     MatMulSize::new("1x4096x4096", 1, 4096, 4096),
-    MatMulSize::new("32x4096x4096", 32, 4096, 4096),
+    // MatMulSize::new("32x4096x4096", 32, 4096, 4096),
 ];
 
 /// Transformer-like sizes for softmax, layernorm, etc.
 pub const TRANSFORMER_SIZES: &[BenchSize] = &[
-    BenchSize::new("128x128", 128 * 128),      // small attention
-    BenchSize::new("512x512", 512 * 512),      // medium attention
-    BenchSize::new("2048x128", 2048 * 128),    // typical seq_len x head_dim
-    BenchSize::new("4096x128", 4096 * 128),    // long context
+    BenchSize::new("128x128", 128 * 128), // small attention
+    BenchSize::new("512x512", 512 * 512), // medium attention
+    BenchSize::new("2048x128", 2048 * 128), // typical seq_len x head_dim
+                                          // BenchSize::new("4096x128", 4096 * 128), // long context
 ];
 
 /// Attention size configurations (seq_len, head_dim)
 pub const ATTENTION_SIZES: &[(usize, usize)] = &[
-    (128, 64),   // small: seq=128, head_dim=64
-    (512, 64),   // medium: seq=512, head_dim=64
-    (1024, 64),  // large: seq=1024, head_dim=64
-    (2048, 64),  // xlarge: seq=2048, head_dim=64
+    (128, 64), // small: seq=128, head_dim=64
+    (512, 64), // medium: seq=512, head_dim=64
+    (1024, 64), // large: seq=1024, head_dim=64
+               // (2048, 64), // xlarge: seq=2048, head_dim=64
 ];
 
 // ============================================================================
@@ -267,7 +267,11 @@ pub fn all_pattern_benchmarks() -> Vec<Box<dyn BenchmarkPattern>> {
 }
 
 /// Calculate bytes transferred for pattern benchmarks
-pub fn bytes_for_pattern_bench(pattern_name: &str, size: usize, extra: Option<(usize, usize, usize)>) -> usize {
+pub fn bytes_for_pattern_bench(
+    pattern_name: &str,
+    size: usize,
+    extra: Option<(usize, usize, usize)>,
+) -> usize {
     let elem_size = std::mem::size_of::<f32>();
 
     match pattern_name {
