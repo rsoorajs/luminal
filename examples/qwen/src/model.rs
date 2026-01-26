@@ -1,11 +1,11 @@
 use luminal::{
     graph::Graph,
     op::{CustomOp, LLIROp},
-    prelude::{FxHashMap, GraphTensor},
-    shape::{flatten_mul_strides, Expression, ToShape},
+    prelude::GraphTensor,
+    shape::{Expression, ToShape, flatten_mul_strides},
 };
 use luminal_cuda::{
-    block::{BlockOp, CStruct},
+    block::{BlockOp, cstruct::CStruct},
     cudarc::driver::{CudaSlice, CudaStream, DevicePtr},
 };
 use luminal_nn::LayerNorm;
@@ -154,16 +154,14 @@ pub struct QwenQKNormRoPE {
     range: Vec<Expression>,      // [seq]
     inp_stride: Vec<Expression>, // Input strides
     row_width: Expression,       // Total width (n_heads * head_dim)
-    n_heads: usize,
 }
 
 impl QwenQKNormRoPE {
-    fn new(seq: Expression, row_width: Expression, n_heads: usize) -> Self {
+    fn new(seq: Expression, row_width: Expression) -> Self {
         Self {
             range: vec![seq],
             inp_stride: vec![row_width],
             row_width,
-            n_heads,
         }
     }
 }
@@ -200,8 +198,13 @@ impl BlockOp for QwenQKNormRoPE {
         ]
     }
 
-    fn cuda_struct(&self) -> String {
-        "const int inp; const int out; int row_width; const int weight; const int token_ids; int n_heads;".to_string()
+    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
+        payload
+            .expr("inp", flatten_mul_strides(&self.range, &self.inp_stride))
+            .expr("out", flatten_mul_strides(&self.range, &self.inp_stride))
+            .expr("row_width", self.row_width)
+            .expr("weight", 0)
+            .expr("token_ids", 'z')
     }
 
     fn cuda_function(&self) -> String {
@@ -267,29 +270,6 @@ impl BlockOp for QwenQKNormRoPE {
             RMS_NORM_EPS = RMS_NORM_EPS
         )
     }
-
-    fn schedule_op(
-        &self,
-        _: &Arc<CudaStream>,
-        expressions: &FxHashMap<Expression, i32>,
-    ) -> Vec<u8> {
-        CStruct::new()
-            .int(expressions[&flatten_mul_strides(&self.range, &self.inp_stride)])
-            .int(expressions[&flatten_mul_strides(&self.range, &self.inp_stride)])
-            .int(expressions[&self.row_width])
-            .int(0) // weight offset is always 0
-            .int(expressions[&'z'.into()])
-            .int(self.n_heads as i32)
-            .finish_struct()
-    }
-
-    fn expressions(&self) -> Vec<Expression> {
-        vec![
-            flatten_mul_strides(&self.range, &self.inp_stride),
-            self.row_width,
-            'z'.into(),
-        ]
-    }
 }
 
 impl QwenLayer {
@@ -307,13 +287,13 @@ impl QwenLayer {
 
         // Apply QK-Norm + RoPE using fused custom kernel
         let q_rope = x.graph().custom_op(
-            QwenQKNormRoPE::new(q.dims()[0], q.dims()[1], N_HEADS),
+            QwenQKNormRoPE::new(q.dims()[0], q.dims()[1]),
             (q, self.q_norm, pos_ids),
             q.shape,
             q.dtype,
         );
         let k_rope = x.graph().custom_op(
-            QwenQKNormRoPE::new(k.dims()[0], k.dims()[1], N_KV_HEADS),
+            QwenQKNormRoPE::new(k.dims()[0], k.dims()[1]),
             (k, self.k_norm, pos_ids),
             k.shape,
             k.dtype,
@@ -431,23 +411,36 @@ impl BlockOp for QwenAttention {
         vec![q, k, v]
     }
 
-    fn cuda_struct(&self) -> String {
-        "
-            int head_size;
-            int cur_seq;
-            int kv_row_stride;
-            const int q;
-            const int k;
-            const int v;
-            const int out;
-            float* key_cache;
-            float* val_cache;
-            int prev_seq;
-            int q_pos_stride;
-            int group_pos_stride;
-            int head_pos_stride;
-        "
-        .to_string()
+    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
+        let mut q_pos_stride = vec![0.into(); self.range.len()];
+        q_pos_stride[self.range.len() - 1] = 1.into();
+        let mut group_pos_stride = vec![0.into(); self.range.len()];
+        group_pos_stride[self.range.len() - 2] = 1.into();
+        let mut head_pos_stride = vec![0.into(); self.range.len()];
+        head_pos_stride[self.range.len() - 3] = 1.into();
+        payload
+            .expr("head_size", self.head_dim)
+            .expr("cur_seq", self.cur_seq)
+            .expr("kv_row_stride", self.kv_row_stride)
+            .expr("q", flatten_mul_strides(&self.range, &self.q_stride))
+            .expr("k", flatten_mul_strides(&self.range, &self.k_stride))
+            .expr("v", flatten_mul_strides(&self.range, &self.v_stride))
+            .expr("out", flatten_mul_strides(&self.range, &self.o_stride))
+            .ptr_mut_f32("key_cache", self.k_cache as *mut f32)
+            .ptr_mut_f32("val_cache", self.v_cache as *mut f32)
+            .expr("prev_seq", self.prev_seq)
+            .expr(
+                "q_pos_stride",
+                flatten_mul_strides(&self.range, &q_pos_stride),
+            )
+            .expr(
+                "group_pos_stride",
+                flatten_mul_strides(&self.range, &group_pos_stride),
+            )
+            .expr(
+                "head_pos_stride",
+                flatten_mul_strides(&self.range, &head_pos_stride),
+            )
     }
 
     fn cuda_function(&self) -> String {
@@ -630,55 +623,5 @@ impl BlockOp for QwenAttention {
             }
         "
         .to_string()
-    }
-
-    fn schedule_op(
-        &self,
-        _: &Arc<CudaStream>,
-        expressions: &FxHashMap<Expression, i32>,
-    ) -> Vec<u8> {
-        let mut q_pos_stride = vec![0.into(); self.range.len()];
-        q_pos_stride[self.range.len() - 1] = 1.into();
-        let mut group_pos_stride = vec![0.into(); self.range.len()];
-        group_pos_stride[self.range.len() - 2] = 1.into();
-        let mut head_pos_stride = vec![0.into(); self.range.len()];
-        head_pos_stride[self.range.len() - 3] = 1.into();
-        CStruct::new()
-            .int(expressions[&self.head_dim])
-            .int(expressions[&self.cur_seq])
-            .int(expressions[&self.kv_row_stride])
-            .int(expressions[&flatten_mul_strides(&self.range, &self.q_stride)])
-            .int(expressions[&flatten_mul_strides(&self.range, &self.k_stride)])
-            .int(expressions[&flatten_mul_strides(&self.range, &self.v_stride)])
-            .int(expressions[&flatten_mul_strides(&self.range, &self.o_stride)])
-            .ptr_mut_f32(self.k_cache as *mut f32)
-            .ptr_mut_f32(self.v_cache as *mut f32)
-            .int(expressions[&self.prev_seq])
-            .int(expressions[&flatten_mul_strides(&self.range, &q_pos_stride)])
-            .int(expressions[&flatten_mul_strides(&self.range, &group_pos_stride)])
-            .int(expressions[&flatten_mul_strides(&self.range, &head_pos_stride)])
-            .finish_struct()
-    }
-
-    fn expressions(&self) -> Vec<Expression> {
-        let mut q_pos_stride = vec![0.into(); self.range.len()];
-        q_pos_stride[self.range.len() - 1] = 1.into();
-        let mut group_pos_stride = vec![0.into(); self.range.len()];
-        group_pos_stride[self.range.len() - 2] = 1.into();
-        let mut head_pos_stride = vec![0.into(); self.range.len()];
-        head_pos_stride[self.range.len() - 3] = 1.into();
-        vec![
-            flatten_mul_strides(&self.range, &self.q_stride),
-            flatten_mul_strides(&self.range, &self.k_stride),
-            flatten_mul_strides(&self.range, &self.v_stride),
-            flatten_mul_strides(&self.range, &self.o_stride),
-            self.head_dim,
-            self.cur_seq,
-            self.kv_row_stride,
-            self.prev_seq,
-            flatten_mul_strides(&self.range, &q_pos_stride),
-            flatten_mul_strides(&self.range, &group_pos_stride),
-            flatten_mul_strides(&self.range, &head_pos_stride),
-        ]
     }
 }
