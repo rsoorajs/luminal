@@ -2,6 +2,8 @@
 /crates/**/target
 /examples/**/target
 
+*.env
+.claude/
 .DS_Store
 *.vscode
 Cargo.lock
