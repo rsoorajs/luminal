@@ -84,26 +84,8 @@ pub struct BlockOpStats {
     pub flops: usize,
     pub bandwidth_gbps: f64,
     pub tflops: f64,
+    pub count: usize,
 }
-
-/// Aggregated execution statistics
-#[derive(Debug, Default, Clone)]
-pub struct ExecutionStats {
-    pub kernel_stats: Vec<KernelStats>,
-    pub block_op_stats: Vec<BlockOpStats>,
-    pub total_time_us: f64,
-    /// Total bytes loaded across all ops
-    pub total_bytes_loaded: usize,
-    /// Total bytes stored across all ops
-    pub total_bytes_stored: usize,
-    /// Total floating point operations across all ops
-    pub total_flops: usize,
-    /// Aggregate bandwidth in GB/s (total bytes / total time)
-    pub aggregate_bandwidth_gbps: f64,
-    /// Aggregate compute in TFLOPS (total flops / total time)
-    pub aggregate_tflops: f64,
-}
-
 impl Drop for ExecutableKernel {
     fn drop(&mut self) {
         match self {
@@ -151,11 +133,16 @@ pub struct CudaRuntime {
     cuda_stream: Arc<CudaStream>,
     exec_graph: StableGraph<ExecutableKernel, (), Directed>,
     node_to_exec: FxHashMap<NodeIndex, NodeIndex>,
-    pub(crate) timings: Vec<(Vec<SMEvent>, u64, Uuid)>,
+    pub(crate) timings: Vec<Vec<(Vec<SMEvent>, u64, Uuid)>>,
     last_dyn_map: FxHashMap<char, usize>,
     intermediate_buffer_dims: FxHashSet<char>,
-    /// Statistics from the last execution
-    pub last_execution_stats: ExecutionStats,
+    llir_to_hlir: FxHashMap<NodeIndex, NodeIndex>,
+    hlir_to_llir: FxHashMap<NodeIndex, NodeIndex>,
+    changed_hlir: FxHashSet<NodeIndex>,
+    // Raw stats saved during execute, interpreted lazily in print_execution_stats
+    pub last_kernel_stats: Vec<KernelStats>,
+    pub last_total_time_us: f64,
+    kernel_cache: FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
 }
 
 impl CudaRuntime {
@@ -187,6 +174,7 @@ impl CudaRuntime {
                         let f32s: &[f32] = bytemuck::cast_slice(bytes);
                         let dev = f32s.to_cuda_input(&self.cuda_stream);
                         self.hlir_buffers.insert(node, dev);
+                        self.changed_hlir.insert(node);
                     }
                     dtype => unimplemented!("{dtype} loading not supported yet"),
                 }
@@ -197,6 +185,7 @@ impl CudaRuntime {
     pub fn set_data(&mut self, id: impl ToId, data: impl ToCudaInput) {
         self.hlir_buffers
             .insert(id.to_id(), data.to_cuda_input(&self.cuda_stream));
+        self.changed_hlir.insert(id.to_id());
     }
 
     #[tracing::instrument(skip_all)]
@@ -218,6 +207,7 @@ impl CudaRuntime {
             .neighbors_directed(output_id, Direction::Incoming)
             .next()
             .unwrap();
+        let _span = span!(Level::TRACE, "dtoh").entered();
         self.cuda_stream
             .clone_dtoh(
                 self.buffers
@@ -228,10 +218,12 @@ impl CudaRuntime {
     }
 
     pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
-        self.get_output_data(id)
-            .chunks_exact(4)
-            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-            .collect_vec()
+        let bytes = self.get_output_data(id);
+        let bytes = bytes.leak();
+        let n_bytes = bytes.len();
+        let bytes_ptr = bytes.as_mut_ptr();
+        let float_ptr = bytes_ptr as *mut f32;
+        unsafe { Vec::from_raw_parts(float_ptr, n_bytes / 4, n_bytes / 4) }
     }
 
     pub fn get_i32(&self, id: impl ToId) -> Vec<i32> {
@@ -255,10 +247,11 @@ impl CudaRuntime {
         {
             work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
         }
-        for edge in self
+        let outgoing_edges: Vec<_> = self
             .llir_graph
             .edges_directed(llir_node, Direction::Outgoing)
-        {
+            .collect();
+        for edge in outgoing_edges {
             let dest = edge.target();
             let n_input = self
                 .llir_graph
@@ -385,15 +378,23 @@ impl Runtime for CudaRuntime {
             llir_graph: StableGraph::default(),
             exec_graph: StableGraph::default(),
             node_to_exec: FxHashMap::default(),
+            hlir_to_llir: FxHashMap::default(),
+            llir_to_hlir: FxHashMap::default(),
+            changed_hlir: FxHashSet::default(),
             timings: vec![],
             last_dyn_map: FxHashMap::default(),
             intermediate_buffer_dims: FxHashSet::default(),
-            last_execution_stats: ExecutionStats::default(),
+            last_kernel_stats: vec![],
+            last_total_time_us: 0.0,
+            kernel_cache: FxHashMap::default(),
         }
     }
 
     #[tracing::instrument(skip_all)]
     fn load_llir(&mut self, llir_graph: &LLIRGraph) {
+        // Clear intermediate buffers when loading new graph - they need to be
+        // reallocated and re-registered with the new work_queue
+        self.buffers.clear();
         self.exec_graph.clear();
         self.buffers.clear();
         let block_ops_in_graph = llir_graph
@@ -407,7 +408,12 @@ impl Runtime for CudaRuntime {
         let mut node_to_exec = FxHashMap::default();
         for subgraph in block_subgraphs {
             let (interpreter, constants, n_barriers, tasks, node_to_task_index) =
-                make_megakernel_from_llir_graph(llir_graph, &subgraph, &self.cuda_stream);
+                make_megakernel_from_llir_graph(
+                    llir_graph,
+                    &subgraph,
+                    &self.cuda_stream,
+                    &mut self.kernel_cache,
+                );
             let exec_node = exec_graph.add_node(ExecutableKernel::Megakernel {
                 interpreter,
                 interpreter_constants: constants,
@@ -485,6 +491,21 @@ impl Runtime for CudaRuntime {
         self.exec_graph = exec_graph;
         self.llir_graph = llir_graph.clone();
         self.node_to_exec = node_to_exec;
+        self.hlir_to_llir.clear();
+        self.llir_to_hlir.clear();
+        self.changed_hlir.clear();
+        for (hlir_node, llir_node) in self
+            .llir_graph
+            .node_indices()
+            .filter_map(|n| self.llir_graph[n].to_op::<Input>().map(|op| (op.node, n)))
+            .collect_vec()
+        {
+            self.llir_to_hlir
+                .insert(llir_node, NodeIndex::new(hlir_node));
+            self.hlir_to_llir
+                .insert(NodeIndex::new(hlir_node), llir_node);
+            self.changed_hlir.insert(NodeIndex::new(hlir_node));
+        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -500,18 +521,54 @@ impl Runtime for CudaRuntime {
         trace!("execute");
         let start = std::time::Instant::now();
         self.execute(dyn_map);
+        let duration = start.elapsed();
+
+        // Compute aggregates for profile display
+        let sm_count = self
+            .cuda_stream
+            .context()
+            .attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            )
+            .unwrap() as usize;
+        let block_op_stats = Self::compute_block_op_stats(
+            &self.llir_graph,
+            self.timings.last().unwrap(),
+            &self.last_dyn_map,
+            sm_count,
+        );
         self.timings.clear();
 
-        let duration = start.elapsed();
-        let stats = &self.last_execution_stats;
+        let total_bytes: usize = self
+            .last_kernel_stats
+            .iter()
+            .map(|s| s.bytes_loaded + s.bytes_stored)
+            .sum::<usize>()
+            + block_op_stats
+                .iter()
+                .map(|s| s.bytes_loaded + s.bytes_stored)
+                .sum::<usize>();
+        let total_flops: usize = self
+            .last_kernel_stats
+            .iter()
+            .map(|s| s.flops)
+            .sum::<usize>()
+            + block_op_stats.iter().map(|s| s.flops).sum::<usize>();
+        let aggregate_bw = if self.last_total_time_us > 0.0 {
+            (total_bytes as f64) / (self.last_total_time_us * 1e-6) / 1e9
+        } else {
+            0.0
+        };
+        let aggregate_tf = if self.last_total_time_us > 0.0 {
+            (total_flops as f64) / (self.last_total_time_us * 1e-6) / 1e12
+        } else {
+            0.0
+        };
 
-        // Compute MBU and MFU from execution stats
-        let peak_bandwidth_gbps = crate::cuda_bandwidth_gbps(self.cuda_stream.context());
-        let peak_tflops = crate::cuda_compute_f32_tflops(self.cuda_stream.context());
-
-        let mbu =
-            peak_bandwidth_gbps.map(|peak_bw| stats.aggregate_bandwidth_gbps / peak_bw as f64);
-        let mfu = peak_tflops.map(|peak_tf| stats.aggregate_tflops / peak_tf as f64);
+        let peak_bw = crate::cuda_bandwidth_gbps(self.cuda_stream.context());
+        let peak_tf = crate::cuda_compute_f32_tflops(self.cuda_stream.context());
+        let mbu = peak_bw.map(|p| aggregate_bw / p as f64);
+        let mfu = peak_tf.map(|p| aggregate_tf / p as f64);
 
         let duration_str = pretty_duration::pretty_duration(&duration, None);
         let mbu_str = mbu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
@@ -535,24 +592,24 @@ impl Runtime for CudaRuntime {
             trace!("reallocating intermediate buffers");
             self.allocate_intermediate_buffers(dyn_map);
         }
-        let mut llir_to_hlir: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
-        for (hlir_node, llir_node) in self
-            .llir_graph
-            .node_indices()
-            .filter_map(|n| self.llir_graph[n].to_op::<Input>().map(|op| (op.node, n)))
-            .collect_vec()
-        {
-            llir_to_hlir.insert(llir_node, NodeIndex::new(hlir_node));
-            let ptr = match &self.hlir_buffers[&NodeIndex::new(hlir_node)] {
-                CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
-                CudaInput::Ptr(p) => *p,
-            };
-            trace!(
-                "llir_node: {:?} registered to ptr {:?}",
-                self.llir_graph[llir_node],
-                ptr
-            );
-            self.register_buffer(llir_node, ptr);
+
+        // Always clear intermediate buffers to ensure correctness for operations using atomicAdd
+        // TODO: this is very expensive. Need to eliminate ops that require zeroed outputs
+        for buffer in self.buffers.values_mut() {
+            self.cuda_stream.memset_zeros(buffer).unwrap();
+        }
+        self.cuda_stream.synchronize().unwrap();
+
+        if !self.changed_hlir.is_empty() {
+            for hlir_node in self.changed_hlir.clone() {
+                let llir_node = self.hlir_to_llir[&hlir_node];
+                let ptr = match &self.hlir_buffers[&hlir_node] {
+                    CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
+                    CudaInput::Ptr(p) => *p,
+                };
+                self.register_buffer(llir_node, ptr);
+            }
+            self.changed_hlir.clear();
         }
         let mut timings = Vec::new();
         let mut kernel_stats = Vec::new();
@@ -607,7 +664,7 @@ impl Runtime for CudaRuntime {
                             );
                             ptrs.push(ptr);
                         } else {
-                            let ptr = match &self.hlir_buffers[&llir_to_hlir[inp]] {
+                            ptrs.push(match &self.hlir_buffers[&self.llir_to_hlir[inp]] {
                                 CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
                                 CudaInput::Ptr(p) => *p,
                             };
@@ -669,9 +726,6 @@ impl Runtime for CudaRuntime {
                         bandwidth_gbps,
                         tflops,
                     });
-
-                    drop(_entered);
-                    drop(span);
                 }
                 ExecutableKernel::Megakernel {
                     interpreter,
@@ -685,34 +739,25 @@ impl Runtime for CudaRuntime {
                         .context()
                         .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
                         .unwrap();
-
-                    let (d_barriers, d_tasks, d_head, queue_lock, timing_buffer, start_time, cfg) = {
-                        let _span = span!(
-                            Level::INFO,
-                            "megakernel_setup",
-                            sm_count = sm_count,
-                            n_barriers = n_barriers.exec(dyn_map).unwrap(),
-                            n_tasks = work_queue.len()
-                        )
-                        .entered();
-
-                        // Upload queue, barriers and program counter
-                        let d_barriers = self
-                            .cuda_stream
-                            .alloc_zeros::<i32>(n_barriers.exec(dyn_map).unwrap())
-                            .unwrap();
-                        let d_tasks = self.cuda_stream.clone_htod(work_queue.as_slice()).unwrap();
-                        let d_head = self.cuda_stream.clone_htod(&[0i32]).unwrap();
-                        let queue_lock = self.cuda_stream.clone_htod(&[0i32]).unwrap();
-                        // Set up timing buffer (start_time_u64,[[event_start_u64,event_type_i32 for sm_event in sm[:1000] for sm in sms[:sm_count]])
-                        let timing_buffer = self
-                            .cuda_stream
-                            .alloc_zeros::<SMEvent>(sm_count as usize * 1000)
-                            .unwrap();
-                        let start_time = self
-                            .cuda_stream
-                            .alloc_zeros::<u64>(sm_count as usize)
-                            .unwrap();
+                    let span = span!(Level::INFO, "megakernel_setup");
+                    // Upload queue, barriers and program counter
+                    let d_barriers = self
+                        .cuda_stream
+                        .alloc_zeros::<i32>(n_barriers.exec(dyn_map).unwrap())
+                        .unwrap();
+                    let d_tasks = self.cuda_stream.memcpy_stod(work_queue.as_slice()).unwrap();
+                    let d_head = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
+                    let queue_lock = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
+                    // Set up timing buffer storing (start_u64, stop_u64, event_i32) tuples
+                    // for up to 1000 events per SM
+                    let timing_buffer = self
+                        .cuda_stream
+                        .alloc_zeros::<SMEvent>(sm_count as usize * 1000)
+                        .unwrap();
+                    let start_time = self
+                        .cuda_stream
+                        .alloc_zeros::<u64>(sm_count as usize)
+                        .unwrap();
 
                         // Set up dyn dims
                         for (dyn_dim, val) in dyn_map {
@@ -739,13 +784,11 @@ impl Runtime for CudaRuntime {
                             )
                             .unwrap();
 
-                        // Launch kernel
-                        let cfg = LaunchConfig {
-                            grid_dim: (sm_count as u32, 1, 1), // One block per SM
-                            block_dim: (256, 1, 1),            // 1024 threads (32 warps) per block
-                            shared_mem_bytes: max_dynamic_allowed as u32,
-                        };
-                        (d_barriers, d_tasks, d_head, queue_lock, timing_buffer, start_time, cfg)
+                    // Launch kernel
+                    let cfg = LaunchConfig {
+                        grid_dim: (sm_count as u32, 1, 1), // One block per SM
+                        block_dim: (1024, 1, 1), // 1024 threads (32 warps) for max latency hiding
+                        shared_mem_bytes: (max_dynamic_allowed / 2) as u32,
                     };
                     let mut lb = self.cuda_stream.launch_builder(interpreter);
                     let n_tasks = work_queue.len() as i32;
@@ -756,99 +799,37 @@ impl Runtime for CudaRuntime {
                     lb.arg(&queue_lock);
                     lb.arg(&timing_buffer);
                     lb.arg(&start_time);
-                    let mk_span_id = Uuid::new_v4();
-                    let span = span!(Level::INFO, "megakernel", id = field::Empty);
-                    // Record fields after span creation to work around tracing-perfetto-sdk-layer sync span bug
-                    span.record("id", format!("{}", mk_span_id).as_str());
-                    let _entered = span.enter();
-                    unsafe { lb.launch(cfg) }.unwrap();
-                    self.cuda_stream.synchronize().unwrap();
-                    drop(_entered);
                     drop(span);
-                    timings.push((
-                        self.cuda_stream.clone_dtoh(&timing_buffer).unwrap(),
-                        self.cuda_stream
-                            .clone_dtoh(&start_time)
-                            .unwrap()
-                            .into_iter()
-                            .min()
-                            .unwrap(),
-                        mk_span_id,
-                    ));
-                }
-                ExecutableKernel::HostOp {
-                    stream,
-                    inputs,
-                    output,
-                    internal,
-                } => {
-                    let mut host_op_buffers: Vec<&CudaSlice<u8>> = vec![&self.buffers[output]];
-                    host_op_buffers.extend(inputs.iter().map(|inp| {
-                        if let Some(buf) = self.buffers.get(inp) {
-                            buf
-                        } else {
-                            match &self.hlir_buffers[&llir_to_hlir[inp]] {
-                                CudaInput::Buffer(buf) => buf,
-                                CudaInput::Ptr(_) => unimplemented!(),
-                            }
-                        }
-                    }));
-                    let _span =
-                        span!(Level::INFO, "host_op_execute", n_inputs = inputs.len()).entered();
-                    internal.execute(stream, &host_op_buffers, dyn_map).unwrap();
+                    let mk_span_id = Uuid::new_v4();
+                    {
+                        let span = span!(Level::INFO, "megakernel", id = field::Empty);
+                        // Record fields after span creation to work around tracing-perfetto-sdk-layer sync span bug
+                        span.record("id", mk_span_id.to_string().as_str());
+                        let _entered = span.enter();
+                        unsafe { lb.launch(cfg) }.unwrap();
+                        self.cuda_stream.synchronize().unwrap();
+                    }
+                    {
+                        let _span = span!(Level::INFO, "mk_timings").entered();
+                        timings.push((
+                            self.cuda_stream.memcpy_dtov(&timing_buffer).unwrap(),
+                            self.cuda_stream
+                                .memcpy_dtov(&start_time)
+                                .unwrap()
+                                .into_iter()
+                                .min()
+                                .unwrap(),
+                            mk_span_id,
+                        ));
+                    }
                 }
             }
         }
-        self.timings.extend(timings.clone());
+        self.timings.push(timings);
 
-        {
-            let span = span!(Level::TRACE, "timings");
-            let _entered = span.enter();
-            // Compute block op stats from SMEvent timings
-            let sm_count = self
-            .cuda_stream
-            .context()
-            .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
-            .unwrap() as usize;
-            let block_op_stats =
-                Self::compute_block_op_stats(&self.llir_graph, &timings, dyn_map, sm_count);
-
-            // Compute aggregate stats from kernel and block op stats
-            let total_time_us = total_start.elapsed().as_secs_f64() * 1_000_000.0;
-
-            let total_bytes_loaded: usize =
-                kernel_stats.iter().map(|s| s.bytes_loaded).sum::<usize>()
-                    + block_op_stats.iter().map(|s| s.bytes_loaded).sum::<usize>();
-            let total_bytes_stored: usize =
-                kernel_stats.iter().map(|s| s.bytes_stored).sum::<usize>()
-                    + block_op_stats.iter().map(|s| s.bytes_stored).sum::<usize>();
-            let total_flops: usize = kernel_stats.iter().map(|s| s.flops).sum::<usize>()
-                + block_op_stats.iter().map(|s| s.flops).sum::<usize>();
-
-            let total_bytes = total_bytes_loaded + total_bytes_stored;
-            let aggregate_bandwidth_gbps = if total_time_us > 0.0 {
-                (total_bytes as f64) / (total_time_us * 1e-6) / 1e9
-            } else {
-                0.0
-            };
-            let aggregate_tflops = if total_time_us > 0.0 {
-                (total_flops as f64) / (total_time_us * 1e-6) / 1e12
-            } else {
-                0.0
-            };
-
-            // Store execution stats
-            self.last_execution_stats = ExecutionStats {
-                kernel_stats,
-                block_op_stats,
-                total_time_us,
-                total_bytes_loaded,
-                total_bytes_stored,
-                total_flops,
-                aggregate_bandwidth_gbps,
-                aggregate_tflops,
-            };
-        }
+        // Save raw stats for lazy interpretation in print_execution_stats
+        self.last_kernel_stats = kernel_stats;
+        self.last_total_time_us = total_start.elapsed().as_secs_f64() * 1_000_000.0;
     }
 }
 
@@ -924,11 +905,17 @@ impl CudaRuntime {
         // 2 + n_ops + op_idx * 3 + 2: Prologue C
         let n_ops = op_names.len();
         let mut op_times_ns: Vec<u64> = vec![0; n_ops];
+        let mut op_counts: Vec<usize> = vec![0; n_ops];
         let mut prologue_a_times_ns: Vec<u64> = vec![0; n_ops];
+        let mut prologue_a_counts: Vec<usize> = vec![0; n_ops];
         let mut prologue_b_times_ns: Vec<u64> = vec![0; n_ops];
+        let mut prologue_b_counts: Vec<usize> = vec![0; n_ops];
         let mut prologue_c_times_ns: Vec<u64> = vec![0; n_ops];
+        let mut prologue_c_counts: Vec<usize> = vec![0; n_ops];
         let mut issue_time_ns: u64 = 0;
+        let mut issue_count: usize = 0;
         let mut wait_time_ns: u64 = 0;
+        let mut wait_count: usize = 0;
 
         for (sm_timings, _start_time, _) in timings {
             for sm_chunk in sm_timings.chunks(1000) {
@@ -945,12 +932,15 @@ impl CudaRuntime {
                     let event_code = event.event as usize;
                     if event_code == 0 {
                         issue_time_ns += duration;
+                        issue_count += 1;
                     } else if event_code == 1 {
                         wait_time_ns += duration;
+                        wait_count += 1;
                     } else if event_code >= 2 && event_code < 2 + n_ops {
                         // Main op
                         let op_idx = event_code - 2;
                         op_times_ns[op_idx] += duration;
+                        op_counts[op_idx] += 1;
                     } else if event_code >= 2 + n_ops {
                         // Prologue event
                         let prologue_event = event_code - 2 - n_ops;
@@ -958,9 +948,18 @@ impl CudaRuntime {
                         let prologue_type = prologue_event % 3;
                         if op_idx < n_ops {
                             match prologue_type {
-                                0 => prologue_a_times_ns[op_idx] += duration,
-                                1 => prologue_b_times_ns[op_idx] += duration,
-                                2 => prologue_c_times_ns[op_idx] += duration,
+                                0 => {
+                                    prologue_a_times_ns[op_idx] += duration;
+                                    prologue_a_counts[op_idx] += 1;
+                                }
+                                1 => {
+                                    prologue_b_times_ns[op_idx] += duration;
+                                    prologue_b_counts[op_idx] += 1;
+                                }
+                                2 => {
+                                    prologue_c_times_ns[op_idx] += duration;
+                                    prologue_c_counts[op_idx] += 1;
+                                }
                                 _ => {}
                             }
                         }
@@ -1002,6 +1001,7 @@ impl CudaRuntime {
                     flops: flop_count,
                     bandwidth_gbps,
                     tflops,
+                    count: op_counts[i],
                 }
             })
             .collect();
@@ -1030,6 +1030,7 @@ impl CudaRuntime {
                     flops: flop_count,
                     bandwidth_gbps,
                     tflops,
+                    count: prologue_a_counts[i],
                 });
             }
             if prologue_b_times_ns[i] > 0 {
@@ -1054,6 +1055,7 @@ impl CudaRuntime {
                     flops: flop_count,
                     bandwidth_gbps,
                     tflops,
+                    count: prologue_b_counts[i],
                 });
             }
             if prologue_c_times_ns[i] > 0 {
@@ -1078,6 +1080,7 @@ impl CudaRuntime {
                     flops: flop_count,
                     bandwidth_gbps,
                     tflops,
+                    count: prologue_c_counts[i],
                 });
             }
         }
@@ -1093,6 +1096,7 @@ impl CudaRuntime {
                 flops: 0,
                 bandwidth_gbps: 0.0,
                 tflops: 0.0,
+                count: issue_count,
             });
         }
         if wait_time_ns > 0 {
@@ -1105,27 +1109,71 @@ impl CudaRuntime {
                 flops: 0,
                 bandwidth_gbps: 0.0,
                 tflops: 0.0,
+                count: wait_count,
             });
         }
 
         stats
     }
 
-    /// Print execution statistics for the last execution.
-    /// Shows bandwidth and compute utilization for each kernel and block op.
+    /// Print execution statistics for the last execution (computes block op stats lazily).
     pub fn print_execution_stats(&self) {
-        let stats = &self.last_execution_stats;
-        if stats.kernel_stats.is_empty() && stats.block_op_stats.is_empty() {
+        if self.last_kernel_stats.is_empty() && self.timings.is_empty() {
             println!("No execution stats available.");
             return;
         }
 
-        // Get device peak performance
-        let peak_bandwidth_gbps = crate::cuda_bandwidth_gbps(self.cuda_stream.context());
-        let peak_tflops = crate::cuda_compute_f32_tflops(self.cuda_stream.context());
+        // Compute block op stats lazily
+        let sm_count = self
+            .cuda_stream
+            .context()
+            .attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            )
+            .unwrap() as usize;
+        let block_op_stats = Self::compute_block_op_stats(
+            &self.llir_graph,
+            self.timings.last().map(|v| v.as_slice()).unwrap_or(&[]),
+            &self.last_dyn_map,
+            sm_count,
+        );
 
-        // Print kernel stats if any
-        if !stats.kernel_stats.is_empty() {
+        // Compute aggregates
+        let total_bytes_loaded: usize = self
+            .last_kernel_stats
+            .iter()
+            .map(|s| s.bytes_loaded)
+            .sum::<usize>()
+            + block_op_stats.iter().map(|s| s.bytes_loaded).sum::<usize>();
+        let total_bytes_stored: usize = self
+            .last_kernel_stats
+            .iter()
+            .map(|s| s.bytes_stored)
+            .sum::<usize>()
+            + block_op_stats.iter().map(|s| s.bytes_stored).sum::<usize>();
+        let total_flops: usize = self
+            .last_kernel_stats
+            .iter()
+            .map(|s| s.flops)
+            .sum::<usize>()
+            + block_op_stats.iter().map(|s| s.flops).sum::<usize>();
+        let total_bytes = total_bytes_loaded + total_bytes_stored;
+        let aggregate_bw = if self.last_total_time_us > 0.0 {
+            (total_bytes as f64) / (self.last_total_time_us * 1e-6) / 1e9
+        } else {
+            0.0
+        };
+        let aggregate_tf = if self.last_total_time_us > 0.0 {
+            (total_flops as f64) / (self.last_total_time_us * 1e-6) / 1e12
+        } else {
+            0.0
+        };
+
+        let peak_bw = crate::cuda_bandwidth_gbps(self.cuda_stream.context());
+        let peak_tf = crate::cuda_compute_f32_tflops(self.cuda_stream.context());
+
+        // Print kernel stats
+        if !self.last_kernel_stats.is_empty() {
             println!("\n=== Kernel Execution Statistics ===\n");
             println!(
                 "{:<20} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
@@ -1140,31 +1188,31 @@ impl CudaRuntime {
                 "MFU"
             );
             println!("{}", "-".repeat(116));
-
-            for stat in &stats.kernel_stats {
+            for s in &self.last_kernel_stats {
                 self.print_stat_row(
-                    stat.name,
-                    stat.execution_time_us,
-                    stat.bytes_loaded,
-                    stat.bytes_stored,
-                    stat.flops,
-                    stat.bandwidth_gbps,
-                    stat.tflops,
-                    peak_bandwidth_gbps,
-                    peak_tflops,
+                    s.name,
+                    s.execution_time_us,
+                    None,
+                    s.bytes_loaded,
+                    s.bytes_stored,
+                    s.flops,
+                    s.bandwidth_gbps,
+                    s.tflops,
+                    peak_bw,
+                    peak_tf,
                 );
             }
-
             println!("{}", "-".repeat(116));
         }
 
-        // Print block op stats if any
-        if !stats.block_op_stats.is_empty() {
+        // Print block op stats
+        if !block_op_stats.is_empty() {
             println!("\n=== Block Op Execution Statistics ===\n");
             println!(
-                "{:<20} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
+                "{:<20} {:>12} {:>8} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
                 "BlockOp",
                 "Time (us)",
+                "Count",
                 "Loaded",
                 "Stored",
                 "Agg FLOPS",
@@ -1173,23 +1221,22 @@ impl CudaRuntime {
                 "MBU",
                 "MFU"
             );
-            println!("{}", "-".repeat(116));
-
-            for stat in &stats.block_op_stats {
+            println!("{}", "-".repeat(124));
+            for s in &block_op_stats {
                 self.print_stat_row(
-                    stat.name,
-                    stat.execution_time_us,
-                    stat.bytes_loaded,
-                    stat.bytes_stored,
-                    stat.flops,
-                    stat.bandwidth_gbps,
-                    stat.tflops,
-                    peak_bandwidth_gbps,
-                    peak_tflops,
+                    s.name,
+                    s.execution_time_us,
+                    Some(s.count),
+                    s.bytes_loaded,
+                    s.bytes_stored,
+                    s.flops,
+                    s.bandwidth_gbps,
+                    s.tflops,
+                    peak_bw,
+                    peak_tf,
                 );
             }
-
-            println!("{}", "-".repeat(116));
+            println!("{}", "-".repeat(124));
         }
 
         // Print aggregate stats
@@ -1199,35 +1246,28 @@ impl CudaRuntime {
             "", "Time (us)", "Loaded", "Stored", "Agg FLOPS", "BW (GB/s)", "TFLOPS", "MBU", "MFU"
         );
         println!("{}", "-".repeat(116));
-
-        let (mbu_str, mfu_str) =
-            if let (Some(peak_bw), Some(peak_tf)) = (peak_bandwidth_gbps, peak_tflops) {
-                let mbu = (stats.aggregate_bandwidth_gbps / peak_bw as f64) * 100.0;
-                let mfu = (stats.aggregate_tflops / peak_tf as f64) * 100.0;
-                (format!("{mbu:.1}%"), format!("{mfu:.1}%"))
-            } else {
-                ("-".to_string(), "-".to_string())
-            };
-
+        let (mbu, mfu) = match (peak_bw, peak_tf) {
+            (Some(pb), Some(pt)) => (
+                format!("{:.1}%", aggregate_bw / pb as f64 * 100.0),
+                format!("{:.1}%", aggregate_tf / pt as f64 * 100.0),
+            ),
+            _ => ("-".into(), "-".into()),
+        };
         println!(
             "{:<20} {:>12.2} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
             "Total",
-            stats.total_time_us,
-            format_size(stats.total_bytes_loaded),
-            format_size(stats.total_bytes_stored),
-            format_flops(stats.total_flops),
-            format!("{:.2}", stats.aggregate_bandwidth_gbps),
-            format!("{:.4}", stats.aggregate_tflops),
-            mbu_str,
-            mfu_str
+            self.last_total_time_us,
+            format_size(total_bytes_loaded),
+            format_size(total_bytes_stored),
+            format_flops(total_flops),
+            format!("{:.2}", aggregate_bw),
+            format!("{:.4}", aggregate_tf),
+            mbu,
+            mfu
         );
 
-        // Print device info
-        if let (Some(peak_bw), Some(peak_tf)) = (peak_bandwidth_gbps, peak_tflops) {
-            println!(
-                "\nDevice peak: {} GB/s bandwidth, {} TFLOPS (F32)",
-                peak_bw, peak_tf
-            );
+        if let (Some(pb), Some(pt)) = (peak_bw, peak_tf) {
+            println!("\nDevice peak: {} GB/s bandwidth, {} TFLOPS (F32)", pb, pt);
         }
         println!();
     }
@@ -1236,70 +1276,59 @@ impl CudaRuntime {
     fn print_stat_row(
         &self,
         name: &str,
-        execution_time_us: f64,
-        bytes_loaded: usize,
-        bytes_stored: usize,
+        time_us: f64,
+        count: Option<usize>,
+        loaded: usize,
+        stored: usize,
         flops: usize,
-        bandwidth_gbps: f64,
-        tflops: f64,
-        peak_bandwidth_gbps: Option<usize>,
-        peak_tflops: Option<usize>,
+        bw: f64,
+        tf: f64,
+        peak_bw: Option<usize>,
+        peak_tf: Option<usize>,
     ) {
-        let total_bytes = bytes_loaded + bytes_stored;
-
-        // Show "-" if bytes are 0 (not specified)
-        let loaded_str = if bytes_loaded > 0 {
-            format_size(bytes_loaded)
+        let total = loaded + stored;
+        let ld = if loaded > 0 {
+            format_size(loaded)
         } else {
-            "-".to_string()
+            "-".into()
         };
-        let stored_str = if bytes_stored > 0 {
-            format_size(bytes_stored)
+        let st = if stored > 0 {
+            format_size(stored)
         } else {
-            "-".to_string()
+            "-".into()
         };
-        let flops_str = if flops > 0 {
+        let fl = if flops > 0 {
             format_flops(flops)
         } else {
-            "-".to_string()
+            "-".into()
         };
-        let bw_str = if total_bytes > 0 {
-            format!("{bandwidth_gbps:.2}")
+        let bw_s = if total > 0 {
+            format!("{bw:.2}")
         } else {
-            "-".to_string()
+            "-".into()
         };
-        let tflops_str = if flops > 0 {
-            format!("{tflops:.4}")
+        let tf_s = if flops > 0 {
+            format!("{tf:.4}")
         } else {
-            "-".to_string()
+            "-".into()
         };
+        let mbu = peak_bw
+            .filter(|_| total > 0)
+            .map(|p| format!("{:.1}%", bw / p as f64 * 100.0))
+            .unwrap_or("-".into());
+        let mfu = peak_tf
+            .filter(|_| flops > 0)
+            .map(|p| format!("{:.1}%", tf / p as f64 * 100.0))
+            .unwrap_or("-".into());
 
-        // Calculate MBU (Memory Bandwidth Utilization) and MFU (Model FLOPS Utilization)
-        let mbu_str = if let Some(peak_bw) = peak_bandwidth_gbps {
-            if total_bytes > 0 {
-                let mbu = (bandwidth_gbps / peak_bw as f64) * 100.0;
-                format!("{:.1}%", mbu)
-            } else {
-                "-".to_string()
-            }
-        } else {
-            "-".to_string()
-        };
-
-        let mfu_str = if let Some(peak_tf) = peak_tflops {
-            if flops > 0 {
-                let mfu = (tflops / peak_tf as f64) * 100.0;
-                format!("{:.1}%", mfu)
-            } else {
-                "-".to_string()
-            }
-        } else {
-            "-".to_string()
-        };
-
-        println!(
-            "{name:<20} {execution_time_us:>12.2} {loaded_str:>12} {stored_str:>12} {flops_str:>12} {bw_str:>12} {tflops_str:>12} {mbu_str:>8} {mfu_str:>8}"
-        );
+        match count {
+            Some(c) => println!(
+                "{name:<20} {time_us:>12.2} {c:>8} {ld:>12} {st:>12} {fl:>12} {bw_s:>12} {tf_s:>12} {mbu:>8} {mfu:>8}"
+            ),
+            None => println!(
+                "{name:<20} {time_us:>12.2} {ld:>12} {st:>12} {fl:>12} {bw_s:>12} {tf_s:>12} {mbu:>8} {mfu:>8}"
+            ),
+        }
     }
 }
 

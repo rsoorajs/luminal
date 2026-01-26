@@ -7,23 +7,21 @@ use std::{io::Write, time::Duration};
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
 
-// This example compiles and runs Llama 3 8B on CUDA. On an H100, this should hit >75% MBU
+// This example compiles and runs Qwen3-4B on CUDA.
 
 fn main() {
     let max_seq_len = 4096;
-    let gen_tokens = 10;
+    let gen_tokens = 30;
     let search_graphs = 5; // the number of graphs we want to search during compilation
-    let prompt = "Hello, how are you";
+    let prompt = "The capital of France is";
 
     // Set up tracing to perfetto
     let trace_session = luminal_tracing::subscriber()
-        // .perfetto("trace.pftrace")
-        .env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| {
-            format!(
-                "{}=trace,luminal=trace,luminal_cuda=trace",
-                env!("CARGO_PKG_NAME")
-            )
-        }))
+        .perfetto("trace.pftrace")
+        .env_filter(format!(
+            "{}=trace,luminal=trace,luminal_cuda=trace",
+            env!("CARGO_PKG_NAME")
+        ))
         .init();
 
     // Set up cuda context and stream
@@ -41,7 +39,7 @@ fn main() {
     let mut cx = Graph::default();
     let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
     let token_ids = cx.named_tensor("token_ids", 's').as_dtype(DType::Int);
-    let model = model::Llama::init(&mut cx);
+    let model = model::Qwen::init(&mut cx);
     let logits = model.forward(input, token_ids, &kv_cache).output();
 
     // Build search space
@@ -79,7 +77,6 @@ fn main() {
 
         // Set runtime dimensions
         let seq_len = sentence.len();
-
         cx.set_dim('s', seq_len);
         cx.set_dim('p', prev_seq);
 

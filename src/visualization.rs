@@ -61,8 +61,8 @@ where
 
 #[allow(unused)]
 /// View a debug graph in the browser
-pub fn display_graph<E>(
-    graph: &StableGraph<impl Debug, E, Directed, u32>,
+pub fn display_graph(
+    graph: &StableGraph<impl Debug, impl Debug, Directed, u32>,
     mark_nodes: Option<Vec<NodeIndex>>,
     file_name: &str,
 ) {
@@ -71,8 +71,8 @@ pub fn display_graph<E>(
         .unwrap();
 }
 
-fn display_graph_text<E>(
-    graph: &StableGraph<impl Debug, E, Directed, u32>,
+fn display_graph_text(
+    graph: &StableGraph<impl Debug, impl Debug, Directed, u32>,
     mark_nodes: Option<Vec<NodeIndex>>,
 ) -> String {
     let mut new_graph = StableGraph::new();
@@ -92,16 +92,11 @@ fn display_graph_text<E>(
     for edge in graph.edge_indices() {
         let (src, dest) = graph.edge_endpoints(edge).unwrap();
         if let (Some(src), Some(dest)) = (map.get(&src), map.get(&dest)) {
-            new_graph.add_edge(*src, *dest, "".to_string());
+            let label = format!("{:?}", graph.edge_weight(edge).unwrap());
+            new_graph.add_edge(*src, *dest, label);
         }
     }
-    let mut graph_string = crate::prelude::petgraph::dot::Dot::with_config(
-        &new_graph,
-        &[crate::prelude::petgraph::dot::Config::EdgeIndexLabel],
-    )
-    .to_string();
-    let re = regex::Regex::new(r#"label\s*=\s*"\d+""#).unwrap();
-    graph_string = re.replace_all(&graph_string, "").to_string();
+    let graph_string = crate::prelude::petgraph::dot::Dot::with_config(&new_graph, &[]).to_string();
 
     format!(
         "https://dreampuf.github.io/GraphvizOnline/#{}",

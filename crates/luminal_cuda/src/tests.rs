@@ -153,6 +153,17 @@ proptest! {
     fn test_mean(rows in 1usize..8, cols in 1usize..8) {
         test_unary((rows, cols), |a| a.mean(1), |a| a.mean(1).unwrap());
     }
+
+    #[test]
+    fn test_matmul(m in 1usize..128, n in 1usize..128, k in 1usize..128) {
+        // a_shape: (m, k), b_shape: (n, k) - b gets transposed to (k, n) with k-contiguous strides
+        test_binary(
+            (m, k),
+            (n, k),
+            |a, b| a.matmul(b.t()),
+            |a, b| a.matmul(&b.t().unwrap()).unwrap(),
+        );
+    }
 }
 
 /// Test that measures bandwidth utilization for a large element-wise add kernel.
@@ -217,9 +228,8 @@ pub fn kernel_add_bandwidth_test() {
     }
 
     // Check bandwidth is reasonable (at least 50% of peak for large kernels)
-    let stats = &rt.last_execution_stats;
     if let Some(peak_bw) = cuda_bandwidth_gbps(&ctx) {
-        for stat in &stats.kernel_stats {
+        for stat in &rt.last_kernel_stats {
             let total_bytes = stat.bytes_loaded + stat.bytes_stored;
             if stat.name == "Add" && total_bytes > 0 {
                 let utilization = stat.bandwidth_gbps / peak_bw as f64 * 100.0;
