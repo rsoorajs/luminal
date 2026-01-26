@@ -86,7 +86,7 @@ impl EgglogOp for CuBlasSgemmV2 {
     }
 }
 
-impl HostOp for CuBlasSgemmV2TN {
+impl HostOp for CuBlasSgemmV2 {
     fn execute(
         &self,
         stream: &Arc<CudaStream>,
