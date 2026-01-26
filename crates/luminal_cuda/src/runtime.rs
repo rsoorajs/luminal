@@ -4,7 +4,7 @@ use crate::{
     kernel::KernelOp,
 };
 use cudarc::driver::{
-    CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg, sys::CUevent_flags,
+    CudaFunction, CudaSlice, CudaModule, CudaStream, DevicePtr, LaunchConfig, PushKernelArg, sys::CUevent_flags,
 };
 
 use fixedbitset::FixedBitSet;
@@ -667,14 +667,7 @@ impl Runtime for CudaRuntime {
                             ptrs.push(match &self.hlir_buffers[&self.llir_to_hlir[inp]] {
                                 CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
                                 CudaInput::Ptr(p) => *p,
-                            };
-                            trace!(
-                                "no buffer match. input {}: {:?}, {}",
-                                i,
-                                self.llir_graph[*inp],
-                                ptr
-                            );
-                            ptrs.push(ptr);
+                            });
                         }
                     }
                     let mut lb = self.cuda_stream.launch_builder(kernel);
@@ -745,9 +738,9 @@ impl Runtime for CudaRuntime {
                         .cuda_stream
                         .alloc_zeros::<i32>(n_barriers.exec(dyn_map).unwrap())
                         .unwrap();
-                    let d_tasks = self.cuda_stream.memcpy_stod(work_queue.as_slice()).unwrap();
-                    let d_head = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
-                    let queue_lock = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
+                    let d_tasks = self.cuda_stream.clone_htod(work_queue.as_slice()).unwrap();
+                    let d_head = self.cuda_stream.clone_htod(&[0i32]).unwrap();
+                    let queue_lock = self.cuda_stream.clone_htod(&[0i32]).unwrap();
                     // Set up timing buffer storing (start_u64, stop_u64, event_i32) tuples
                     // for up to 1000 events per SM
                     let timing_buffer = self
@@ -812,9 +805,9 @@ impl Runtime for CudaRuntime {
                     {
                         let _span = span!(Level::INFO, "mk_timings").entered();
                         timings.push((
-                            self.cuda_stream.memcpy_dtov(&timing_buffer).unwrap(),
+                            self.cuda_stream.clone_dtoh(&timing_buffer).unwrap(),
                             self.cuda_stream
-                                .memcpy_dtov(&start_time)
+                                .clone_dtoh(&start_time)
                                 .unwrap()
                                 .into_iter()
                                 .min()
@@ -822,6 +815,27 @@ impl Runtime for CudaRuntime {
                             mk_span_id,
                         ));
                     }
+                }
+                ExecutableKernel::HostOp {
+                    stream,
+                    inputs,
+                    output,
+                    internal,
+                } => {
+                    let mut host_op_buffers: Vec<&CudaSlice<u8>> = vec![&self.buffers[output]];
+                    host_op_buffers.extend(inputs.iter().map(|inp| {
+                        if let Some(buf) = self.buffers.get(inp) {
+                            buf
+                        } else {
+                            match &self.hlir_buffers[&self.llir_to_hlir[inp]] {
+                                CudaInput::Buffer(buf) => buf,
+                                CudaInput::Ptr(_) => unimplemented!(),
+                            }
+                        }
+                    }));
+                    let _span =
+                        span!(Level::INFO, "host_op_execute", n_inputs = inputs.len()).entered();
+                    internal.execute(stream, &host_op_buffers, dyn_map).unwrap();
                 }
             }
         }
