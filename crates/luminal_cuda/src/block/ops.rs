@@ -8,7 +8,7 @@ use luminal::{
     prelude::*,
 };
 
-use crate::block::{BlockOp, CStructData};
+use crate::block::{BlockOp, CStruct};
 
 pub type Ops = (
     RowAdd,
@@ -141,7 +141,7 @@ impl BlockOp for RowAdd {
         .to_string()
     }
 
-    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStructData<'a>) -> CStructData<'a> {
+    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
         payload
             .expr(
                 "a_strides",
@@ -319,7 +319,7 @@ impl BlockOp for RowSwishMul {
         .to_string()
     }
 
-    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStructData<'a>) -> CStructData<'a> {
+    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
         // Extend strides with 0 for the SM dimension
         let mut a_stride_ext = self.a_stride.clone();
         a_stride_ext.push(0.into());
@@ -504,7 +504,7 @@ impl BlockOp for RowRMSNorm {
         self.range.iter().copied().product::<Expression>() * self.row_width * 5
     }
 
-    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStructData<'a>) -> CStructData<'a> {
+    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
         payload
             .expr("inp", flatten_mul_strides(&self.range, &self.a_stride))
             .expr("out", flatten_mul_strides(&self.range, &self.a_stride))
@@ -899,7 +899,7 @@ impl BlockOp for RowRope {
         self.range.iter().copied().product::<Expression>() * self.row_width * 5
     }
 
-    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStructData<'a>) -> CStructData<'a> {
+    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
         payload
             .expr("inp", flatten_mul_strides(&self.range, &self.a_stride))
             .expr("out", flatten_mul_strides(&self.range, &self.a_stride))
@@ -1166,7 +1166,7 @@ impl BlockOp for TileMatmulSplitK {
         batch * m * n * k * 2
     }
 
-    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStructData<'a>) -> CStructData<'a> {
+    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
         assert_eq!(self.untiled_range.len(), 2);
         // Range layout: [k_chunks, batch..., tiled_m, tiled_n]
         // k_chunk is at index 0
@@ -1731,7 +1731,7 @@ impl BlockOp for TileMatmulFullSplit {
         )
     }
 
-    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStructData<'a>) -> CStructData<'a> {
+    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
         payload
             .expr_arr("untiled_range", &self.untiled_range)
             .expr("m_tiles", self.m_tiles)
@@ -1933,7 +1933,7 @@ impl BlockOp for RowEmbed {
         .to_string()
     }
 
-    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStructData<'a>) -> CStructData<'a> {
+    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
         payload
             .expr(
                 "token_stride",

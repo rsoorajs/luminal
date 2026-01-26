@@ -32,7 +32,7 @@ use tracing_perfetto_sdk_schema::{
     track_event,
 };
 
-use crate::{block::cstruct::CStructData, runtime::CudaRuntime};
+use crate::{block::cstruct::CStruct, runtime::CudaRuntime};
 
 #[allow(unused_variables)]
 pub trait BlockOp: Debug + as_any::AsAny {
@@ -71,11 +71,7 @@ pub trait BlockOp: Debug + as_any::AsAny {
         0.into()
     }
     /// Build C-struct paylod
-    fn build_payload<'a>(
-        &self,
-        stream: &Arc<CudaStream>,
-        payload: CStructData<'a>,
-    ) -> CStructData<'a> {
+    fn build_payload<'a>(&self, stream: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
         unimplemented!()
     }
     fn prologue_a(&self) -> String {
@@ -376,7 +372,7 @@ impl TaskQueue {
         payload: &[u8],
         expressions: &FxHashMap<Expression, i32>,
     ) {
-        let mut bytes = CStructData::new(Some(expressions))
+        let mut bytes = CStruct::new(Some(expressions))
             .int("op", op)
             .int("range", range)
             .int("remaining", remaining)
@@ -390,7 +386,7 @@ impl TaskQueue {
             .int("out_dep_base", out_dep_base)
             .ptr_const_f32_arr("source_ptrs", source_ptrs.as_slice())
             .ptr_mut_f32("out_ptr", out_ptr)
-            .bytes(1, payload) // Add payload with byte alignment
+            .bytes(1, "payload", payload) // Add payload with byte alignment
             .finish_struct();
 
         // Pad to task_stride
@@ -597,7 +593,7 @@ fn compile_interpreter(
                 format!(
                     "struct {}Payload {{{}}};",
                     op.op_name(),
-                    op.build_payload(cuda_stream, CStructData::new(Some(&expression_map)))
+                    op.build_payload(cuda_stream, CStruct::new(Some(&expression_map)))
                         .to_string(),
                 )
             })
@@ -930,7 +926,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
         .node_weights()
         .filter_map(|op| op.to_dialect::<dyn BlockOp>())
         .flat_map(|op| {
-            op.build_payload(cuda_stream, CStructData::new(None))
+            op.build_payload(cuda_stream, CStruct::new(None))
                 .recorded_expressions
                 .into_iter()
                 .chain(once(op.launch_range().iter().copied().product()))
@@ -968,7 +964,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
     let max_payload_size = block_ops
         .iter()
         .map(|op| {
-            op.build_payload(cuda_stream, CStructData::new(Some(&temp_expression_map)))
+            op.build_payload(cuda_stream, CStruct::new(Some(&temp_expression_map)))
                 .finish_struct()
                 .len()
         })
@@ -1001,7 +997,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
             .position(|o| o.op_name() == op.op_name())
             .unwrap();
         let mut payload = op
-            .build_payload(cuda_stream, CStructData::new(Some(&expressions)))
+            .build_payload(cuda_stream, CStruct::new(Some(&expressions)))
             .finish_struct();
         // Pad payload to max_payload_size
         payload.resize(max_payload_size, 0);

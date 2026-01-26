@@ -2,7 +2,7 @@ use itertools::Itertools;
 use luminal::{prelude::FxHashMap, shape::Expression};
 
 #[derive(Debug, PartialEq, Eq)]
-enum CStructTemplateType {
+enum CStructType {
     Float,
     FloatArr(usize),
     Int,
@@ -17,15 +17,15 @@ enum CStructTemplateType {
 }
 
 #[derive(Debug)]
-pub struct CStructData<'a> {
+pub struct CStruct<'a> {
     buf: Vec<u8>,
     max_align: usize,
-    struct_types: Vec<(String, CStructTemplateType)>,
+    struct_types: Vec<(String, CStructType)>,
     expressions: Option<&'a FxHashMap<Expression, i32>>,
     pub(crate) recorded_expressions: Vec<Expression>,
 }
 
-impl<'a> CStructData<'a> {
+impl<'a> CStruct<'a> {
     pub fn new(expressions: Option<&'a FxHashMap<Expression, i32>>) -> Self {
         Self {
             max_align: 1,
@@ -48,8 +48,7 @@ impl<'a> CStructData<'a> {
     }
 
     pub fn int(mut self, name: impl ToString, v: i32) -> Self {
-        self.struct_types
-            .push((name.to_string(), CStructTemplateType::Int));
+        self.struct_types.push((name.to_string(), CStructType::Int));
         self.align_to(4);
         self.buf.extend_from_slice(&v.to_ne_bytes());
         self
@@ -57,7 +56,7 @@ impl<'a> CStructData<'a> {
 
     pub fn int_arr(mut self, name: impl ToString, vs: &[i32]) -> Self {
         self.struct_types
-            .push((name.to_string(), CStructTemplateType::IntArr(vs.len())));
+            .push((name.to_string(), CStructType::IntArr(vs.len())));
         self.align_to(4);
         for &v in vs {
             self.buf.extend_from_slice(&v.to_ne_bytes());
@@ -67,8 +66,7 @@ impl<'a> CStructData<'a> {
 
     pub fn expr(mut self, name: impl ToString, v: impl Into<Expression>) -> Self {
         if let Some(expressions) = self.expressions {
-            self.struct_types
-                .push((name.to_string(), CStructTemplateType::Int));
+            self.struct_types.push((name.to_string(), CStructType::Int));
             let v = expressions[&v.into()];
             self.align_to(4);
             self.buf.extend_from_slice(&v.to_ne_bytes());
@@ -81,7 +79,7 @@ impl<'a> CStructData<'a> {
     pub fn expr_arr(mut self, name: impl ToString, vs: &[Expression]) -> Self {
         if let Some(expressions) = self.expressions {
             self.struct_types
-                .push((name.to_string(), CStructTemplateType::IntArr(vs.len())));
+                .push((name.to_string(), CStructType::IntArr(vs.len())));
             self.align_to(4);
             for &v in vs {
                 let v = expressions[&v.into()];
@@ -95,15 +93,25 @@ impl<'a> CStructData<'a> {
 
     pub fn long(mut self, name: impl ToString, v: i64) -> Self {
         self.struct_types
-            .push((name.to_string(), CStructTemplateType::Long));
+            .push((name.to_string(), CStructType::Long));
         self.align_to(8);
         self.buf.extend_from_slice(&v.to_ne_bytes());
         self
     }
 
+    pub fn long_arr(mut self, name: impl ToString, vs: &[i64]) -> Self {
+        self.struct_types
+            .push((name.to_string(), CStructType::LongArr(vs.len())));
+        self.align_to(8);
+        for &v in vs {
+            self.buf.extend_from_slice(&v.to_ne_bytes());
+        }
+        self
+    }
+
     pub fn float(mut self, name: impl ToString, v: f32) -> Self {
         self.struct_types
-            .push((name.to_string(), CStructTemplateType::Float));
+            .push((name.to_string(), CStructType::Float));
         self.align_to(4);
         self.buf.extend_from_slice(&v.to_ne_bytes());
         self
@@ -111,7 +119,7 @@ impl<'a> CStructData<'a> {
 
     pub fn float_arr(mut self, name: impl ToString, vs: &[f32]) -> Self {
         self.struct_types
-            .push((name.to_string(), CStructTemplateType::FloatArr(vs.len())));
+            .push((name.to_string(), CStructType::FloatArr(vs.len())));
         self.align_to(4);
         for &v in vs {
             self.buf.extend_from_slice(&v.to_ne_bytes());
@@ -121,15 +129,24 @@ impl<'a> CStructData<'a> {
 
     pub fn bool(mut self, name: impl ToString, v: bool) -> Self {
         self.struct_types
-            .push((name.to_string(), CStructTemplateType::Bool));
+            .push((name.to_string(), CStructType::Bool));
         self.align_to(1);
         self.buf.push(if v { 1 } else { 0 });
         self
     }
 
-    pub fn ptr_const_f32(mut self, name: impl ToString, p: *const f32) -> Self {
+    pub fn bool_arr(mut self, name: impl ToString, vs: &[bool]) -> Self {
         self.struct_types
-            .push((name.to_string(), CStructTemplateType::Ptr));
+            .push((name.to_string(), CStructType::BoolArr(vs.len())));
+        self.align_to(1);
+        for &v in vs {
+            self.buf.push(if v { 1 } else { 0 });
+        }
+        self
+    }
+
+    pub fn ptr_const_f32(mut self, name: impl ToString, p: *const f32) -> Self {
+        self.struct_types.push((name.to_string(), CStructType::Ptr));
         let ptr_size = std::mem::size_of::<usize>(); // usually 8
         let ptr_align = ptr_size;
         self.align_to(ptr_align);
@@ -147,7 +164,7 @@ impl<'a> CStructData<'a> {
 
     pub fn ptr_const_f32_arr(mut self, name: impl ToString, p: &[*const f32]) -> Self {
         self.struct_types
-            .push((name.to_string(), CStructTemplateType::PtrArr(p.len())));
+            .push((name.to_string(), CStructType::PtrArr(p.len())));
         let ptr_size = std::mem::size_of::<usize>(); // usually 8
         let ptr_align = ptr_size;
         self.align_to(ptr_align);
@@ -193,29 +210,31 @@ impl<'a> CStructData<'a> {
 
     /// Insert a raw byte field (e.g., another struct).
     /// `align` must be the alignment of the nested struct.
-    pub fn bytes(mut self, align: usize, data: &[u8]) -> Self {
+    pub fn bytes(mut self, align: usize, name: impl ToString, data: &[u8]) -> Self {
+        self.struct_types
+            .push((name.to_string(), CStructType::Bytes(data.len())));
         self.align_to(align);
         self.buf.extend_from_slice(data);
         self
     }
 }
 
-impl ToString for CStructData<'_> {
+impl ToString for CStruct<'_> {
     fn to_string(&self) -> String {
         self.struct_types
             .iter()
             .map(|(name, ty)| match ty {
-                CStructTemplateType::Bool => format!("bool {name};"),
-                CStructTemplateType::BoolArr(l) => format!("bool {name}[{l}];"),
-                CStructTemplateType::Float => format!("float {name};"),
-                CStructTemplateType::FloatArr(l) => format!("float {name}[{l}];"),
-                CStructTemplateType::Int => format!("int {name};"),
-                CStructTemplateType::IntArr(l) => format!("int {name}[{l}];"),
-                CStructTemplateType::Long => format!("long {name};"),
-                CStructTemplateType::LongArr(l) => format!("long {name}[{l}];"),
-                CStructTemplateType::Ptr => format!("float* {name};"),
-                CStructTemplateType::PtrArr(l) => format!("float* {name}[{l}];"),
-                CStructTemplateType::Bytes(l) => format!("char payload[{l}];"),
+                CStructType::Bool => format!("bool {name};"),
+                CStructType::BoolArr(l) => format!("bool {name}[{l}];"),
+                CStructType::Float => format!("float {name};"),
+                CStructType::FloatArr(l) => format!("float {name}[{l}];"),
+                CStructType::Int => format!("int {name};"),
+                CStructType::IntArr(l) => format!("int {name}[{l}];"),
+                CStructType::Long => format!("long {name};"),
+                CStructType::LongArr(l) => format!("long {name}[{l}];"),
+                CStructType::Ptr => format!("float* {name};"),
+                CStructType::PtrArr(l) => format!("float* {name}[{l}];"),
+                CStructType::Bytes(l) => format!("char payload[{l}];"),
             })
             .join("\n")
     }

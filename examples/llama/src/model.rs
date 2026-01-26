@@ -5,7 +5,7 @@ use luminal::{
     shape::{flatten_mul_strides, Expression, ToShape},
 };
 use luminal_cuda::{
-    block::{cstruct::CStructData, BlockOp},
+    block::{cstruct::CStruct, BlockOp},
     cudarc::driver::{CudaSlice, CudaStream, DevicePtr},
 };
 use luminal_nn::LayerNorm;
@@ -285,7 +285,7 @@ impl BlockOp for LlamaAttention {
         vec![q, k, v]
     }
 
-    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStructData<'a>) -> CStructData<'a> {
+    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
         let mut q_pos_stride = vec![0.into(); self.range.len()];
         q_pos_stride[self.range.len() - 1] = 1.into();
         let mut group_pos_stride = vec![0.into(); self.range.len()];
