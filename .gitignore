@@ -8,9 +8,11 @@ Cargo.lock
 *.st
 *.npx
 *.npz
-/**/llama-7b-hf
-/**/setup_weights/target
 *.model
 *.gguf
 proptest-regressions
 *.pftrace
+*.safetensors
+*.safetensors.index.json
+tokenizer.json
+**/.cache
