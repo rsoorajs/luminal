@@ -15,11 +15,11 @@ pub const LAYERS: usize = 34;
 pub const HIDDEN: usize = 2560;
 pub const INTERMEDIATE: usize = 10240;
 pub const HEAD_DIM: usize = 256;
-pub const N_HEADS: usize = 8;      // Number of attention heads for Q
-pub const N_KV_HEADS: usize = 4;   // Number of KV heads
+pub const N_HEADS: usize = 8; // Number of attention heads for Q
+pub const N_KV_HEADS: usize = 4; // Number of KV heads
 pub const KV_GROUPS: usize = N_HEADS / N_KV_HEADS; // = 2
-pub const Q_DIM: usize = N_HEADS * HEAD_DIM;       // = 2048
-pub const KV_DIM: usize = N_KV_HEADS * HEAD_DIM;   // = 1024
+pub const Q_DIM: usize = N_HEADS * HEAD_DIM; // = 2048
+pub const KV_DIM: usize = N_KV_HEADS * HEAD_DIM; // = 1024
 pub const VOCAB_SIZE: usize = 262208;
 pub const RMS_NORM_EPS: f32 = 1e-6;
 
@@ -41,7 +41,9 @@ impl GemmaRMSNorm {
     pub fn forward(&self, input: GraphTensor) -> GraphTensor {
         // RMS normalize, then multiply by weight (already has +1 applied in setup.py)
         let normalized = input.std_norm(input.shape.last_axis(), self.epsilon);
-        let scale = self.weight.expand_lhs(&input.dims()[..input.dims().len() - 1]);
+        let scale = self
+            .weight
+            .expand_lhs(&input.dims()[..input.dims().len() - 1]);
         normalized * scale
     }
 }
@@ -120,12 +122,7 @@ impl Gemma {
                 ),
             });
         }
-        let lm_norm = GemmaRMSNorm::new(
-            HIDDEN,
-            "model.norm.weight",
-            RMS_NORM_EPS,
-            cx,
-        );
+        let lm_norm = GemmaRMSNorm::new(HIDDEN, "model.norm.weight", RMS_NORM_EPS, cx);
         Self {
             embedding: cx.named_tensor("model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN)),
             lm_head: cx.named_tensor("lm_head.weight", (VOCAB_SIZE, HIDDEN)),
@@ -339,13 +336,13 @@ impl GemmaLayer {
 
         // 3. Apply QK-Norm + RoPE using fused custom kernel
         let q_rope = x.graph().custom_op(
-            GemmaQKNormRoPE::new(q.dims()[0], q.dims()[1].into(), N_HEADS),
+            GemmaQKNormRoPE::new(q.dims()[0], q.dims()[1], N_HEADS),
             (q, self.q_norm, pos_ids),
             q.shape,
             q.dtype,
         );
         let k_rope = x.graph().custom_op(
-            GemmaQKNormRoPE::new(k.dims()[0], k.dims()[1].into(), N_KV_HEADS),
+            GemmaQKNormRoPE::new(k.dims()[0], k.dims()[1], N_KV_HEADS),
             (k, self.k_norm, pos_ids),
             k.shape,
             k.dtype,
@@ -369,7 +366,8 @@ impl GemmaLayer {
 
         // 7. MLP with SwiGLU
         // MLP with gated activation (using swish for now - TODO: verify correct activation)
-        let mlp_out = (x_ff.matmul(self.gate.t()).swish() * x_ff.matmul(self.up.t())).matmul(self.down.t());
+        let mlp_out =
+            (x_ff.matmul(self.gate.t()).swish() * x_ff.matmul(self.up.t())).matmul(self.down.t());
 
         // 8. Post-feedforward norm + residual
         let mlp_normed = self.post_feedforward_layernorm.forward(mlp_out);

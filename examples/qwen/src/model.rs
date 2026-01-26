@@ -201,9 +201,7 @@ impl BlockOp for QwenQKNormRoPE {
     }
 
     fn cuda_struct(&self) -> String {
-        format!(
-            "const int inp; const int out; int row_width; const int weight; const int token_ids; int n_heads;",
-        )
+        "const int inp; const int out; int row_width; const int weight; const int token_ids; int n_heads;".to_string()
     }
 
     fn cuda_function(&self) -> String {
@@ -309,13 +307,13 @@ impl QwenLayer {
 
         // Apply QK-Norm + RoPE using fused custom kernel
         let q_rope = x.graph().custom_op(
-            QwenQKNormRoPE::new(q.dims()[0], q.dims()[1].into(), N_HEADS),
+            QwenQKNormRoPE::new(q.dims()[0], q.dims()[1], N_HEADS),
             (q, self.q_norm, pos_ids),
             q.shape,
             q.dtype,
         );
         let k_rope = x.graph().custom_op(
-            QwenQKNormRoPE::new(k.dims()[0], k.dims()[1].into(), N_KV_HEADS),
+            QwenQKNormRoPE::new(k.dims()[0], k.dims()[1], N_KV_HEADS),
             (k, self.k_norm, pos_ids),
             k.shape,
             k.dtype,
