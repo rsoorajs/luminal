@@ -16,6 +16,11 @@ use tracing::{span, Level};
 
 use crate::{cudarc::driver::CudaSlice, host::HostOp};
 
+pub type Ops = (
+    CuBlasSgemmV2,
+);
+
+
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct CuBlasSgemmV2 {

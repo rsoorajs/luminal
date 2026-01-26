@@ -2,10 +2,10 @@ use std::{fmt::Debug, sync::Arc};
 
 use crate::cudarc::driver::{CudaSlice, CudaStream};
 use luminal::{op::EgglogOp, prelude::*};
-mod host_matmul;
+mod cublas;
 
 pub type Ops = (
-    host_matmul::CuBlasSgemmV2TN,
+    cublas::Ops,
 );
 
 pub trait HostOp: Debug + as_any::AsAny + EgglogOp {

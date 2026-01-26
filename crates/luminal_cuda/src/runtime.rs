@@ -219,7 +219,7 @@ impl CudaRuntime {
             .next()
             .unwrap();
         self.cuda_stream
-            .memcpy_dtov(
+            .clone_dtoh(
                 self.buffers
                     .get(&data_id)
                     .expect("Cannot find tensor in runtime!"),
@@ -334,7 +334,7 @@ impl ToCudaInput for &[f32] {
     fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
         CudaInput::Buffer(
             stream
-                .memcpy_stod(unsafe {
+                .clone_htod(unsafe {
                     std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
                 })
                 .unwrap(),
@@ -346,7 +346,7 @@ impl ToCudaInput for Vec<i32> {
     fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
         CudaInput::Buffer(
             stream
-                .memcpy_stod(unsafe {
+                .clone_htod(unsafe {
                     std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
                 })
                 .unwrap(),
@@ -358,7 +358,7 @@ impl ToCudaInput for Vec<f32> {
     fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
         CudaInput::Buffer(
             stream
-                .memcpy_stod(unsafe {
+                .clone_htod(unsafe {
                     std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
                 })
                 .unwrap(),
@@ -701,9 +701,9 @@ impl Runtime for CudaRuntime {
                             .cuda_stream
                             .alloc_zeros::<i32>(n_barriers.exec(dyn_map).unwrap())
                             .unwrap();
-                        let d_tasks = self.cuda_stream.memcpy_stod(work_queue.as_slice()).unwrap();
-                        let d_head = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
-                        let queue_lock = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
+                        let d_tasks = self.cuda_stream.clone_htod(work_queue.as_slice()).unwrap();
+                        let d_head = self.cuda_stream.clone_htod(&[0i32]).unwrap();
+                        let queue_lock = self.cuda_stream.clone_htod(&[0i32]).unwrap();
                         // Set up timing buffer (start_time_u64,[[event_start_u64,event_type_i32 for sm_event in sm[:1000] for sm in sms[:sm_count]])
                         let timing_buffer = self
                             .cuda_stream
@@ -766,9 +766,9 @@ impl Runtime for CudaRuntime {
                     drop(_entered);
                     drop(span);
                     timings.push((
-                        self.cuda_stream.memcpy_dtov(&timing_buffer).unwrap(),
+                        self.cuda_stream.clone_dtoh(&timing_buffer).unwrap(),
                         self.cuda_stream
-                            .memcpy_dtov(&start_time)
+                            .clone_dtoh(&start_time)
                             .unwrap()
                             .into_iter()
                             .min()
