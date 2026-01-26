@@ -70,16 +70,13 @@ pub trait BlockOp: Debug + as_any::AsAny {
     fn flops(&self) -> Expression {
         0.into()
     }
-    #[allow(clippy::mutable_key_type)]
+    /// Build C-struct paylod
     fn build_payload<'a>(
         &self,
         stream: &Arc<CudaStream>,
         payload: CStructData<'a>,
     ) -> CStructData<'a> {
         unimplemented!()
-    } // C struct
-    fn expressions(&self) -> Vec<Expression> {
-        vec![]
     }
     fn prologue_a(&self) -> String {
         "".to_string()
@@ -379,7 +376,7 @@ impl TaskQueue {
         payload: &[u8],
         expressions: &FxHashMap<Expression, i32>,
     ) {
-        let mut bytes = CStructData::new(expressions)
+        let mut bytes = CStructData::new(Some(expressions))
             .int("op", op)
             .int("range", range)
             .int("remaining", remaining)
@@ -600,7 +597,7 @@ fn compile_interpreter(
                 format!(
                     "struct {}Payload {{{}}};",
                     op.op_name(),
-                    op.build_payload(cuda_stream, CStructData::new(&expression_map))
+                    op.build_payload(cuda_stream, CStructData::new(Some(&expression_map)))
                         .to_string(),
                 )
             })
@@ -933,7 +930,8 @@ pub(crate) fn make_megakernel_from_llir_graph(
         .node_weights()
         .filter_map(|op| op.to_dialect::<dyn BlockOp>())
         .flat_map(|op| {
-            op.expressions()
+            op.build_payload(cuda_stream, CStructData::new(None))
+                .recorded_expressions
                 .into_iter()
                 .chain(once(op.launch_range().iter().copied().product()))
         })
@@ -970,7 +968,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
     let max_payload_size = block_ops
         .iter()
         .map(|op| {
-            op.build_payload(cuda_stream, CStructData::new(&temp_expression_map))
+            op.build_payload(cuda_stream, CStructData::new(Some(&temp_expression_map)))
                 .finish_struct()
                 .len()
         })
@@ -1003,7 +1001,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
             .position(|o| o.op_name() == op.op_name())
             .unwrap();
         let mut payload = op
-            .build_payload(cuda_stream, CStructData::new(&expressions))
+            .build_payload(cuda_stream, CStructData::new(Some(&expressions)))
             .finish_struct();
         // Pad payload to max_payload_size
         payload.resize(max_payload_size, 0);

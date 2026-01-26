@@ -1,7 +1,7 @@
 use luminal::{
     graph::Graph,
     op::{CustomOp, DType, LLIROp},
-    prelude::{F32Pow, FxHashMap, GraphTensor},
+    prelude::{F32Pow, GraphTensor},
     shape::{flatten_mul_strides, Expression, ToShape},
 };
 use luminal_cuda::{
@@ -285,11 +285,7 @@ impl BlockOp for LlamaAttention {
         vec![q, k, v]
     }
 
-    fn build_payload<'a>(
-        &self,
-        stream: &Arc<CudaStream>,
-        payload: CStructData<'a>,
-    ) -> CStructData<'a> {
+    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStructData<'a>) -> CStructData<'a> {
         let mut q_pos_stride = vec![0.into(); self.range.len()];
         q_pos_stride[self.range.len() - 1] = 1.into();
         let mut group_pos_stride = vec![0.into(); self.range.len()];
@@ -501,27 +497,5 @@ impl BlockOp for LlamaAttention {
             }
         "
         .to_string()
-    }
-
-    fn expressions(&self) -> Vec<Expression> {
-        let mut q_pos_stride = vec![0.into(); self.range.len()];
-        q_pos_stride[self.range.len() - 1] = 1.into();
-        let mut group_pos_stride = vec![0.into(); self.range.len()];
-        group_pos_stride[self.range.len() - 2] = 1.into();
-        let mut head_pos_stride = vec![0.into(); self.range.len()];
-        head_pos_stride[self.range.len() - 3] = 1.into();
-        vec![
-            flatten_mul_strides(&self.range, &self.q_stride),
-            flatten_mul_strides(&self.range, &self.k_stride),
-            flatten_mul_strides(&self.range, &self.v_stride),
-            flatten_mul_strides(&self.range, &self.o_stride),
-            self.head_dim,
-            self.cur_seq,
-            self.kv_row_stride,
-            self.prev_seq,
-            flatten_mul_strides(&self.range, &q_pos_stride),
-            flatten_mul_strides(&self.range, &group_pos_stride),
-            flatten_mul_strides(&self.range, &head_pos_stride),
-        ]
     }
 }

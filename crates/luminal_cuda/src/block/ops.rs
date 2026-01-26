@@ -1,7 +1,6 @@
 use std::{fmt::Debug, sync::Arc};
 
 use cudarc::driver::CudaStream;
-use itertools::Itertools;
 use luminal::{
     graph::{extract_expr, extract_expr_list},
     op::OpParam::*,
@@ -157,15 +156,6 @@ impl BlockOp for RowAdd {
                 &flatten_mul_strides(&self.range, &self.out_stride),
             )
             .expr("row_width", &self.row_width)
-    }
-
-    fn expressions(&self) -> Vec<Expression> {
-        vec![
-            flatten_mul_strides(&self.range, &self.a_stride),
-            flatten_mul_strides(&self.range, &self.b_stride),
-            flatten_mul_strides(&self.range, &self.out_stride),
-            self.row_width,
-        ]
     }
 }
 
@@ -343,21 +333,6 @@ impl BlockOp for RowSwishMul {
             .expr("out", flatten_mul_strides(&launch_range, &a_stride_ext))
             .expr("row_width", self.row_width)
             .expr("sm_count", self.sm_count)
-    }
-
-    fn expressions(&self) -> Vec<Expression> {
-        let mut a_stride_ext = self.a_stride.clone();
-        a_stride_ext.push(0.into());
-        let mut b_stride_ext = self.b_stride.clone();
-        b_stride_ext.push(0.into());
-
-        let launch_range = self.launch_range();
-        vec![
-            flatten_mul_strides(&launch_range, &a_stride_ext),
-            flatten_mul_strides(&launch_range, &b_stride_ext),
-            self.row_width,
-            self.sm_count,
-        ]
     }
 }
 
@@ -583,13 +558,6 @@ impl BlockOp for RowRMSNorm {
         }
         "
         .to_string()
-    }
-
-    fn expressions(&self) -> Vec<Expression> {
-        vec![
-            flatten_mul_strides(&self.range, &self.a_stride),
-            self.row_width,
-        ]
     }
 }
 
@@ -980,14 +948,6 @@ impl BlockOp for RowRope {
         "
         .to_string()
     }
-
-    fn expressions(&self) -> Vec<Expression> {
-        vec![
-            flatten_mul_strides(&self.range, &self.a_stride),
-            self.row_width,
-            'z'.into(),
-        ]
-    }
 }
 
 use crate::TILE_SIZE;
@@ -1206,11 +1166,7 @@ impl BlockOp for TileMatmulSplitK {
         batch * m * n * k * 2
     }
 
-    fn build_payload<'a>(
-        &self,
-        stream: &Arc<CudaStream>,
-        payload: CStructData<'a>,
-    ) -> CStructData<'a> {
+    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStructData<'a>) -> CStructData<'a> {
         assert_eq!(self.untiled_range.len(), 2);
         // Range layout: [k_chunks, batch..., tiled_m, tiled_n]
         // k_chunk is at index 0
@@ -1361,31 +1317,6 @@ impl BlockOp for TileMatmulSplitK {
             }}
         }}
         ", ts = TILE_SIZE)
-    }
-
-    fn expressions(&self) -> Vec<Expression> {
-        // Range layout: [k_chunks, batch..., tiled_m, tiled_n]
-        let mut k_chunk_stride = vec![0.into(); self.range.len()];
-        k_chunk_stride[0] = 1.into();
-        let mut m_pos_stride = vec![0.into(); self.range.len()];
-        m_pos_stride[self.range.len() - 2] = 1.into();
-        let mut n_pos_stride = vec![0.into(); self.range.len()];
-        n_pos_stride[self.range.len() - 1] = 1.into();
-        vec![
-            self.untiled_range[0],
-            self.untiled_range[1],
-            flatten_mul_strides(&self.range, &self.a_stride),
-            flatten_mul_strides(&self.range, &self.b_stride),
-            flatten_mul_strides(&self.range, &self.out_stride),
-            self.total_k,
-            self.a_m_stride,
-            self.b_n_stride,
-            self.out_m_stride,
-            flatten_mul_strides(&self.range, &m_pos_stride),
-            flatten_mul_strides(&self.range, &n_pos_stride),
-            flatten_mul_strides(&self.range, &k_chunk_stride),
-            self.k_chunk,
-        ]
     }
 }
 
@@ -1820,24 +1751,6 @@ impl BlockOp for TileMatmulFullSplit {
             .expr("c_n_stride", self.out_n_stride)
             .expr("c_width", self.out_m_stride) // c_width = c_m_stride
     }
-
-    fn expressions(&self) -> Vec<Expression> {
-        vec![
-            self.untiled_range[0],
-            self.untiled_range[1],
-            self.m_tiles,
-            self.n_tiles,
-            self.total_k,
-            self.sm_count,
-            flatten_mul_strides(&[self.sm_count], &[0.into()]),
-            self.a_m_stride,
-            self.a_k_stride,
-            self.b_n_stride,
-            self.b_k_stride,
-            self.out_m_stride,
-            self.out_n_stride,
-        ]
-    }
 }
 
 #[derive(Debug, Default)]
@@ -2031,13 +1944,5 @@ impl BlockOp for RowEmbed {
                 &flatten_mul_strides(&self.range, &self.out_stride),
             )
             .expr("embed_dim", &self.embed_dim)
-    }
-
-    fn expressions(&self) -> Vec<Expression> {
-        vec![
-            flatten_mul_strides(&self.range, &self.token_stride),
-            flatten_mul_strides(&self.range, &self.out_stride),
-            self.embed_dim,
-        ]
     }
 }

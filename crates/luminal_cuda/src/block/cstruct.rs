@@ -21,16 +21,18 @@ pub struct CStructData<'a> {
     buf: Vec<u8>,
     max_align: usize,
     struct_types: Vec<(String, CStructTemplateType)>,
-    expressions: &'a FxHashMap<Expression, i32>,
+    expressions: Option<&'a FxHashMap<Expression, i32>>,
+    pub(crate) recorded_expressions: Vec<Expression>,
 }
 
 impl<'a> CStructData<'a> {
-    pub fn new(expressions: &'a FxHashMap<Expression, i32>) -> Self {
+    pub fn new(expressions: Option<&'a FxHashMap<Expression, i32>>) -> Self {
         Self {
             max_align: 1,
             struct_types: vec![],
             buf: vec![],
             expressions,
+            recorded_expressions: vec![],
         }
     }
 
@@ -64,21 +66,29 @@ impl<'a> CStructData<'a> {
     }
 
     pub fn expr(mut self, name: impl ToString, v: impl Into<Expression>) -> Self {
-        self.struct_types
-            .push((name.to_string(), CStructTemplateType::Int));
-        let v = self.expressions[&v.into()];
-        self.align_to(4);
-        self.buf.extend_from_slice(&v.to_ne_bytes());
+        if let Some(expressions) = self.expressions {
+            self.struct_types
+                .push((name.to_string(), CStructTemplateType::Int));
+            let v = expressions[&v.into()];
+            self.align_to(4);
+            self.buf.extend_from_slice(&v.to_ne_bytes());
+        } else {
+            self.recorded_expressions.push(v.into());
+        }
         self
     }
 
     pub fn expr_arr(mut self, name: impl ToString, vs: &[Expression]) -> Self {
-        self.struct_types
-            .push((name.to_string(), CStructTemplateType::IntArr(vs.len())));
-        self.align_to(4);
-        for &v in vs {
-            let v = self.expressions[&v.into()];
-            self.buf.extend_from_slice(&v.to_ne_bytes());
+        if let Some(expressions) = self.expressions {
+            self.struct_types
+                .push((name.to_string(), CStructTemplateType::IntArr(vs.len())));
+            self.align_to(4);
+            for &v in vs {
+                let v = expressions[&v.into()];
+                self.buf.extend_from_slice(&v.to_ne_bytes());
+            }
+        } else {
+            self.recorded_expressions.extend(vs.iter().copied());
         }
         self
     }
@@ -165,6 +175,10 @@ impl<'a> CStructData<'a> {
 
     /// Pad the struct size to a multiple of max_align.
     pub fn finish_struct(mut self) -> Vec<u8> {
+        assert!(
+            self.expressions.is_some(),
+            "Can only create cstruct bytes when expression map is provided!"
+        );
         let align = self.max_align;
         if align > 1 {
             let len = self.buf.len();
