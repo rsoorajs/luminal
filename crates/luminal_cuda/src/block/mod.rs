@@ -1,4 +1,5 @@
 #![allow(clippy::mutable_key_type)]
+pub mod cstruct;
 mod ops;
 use itertools::Itertools;
 pub use ops::*;
@@ -31,7 +32,7 @@ use tracing_perfetto_sdk_schema::{
     track_event,
 };
 
-use crate::runtime::CudaRuntime;
+use crate::{block::cstruct::CStructData, runtime::CudaRuntime};
 
 #[allow(unused_variables)]
 pub trait BlockOp: Debug + as_any::AsAny {
@@ -45,10 +46,6 @@ pub trait BlockOp: Debug + as_any::AsAny {
     }
     fn producer_barriers_seperate(&self) -> Vec<bool>;
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>>;
-    /// C struct body
-    fn cuda_struct(&self) -> String {
-        "".to_string()
-    }
     /// C function body
     fn cuda_function(&self) -> String {
         "".to_string()
@@ -74,11 +71,11 @@ pub trait BlockOp: Debug + as_any::AsAny {
         0.into()
     }
     #[allow(clippy::mutable_key_type)]
-    fn schedule_op(
+    fn build_payload<'a>(
         &self,
         stream: &Arc<CudaStream>,
-        expressions: &FxHashMap<Expression, i32>,
-    ) -> Vec<u8> {
+        payload: CStructData<'a>,
+    ) -> CStructData<'a> {
         unimplemented!()
     } // C struct
     fn expressions(&self) -> Vec<Expression> {
@@ -380,25 +377,22 @@ impl TaskQueue {
         source_ptrs: [*const f32; 3],
         out_ptr: *mut f32,
         payload: &[u8],
+        expressions: &FxHashMap<Expression, i32>,
     ) {
-        use crate::block::CStruct;
-
-        let mut bytes = CStruct::new()
-            .int(op)
-            .int(range)
-            .int(remaining)
-            .int(in_dep_a_stride)
-            .int(in_dep_a_base)
-            .int(in_dep_b_stride)
-            .int(in_dep_b_base)
-            .int(in_dep_c_stride)
-            .int(in_dep_c_base)
-            .int(out_dep_stride)
-            .int(out_dep_base)
-            .ptr_const_f32(source_ptrs[0])
-            .ptr_const_f32(source_ptrs[1])
-            .ptr_const_f32(source_ptrs[2])
-            .ptr_mut_f32(out_ptr)
+        let mut bytes = CStructData::new(expressions)
+            .int("op", op)
+            .int("range", range)
+            .int("remaining", remaining)
+            .int("in_dep_a_stride", in_dep_a_stride)
+            .int("in_dep_a_base", in_dep_a_base)
+            .int("in_dep_b_stride", in_dep_b_stride)
+            .int("in_dep_b_base", in_dep_b_base)
+            .int("in_dep_c_stride", in_dep_c_stride)
+            .int("in_dep_c_base", in_dep_c_base)
+            .int("out_dep_stride", out_dep_stride)
+            .int("out_dep_base", out_dep_base)
+            .ptr_const_f32_arr("source_ptrs", source_ptrs.as_slice())
+            .ptr_mut_f32("out_ptr", out_ptr)
             .bytes(1, payload) // Add payload with byte alignment
             .finish_struct();
 
@@ -579,6 +573,12 @@ fn compile_interpreter(
     FxHashMap<Expression, i32>,
     FxHashMap<char, CudaSlice<u8>>,
 ) {
+    let expression_map = expressions
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (*e, i as i32))
+        .collect::<FxHashMap<_, _>>();
+
     // Compile the interpreter
     let mut kernel = include_str!("interpreter.cu").to_string();
     let n_ops = ops.len();
@@ -596,7 +596,14 @@ fn compile_interpreter(
     kernel = kernel.replace(
         "//%extra_op_structs%",
         &ops.iter()
-            .map(|op| format!("struct {}Payload {{{}}};", op.op_name(), op.cuda_struct()))
+            .map(|op| {
+                format!(
+                    "struct {}Payload {{{}}};",
+                    op.op_name(),
+                    op.build_payload(cuda_stream, CStructData::new(&expression_map))
+                        .to_string(),
+                )
+            })
             .join("\n"),
     );
     kernel = kernel.replace(
@@ -726,11 +733,6 @@ fn compile_interpreter(
         .iter()
         .map(|v| format!("__constant__ int const_{v}[1];"))
         .join("\n");
-    let expression_map = expressions
-        .iter()
-        .enumerate()
-        .map(|(i, e)| (*e, i as i32))
-        .collect::<FxHashMap<_, _>>();
     let lambdas = expression_map
         .iter()
         .sorted_by_key(|(_, i)| **i)
@@ -967,7 +969,11 @@ pub(crate) fn make_megakernel_from_llir_graph(
     // Calculate actual max payload size from the ops being used
     let max_payload_size = block_ops
         .iter()
-        .map(|op| op.schedule_op(cuda_stream, &temp_expression_map).len())
+        .map(|op| {
+            op.build_payload(cuda_stream, CStructData::new(&temp_expression_map))
+                .finish_struct()
+                .len()
+        })
         .max()
         .unwrap_or(0);
 
@@ -996,7 +1002,9 @@ pub(crate) fn make_megakernel_from_llir_graph(
             .iter()
             .position(|o| o.op_name() == op.op_name())
             .unwrap();
-        let mut payload = op.schedule_op(cuda_stream, &expressions);
+        let mut payload = op
+            .build_payload(cuda_stream, CStructData::new(&expressions))
+            .finish_struct();
         // Pad payload to max_payload_size
         payload.resize(max_payload_size, 0);
         let range = op.launch_range();
@@ -1053,6 +1061,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
             [null(); 3],
             null_mut(),
             &payload,
+            &expressions,
         );
     }
     (
