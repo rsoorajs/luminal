@@ -19,7 +19,7 @@ use std::{
     path::Path,
     sync::Arc,
 };
-use tracing::{self, Level, enabled, info, trace};
+use tracing::{self, Level, enabled, info};
 
 pub type LLIRGraph = StableGraph<LLIROp, ()>;
 pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ShapeTracker>;
