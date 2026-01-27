@@ -155,7 +155,7 @@ fn main() {
         let _sample_span = span!(Level::INFO, "sample_full").entered();
         sentence = vec![*sample(&logits_data, VOCAB_SIZE).last().unwrap()];
         prev_seq += seq_len;
-        print!("Output: {}", tokenizer.decode(&sentence, true).unwrap());
+        print!("{}", tokenizer.decode(&sentence, true).unwrap());
         std::io::stdout().flush().unwrap();
         fwd_durations.push(start.elapsed());
     }
