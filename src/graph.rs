@@ -407,7 +407,6 @@ fn run_egglog(
     let (program, root) = termdag_to_egglog(termdag, termdag.lookup(term));
     let code = egglog_utils::full_egglog(&program, ops, cleanup);
     let mut egraph = egglog::EGraph::default();
-    println!("{}", code);
     let commands = egraph.parser.get_program_from_string(None, &code)?;
     println!("{}", "Egglog running...".green());
     let _outputs = egraph.run_program(commands)?;

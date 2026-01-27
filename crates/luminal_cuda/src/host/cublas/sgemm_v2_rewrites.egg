@@ -1,17 +1,77 @@
-; TileMatmul -> CuBlasSgemmV2TN (row major) [M,K] x [K,N] (column Major) -> [M,N] (row major) 
+; plz ignore during debug
+; (rule
+;     (
+;         ; get TileMatmul
+;         (= ?tm (TileMatmul ?tm_range ?tm_untiled_range ?tm_iters ?a ?tm_a_stride ?tm_a_m_stride ?tm_a_n_stride ?b ?tm_b_stride ?tm_b_m_stride ?tm_b_n_stride ?tm_out_stride ?tm_out_m_stride ?tm_out_n_stride))
+;         (= m (nth_from_end ?tm_untiled_range 1))
+;         (= n (nth_from_end ?tm_untiled_range 0))
+;         (= (F32) (dtype ?a))
+;         (= (F32) (dtype ?b)) 
+;     )
+;     (   
+;         ; make KernelMatmul
+;         (let ?hm (cublasSgemmV2 ?a ?b m n ?tm_iters))
+;         (union ?tm ?hm)
+;         (set (dtype ?hm) (F32))
+;     )
+; )
 (rule
-    (
-        ; get TileMatmul
-        (= ?tm (TileMatmul ?tm_range ?tm_untiled_range ?tm_iters ?a ?tm_a_stride ?tm_a_m_stride ?tm_a_n_stride ?b ?tm_b_stride ?tm_b_m_stride ?tm_b_n_stride ?tm_out_stride ?tm_out_m_stride ?tm_out_n_stride))
-        (= m (nth_from_end ?tm_untiled_range 1))
-        (= n (nth_from_end ?tm_untiled_range 0))
-        (= (F32) (dtype ?a))
-        (= (F32) (dtype ?b)) 
-    )
-    (   
-        ; make KernelMatmul
-        (let ?hm (cublasSgemmV2TN ?a ?b m n ?tm_iters))
-        (union ?tm ?hm)
-        (set (dtype ?hm) (F32))
-    )
+            (
+                ; Match Mul node
+                (= ?mul (Mul ?mul_shape ?a ?a_stride ?b ?b_stride ?mul_out_stride))
+
+                ; Match Sum that reduces the Mul (k dimension)
+                (= ?sum (Sum ?out_shape ?k ?mul ?sum_in_stride ?k_stride ?sum_out_stride))
+
+                ; Get dimensions from output shape
+                (= ?m (nth_from_end ?out_shape 1))
+                (= ?n (nth_from_end ?out_shape 0))
+                (!= ?m (MNum 0))
+                (!= ?n (MNum 0))
+
+                ; Get output strides
+                (= ?sum_out_m_stride (nth_from_end ?sum_out_stride 1))
+                (= ?sum_out_n_stride (nth_from_end ?sum_out_stride 0))
+
+                ; Get A strides
+                (= ?a_m_stride (nth_from_end ?a_stride 2))
+                (= ?a_n_stride (nth_from_end ?a_stride 1))
+                (= ?a_k_stride (nth_from_end ?a_stride 0))
+
+                ; Get B strides
+                (= ?b_m_stride (nth_from_end ?b_stride 2))
+                (= ?b_n_stride (nth_from_end ?b_stride 1))
+                (= ?b_k_stride (nth_from_end ?b_stride 0))
+
+                ; Assert contiguous k stride on output (required for reduction)
+                (= ?k_stride (MNum 1))
+
+                ; Assert A has contiguous k (row-major A)
+                (= ?a_k_stride (MNum 1))
+
+                ; Assert B has contiguous k (col-major B / transposed)
+                (= ?b_k_stride (MNum 1))
+
+                (= (F32) (dtype ?a))
+                (= (F32) (dtype ?b)) 
+            )
+            (   
+                (let ?a_layout "T")
+                (let ?b_layout "N")
+                (let ?sgemm (cublasSgemmV2
+                    ?a
+                    ?b
+                    ?m
+                    ?n 
+                    ?k 
+                    ?a_layout
+                    ?b_layout
+                    ?a_m_stride
+                    ?b_n_stride 
+                    ?m)
+                )
+                (union ?sum ?sgemm)
+                (set (dtype ?sgemm) (F32))
+            )
+            :name "cublas sgemm"
 )

@@ -1,12 +1,13 @@
 use candle_core::{Device, Tensor};
 use luminal::prelude::*;
 use luminal_cuda::runtime::CudaRuntime;
+use luminal::visualization::ToDot;
 
 #[cfg(test)]
 mod tests {
-    use luminal::visualization::ToDot;
 
     use super::*;
+
 
     /// Convert a row-major matrix B (k x n) to column-major layout using candle
     fn to_col_major(b_row_major: &[f32], k: usize, n: usize) -> Vec<f32> {
@@ -32,9 +33,9 @@ mod tests {
 
         let mut rt = CudaRuntime::new().unwrap();
 
-        let example_m = 100;
-        let example_n = 100;
-        let example_k = 100;
+        let example_m = 1000;
+        let example_n = 1000;
+        let example_k = 1000;
 
         cx.set_dim('m', example_m);
         cx.set_dim('n', example_n);
@@ -47,8 +48,15 @@ mod tests {
         rt.set_data(graph_a, a.clone());
         rt.set_data(graph_b, b_col_major.clone());
 
-        rt = cx.search(rt, 1);
-        // assert!(rt.llir_graph.to_dot().unwrap().contains("HostMatmul"));
+        cx.build_search_space::<CudaRuntime>();
+        
+        rt = cx.search(rt, 10);
+        
+        if !rt.llir_graph.to_dot().unwrap().contains("Cublas"){
+            dbg!(rt.llir_graph.to_dot().unwrap());
+            dbg!("NO CUBLAS");
+        }
+        // assert!(rt.llir_graph.to_dot().unwrap().contains("Cublas"));
 
         return (cx, rt, graph_a, graph_b, graph_c);
     }
@@ -123,7 +131,7 @@ mod tests {
         use proptest::prelude::*;
 
         proptest! {
-            #![proptest_config(ProptestConfig::with_cases(1))]
+            #![proptest_config(ProptestConfig::with_cases(32))]
             #[test]
             fn test_cuda_vs_cpu_matmul(
                 m in 1i32..=32,

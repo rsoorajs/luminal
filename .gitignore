@@ -13,7 +13,7 @@ Cargo.lock
 *.model
 *.gguf
 
-proptest-regressions
+*.proptest-regressions
 *.pftrace
 *.safetensors
 *.safetensors.index.json
