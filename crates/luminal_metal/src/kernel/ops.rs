@@ -23,6 +23,8 @@ pub type MetalOps = (
     MetalConstant,
     MetalIota,
     MetalGather,
+    // Type conversion
+    MetalCast,
 );
 
 fn compile_shader(device: &Device, source: &str, function_name: &str) -> ComputePipelineState {
@@ -118,13 +120,15 @@ macro_rules! metal_unary_op {
             fn rewrites(&self) -> Vec<String> {
                 vec![format!(
                     r#"(rule
-                        ((= ?e ({} ?shape ?x ?x_stride ?out_stride))
-                         (= ?dt (dtype ?x)))
-                        ((let ?me ({} ?shape ?x ?x_stride ?out_stride))
-                         (union ?e ?me)
-                         (set (dtype ?me) ?dt))
-                    )"#,
+	                        ((= ?e ({} ?shape ?x ?x_stride ?out_stride))
+	                         (= ?dt (dtype ?x)))
+	                        ((let ?me ({} ?shape ?x ?x_stride ?out_stride))
+	                         (union ?e ?me)
+	                         (set (dtype ?me) ?dt))
+	                        :name "metal {}"
+	                    )"#,
                     $op_name.replace("Metal", ""),
+                    $op_name,
                     $op_name
                 )]
             }
@@ -259,14 +263,25 @@ impl EgglogOp for MetalAdd {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec![r#"(rule
+        vec![
+            r#"(rule
             ((= ?e (Add ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
              (= ?dt (dtype ?a)))
             ((let ?me (MetalAdd ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
              (union ?e ?me)
              (set (dtype ?me) ?dt))
+            :name "metal MetalAdd"
         )"#
-        .to_string()]
+            .to_string(),
+            r#"(rule
+            ((= ?e (Add ?shape ?a ?a_stride ?b ?b_stride ?out_stride)))
+            ((let ?me (MetalAdd ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
+             (union ?e ?me)
+             (set (dtype ?me) (F32)))
+            :name "metal MetalAdd (no dtype)"
+        )"#
+            .to_string(),
+        ]
     }
 
     fn cleanup(&self) -> bool {
@@ -387,6 +402,7 @@ impl EgglogOp for MetalMul {
             ((let ?me (MetalMul ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
              (union ?e ?me)
              (set (dtype ?me) ?dt))
+            :name "metal MetalMul"
         )"#
         .to_string()]
     }
@@ -508,6 +524,7 @@ impl EgglogOp for MetalMod {
             ((let ?me (MetalMod ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
              (union ?e ?me)
              (set (dtype ?me) ?dt))
+            :name "metal MetalMod"
         )"#
         .to_string()]
     }
@@ -629,6 +646,7 @@ impl EgglogOp for MetalLessThan {
             ((let ?me (MetalLessThan ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
              (union ?e ?me)
              (set (dtype ?me) ?dt))
+            :name "metal MetalLessThan"
         )"#
         .to_string()]
     }
@@ -754,6 +772,7 @@ impl EgglogOp for MetalSumReduce {
             ((let ?me (MetalSum ?out_shape ?iters ?inp ?in_stride ?iter_stride ?out_stride))
              (union ?e ?me)
              (set (dtype ?me) ?dt))
+            :name "metal MetalSum"
         )"#
         .to_string()]
     }
@@ -910,6 +929,7 @@ impl EgglogOp for MetalMaxReduce {
             ((let ?me (MetalMax ?out_shape ?iters ?inp ?in_stride ?iter_stride ?out_stride))
              (union ?e ?me)
              (set (dtype ?me) ?dt))
+            :name "metal MetalMax"
         )"#
         .to_string()]
     }
@@ -1063,6 +1083,7 @@ impl EgglogOp for MetalConstant {
             ((let ?me (MetalConstant ?f))
              (union ?e ?me)
              (set (dtype ?me) (F32)))
+            :name "metal MetalConstant"
         )"#
         .to_string()]
     }
@@ -1158,6 +1179,7 @@ impl EgglogOp for MetalIota {
             ((let ?me (MetalIota ?expr ?range))
              (union ?e ?me)
              (set (dtype ?me) (Int)))
+            :name "metal MetalIota"
         )"#
         .to_string()]
     }
@@ -1262,6 +1284,7 @@ impl EgglogOp for MetalGather {
              (let ?me (MetalGather ?out_shape ?indexes ?index_strides ?data ?data_strides ?out_strides))
              (union ?a ?me)
              (set (dtype ?me) ?dty))
+            :name "metal MetalGather"
         )"#
         .to_string()]
     }
@@ -1375,5 +1398,140 @@ impl MetalKernelOp for MetalGather {
     fn flops(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {
         // Gather is memory-bound, no significant FLOPs
         0
+    }
+}
+
+// ============================================================================
+// Type Conversion Operations
+// ============================================================================
+
+// MetalCast: convert between data types (Int <-> F32, F16, etc.)
+// This is a pure element-wise operation with no data movement or reshaping.
+#[derive(Debug, Default, Clone)]
+pub struct MetalCast {
+    target_dtype: DType,
+    shape: Vec<Expression>,
+    n_elements: Expression,
+}
+
+impl EgglogOp for MetalCast {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        (
+            "MetalCast".to_string(),
+            vec![Input, Dty, EList, Expr],
+        )
+    }
+
+    fn rewrites(&self) -> Vec<String> {
+        vec![r#"(rule
+            ((= ?e (Cast ?inp ?dty ?shape ?n_elements)))
+            ((let ?me (MetalCast ?inp ?dty ?shape ?n_elements))
+             (union ?e ?me)
+             (set (dtype ?me) ?dty))
+            :name "metal MetalCast"
+        )"#
+        .to_string()]
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        use luminal::graph::{extract_dtype, extract_expr, extract_expr_list};
+        (
+            LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
+                target_dtype: extract_dtype(egraph, children[1]),
+                shape: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
+                n_elements: extract_expr(egraph, children[3], expr_cache).unwrap(),
+            })),
+            vec![children[0]],
+        )
+    }
+}
+
+impl MetalKernelOp for MetalCast {
+    fn compile(&self, device: &Device) -> ComputePipelineState {
+        // Cast is a pure element-wise operation: out[i] = (target_type)inp[i]
+        // No stride calculations needed - input and output are both contiguous
+
+        // Determine input and output types based on target dtype
+        let (in_type, out_type) = match self.target_dtype {
+            DType::F32 => ("int", "float"),
+            DType::Int => ("float", "int"),
+            DType::F16 => ("float", "half"),
+            DType::Bf16 => ("float", "bfloat"),
+        };
+
+        let source = format!(
+            r#"
+            #include <metal_stdlib>
+            using namespace metal;
+
+            kernel void mkernel(
+                device {in_type} *inp [[buffer(0)]],
+                device {out_type} *out [[buffer(1)]],
+                device uint &n_elements [[buffer(2)]],
+                uint idx [[thread_position_in_grid]]
+            ) {{
+                if (idx < n_elements) {{
+                    out[idx] = ({out_type})inp[idx];
+                }}
+            }}
+            "#,
+            in_type = in_type,
+            out_type = out_type,
+        );
+        compile_shader(device, &source, "mkernel")
+    }
+
+    fn output_size(&self) -> Expression {
+        // Use n_elements directly - this is the physical element count
+        self.n_elements.clone()
+    }
+
+    fn encode(
+        &self,
+        encoder: &ComputeCommandEncoderRef,
+        pipeline: &ComputePipelineState,
+        inputs: &[&Buffer],
+        output: &Buffer,
+        dyn_map: &FxHashMap<char, usize>,
+    ) {
+        let n_elements = self.n_elements.exec(dyn_map).unwrap() as u32;
+
+        encoder.set_compute_pipeline_state(pipeline);
+        encoder.set_buffer(0, Some(inputs[0]), 0);
+        encoder.set_buffer(1, Some(output), 0);
+        encoder.set_bytes(
+            2,
+            std::mem::size_of::<u32>() as u64,
+            &n_elements as *const u32 as *const _,
+        );
+
+        let thread_group_size = MTLSize::new(256, 1, 1);
+        let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
+        encoder.dispatch_thread_groups(thread_groups, thread_group_size);
+    }
+
+    // Cast is memory-bound: 1 read, 1 write, minimal compute
+    fn bytes_loaded(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let n = self.n_elements.exec(dyn_map).unwrap_or(0);
+        n * 4 // Assuming 4 bytes per element (f32 or i32)
+    }
+
+    fn bytes_stored(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let n = self.n_elements.exec(dyn_map).unwrap_or(0);
+        n * 4
+    }
+
+    fn flops(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {
+        0 // Type conversion has negligible compute cost
     }
 }

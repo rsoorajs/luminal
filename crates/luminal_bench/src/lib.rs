@@ -23,6 +23,11 @@ mod metrics;
 mod micro;
 mod patterns;
 
+/// Egglog debugging and analysis utilities.
+/// This module is backend-agnostic; specific backends are selected via feature flags
+/// in the debug_ops example.
+pub mod egglog_debug;
+
 pub use metrics::*;
 pub use micro::*;
 pub use patterns::*;

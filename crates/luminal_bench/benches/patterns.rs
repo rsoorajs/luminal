@@ -15,10 +15,16 @@ use std::time::Duration;
 
 #[cfg(feature = "metal")]
 use luminal_bench::{
-    BenchMetrics, BenchMetricsMap, BenchResultCollector, BenchmarkBackend, HardwareSpec,
-    MetalBenchmark,
     // Pattern size configs
-    ATTENTION_SIZES, MATMUL_SIZES, TRANSFORMER_SIZES,
+    ATTENTION_SIZES,
+    BenchMetrics,
+    BenchMetricsMap,
+    BenchResultCollector,
+    BenchmarkBackend,
+    HardwareSpec,
+    MATMUL_SIZES,
+    MetalBenchmark,
+    TRANSFORMER_SIZES,
 };
 
 #[cfg(feature = "metal")]

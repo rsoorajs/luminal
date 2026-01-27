@@ -110,7 +110,8 @@ impl BenchMetricsMap {
     /// Load from file
     pub fn load(path: &std::path::Path) -> std::io::Result<Self> {
         let json = std::fs::read_to_string(path)?;
-        serde_json::from_str(&json).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        serde_json::from_str(&json)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 }
 
@@ -243,8 +244,10 @@ impl FullBenchReport {
     pub fn print_summary(&self) {
         println!("\n{}", "=".repeat(100));
         println!("BENCHMARK RESULTS - {}", self.hardware.device_name);
-        println!("Peak Bandwidth: {:.0} GB/s | Peak Compute: {:.1} TFLOPS",
-            self.hardware.peak_bandwidth_gbps, self.hardware.peak_tflops);
+        println!(
+            "Peak Bandwidth: {:.0} GB/s | Peak Compute: {:.1} TFLOPS",
+            self.hardware.peak_bandwidth_gbps, self.hardware.peak_tflops
+        );
         println!("{}", "=".repeat(100));
         println!(
             "{:<20} {:>8} {:>12} {:>10} {:>8} {:>10} {:>8}",
@@ -255,8 +258,13 @@ impl FullBenchReport {
         for r in &self.results {
             println!(
                 "{:<20} {:>8} {:>12.2} {:>10.2} {:>7.1}% {:>10.4} {:>7.1}%",
-                r.pattern, r.size, r.time_us, r.throughput_gbps,
-                r.mbu_percent, r.tflops, r.mfu_percent
+                r.pattern,
+                r.size,
+                r.time_us,
+                r.throughput_gbps,
+                r.mbu_percent,
+                r.tflops,
+                r.mfu_percent
             );
         }
         println!("{}", "=".repeat(100));
@@ -314,7 +322,9 @@ impl BenchResultCollector {
         report.results = self.results.lock().unwrap().clone();
         // Sort by pattern name, then by size
         report.results.sort_by(|a, b| {
-            a.pattern.cmp(&b.pattern).then_with(|| a.size_value.cmp(&b.size_value))
+            a.pattern
+                .cmp(&b.pattern)
+                .then_with(|| a.size_value.cmp(&b.size_value))
         });
         report
     }

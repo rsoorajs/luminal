@@ -312,12 +312,22 @@ impl NativeOp for Iota {
 pub struct Cast(pub DType);
 impl HLIROp for Cast {
     fn to_egglog(&self, inp: &[(NodeIndex, String, ShapeTracker)]) -> String {
-        format!("(Cast {} ({:?}))", inp[0].1, self.0)
+        // Calculate number of physical elements (handles broadcast where stride=0)
+        // This is the actual number of elements to cast, not the logical shape size
+        let n_physical_elements = inp[0].2.n_physical_elements();
+        format!(
+            "(Cast {} ({:?}) {} {})",
+            inp[0].1,
+            self.0,
+            elist_to_egglog(&inp[0].2.dims),
+            n_physical_elements
+        )
     }
 }
 impl EgglogOp for Cast {
     fn term(&self) -> (String, Vec<OpParam>) {
-        ("Cast".to_string(), vec![Input, Dty])
+        // (Cast input dtype shape n_elements)
+        ("Cast".to_string(), vec![Input, Dty, EList, Expr])
     }
 
     fn cleanup(&self) -> bool {
@@ -327,7 +337,7 @@ impl EgglogOp for Cast {
     fn rewrites(&self) -> Vec<String> {
         vec![
             "(rule
-           ((= ?e (Cast ?inp ?dty)))
+           ((= ?e (Cast ?inp ?dty ?shape ?n_elements)))
            ((set (dtype ?e) ?dty))
         )"
             .to_string(),
@@ -776,6 +786,7 @@ impl EgglogOp for Add {
             "(rule
            ((= ?e (Add ?shape ?inp_a ?a ?inp_b ?b ?o)) (= ?dty (dtype ?inp_a)))
            ((set (dtype ?e) ?dty))
+           :name \"hlir Add dtype\"
         )"
             .to_string(),
         ]

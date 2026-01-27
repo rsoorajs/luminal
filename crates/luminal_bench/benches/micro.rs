@@ -17,8 +17,8 @@ use std::time::Duration;
 
 #[cfg(feature = "metal")]
 use luminal_bench::{
-    all_micro_patterns, BenchMetrics, BenchMetricsMap, BenchResultCollector, BenchmarkBackend,
-    BenchmarkPattern, HardwareSpec, MetalBenchmark,
+    BenchMetrics, BenchMetricsMap, BenchResultCollector, BenchmarkBackend, BenchmarkPattern,
+    HardwareSpec, MetalBenchmark, all_micro_patterns,
 };
 
 #[cfg(feature = "metal")]
@@ -81,7 +81,8 @@ fn run_metal_pattern_benchmark(
 
                 for _ in 0..iters {
                     if let Some(stats) = rt.execute_with_stats(&dyn_map) {
-                        total_time += Duration::from_secs_f64(stats.execution_time_us / 1_000_000.0);
+                        total_time +=
+                            Duration::from_secs_f64(stats.execution_time_us / 1_000_000.0);
                     }
                 }
 

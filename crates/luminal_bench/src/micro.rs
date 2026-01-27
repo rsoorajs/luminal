@@ -297,7 +297,10 @@ impl BenchmarkPattern for CastBench {
     fn build_graph(&self, cx: &mut Graph, size: BenchSize) {
         let a = cx.tensor(size.value);
         // Cast to f16 then back to f32 to measure round-trip cost
-        let _ = a.cast(luminal::op::DType::F16).cast(luminal::op::DType::F32).output();
+        let _ = a
+            .cast(luminal::op::DType::F16)
+            .cast(luminal::op::DType::F32)
+            .output();
     }
 }
 

@@ -7,18 +7,32 @@ use crate::prelude::*;
 use as_any::{AsAny, Downcast};
 use rustc_hash::FxHashMap;
 
-// ============================================================================
-// Execution Statistics for Benchmarking
-// ============================================================================
+pub trait Runtime {
+    type Ops: IntoEgglogOp;
+    type CompileArg;
+    type ExecReturn;
+    type ProfileMetric: PartialOrd + Clone + Debug;
+    fn initialize(arg: Self::CompileArg) -> Self;
+    fn load_llir(&mut self, llir_graph: &LLIRGraph);
+    fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn;
+    fn execute_with_stats(&mut self, _dyn_map: &FxHashMap<char, usize>) -> Option<ExecutionStats> {
+        None
+    }
+    fn profile(
+        &mut self,
+        llir_graph: &LLIRGraph,
+        dyn_map: &FxHashMap<char, usize>,
+    ) -> (Self::ProfileMetric, String);
+}
 
-/// Timing method used for execution statistics
+/// Timing method used for execution statistics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TimingMethod {
-    /// GPU-side timing using Metal timestamps or CUDA events
-    /// Most accurate for measuring kernel performance
+    /// GPU-side timing using Metal timestamps or CUDA events.
+    /// Most accurate for measuring kernel performance.
     GpuTimestamp,
-    /// Wall-clock timing using CPU Instant
-    /// Includes CPU-GPU synchronization overhead
+    /// Wall-clock timing using CPU Instant.
+    /// Includes CPU-GPU synchronization overhead.
     #[default]
     WallClock,
 }
@@ -32,27 +46,32 @@ impl std::fmt::Display for TimingMethod {
     }
 }
 
-/// Detailed execution statistics from a single run
+/// Detailed execution statistics from a single run.
 ///
 /// This struct captures precise metrics for computing MBU (Memory Bandwidth
 /// Utilization) and MFU (Model FLOPs Utilization).
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionStats {
-    /// GPU-side execution time in microseconds
+    /// GPU-side execution time in microseconds.
     pub execution_time_us: f64,
-    /// Total bytes loaded from memory
+    /// Total bytes loaded from memory.
     pub bytes_loaded: usize,
-    /// Total bytes stored to memory
+    /// Total bytes stored to memory.
     pub bytes_stored: usize,
-    /// Total floating-point operations
+    /// Total floating-point operations.
     pub flops: usize,
-    /// Timing method used for this measurement
+    /// Timing method used for this measurement.
     pub timing_method: TimingMethod,
 }
 
 impl ExecutionStats {
-    /// Create new execution stats with GPU timing
-    pub fn new(execution_time_us: f64, bytes_loaded: usize, bytes_stored: usize, flops: usize) -> Self {
+    /// Create new execution stats with GPU timing.
+    pub fn new(
+        execution_time_us: f64,
+        bytes_loaded: usize,
+        bytes_stored: usize,
+        flops: usize,
+    ) -> Self {
         Self {
             execution_time_us,
             bytes_loaded,
@@ -62,7 +81,7 @@ impl ExecutionStats {
         }
     }
 
-    /// Create new execution stats with explicit timing method
+    /// Create new execution stats with explicit timing method.
     pub fn with_timing_method(
         execution_time_us: f64,
         bytes_loaded: usize,
@@ -79,31 +98,31 @@ impl ExecutionStats {
         }
     }
 
-    /// Total bytes transferred (loaded + stored)
+    /// Total bytes transferred (loaded + stored).
     pub fn total_bytes(&self) -> usize {
         self.bytes_loaded + self.bytes_stored
     }
 
-    /// Achieved memory bandwidth in GB/s
+    /// Achieved memory bandwidth in GB/s.
     pub fn bandwidth_gbps(&self) -> f64 {
         if self.execution_time_us <= 0.0 {
             return 0.0;
         }
         let total_bytes = self.total_bytes() as f64;
-        // bytes / us = MB/s, so divide by 1000 to get GB/s
+        // bytes / us = MB/s, so divide by 1000 to get GB/s.
         total_bytes / self.execution_time_us / 1000.0
     }
 
-    /// Achieved compute throughput in TFLOPS
+    /// Achieved compute throughput in TFLOPS.
     pub fn tflops(&self) -> f64 {
         if self.execution_time_us <= 0.0 {
             return 0.0;
         }
-        // flops / us = MFLOPS, so divide by 1_000_000 to get TFLOPS
+        // flops / us = MFLOPS, so divide by 1_000_000 to get TFLOPS.
         self.flops as f64 / self.execution_time_us / 1_000_000.0
     }
 
-    /// Memory Bandwidth Utilization (MBU) as percentage
+    /// Memory Bandwidth Utilization (MBU) as percentage.
     pub fn mbu(&self, peak_bandwidth_gbps: f64) -> f64 {
         if peak_bandwidth_gbps <= 0.0 {
             return 0.0;
@@ -111,7 +130,7 @@ impl ExecutionStats {
         self.bandwidth_gbps() / peak_bandwidth_gbps * 100.0
     }
 
-    /// Model FLOPs Utilization (MFU) as percentage
+    /// Model FLOPs Utilization (MFU) as percentage.
     pub fn mfu(&self, peak_tflops: f64) -> f64 {
         if peak_tflops <= 0.0 {
             return 0.0;
@@ -119,7 +138,7 @@ impl ExecutionStats {
         self.tflops() / peak_tflops * 100.0
     }
 
-    /// Merge stats from another execution (for accumulating across multiple kernels)
+    /// Merge stats from another execution (for accumulating across multiple kernels).
     pub fn merge(&mut self, other: &ExecutionStats) {
         self.execution_time_us += other.execution_time_us;
         self.bytes_loaded += other.bytes_loaded;
@@ -139,35 +158,6 @@ impl std::fmt::Display for ExecutionStats {
             self.bandwidth_gbps(),
             self.tflops()
         )
-    }
-}
-
-pub trait Runtime {
-    type Ops: IntoEgglogOp;
-    type CompileArg;
-    type ExecReturn;
-    type ProfileMetric: PartialOrd + Clone + Debug;
-    fn initialize(arg: Self::CompileArg) -> Self;
-    fn load_llir(&mut self, llir_graph: &LLIRGraph);
-    fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn;
-    fn profile(
-        &mut self,
-        llir_graph: &LLIRGraph,
-        dyn_map: &FxHashMap<char, usize>,
-    ) -> (Self::ProfileMetric, String);
-
-    /// Execute and return detailed execution statistics for benchmarking.
-    ///
-    /// This method provides precise metrics for computing MBU/MFU:
-    /// - GPU-side timing (not wall-clock)
-    /// - Actual bytes loaded/stored per kernel
-    /// - Actual FLOPs per kernel
-    ///
-    /// Default implementation returns None. Backends should override this
-    /// to provide accurate statistics.
-    fn execute_with_stats(&mut self, dyn_map: &FxHashMap<char, usize>) -> Option<ExecutionStats> {
-        self.execute(dyn_map);
-        None
     }
 }
 
