@@ -69,7 +69,12 @@ impl EgglogOp for CuBlasSgemmV2 {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec![include_str!["sgemm_v2_rewrites.egg"].to_string()]
+        vec![
+            include_str!["sgemm_v2_RmRm_rewrite.egg"].to_string(), // row row 
+            include_str!["sgemm_v2_RmCm_rewrite.egg"].to_string(), // row col 
+            include_str!["sgemm_v2_CmRm_rewrite.egg"].to_string(), // col row
+            include_str!["sgemm_v2_CmCm_rewrite.egg"].to_string(), // col col 
+            ]
     }
 
     #[allow(unused_variables)]
