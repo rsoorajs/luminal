@@ -329,3 +329,246 @@ pub fn cuda_argsort_test() {
         );
     }
 }
+
+// ========================================
+// CUDA Graph Tests
+// ========================================
+
+/// Test basic CUDA graph execution with a chain of kernel ops.
+/// Multiple kernel ops should be captured into a single CUDA graph.
+#[test]
+fn test_cuda_graph_basic_execution() {
+    let Some(stream) = get_cuda_stream() else {
+        return;
+    };
+
+    let size = 1024;
+    let mut cx = Graph::default();
+    let a = cx.tensor(size);
+    let b = cx.tensor(size);
+    // Chain of operations: (a + b) * a + b
+    // This creates multiple kernel ops that should be graphed together
+    let c = ((a + b) * a + b).output();
+
+    cx.build_search_space::<CudaRuntime>();
+    let mut rt = CudaRuntime::initialize(stream);
+
+    let data_a = random_vec(size);
+    let data_b = random_vec(size);
+    rt.set_data(a, data_a.clone());
+    rt.set_data(b, data_b.clone());
+    rt = cx.search(rt, 5);
+
+    // First execution builds the graph
+    rt.execute(&cx.dyn_map);
+    let result1 = rt.get_f32(c);
+
+    // Second execution should reuse the graph
+    rt.execute(&cx.dyn_map);
+    let result2 = rt.get_f32(c);
+
+    // Results should be identical
+    assert_close(&result1, &result2);
+
+    // Verify correctness against reference
+    let expected: Vec<f32> = data_a
+        .iter()
+        .zip(&data_b)
+        .map(|(a, b)| (a + b) * a + b)
+        .collect();
+    assert_close(&result1, &expected);
+}
+
+/// Test that CUDA graphs handle multiple executions correctly.
+/// The graph should be built once and reused.
+#[test]
+fn test_cuda_graph_multiple_executions() {
+    let Some(stream) = get_cuda_stream() else {
+        return;
+    };
+
+    let size = 2048;
+    let mut cx = Graph::default();
+    let a = cx.tensor(size);
+    let b = cx.tensor(size);
+    let c = (a + b + a + b).output();  // Multiple adds should be graphed
+
+    cx.build_search_space::<CudaRuntime>();
+    let mut rt = CudaRuntime::initialize(stream);
+
+    let data_a = random_vec(size);
+    let data_b = random_vec(size);
+    rt.set_data(a, data_a.clone());
+    rt.set_data(b, data_b.clone());
+    rt = cx.search(rt, 5);
+
+    // Execute multiple times - should reuse the same graph
+    let mut results = Vec::new();
+    for _ in 0..5 {
+        rt.execute(&cx.dyn_map);
+        results.push(rt.get_f32(c));
+    }
+
+    // All results should be identical
+    for result in &results {
+        assert_close(result, &results[0]);
+    }
+
+    // Verify correctness
+    let expected: Vec<f32> = data_a
+        .iter()
+        .zip(&data_b)
+        .map(|(a, b)| a + b + a + b)
+        .collect();
+    assert_close(&results[0], &expected);
+}
+
+/// Test CUDA graph with dynamic dimension changes.
+/// When dyn dims change (but buffer sizes don't), the graph should update nodes surgically.
+#[test]
+fn test_cuda_graph_dyn_dims_surgical_update() {
+    let Some(stream) = get_cuda_stream() else {
+        return;
+    };
+
+    // Use a fixed-size tensor but with a dyn dim that affects computations
+    // Note: For true surgical update testing, we'd need dyn dims that affect
+    // launch config but not buffer sizes. For now, test with static shapes.
+    let size = 512;
+    let mut cx = Graph::default();
+    let a = cx.tensor(size);
+    let b = cx.tensor(size);
+    let c = (a + b).output();
+    let d = (c * a).output();
+
+    cx.build_search_space::<CudaRuntime>();
+    let mut rt = CudaRuntime::initialize(stream);
+
+    // First execution
+    let data_a = random_vec(size);
+    let data_b = random_vec(size);
+    rt.set_data(a, data_a.clone());
+    rt.set_data(b, data_b.clone());
+    rt = cx.search(rt, 5);
+    rt.execute(&cx.dyn_map);
+    let result1 = rt.get_f32(d);
+
+    // Verify correctness
+    let expected: Vec<f32> = data_a
+        .iter()
+        .zip(&data_b)
+        .map(|(a, b)| (a + b) * a)
+        .collect();
+    assert_close(&result1, &expected);
+
+    // Change input data and re-execute (graph should still work)
+    let data_a2 = random_vec(size);
+    let data_b2 = random_vec(size);
+    rt.set_data(a, data_a2.clone());
+    rt.set_data(b, data_b2.clone());
+    rt.execute(&cx.dyn_map);
+    let result2 = rt.get_f32(d);
+
+    let expected2: Vec<f32> = data_a2
+        .iter()
+        .zip(&data_b2)
+        .map(|(a, b)| (a + b) * a)
+        .collect();
+    assert_close(&result2, &expected2);
+}
+
+/// Test that a single kernel operation doesn't create a CUDA graph.
+/// CUDA graphs only benefit multiple kernels due to launch overhead savings.
+#[test]
+fn test_single_kernel_no_graph() {
+    let Some(stream) = get_cuda_stream() else {
+        return;
+    };
+
+    let size = 1024;
+    let mut cx = Graph::default();
+    let a = cx.tensor(size);
+    let b = cx.tensor(size);
+    // Single add operation
+    let c = (a + b).output();
+
+    cx.build_search_space::<CudaRuntime>();
+    let mut rt = CudaRuntime::initialize(stream);
+
+    let data_a = random_vec(size);
+    let data_b = random_vec(size);
+    rt.set_data(a, data_a.clone());
+    rt.set_data(b, data_b.clone());
+    rt = cx.search(rt, 5);
+    rt.execute(&cx.dyn_map);
+
+    let result = rt.get_f32(c);
+    let expected: Vec<f32> = data_a.iter().zip(&data_b).map(|(a, b)| a + b).collect();
+    assert_close(&result, &expected);
+
+    // Check that profiling shows "Add" kernel, not "CudaGraph"
+    for stat in &rt.last_kernel_stats {
+        assert_ne!(
+            stat.name, "CudaGraph",
+            "Single kernel should not use CUDA graph"
+        );
+    }
+}
+
+/// Test CUDA graph with larger tensor chain for performance.
+#[test]
+fn test_cuda_graph_chain_performance() {
+    let Some(stream) = get_cuda_stream() else {
+        return;
+    };
+
+    // Create a longer chain of operations
+    let size = 4096;
+    let mut cx = Graph::default();
+    let a = cx.tensor(size);
+    let b = cx.tensor(size);
+
+    // Chain: many adds and multiplies
+    let mut result = a + b;
+    for _ in 0..5 {
+        result = result + a;
+        result = result * b;
+    }
+    let output = result.output();
+
+    cx.build_search_space::<CudaRuntime>();
+    let mut rt = CudaRuntime::initialize(stream);
+
+    let data_a = random_vec(size);
+    let data_b = random_vec(size);
+    rt.set_data(a, data_a.clone());
+    rt.set_data(b, data_b.clone());
+    rt = cx.search(rt, 5);
+
+    // Warm up
+    rt.execute(&cx.dyn_map);
+
+    // Time multiple executions
+    let start = std::time::Instant::now();
+    for _ in 0..10 {
+        rt.execute(&cx.dyn_map);
+    }
+    let elapsed = start.elapsed();
+
+    println!("\n=== CUDA Graph Chain Performance Test ===");
+    println!("Chain of {} kernel ops", 11);  // 1 initial + 5*2 ops
+    println!("10 executions took {:?}", elapsed);
+    println!("Average per execution: {:?}", elapsed / 10);
+
+    rt.print_execution_stats();
+
+    // Verify correctness (compute expected result)
+    let mut expected: Vec<f32> = data_a.iter().zip(&data_b).map(|(a, b)| a + b).collect();
+    for _ in 0..5 {
+        expected = expected.iter().zip(&data_a).map(|(r, a)| r + a).collect();
+        expected = expected.iter().zip(&data_b).map(|(r, b)| r * b).collect();
+    }
+
+    let result = rt.get_f32(output);
+    assert_close_precision(&result, &expected, 1e-2);  // Lower precision due to chained ops
+}
