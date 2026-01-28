@@ -56,7 +56,7 @@ mod tests {
             dbg!(rt.llir_graph.to_dot().unwrap());
             dbg!("NO CUBLAS");
         }
-        // assert!(rt.llir_graph.to_dot().unwrap().contains("Cublas"));
+        assert!(rt.llir_graph.to_dot().unwrap().contains("Cublas"));
 
         return (cx, rt, graph_a, graph_b, graph_c);
     }
