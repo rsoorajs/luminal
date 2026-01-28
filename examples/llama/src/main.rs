@@ -3,15 +3,15 @@ mod model;
 use luminal::prelude::*;
 use luminal_cuda::{cudarc::driver::CudaContext, runtime::CudaRuntime};
 use model::*;
-use std::{io::Write, path::PathBuf, time::Duration};
+use std::{env, io::Write, path::PathBuf, time::Duration};
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
-
-const REPO_ID: &str = "NousResearch/Meta-Llama-3-8B-Instruct";
 
 /// Get the model directory, respecting HF_HUB_CACHE or HF_HOME environment variables.
 /// Falls back to "setup/" for backward compatibility.
 fn get_model_dir() -> PathBuf {
+    let repo_id = env::var("LUMINAL_EXAMPLE_HF_MODEL").unwrap();
+
     // Check HF_HUB_CACHE first, then derive from HF_HOME, then use default
     let cache_dir = std::env::var("HF_HUB_CACHE")
         .ok()
@@ -28,7 +28,7 @@ fn get_model_dir() -> PathBuf {
         });
 
     // HF cache structure: models--<org>--<repo>/snapshots/<revision>/
-    let repo_dir = cache_dir.join(format!("models--{}", REPO_ID.replace('/', "--")));
+    let repo_dir = cache_dir.join(format!("models--{}", repo_id.replace('/', "--")));
     let snapshots_dir = repo_dir.join("snapshots");
 
     // Find the snapshot directory (use the first/only one, or latest modified)
