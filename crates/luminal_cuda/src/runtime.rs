@@ -106,9 +106,7 @@ impl Drop for ExecutableKernel {
                     std::mem::forget(v);
                 }
             }
-            ExecutableKernel::HostOp { .. } => {
-                // No special cleanup needed... maybe ???
-            }
+            ExecutableKernel::HostOp { .. } => {}
         }
     }
 }
@@ -121,7 +119,7 @@ impl Debug for ExecutableKernel {
             match self {
                 Self::Megakernel { work_queue, .. } => format!("Megakernel ({})", work_queue.len()),
                 Self::Kernel { kernel_name, .. } => format!("Kernel: ({})", kernel_name),
-                Self::HostOp { .. } => "HostOp".to_string(),
+                Self::HostOp { internal, .. } => format!("HostOp: ({:?})", internal),
             }
         )
     }
@@ -397,7 +395,6 @@ impl Runtime for CudaRuntime {
         // reallocated and re-registered with the new work_queue
         self.buffers.clear();
         self.exec_graph.clear();
-        self.buffers.clear();
         let block_ops_in_graph = llir_graph
             .node_indices()
             .filter(|n| llir_graph[*n].to_dialect::<dyn BlockOp>().is_some())
@@ -515,11 +512,8 @@ impl Runtime for CudaRuntime {
         llir_graph: &LLIRGraph,
         dyn_map: &FxHashMap<char, usize>,
     ) -> (Self::ProfileMetric, String) {
-        trace!("clear buffers");
         self.buffers.clear();
-        trace!("load llir");
         self.load_llir(llir_graph);
-        trace!("execute");
         let start = std::time::Instant::now();
         self.execute(dyn_map);
         let duration = start.elapsed();
@@ -588,9 +582,7 @@ impl Runtime for CudaRuntime {
                 .filter(|(d, _)| self.intermediate_buffer_dims.contains(*d))
                 .any(|(d, v)| self.last_dyn_map.get(d).map(|n| *n != *v).unwrap_or(true))
         {
-            trace!("re-assigning dynamic dimensions");
             self.last_dyn_map = dyn_map.clone();
-            trace!("reallocating intermediate buffers");
             self.allocate_intermediate_buffers(dyn_map);
         }
 
@@ -654,14 +646,9 @@ impl Runtime for CudaRuntime {
                         shared_mem_bytes: shared_mem.exec(dyn_map).unwrap() as u32,
                     };
                     let mut ptrs = vec![];
-                    for (i, inp) in inputs.iter().enumerate() {
+                    for inp in inputs {
                         if let Some(buf) = self.buffers.get(inp) {
-                            let ptr = buf.device_ptr(&self.cuda_stream).0;
-                            trace!(
-                                "buffer match: input {}: {:?}, {}",
-                                i, self.llir_graph[*inp], ptr
-                            );
-                            ptrs.push(ptr);
+                            ptrs.push(buf.device_ptr(&self.cuda_stream).0);                            
                         } else {
                             ptrs.push(match &self.hlir_buffers[&self.llir_to_hlir[inp]] {
                                 CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
