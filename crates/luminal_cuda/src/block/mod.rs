@@ -210,7 +210,6 @@ fn compute_barrier_strides(
     (p, c)
 }
 
-#[allow(clippy::type_complexity)]
 #[tracing::instrument(skip_all)]
 #[allow(clippy::type_complexity)]
 fn get_barrier_strides(

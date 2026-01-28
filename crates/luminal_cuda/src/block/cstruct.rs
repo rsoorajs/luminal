@@ -82,7 +82,7 @@ impl<'a> CStruct<'a> {
                 .push((name.to_string(), CStructType::IntArr(vs.len())));
             self.align_to(4);
             for &v in vs {
-                let v = expressions[&v.into()];
+                let v = expressions[&v];
                 self.buf.extend_from_slice(&v.to_ne_bytes());
             }
         } else {

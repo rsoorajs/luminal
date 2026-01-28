@@ -145,17 +145,17 @@ impl BlockOp for RowAdd {
         payload
             .expr(
                 "a_strides",
-                &flatten_mul_strides(&self.range, &self.a_stride),
+                flatten_mul_strides(&self.range, &self.a_stride),
             )
             .expr(
                 "b_strides",
-                &flatten_mul_strides(&self.range, &self.b_stride),
+                flatten_mul_strides(&self.range, &self.b_stride),
             )
             .expr(
                 "out_strides",
-                &flatten_mul_strides(&self.range, &self.out_stride),
+                flatten_mul_strides(&self.range, &self.out_stride),
             )
-            .expr("row_width", &self.row_width)
+            .expr("row_width", self.row_width)
     }
 }
 
@@ -1938,12 +1938,12 @@ impl BlockOp for RowEmbed {
         payload
             .expr(
                 "token_stride",
-                &flatten_mul_strides(&self.range, &self.token_stride),
+                flatten_mul_strides(&self.range, &self.token_stride),
             )
             .expr(
                 "out_stride",
-                &flatten_mul_strides(&self.range, &self.out_stride),
+                flatten_mul_strides(&self.range, &self.out_stride),
             )
-            .expr("embed_dim", &self.embed_dim)
+            .expr("embed_dim", self.embed_dim)
     }
 }
