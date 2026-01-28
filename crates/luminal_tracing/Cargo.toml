@@ -4,7 +4,6 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-luminal = { path = "../.." }
 tracing-appender = "0.2.4"
 tracing-perfetto-sdk-layer = "0.13.0"
 tracing-perfetto-sdk-schema = "0.13.0"
