@@ -15,6 +15,18 @@ use tracing::{span, Level, trace};
 
 use crate::{cudarc::driver::CudaSlice, host::HostOp};
 
+/// Parse cuBLAS operation from egglog string (e.g., "\"T\"" -> CUBLAS_OP_T)
+fn parse_cublas_op(s: &str) -> cublasOperation_t {
+    // Strip quotes if present (egglog strings are stored with quotes)
+    let stripped = s.trim_matches('"');
+    match stripped {
+        "T" => cublasOperation_t::CUBLAS_OP_T,
+        "N" => cublasOperation_t::CUBLAS_OP_N,
+        "C" => cublasOperation_t::CUBLAS_OP_C,
+        other => panic!("Unknown cuBLAS operation: '{other}' (original: '{s}')"),
+    }
+}
+
 
 
 #[derive(Debug, Clone)]
@@ -68,33 +80,37 @@ impl EgglogOp for CuBlasSgemmV2 {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
+        // Extract dimensions from egglog
         let m = extract_expr(egraph, children[2], expr_cache).unwrap();
         let n = extract_expr(egraph, children[3], expr_cache).unwrap();
         let k = extract_expr(egraph, children[4], expr_cache).unwrap();
-        let a_layout = cublasOperation_t::CUBLAS_OP_T; 
-        let b_layout = cublasOperation_t::CUBLAS_OP_N; 
-        let lda = extract_expr(egraph, children[7], expr_cache).unwrap(); 
-        let ldb = extract_expr(egraph, children[8], expr_cache).unwrap(); 
-        let ldc = extract_expr(egraph, children[9], expr_cache).unwrap(); 
+
+        // Extract layout strings from egglog
+        let a_layout_str = &egraph.enodes[children[5]].0;
+        let b_layout_str = &egraph.enodes[children[6]].0;
+        let a_layout = parse_cublas_op(a_layout_str);
+        let b_layout = parse_cublas_op(b_layout_str);
+
+        // Extract leading dimensions from egglog
+        let lda = extract_expr(egraph, children[7], expr_cache).unwrap();
+        let ldb = extract_expr(egraph, children[8], expr_cache).unwrap();
+        let ldc = extract_expr(egraph, children[9], expr_cache).unwrap();
 
         let extracted_state = Self {
-                m,
-                n,
-                k,
-                a_layout,
-                b_layout, 
-                lda,
-                ldb,
-                ldc,
-            }; 
-        trace!(?extracted_state); 
+            m,
+            n,
+            k,
+            a_layout,
+            b_layout,
+            lda,
+            ldb,
+            ldc,
+        };
+        trace!(?extracted_state);
 
         let extracted = LLIROp::new::<dyn HostOp>(Box::new(extracted_state) as Box<dyn HostOp>);
 
-        (extracted, 
-            vec![children[0], children[1]],
-        )
-        
+        (extracted, vec![children[0], children[1]])
     }
 
     fn cleanup(&self) -> bool {
