@@ -9,7 +9,11 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 fn main() {
     // Initialize tracing
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("cuda_matmul=info,luminal=info,luminal_cuda=info")))
+        .with(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                EnvFilter::new("cuda_matmul=info,luminal=info,luminal_cuda=info")
+            }),
+        )
         .with(fmt::layer())
         .init();
 
@@ -82,8 +86,12 @@ fn main() {
     debug!("C candle result [{} x {}]:\n{}", m, n, candle_result);
 
     // Create luminal result as tensor for debug display
-    let luminal_result_tensor = Tensor::from_vec(luminal_result_data.clone(), (m, n), &device).unwrap();
-    debug!("C luminal result [{} x {}]:\n{}", m, n, luminal_result_tensor);
+    let luminal_result_tensor =
+        Tensor::from_vec(luminal_result_data.clone(), (m, n), &device).unwrap();
+    debug!(
+        "C luminal result [{} x {}]:\n{}",
+        m, n, luminal_result_tensor
+    );
 
     let candle_result_flat = candle_result
         .to_vec2::<f32>()

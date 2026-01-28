@@ -40,7 +40,9 @@ fn get_model_dir() -> PathBuf {
         {
             let path = snapshot.path();
             // Verify required files exist
-            if path.join("tokenizer.json").exists() && path.join("model_combined.safetensors").exists() {
+            if path.join("tokenizer.json").exists()
+                && path.join("model_combined.safetensors").exists()
+            {
                 return path;
             }
         }

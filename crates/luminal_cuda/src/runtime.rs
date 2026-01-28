@@ -1,10 +1,11 @@
 use crate::{
-    block::{make_megakernel_from_llir_graph, BlockOp, SMEvent, TaskQueue},
+    block::{BlockOp, SMEvent, TaskQueue, make_megakernel_from_llir_graph},
     host::HostOp,
     kernel::KernelOp,
 };
 use cudarc::driver::{
-    CudaFunction, CudaSlice, CudaModule, CudaStream, DevicePtr, LaunchConfig, PushKernelArg, sys::CUevent_flags,
+    CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
+    sys::CUevent_flags,
 };
 
 use fixedbitset::FixedBitSet;
@@ -23,7 +24,7 @@ use luminal::prelude::{
 use memmap2::MmapOptions;
 use safetensors::SafeTensors;
 use std::{collections::VecDeque, fmt::Debug, fs::File, mem::size_of, sync::Arc, time::Duration};
-use tracing::{field, span, trace, Level};
+use tracing::{Level, field, span, trace};
 use uuid::Uuid;
 
 pub enum CudaInput {
@@ -658,9 +659,7 @@ impl Runtime for CudaRuntime {
                             let ptr = buf.device_ptr(&self.cuda_stream).0;
                             trace!(
                                 "buffer match: input {}: {:?}, {}",
-                                i,
-                                self.llir_graph[*inp],
-                                ptr
+                                i, self.llir_graph[*inp], ptr
                             );
                             ptrs.push(ptr);
                         } else {
@@ -752,25 +751,25 @@ impl Runtime for CudaRuntime {
                         .alloc_zeros::<u64>(sm_count as usize)
                         .unwrap();
 
-                        // Set up dyn dims
-                        for (dyn_dim, val) in dyn_map {
-                            if let Some(global) = interpreter_constants.get_mut(dyn_dim) {
-                                let mut view = global.as_view_mut();
-                                let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
-                                self.cuda_stream
-                                    .memcpy_htod(&[*val as i32], &mut symbol)
-                                    .unwrap();
-                            }
+                    // Set up dyn dims
+                    for (dyn_dim, val) in dyn_map {
+                        if let Some(global) = interpreter_constants.get_mut(dyn_dim) {
+                            let mut view = global.as_view_mut();
+                            let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
+                            self.cuda_stream
+                                .memcpy_htod(&[*val as i32], &mut symbol)
+                                .unwrap();
                         }
+                    }
 
-                        let per_block_optin = self.cuda_stream.context().attribute(
+                    let per_block_optin = self.cuda_stream.context().attribute(
                             cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
                         ).unwrap();
-                        let static_shared = interpreter
+                    let static_shared = interpreter
                             .get_attribute(cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)
                             .unwrap();
-                        let max_dynamic_allowed = (per_block_optin - static_shared).max(0);
-                        interpreter
+                    let max_dynamic_allowed = (per_block_optin - static_shared).max(0);
+                    interpreter
                             .set_attribute(
                                 cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                                 max_dynamic_allowed,

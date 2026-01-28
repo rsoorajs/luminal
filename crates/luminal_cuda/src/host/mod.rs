@@ -4,9 +4,7 @@ use crate::cudarc::driver::{CudaSlice, CudaStream};
 use luminal::{op::EgglogOp, prelude::*};
 mod cublas;
 
-pub type Ops = (
-    cublas::CuBlasSgemmV2,
-);
+pub type Ops = (cublas::CuBlasSgemmV2,);
 
 pub trait HostOp: Debug + as_any::AsAny + EgglogOp {
     /// With the convention, and this is a bad way to do it, that the first is the output buffer.

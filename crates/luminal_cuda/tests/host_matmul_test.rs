@@ -1,13 +1,12 @@
 use candle_core::{Device, Tensor};
 use luminal::prelude::*;
-use luminal_cuda::runtime::CudaRuntime;
 use luminal::visualization::ToDot;
+use luminal_cuda::runtime::CudaRuntime;
 
 #[cfg(test)]
 mod tests {
 
     use super::*;
-
 
     /// Convert a row-major matrix B (k x n) to column-major layout using candle
     fn to_col_major(b_row_major: &[f32], k: usize, n: usize) -> Vec<f32> {
@@ -49,10 +48,10 @@ mod tests {
         rt.set_data(graph_b, b_col_major.clone());
 
         cx.build_search_space::<CudaRuntime>();
-        
+
         rt = cx.search(rt, 10);
-        
-        if !rt.llir_graph.to_dot().unwrap().contains("Cublas"){
+
+        if !rt.llir_graph.to_dot().unwrap().contains("Cublas") {
             dbg!(rt.llir_graph.to_dot().unwrap());
             dbg!("NO CUBLAS");
         }

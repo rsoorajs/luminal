@@ -1,5 +1,6 @@
 use cudarc::cublas::{
-    CudaBlas, sys::{cublasOperation_t, cublasSgemm_v2, cublasStatus_t}
+    CudaBlas,
+    sys::{cublasOperation_t, cublasSgemm_v2, cublasStatus_t},
 };
 use cudarc::driver::{CudaStream, DevicePtr};
 use luminal::{
@@ -11,7 +12,7 @@ use luminal::{
     prelude::*,
 };
 use std::sync::Arc;
-use tracing::{span, Level, trace};
+use tracing::{Level, span, trace};
 
 use crate::{cudarc::driver::CudaSlice, host::HostOp};
 
@@ -27,8 +28,6 @@ fn parse_cublas_op(s: &str) -> cublasOperation_t {
     }
 }
 
-
-
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct CuBlasSgemmV2 {
@@ -37,14 +36,14 @@ pub struct CuBlasSgemmV2 {
     k: Expression,
     a_layout: cublasOperation_t,
     b_layout: cublasOperation_t,
-    lda: Expression ,
-    ldb: Expression ,
-    ldc: Expression ,
+    lda: Expression,
+    ldb: Expression,
+    ldc: Expression,
 }
 
 // Useless default for IntoEgglogOp
 impl Default for CuBlasSgemmV2 {
-     fn default() -> Self {
+    fn default() -> Self {
         Self {
             m: Expression::default(),
             n: Expression::default(),
@@ -58,23 +57,22 @@ impl Default for CuBlasSgemmV2 {
     }
 }
 
-
 impl EgglogOp for CuBlasSgemmV2 {
     fn term(&self) -> (String, Vec<OpParam>) {
         (
             "cublasSgemmV2".to_string(),
-            //    A      B      m     n      k  , A input Layout, B input Layout, 
+            //    A      B      m     n      k  , A input Layout, B input Layout,
             vec![Input, Input, Expr, Expr, Expr, Str, Str, Expr, Expr, Expr],
         )
     }
 
     fn rewrites(&self) -> Vec<String> {
         vec![
-            include_str!["sgemm_v2_RmRm_rewrite.egg"].to_string(), // row row 
-            include_str!["sgemm_v2_RmCm_rewrite.egg"].to_string(), // row col 
+            include_str!["sgemm_v2_RmRm_rewrite.egg"].to_string(), // row row
+            include_str!["sgemm_v2_RmCm_rewrite.egg"].to_string(), // row col
             include_str!["sgemm_v2_CmRm_rewrite.egg"].to_string(), // col row
-            include_str!["sgemm_v2_CmCm_rewrite.egg"].to_string(), // col col 
-            ]
+            include_str!["sgemm_v2_CmCm_rewrite.egg"].to_string(), // col col
+        ]
     }
 
     #[allow(unused_variables)]
@@ -136,8 +134,8 @@ impl HostOp for CuBlasSgemmV2 {
         let m = self.m.exec(dyn_map).unwrap() as i32;
         let n = self.n.exec(dyn_map).unwrap() as i32;
         let k = self.k.exec(dyn_map).unwrap() as i32;
-        let a_layout = self.a_layout; 
-        let b_layout = self.b_layout; 
+        let a_layout = self.a_layout;
+        let b_layout = self.b_layout;
         let lda = self.lda.exec(dyn_map).unwrap() as i32;
         let ldb = self.ldb.exec(dyn_map).unwrap() as i32;
         let ldc = self.ldc.exec(dyn_map).unwrap() as i32;
@@ -149,7 +147,7 @@ impl HostOp for CuBlasSgemmV2 {
         let (a_ptr, _a_guard) = inputs[1].device_ptr(stream);
         let (b_ptr, _b_guard) = inputs[2].device_ptr(stream);
         let (c_ptr, _c_guard) = inputs[0].device_ptr(stream);
-        
+
         // Debug: Check buffer sizes
         trace!(
             "buffer_validation {}=={},{}=={},{}=={}",
@@ -176,23 +174,23 @@ impl HostOp for CuBlasSgemmV2 {
             ?b_layout,
         )
         .entered();
-        
+
         let status = unsafe {
             cublasSgemm_v2(
                 *blas.handle(),
                 a_layout,
                 b_layout,
-                m,                             
-                n,                             
-                k,                              
+                m,
+                n,
+                k,
                 &alpha as *const f32,
                 a_ptr as *const f32,
-                lda,                   
-                b_ptr as *const f32, 
-                ldb,                   
+                lda,
+                b_ptr as *const f32,
+                ldb,
                 &beta as *const f32,
-                c_ptr as *mut f32, 
-                ldc,                 
+                c_ptr as *mut f32,
+                ldc,
             )
         };
 
