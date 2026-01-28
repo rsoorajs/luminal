@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 description = "Universal benchmark infrastructure for Luminal backends"
 license = "MIT OR Apache-2.0"
+readme = "README.md"
 
 [dependencies]
 luminal = { path = "../.." }

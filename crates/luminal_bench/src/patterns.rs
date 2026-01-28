@@ -1,15 +1,4 @@
-//! L2 Pattern Benchmarks - Composite operator performance tests
-//!
-//! These benchmarks cover common computation patterns composed of HLIR primitives:
-//!
-//! ## High Priority (🔴)
-//! - `MatMul`: Matrix multiplication (Mul + SumReduce)
-//! - `Softmax`: softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))
-//!
-//! ## Medium Priority (🟡)
-//! - `LayerNorm`: Layer normalization
-//! - `GeLU`: Gaussian Error Linear Unit activation
-//! - `Attention`: Self-attention pattern (Q @ K^T @ V)
+//! L2 pattern benchmark patterns (composite graphs), used by `benches/patterns.rs`.
 
 use crate::{BenchSize, BenchmarkPattern};
 use luminal::prelude::*;

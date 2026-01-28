@@ -320,7 +320,7 @@ impl HLIROp for Cast {
             inp[0].1,
             self.0,
             elist_to_egglog(&inp[0].2.dims),
-            n_physical_elements
+            n_physical_elements.to_egglog()
         )
     }
 }

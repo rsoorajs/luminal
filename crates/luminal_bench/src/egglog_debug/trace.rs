@@ -61,20 +61,27 @@ impl DependencyGraph {
                 }
             }
 
-            graph.nodes.insert(var.clone(), DepNode {
-                var,
-                op_type,
-                inputs,
-                dtype: None,
-            });
+            graph.nodes.insert(
+                var.clone(),
+                DepNode {
+                    var,
+                    op_type,
+                    inputs,
+                    dtype: None,
+                },
+            );
         }
 
         // Find roots (nodes that are not inputs to any other node)
-        let all_inputs: HashSet<String> = graph.nodes.values()
+        let all_inputs: HashSet<String> = graph
+            .nodes
+            .values()
             .flat_map(|n| n.inputs.iter().cloned())
             .collect();
 
-        graph.roots = graph.nodes.keys()
+        graph.roots = graph
+            .nodes
+            .keys()
             .filter(|k| !all_inputs.contains(*k))
             .cloned()
             .collect();
@@ -157,7 +164,10 @@ impl TraceEntry {
             Some(d) => format!(" dtype={}", d),
             None => String::new(),
         };
-        format!("{}{}{} ({}){}", indent, prefix, self.var, self.op_type, dtype_str)
+        format!(
+            "{}{}{} ({}){}",
+            indent, prefix, self.var, self.op_type, dtype_str
+        )
     }
 }
 
@@ -174,7 +184,10 @@ impl FunctionTraceEntry {
     pub fn format_tree(&self) -> String {
         let indent = "  ".repeat(self.depth);
         let prefix = if self.depth == 0 { "" } else { "├── " };
-        format!("{}{}{} ({}) {}", indent, prefix, self.var, self.op_type, self.status)
+        format!(
+            "{}{}{} ({}) {}",
+            indent, prefix, self.var, self.op_type, self.status
+        )
     }
 }
 
@@ -191,10 +204,12 @@ impl DTypeChainAnalysis {
     /// Create from dependency graph and target variable.
     pub fn analyze(graph: &DependencyGraph, target: &str) -> Self {
         let chain = graph.trace_back(target, 20);
-        let first_missing = chain.iter()
+        let first_missing = chain
+            .iter()
             .find(|e| matches!(&e.dtype, Some(DTypeStatus::Missing(_))))
             .map(|e| e.var.clone());
-        let all_resolved = chain.iter()
+        let all_resolved = chain
+            .iter()
             .all(|e| matches!(&e.dtype, Some(DTypeStatus::Resolved(_)) | None));
 
         DTypeChainAnalysis {

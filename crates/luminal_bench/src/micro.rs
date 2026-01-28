@@ -1,27 +1,4 @@
-//! L1 Micro Benchmarks - Single operator performance tests
-//!
-//! These benchmarks cover all 12 HLIR primitive operators:
-//!
-//! ## Unary operators (5)
-//! - `Exp2`: 2^x
-//! - `Log2`: log2(x)
-//! - `Sin`: sin(x)
-//! - `Recip`: 1/x
-//! - `Sqrt`: sqrt(x)
-//!
-//! ## Binary operators (4)
-//! - `Add`: a + b
-//! - `Mul`: a * b
-//! - `Mod`: a % b
-//! - `LessThan`: a < b
-//!
-//! ## Indexing operators (2)
-//! - `Gather`: gather(data, indices)
-//! - `Cast`: type conversion
-//!
-//! ## Reduction operators (2)
-//! - `SumReduce`: sum along axis
-//! - `MaxReduce`: max along axis
+//! L1 micro benchmark patterns (single-op graphs), used by `benches/micro.rs`.
 
 use crate::{BenchSize, BenchmarkPattern, MICRO_SIZES};
 use luminal::prelude::*;

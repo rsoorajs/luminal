@@ -1,12 +1,10 @@
 //! Core analysis functions for egglog debugging.
-//!
-//! All functions in this module are backend-agnostic. Backend-specific
-//! operations are passed as parameters or accessed through the `Runtime` trait.
 
 use super::{
     DTypeChainAnalysis, DTypeStatus, DependencyGraph, FactStatus, FunctionChainAnalysis,
     FunctionTraceEntry,
 };
+use egraph_serialize::ClassId;
 use luminal::egglog_utils;
 use luminal::hlir::HLIROps;
 use luminal::op::{EgglogOp, IntoEgglogOp, Runtime};
@@ -15,18 +13,9 @@ use luminal::prelude::egglog::prelude::RustSpan;
 use luminal::prelude::egglog::prelude::exprs;
 use luminal::prelude::egglog_ast::span::Span;
 use luminal::prelude::*;
-use egraph_serialize::ClassId;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
-
-/// Result of analyzing an Add operation without backend equivalent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnmatchedAdd {
-    pub class_id: String,
-    pub a_labels: String,
-    pub b_labels: String,
-}
 
 /// Analysis result for lowering.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -34,9 +23,17 @@ pub struct LoweringAnalysis {
     pub label: String,
     pub root_labels: Vec<String>,
     pub output_input_labels: Vec<String>,
-    pub all_add_have_backend: bool,
-    pub unmatched_adds: Vec<UnmatchedAdd>,
-    pub add_dtypes: BTreeMap<String, DTypeStatus>,
+    /// Optional op-coverage reports (only filled when explicitly requested).
+    pub op_reports: Vec<OpLoweringReport>,
+    /// Optional evaluated facts, keyed by function name then variable name.
+    pub facts: BTreeMap<String, BTreeMap<String, FactStatus>>,
+}
+
+/// Query for evaluating a function on a set of variables.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactQuery {
+    pub fn_name: String,
+    pub vars: Vec<String>,
 }
 
 /// Missing backend equivalent for a specific HLIR op instance.
@@ -117,7 +114,12 @@ fn class_labels(serialized: &egglog_utils::SerializedEGraph, class_id: &ClassId)
     };
     let mut labels: Vec<String> = nodes
         .iter()
-        .filter_map(|node_id| serialized.enodes.get(node_id).map(|(label, _)| label.clone()))
+        .filter_map(|node_id| {
+            serialized
+                .enodes
+                .get(node_id)
+                .map(|(label, _)| label.clone())
+        })
         .collect();
     labels.sort();
     labels.dedup();
@@ -132,9 +134,7 @@ fn class_type(serialized: &egglog_utils::SerializedEGraph, class_id: &ClassId) -
         .unwrap_or_else(|| "<missing>".to_string())
 }
 
-fn collect_dtype_facts(
-    serialized: &egglog_utils::SerializedEGraph,
-) -> FxHashMap<ClassId, String> {
+fn collect_dtype_facts(serialized: &egglog_utils::SerializedEGraph) -> FxHashMap<ClassId, String> {
     let mut map: FxHashMap<ClassId, String> = FxHashMap::default();
     for (node_id, (label, children)) in &serialized.enodes {
         if !label.starts_with("dtype") {
@@ -336,64 +336,6 @@ where
     analyze_op_lowering_with_ops(program, backend_ops, hlir_op, backend_op, &label)
 }
 
-/// Parse program to find Add variables and their inputs.
-pub fn find_add_variables(program: &str) -> (Vec<String>, Option<(String, String, String)>) {
-    let mut add_vars: Vec<String> = Vec::new();
-    let mut output_var: Option<String> = None;
-    let mut add_inputs: Option<(String, String, String)> = None;
-
-    for line in program.lines() {
-        let line = line.trim();
-        if !line.starts_with("(let ") {
-            continue;
-        }
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        if tokens.len() >= 3 && tokens[0] == "(let" {
-            let var = tokens[1].to_string();
-            let head = tokens[2].trim_start_matches('(');
-            if head == "Add" {
-                add_vars.push(var.clone());
-            }
-            if head == "Output" && tokens.len() >= 3 {
-                output_var = Some(var.clone());
-            }
-        }
-    }
-
-    // Find Add inputs related to output
-    if let Some(ref out_var) = output_var {
-        for line in program.lines() {
-            let line = line.trim();
-            if !line.starts_with("(let ") || !line.contains("(Add ") || !line.contains(out_var) {
-                continue;
-            }
-            let mut vars: Vec<String> = Vec::new();
-            let bytes = line.as_bytes();
-            let mut i = 0;
-            while i < bytes.len() {
-                if bytes[i] == b't' {
-                    let mut j = i + 1;
-                    while j < bytes.len() && bytes[j].is_ascii_digit() {
-                        j += 1;
-                    }
-                    if j > i + 1 {
-                        vars.push(line[i..j].to_string());
-                        i = j;
-                        continue;
-                    }
-                }
-                i += 1;
-            }
-            if vars.len() >= 3 && vars[0] == *out_var {
-                add_inputs = Some((vars[0].clone(), vars[1].clone(), vars[2].clone()));
-                break;
-            }
-        }
-    }
-
-    (add_vars, add_inputs)
-}
-
 /// Analyze lowering with a specific set of ops.
 ///
 /// This is the core analysis function that works with any set of ops.
@@ -403,91 +345,90 @@ pub fn analyze_with_ops(
     root: &str,
     ops: Vec<Arc<Box<dyn EgglogOp>>>,
     label: &str,
-    add_vars: &[String],
-    backend_add_name: Option<&str>, // e.g., "MetalAdd", "CudaAdd"
+    fact_queries: &[FactQuery],
+    op_mappings: &[(String, String)],
 ) -> LoweringAnalysis {
     let mut egraph = run_egraph(program, ops);
 
     let (sort, value) = egraph.eval_expr(&egglog::var!(root)).unwrap();
     let serialized = egglog_utils::SerializedEGraph::new(&egraph, vec![(sort, value)]);
+    let dtype_facts = collect_dtype_facts(&serialized);
 
-    // Helper closure to get labels for a class
-    let get_labels = |class_id_str: &str| -> Vec<String> {
-        for (cid, (_, nodes)) in &serialized.eclasses {
-            if format!("{:?}", cid) == class_id_str {
-                let mut labels: Vec<String> = nodes
-                    .iter()
-                    .filter_map(|node_id| {
-                        serialized.enodes.get(node_id).map(|(lbl, _)| lbl.clone())
-                    })
-                    .collect();
-                labels.sort();
-                labels.dedup();
-                return labels;
-            }
-        }
-        vec!["<missing>".to_string()]
-    };
-
-    // Get root labels
     let root_class_id = serialized.roots.first().unwrap();
-    let root_labels = get_labels(&format!("{:?}", root_class_id));
+    let root_labels = class_labels(&serialized, root_class_id);
 
     let mut analysis = LoweringAnalysis {
         label: label.to_string(),
         root_labels,
-        ..Default::default()
+        output_input_labels: Vec::new(),
+        op_reports: Vec::new(),
+        facts: BTreeMap::new(),
     };
 
-    // Check for backend Add presence (if backend_add_name is provided)
-    if let Some(backend_add) = backend_add_name {
-        let mut eclass_has_backend_add: FxHashSet<String> = FxHashSet::default();
+    // Output input labels (if any Output exists under this root).
+    for (_node_id, (lbl, children)) in &serialized.enodes {
+        if lbl != "Output" || children.is_empty() {
+            continue;
+        }
+        analysis.output_input_labels = class_labels(&serialized, &children[0]);
+        break;
+    }
+
+    // Op coverage reports (only when explicitly requested).
+    for (hlir_op, backend_op) in op_mappings {
+        // Determine which eclasses contain the backend op.
+        let mut eclass_has_backend: FxHashSet<ClassId> = FxHashSet::default();
         for (node_id, (lbl, _)) in &serialized.enodes {
-            if lbl == backend_add {
-                let class_id = &serialized.node_to_class[node_id];
-                eclass_has_backend_add.insert(format!("{:?}", class_id));
+            if lbl == backend_op {
+                eclass_has_backend.insert(serialized.node_to_class[node_id].clone());
             }
         }
 
-        // Check Output inputs
-        for (_node_id, (lbl, children)) in &serialized.enodes {
-            if lbl != "Output" {
-                continue;
-            }
-            let inp_class = &children[0];
-            analysis.output_input_labels = get_labels(&format!("{:?}", inp_class));
-        }
-
-        // Find Adds without backend equivalent
-        let mut missing = 0;
+        let mut seen_classes: FxHashSet<ClassId> = FxHashSet::default();
+        let mut missing: Vec<OpMissing> = Vec::new();
         for (node_id, (lbl, children)) in &serialized.enodes {
-            if lbl != "Add" {
+            if lbl != hlir_op {
                 continue;
             }
             let class_id = &serialized.node_to_class[node_id];
-            let class_id_str = format!("{:?}", class_id);
-            if eclass_has_backend_add.contains(&class_id_str) {
+            if !seen_classes.insert(class_id.clone()) {
                 continue;
             }
-            missing += 1;
-
-            let a_labels = get_labels(&format!("{:?}", &children[1])).join("|");
-            let b_labels = get_labels(&format!("{:?}", &children[3])).join("|");
-
-            analysis.unmatched_adds.push(UnmatchedAdd {
-                class_id: class_id_str,
-                a_labels,
-                b_labels,
+            if eclass_has_backend.contains(class_id) {
+                continue;
+            }
+            let mut child_summaries = Vec::new();
+            for child in children {
+                child_summaries.push(ChildInspection {
+                    class_id: format!("{:?}", child),
+                    class_type: class_type(&serialized, child),
+                    class_labels: class_labels(&serialized, child),
+                    dtype: dtype_facts.get(child).cloned(),
+                });
+            }
+            missing.push(OpMissing {
+                class_id: format!("{:?}", class_id),
+                op: hlir_op.clone(),
+                children: child_summaries,
             });
         }
 
-        analysis.all_add_have_backend = missing == 0;
+        analysis.op_reports.push(OpLoweringReport {
+            label: label.to_string(),
+            hlir_op: hlir_op.clone(),
+            backend_op: backend_op.clone(),
+            total_classes: seen_classes.len(),
+            missing,
+        });
     }
 
-    // Collect dtype for all Add variables
-    for add_var in add_vars {
-        let dtype = eval_dtype(&mut egraph, add_var);
-        analysis.add_dtypes.insert(add_var.clone(), dtype);
+    // Evaluate requested facts.
+    for q in fact_queries {
+        let mut table: BTreeMap<String, FactStatus> = BTreeMap::new();
+        for var in &q.vars {
+            table.insert(var.clone(), eval_function(&mut egraph, &q.fn_name, var));
+        }
+        analysis.facts.insert(q.fn_name.clone(), table);
     }
 
     analysis
@@ -571,28 +512,33 @@ pub fn analyze_hlir_function_chain(
 pub fn analyze_lowering<R: Runtime>(
     program: &str,
     root: &str,
-    backend_add_name: &str,
+    fact_queries: &[FactQuery],
+    op_mappings: &[(String, String)],
 ) -> (LoweringAnalysis, LoweringAnalysis)
 where
     R::Ops: IntoEgglogOp,
 {
-    let (add_vars, _add_inputs) = find_add_variables(program);
-
     // HLIR-only analysis
     let hlir_ops = <HLIROps as IntoEgglogOp>::into_vec();
-    let hlir_analysis = analyze_with_ops(program, root, hlir_ops, "HLIR", &add_vars, None);
+    let hlir_analysis = analyze_with_ops(program, root, hlir_ops, "HLIR", fact_queries, &[]);
 
     // Backend+HLIR analysis
     let mut backend_ops = R::Ops::into_vec();
     backend_ops.extend(<HLIROps as IntoEgglogOp>::into_vec());
-    let backend_label = format!("{}+HLIR", std::any::type_name::<R>().split("::").last().unwrap_or("Backend"));
+    let backend_label = format!(
+        "{}+HLIR",
+        std::any::type_name::<R>()
+            .split("::")
+            .last()
+            .unwrap_or("Backend")
+    );
     let backend_analysis = analyze_with_ops(
         program,
         root,
         backend_ops,
         &backend_label,
-        &add_vars,
-        Some(backend_add_name),
+        fact_queries,
+        op_mappings,
     );
 
     (hlir_analysis, backend_analysis)
@@ -600,7 +546,6 @@ where
 
 /// Convenience function for HLIR-only analysis (no backend).
 pub fn analyze_hlir_only(program: &str, root: &str) -> LoweringAnalysis {
-    let (add_vars, _) = find_add_variables(program);
     let hlir_ops = <HLIROps as IntoEgglogOp>::into_vec();
-    analyze_with_ops(program, root, hlir_ops, "HLIR", &add_vars, None)
+    analyze_with_ops(program, root, hlir_ops, "HLIR", &[], &[])
 }

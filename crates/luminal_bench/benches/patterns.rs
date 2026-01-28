@@ -1,30 +1,14 @@
-//! Pattern benchmark runner using criterion
+//! Pattern benchmark runner using criterion.
 //!
-//! Run with:
-//! ```bash
-//! cargo bench -p luminal_bench --features metal --bench patterns
-//! ```
-//!
-//! After running, find:
-//! - Time results: target/criterion/report/index.html
-//! - Metrics mapping: target/criterion/pattern_metrics.json
-//! - Full report: target/criterion/pattern_report.json
+//! Usage and output locations: see `crates/luminal_bench/README.md`.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::time::Duration;
 
 #[cfg(feature = "metal")]
 use luminal_bench::{
-    // Pattern size configs
-    ATTENTION_SIZES,
-    BenchMetrics,
-    BenchMetricsMap,
-    BenchResultCollector,
-    BenchmarkBackend,
-    HardwareSpec,
-    MATMUL_SIZES,
-    MetalBenchmark,
-    TRANSFORMER_SIZES,
+    ATTENTION_SIZES, BenchMetrics, BenchMetricsMap, BenchResultCollector, BenchmarkBackend,
+    HardwareSpec, MATMUL_SIZES, MetalBenchmark, TRANSFORMER_SIZES,
 };
 
 #[cfg(feature = "metal")]
@@ -58,14 +42,12 @@ fn prepare_and_search(cx: &mut Graph, input_sizes: &[(NodeIndex, usize)]) -> Opt
     cx.build_search_space::<MetalRuntime>();
     let mut rt = MetalRuntime::initialize(());
 
-    // Set up dummy input data
     let mut rng = rand::rng();
     for (node, size) in input_sizes {
         let data: Vec<f32> = (0..*size).map(|_| rng.random::<f32>()).collect();
         rt.set_data(*node, &data);
     }
 
-    // Search for best implementation (this is the expensive part)
     let rt = cx.search(rt, 5);
 
     Some(PreparedBench {
@@ -91,19 +73,17 @@ fn bench_matmul(
         let size_name = size.name;
         let (m, k, n) = (size.m, size.k, size.n);
 
-        // === Setup: Build graph and search ONCE ===
+        // Build graph and run search once per size; the benchmark loop only measures execution.
         let mut cx = Graph::default();
         let a = cx.tensor((m, k));
         let b_tensor = cx.tensor((k, n));
         let _ = a.matmul(b_tensor).output();
 
-        // Find input nodes and their sizes
         let input_sizes: Vec<(NodeIndex, usize)> = cx
             .graph
             .node_indices()
             .filter_map(|node| {
                 if (*cx.graph[node]).as_any().downcast_ref::<Input>().is_some() {
-                    // First input is A (m*k), second is B (k*n)
                     Some((node, m * k.max(k * n)))
                 } else {
                     None
@@ -112,20 +92,18 @@ fn bench_matmul(
             .collect();
 
         let Some(mut prepared) = prepare_and_search(&mut cx, &input_sizes) else {
-            println!("⚠️  Skipping matmul/{} - search failed", size_name);
+            println!("error:  Skipping matmul/{} - search failed", size_name);
             continue;
         };
 
         prepared.rt.allocate_intermediate_buffers(&prepared.dyn_map);
 
-        // Collect metrics once
         if let Some(stats) = prepared.rt.execute_with_stats(&prepared.dyn_map) {
             let metrics = BenchMetrics::new(stats.bytes_loaded, stats.bytes_stored, stats.flops);
             metrics_map.add("matmul", size_name, metrics.clone());
             prepared.metrics = Some(metrics);
         }
 
-        // === Benchmark: Only timing, no search ===
         group.bench_with_input(BenchmarkId::from_parameter(size_name), &size, |b, _| {
             b.iter_custom(|iters| {
                 let mut total_time = Duration::ZERO;
@@ -137,7 +115,6 @@ fn bench_matmul(
                     }
                 }
 
-                // Record result
                 if let Some(ref metrics) = prepared.metrics {
                     let avg_time_us = total_time.as_secs_f64() * 1_000_000.0 / iters as f64;
                     collector.add("matmul", size_name, m * k * n, avg_time_us, metrics);
@@ -171,7 +148,6 @@ fn bench_softmax(
         let rows = size_value / dim;
         let cols = dim;
 
-        // === Setup ===
         let mut cx = Graph::default();
         let x = cx.tensor((rows, cols));
         let _ = x.softmax(1).output();
@@ -189,7 +165,7 @@ fn bench_softmax(
             .collect();
 
         let Some(mut prepared) = prepare_and_search(&mut cx, &input_sizes) else {
-            println!("⚠️  Skipping softmax/{} - search failed", size_name);
+            println!("error:  Skipping softmax/{} - search failed", size_name);
             continue;
         };
 
@@ -201,7 +177,6 @@ fn bench_softmax(
             prepared.metrics = Some(metrics);
         }
 
-        // === Benchmark ===
         group.bench_with_input(BenchmarkId::from_parameter(size_name), &size, |b, _| {
             b.iter_custom(|iters| {
                 let mut total_time = Duration::ZERO;
@@ -227,16 +202,83 @@ fn bench_softmax(
 }
 
 // ============================================================================
-// LayerNorm Benchmark (SKIPPED - requires unsupported HLIR ops)
+// LayerNorm Benchmark
 // ============================================================================
 
 #[cfg(feature = "metal")]
 fn bench_layer_norm(
-    _c: &mut Criterion,
-    _metrics_map: &mut BenchMetricsMap,
-    _collector: &BenchResultCollector,
+    c: &mut Criterion,
+    metrics_map: &mut BenchMetricsMap,
+    collector: &BenchResultCollector,
 ) {
-    println!("⚠️  Skipping layer_norm benchmark - requires unsupported HLIR primitives");
+    let mut group = c.benchmark_group("metal/layer_norm");
+
+    for size in TRANSFORMER_SIZES {
+        let size_name = size.name;
+        let size_value = size.value;
+
+        // Typical shape: (batch * seq_len, hidden_dim)
+        let hidden_dim = 128;
+        let batch_seq = (size_value / hidden_dim).max(1);
+
+        let mut cx = Graph::default();
+        let x = cx.tensor((batch_seq, hidden_dim));
+        // LayerNorm along last axis with epsilon
+        let _ = x.layer_norm(1, 1e-5).output();
+
+        let input_sizes: Vec<(NodeIndex, usize)> = cx
+            .graph
+            .node_indices()
+            .filter_map(|node| {
+                if (*cx.graph[node]).as_any().downcast_ref::<Input>().is_some() {
+                    Some((node, batch_seq * hidden_dim))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let Some(mut prepared) = prepare_and_search(&mut cx, &input_sizes) else {
+            println!("error:  Skipping layer_norm/{} - search failed", size_name);
+            continue;
+        };
+
+        prepared.rt.allocate_intermediate_buffers(&prepared.dyn_map);
+
+        if let Some(stats) = prepared.rt.execute_with_stats(&prepared.dyn_map) {
+            let metrics = BenchMetrics::new(stats.bytes_loaded, stats.bytes_stored, stats.flops);
+            metrics_map.add("layer_norm", size_name, metrics.clone());
+            prepared.metrics = Some(metrics);
+        }
+
+        group.bench_with_input(BenchmarkId::from_parameter(size_name), &size, |b, _| {
+            b.iter_custom(|iters| {
+                let mut total_time = Duration::ZERO;
+
+                for _ in 0..iters {
+                    if let Some(stats) = prepared.rt.execute_with_stats(&prepared.dyn_map) {
+                        total_time +=
+                            Duration::from_secs_f64(stats.execution_time_us / 1_000_000.0);
+                    }
+                }
+
+                if let Some(ref metrics) = prepared.metrics {
+                    let avg_time_us = total_time.as_secs_f64() * 1_000_000.0 / iters as f64;
+                    collector.add(
+                        "layer_norm",
+                        size_name,
+                        batch_seq * hidden_dim,
+                        avg_time_us,
+                        metrics,
+                    );
+                }
+
+                total_time
+            });
+        });
+    }
+
+    group.finish();
 }
 
 // ============================================================================
@@ -255,7 +297,6 @@ fn bench_gelu(
         let size_name = size.name;
         let size_value = size.value;
 
-        // === Setup ===
         let mut cx = Graph::default();
         let x = cx.tensor(size_value);
         let _ = x.gelu().output();
@@ -273,7 +314,7 @@ fn bench_gelu(
             .collect();
 
         let Some(mut prepared) = prepare_and_search(&mut cx, &input_sizes) else {
-            println!("⚠️  Skipping gelu/{} - search failed", size_name);
+            println!("error:  Skipping gelu/{} - search failed", size_name);
             continue;
         };
 
@@ -285,7 +326,6 @@ fn bench_gelu(
             prepared.metrics = Some(metrics);
         }
 
-        // === Benchmark ===
         group.bench_with_input(BenchmarkId::from_parameter(size_name), &size, |b, _| {
             b.iter_custom(|iters| {
                 let mut total_time = Duration::ZERO;
@@ -327,7 +367,6 @@ fn bench_attention(
         let seq_len = *seq_len;
         let head_dim = *head_dim;
 
-        // === Setup ===
         let mut cx = Graph::default();
 
         let q = cx.tensor((seq_len, head_dim));
@@ -353,7 +392,7 @@ fn bench_attention(
             .collect();
 
         let Some(mut prepared) = prepare_and_search(&mut cx, &input_sizes) else {
-            println!("⚠️  Skipping attention/{} - search failed", size_name);
+            println!("error:  Skipping attention/{} - search failed", size_name);
             continue;
         };
 
@@ -365,7 +404,6 @@ fn bench_attention(
             prepared.metrics = Some(metrics);
         }
 
-        // === Benchmark ===
         let size_name_clone = size_name.clone();
         group.bench_with_input(
             BenchmarkId::from_parameter(&size_name),
@@ -407,10 +445,8 @@ fn bench_attention(
 
 #[cfg(feature = "metal")]
 fn metal_pattern_benchmarks(c: &mut Criterion) {
-    // Get hardware info
     let hw = MetalBenchmark::hardware_info();
 
-    // Print hardware info
     println!("\n=== Metal Pattern Benchmarks ===");
     println!("Device: {}", hw.device_name);
     println!("Memory: {:.1} GB", hw.memory_gb);
@@ -429,18 +465,15 @@ fn metal_pattern_benchmarks(c: &mut Criterion) {
         peak_tflops: hw.peak_tflops.unwrap_or(1.0),
     };
 
-    // Create metrics map and result collector
     let mut metrics_map = BenchMetricsMap::new(hardware_spec.clone());
     let collector = BenchResultCollector::new(hardware_spec);
 
-    // Run all pattern benchmarks
     bench_matmul(c, &mut metrics_map, &collector);
     bench_softmax(c, &mut metrics_map, &collector);
     bench_layer_norm(c, &mut metrics_map, &collector);
     bench_gelu(c, &mut metrics_map, &collector);
     bench_attention(c, &mut metrics_map, &collector);
 
-    // Save metrics mapping
     let metrics_path = std::path::Path::new("target/criterion/pattern_metrics.json");
     if let Some(parent) = metrics_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -449,11 +482,9 @@ fn metal_pattern_benchmarks(c: &mut Criterion) {
         eprintln!("Warning: Failed to save metrics mapping: {}", e);
     }
 
-    // Generate and print full report
     let report = collector.into_report();
     report.print_summary();
 
-    // Save full report
     let report_path = std::path::Path::new("target/criterion/pattern_report.json");
     if let Err(e) = report.save(report_path) {
         eprintln!("Warning: Failed to save full report: {}", e);

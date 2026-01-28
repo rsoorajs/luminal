@@ -2,22 +2,6 @@
 //!
 //! This module provides tools for diagnosing egglog lowering issues,
 //! particularly when HLIR operations fail to convert to backend implementations.
-//!
-//! ## Design
-//!
-//! The core analysis functions are backend-agnostic. Backend-specific functionality
-//! is accessed through the `Runtime` trait, allowing the same tools to work with
-//! Metal, CUDA, or any other backend.
-//!
-//! ## Usage
-//!
-//! ```bash
-//! # Metal backend
-//! cargo run -p luminal_bench --features metal --example debug_ops -- --case gelu --analyze
-//!
-//! # Future: CUDA backend
-//! cargo run -p luminal_bench --features cuda --example debug_ops -- --case gelu --analyze
-//! ```
 
 mod analysis;
 mod report;
@@ -27,8 +11,8 @@ pub use analysis::*;
 pub use report::*;
 pub use trace::*;
 
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Extract the operation head from an egglog expression.
 ///

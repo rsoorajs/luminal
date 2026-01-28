@@ -6,25 +6,13 @@
 //! This tool is backend-agnostic. The specific backend is selected via feature flags.
 //! All core analysis logic lives in `luminal_bench::egglog_debug` module.
 //!
-//! ## Usage
-//!
-//! ```bash
-//! # Metal backend
-//! cargo run -p luminal_bench --features metal --example debug_ops -- --case gelu --analyze
-//!
-//! # Run all cases
-//! cargo run -p luminal_bench --features metal --example debug_ops -- --all --analyze
-//!
-//! # Dump egglog program
-//! cargo run -p luminal_bench --features metal --example debug_ops -- --case gelu --dump-egglog target/gelu.egg
-//! ```
+//! Usage examples: see `crates/luminal_bench/README.md`.
 
 use luminal::prelude::*;
 use luminal_bench::egglog_debug::{
-    analyze_backend_op_lowering, analyze_hlir_dtype_chain, analyze_hlir_function_chain,
+    DebugReport, FactQuery, analyze_hlir_dtype_chain, analyze_hlir_function_chain,
     analyze_lowering, inspect_var_hlir, print_dtype_chain, print_function_chain,
-    print_lowering_analysis, print_op_lowering_report, print_var_inspection, summarize_egglog_ops,
-    summarize_hlir_ops, DebugReport,
+    print_lowering_analysis, print_var_inspection, summarize_egglog_ops, summarize_hlir_ops,
 };
 
 // ============================================================================
@@ -35,7 +23,6 @@ use luminal_bench::egglog_debug::{
 trait BackendConfig {
     type Runtime: luminal::op::Runtime;
     const NAME: &'static str;
-    const ADD_OP_NAME: &'static str; // e.g., "MetalAdd", "CudaAdd"
 
     fn build_search_space(cx: &mut Graph);
 }
@@ -50,7 +37,6 @@ mod metal_backend {
     impl BackendConfig for MetalConfig {
         type Runtime = MetalRuntime;
         const NAME: &'static str = "Metal";
-        const ADD_OP_NAME: &'static str = "MetalAdd";
 
         fn build_search_space(cx: &mut Graph) {
             cx.build_search_space::<MetalRuntime>();
@@ -76,6 +62,7 @@ enum Case {
     Tanh,
     GeluInner,
     Gelu,
+    LayerNorm,
 }
 
 impl Case {
@@ -86,6 +73,7 @@ impl Case {
             Case::Tanh,
             Case::GeluInner,
             Case::Gelu,
+            Case::LayerNorm,
         ]
     }
 
@@ -96,6 +84,7 @@ impl Case {
             "tanh" => Some(Case::Tanh),
             "gelu-inner" => Some(Case::GeluInner),
             "gelu" => Some(Case::Gelu),
+            "layer-norm" | "layer_norm" => Some(Case::LayerNorm),
             _ => None,
         }
     }
@@ -107,19 +96,29 @@ impl Case {
             Case::Tanh => "Tanh",
             Case::GeluInner => "GeluInner",
             Case::Gelu => "Gelu",
+            Case::LayerNorm => "LayerNorm",
         }
     }
 
     fn build(&self, cx: &mut Graph, size: usize) {
-        let x = cx.tensor(size);
         let out = match self {
-            Case::Mul => x.clone() * x,
-            Case::Sigmoid => x.sigmoid(),
-            Case::Tanh => x.tanh(),
+            Case::Mul => {
+                let x = cx.tensor(size);
+                x.clone() * x
+            }
+            Case::Sigmoid => cx.tensor(size).sigmoid(),
+            Case::Tanh => cx.tensor(size).tanh(),
             Case::GeluInner => {
+                let x = cx.tensor(size);
                 (0.797_884_560_8_f32 * x.clone() * (1. + 0.044_715_f32 * x.clone() * x)).tanh()
             }
-            Case::Gelu => x.gelu(),
+            Case::Gelu => cx.tensor(size).gelu(),
+            Case::LayerNorm => {
+                // Mirror `crates/luminal_bench/src/patterns.rs`: normalize along last axis.
+                let hidden_dim = 128usize;
+                let batch_seq = (size / hidden_dim).max(1);
+                cx.tensor((batch_seq, hidden_dim)).layer_norm(1, 1e-5)
+            }
         };
         let _ = out.output();
     }
@@ -175,8 +174,12 @@ fn parse_args() -> Args {
         match arg.as_str() {
             "--case" => {
                 let val = iter.next().expect("Missing value for --case");
-                args.case = Case::from_str(&val)
-                    .unwrap_or_else(|| panic!("Unknown case: {}. Use: mul|sigmoid|tanh|gelu-inner|gelu", val));
+                args.case = Case::from_str(&val).unwrap_or_else(|| {
+                    panic!(
+                        "Unknown case: {}. Use: mul|sigmoid|tanh|gelu-inner|gelu",
+                        val
+                    )
+                });
             }
             "--size" => {
                 let val = iter.next().expect("Missing value for --size");
@@ -237,6 +240,7 @@ fn parse_args() -> Args {
                     "Usage: debug_ops [OPTIONS]\n\n\
                     Options:\n  \
                       --case <CASE>       Test case: mul|sigmoid|tanh|gelu-inner|gelu (default: gelu)\n  \
+                                         (also: layer-norm)\n  \
                       --size <N>          Tensor size (default: 262144)\n  \
                       --all               Run all test cases\n  \
                       --analyze           Run lowering analysis\n  \
@@ -260,6 +264,22 @@ fn parse_args() -> Args {
         }
     }
 
+    // Expand checks into concrete actions and validate requirements.
+    if args.checks.contains(&Check::All) {
+        args.checks = vec![Check::MissingBackend, Check::DType, Check::Function];
+    }
+    if args.checks.contains(&Check::DType) {
+        args.trace_missing_dtype = true;
+    }
+    if args.checks.contains(&Check::MissingBackend) && args.inspect_ops.is_empty() {
+        eprintln!("--check missing-backend requires at least one --inspect-op HLIR:Backend");
+        std::process::exit(2);
+    }
+    if args.checks.contains(&Check::Function) && args.trace_functions.is_empty() {
+        eprintln!("--check fn requires at least one --trace-fn FN VAR");
+        std::process::exit(2);
+    }
+
     args
 }
 
@@ -272,7 +292,12 @@ where
     B::Runtime: luminal::op::Runtime,
     <B::Runtime as luminal::op::Runtime>::Ops: luminal::op::IntoEgglogOp,
 {
-    println!("\n=== Case: {} (size={}) [{}] ===", case.name(), size, B::NAME);
+    println!(
+        "\n=== Case: {} (size={}) [{}] ===",
+        case.name(),
+        size,
+        B::NAME
+    );
 
     // Build graph
     let mut cx = Graph::default();
@@ -300,7 +325,10 @@ where
     if let Some(ref base_path) = args.dump_egglog {
         let path = if args.all {
             let parent = base_path.parent().unwrap_or(std::path::Path::new("."));
-            let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("debug");
+            let stem = base_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("debug");
             parent.join(format!("{}-{}.egg", stem, case.name()))
         } else {
             base_path.clone()
@@ -315,36 +343,51 @@ where
         println!("-- Egglog program --\n{}", program);
     }
 
-    // Run analysis if requested
+    let find_vars_by_head = |head: &str| -> Vec<String> {
+        let mut vars = Vec::new();
+        for line in program.lines() {
+            let line = line.trim();
+            if !line.starts_with("(let ") {
+                continue;
+            }
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            if tokens.len() >= 3 && tokens[0] == "(let" {
+                let var = tokens[1].to_string();
+                let op = tokens[2].trim_start_matches('(');
+                if op == head {
+                    vars.push(var);
+                }
+            }
+        }
+        vars
+    };
+
+    // Run lowering analysis only when explicitly requested.
     let mut hlir_analysis = None;
     let mut backend_analysis = None;
-    if args.analyze {
-        println!("-- Lowering analysis --");
-        let (hlir, backend) = analyze_lowering::<B::Runtime>(&program, &root, B::ADD_OP_NAME);
+    let needs_lowering_analysis =
+        args.analyze || !args.inspect_ops.is_empty() || args.trace_missing_dtype;
+    if needs_lowering_analysis {
+        let mut fact_queries: Vec<FactQuery> = Vec::new();
+        if args.trace_missing_dtype {
+            fact_queries.push(FactQuery {
+                fn_name: "dtype".to_string(),
+                vars: find_vars_by_head("Add"),
+            });
+        }
 
-        print_lowering_analysis(&hlir);
-        print_lowering_analysis(&backend);
+        let (hlir, backend) =
+            analyze_lowering::<B::Runtime>(&program, &root, &fact_queries, &args.inspect_ops);
         hlir_analysis = Some(hlir);
         backend_analysis = Some(backend);
 
-        if args.trace_missing_dtype
-            || args.checks.contains(&Check::DType)
-            || args.checks.contains(&Check::All)
-        {
-            if let Some((var, status)) = hlir_analysis
-                .as_ref()
-                .unwrap()
-                .add_dtypes
-                .iter()
-                .find(|(_, dtype)| dtype.is_missing())
-            {
-                println!("-- Trace missing dtype: {} ({}) --", var, status);
-                let chain = analyze_hlir_dtype_chain(&program, var);
-                print_dtype_chain(&chain);
-            } else {
-                println!("-- Trace missing dtype --");
-                println!("  ✅ No missing Add dtype found in HLIR analysis");
-            }
+        if args.analyze {
+            println!("-- Lowering analysis --");
+            print_lowering_analysis(hlir_analysis.as_ref().unwrap());
+            print_lowering_analysis(backend_analysis.as_ref().unwrap());
+        } else if !args.inspect_ops.is_empty() {
+            // Just print the backend-side report.
+            print_lowering_analysis(backend_analysis.as_ref().unwrap());
         }
     }
 
@@ -354,26 +397,30 @@ where
         print_dtype_chain(&chain);
     }
 
-    let mut op_reports = Vec::new();
-    let do_missing_backend =
-        args.checks.contains(&Check::MissingBackend) || args.checks.contains(&Check::All);
-    if do_missing_backend && args.inspect_ops.is_empty() {
-        println!("-- Op lowering --");
-        println!("  ⚠️  --check missing-backend requires --inspect-op HLIR:Backend");
-    }
-    for (hlir_op, backend_op) in &args.inspect_ops {
-        let report = analyze_backend_op_lowering::<B::Runtime>(&program, hlir_op, backend_op);
-        print_op_lowering_report(&report);
-        op_reports.push(report);
+    if args.trace_missing_dtype {
+        if let Some(ref hlir) = hlir_analysis {
+            let dtype_table = hlir.facts.get("dtype");
+            let first_missing = dtype_table.and_then(|table| {
+                table
+                    .iter()
+                    .find(|(_, status)| status.is_missing())
+                    .map(|(var, status)| (var.clone(), status.clone()))
+            });
+            if let Some((var, status)) = first_missing {
+                println!("-- Trace missing dtype: {} ({}) --", var, status);
+                let chain = analyze_hlir_dtype_chain(&program, &var);
+                print_dtype_chain(&chain);
+            } else {
+                println!("-- Trace missing dtype --");
+                println!("  √ No missing dtype found for Add nodes");
+            }
+        } else {
+            println!("-- Trace missing dtype --");
+            println!("  error  Skipped: lowering analysis did not run");
+        }
     }
 
     let mut function_traces = Vec::new();
-    let do_fn_check =
-        args.checks.contains(&Check::Function) || args.checks.contains(&Check::All);
-    if do_fn_check && args.trace_functions.is_empty() {
-        println!("-- Function trace --");
-        println!("  ⚠️  --check fn requires --trace-fn FN VAR");
-    }
     for (fn_name, var) in &args.trace_functions {
         let trace = analyze_hlir_function_chain(&program, fn_name, var);
         print_function_chain(&trace);
@@ -399,7 +446,7 @@ where
 
     let build_succeeded = result.is_ok();
     match result {
-        Ok(()) => println!("✅ build_search_space succeeded"),
+        Ok(()) => println!("√ build_search_space succeeded"),
         Err(_) => println!("❌ build_search_space failed"),
     }
 
@@ -411,7 +458,6 @@ where
             egglog_counts,
             hlir_analysis,
             backend_analysis,
-            op_reports,
             var_inspections,
             function_traces,
             build_succeeded,

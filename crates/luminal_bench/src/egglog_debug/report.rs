@@ -1,8 +1,8 @@
 //! Formatted output and reporting for egglog debug analysis.
 
 use super::{
-    DTypeChainAnalysis, DTypeStatus, EnodeInspection, FunctionChainAnalysis, OpLoweringReport,
-    LoweringAnalysis, TraceEntry, VarInspection,
+    DTypeChainAnalysis, DTypeStatus, EnodeInspection, FunctionChainAnalysis, LoweringAnalysis,
+    OpLoweringReport, TraceEntry, VarInspection,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -29,30 +29,26 @@ pub fn print_lowering_analysis(analysis: &LoweringAnalysis) {
     println!("  Root eclass labels: {}", analysis.root_labels.join("|"));
 
     if !analysis.output_input_labels.is_empty() {
-        println!("  Output input labels: {}", analysis.output_input_labels.join("|"));
+        println!(
+            "  Output input labels: {}",
+            analysis.output_input_labels.join("|")
+        );
     }
 
-    // Only print backend Add check if we have unmatched adds info
-    if !analysis.unmatched_adds.is_empty() || analysis.all_add_have_backend {
-        if analysis.all_add_have_backend {
-            println!("  ✅ All Add eclasses have backend equivalent");
-        } else {
-            println!("  ❌ {} Add eclasses missing backend equivalent:", analysis.unmatched_adds.len());
-            for add in &analysis.unmatched_adds {
-                println!("    - class={} a={} b={}", add.class_id, add.a_labels, add.b_labels);
+    if !analysis.facts.is_empty() {
+        println!("  Facts:");
+        for (fn_name, table) in &analysis.facts {
+            println!("    {}:", fn_name);
+            for (var, status) in table {
+                let prefix = if status.is_missing() { "❌" } else { "√" };
+                println!("      {} {}: {}", prefix, var, status);
             }
         }
     }
 
-    // Print dtype status
-    if !analysis.add_dtypes.is_empty() {
-        println!("  Add dtypes:");
-        for (var, dtype) in &analysis.add_dtypes {
-            let status = match dtype {
-                DTypeStatus::Resolved(s) => format!("✅ {}", s),
-                DTypeStatus::Missing(e) => format!("❌ missing ({})", e),
-            };
-            println!("    {}: {}", var, status);
+    if !analysis.op_reports.is_empty() {
+        for report in &analysis.op_reports {
+            print_op_lowering_report(report);
         }
     }
 }
@@ -70,7 +66,7 @@ pub fn print_dtype_chain(analysis: &DTypeChainAnalysis) {
     println!("-- DType chain analysis for {} --", analysis.target);
 
     if analysis.all_resolved {
-        println!("  ✅ All nodes in chain have resolved dtype");
+        println!("  √ All nodes in chain have resolved dtype");
     } else if let Some(ref first) = analysis.first_missing {
         println!("  ❌ First missing dtype at: {}", first);
     }
@@ -78,7 +74,7 @@ pub fn print_dtype_chain(analysis: &DTypeChainAnalysis) {
     println!("  Chain:");
     for entry in &analysis.chain {
         let dtype_str = match &entry.dtype {
-            Some(DTypeStatus::Resolved(s)) => format!("✅ {}", s),
+            Some(DTypeStatus::Resolved(s)) => format!("√ {}", s),
             Some(DTypeStatus::Missing(_)) => "❌ missing".to_string(),
             None => "? unknown".to_string(),
         };
@@ -95,7 +91,7 @@ pub fn print_function_chain(analysis: &FunctionChainAnalysis) {
     );
 
     if analysis.all_resolved {
-        println!("  ✅ All nodes in chain have resolved value");
+        println!("  √ All nodes in chain have resolved value");
     } else if let Some(ref first) = analysis.first_missing {
         println!("  ❌ First missing at: {}", first);
     }
@@ -114,7 +110,7 @@ pub fn print_op_lowering_report(report: &OpLoweringReport) {
     );
     println!("  total eclasses: {}", report.total_classes);
     if report.missing.is_empty() {
-        println!("  ✅ All eclasses have backend equivalent");
+        println!("  √ All eclasses have backend equivalent");
     } else {
         println!("  ❌ Missing backend in {} eclasses:", report.missing.len());
         for miss in &report.missing {
@@ -125,7 +121,10 @@ pub fn print_op_lowering_report(report: &OpLoweringReport) {
                 } else {
                     child.class_labels.join("|")
                 };
-                let dtype = child.dtype.clone().unwrap_or_else(|| "<missing>".to_string());
+                let dtype = child
+                    .dtype
+                    .clone()
+                    .unwrap_or_else(|| "<missing>".to_string());
                 println!(
                     "      [{}] class={} type={} labels={} dtype={}",
                     idx, child.class_id, child.class_type, labels, dtype
@@ -138,7 +137,10 @@ pub fn print_op_lowering_report(report: &OpLoweringReport) {
 fn print_enode(enode: &EnodeInspection) {
     println!("    - {}", enode.label);
     for (idx, child) in enode.children.iter().enumerate() {
-        let dtype = child.dtype.clone().unwrap_or_else(|| "<missing>".to_string());
+        let dtype = child
+            .dtype
+            .clone()
+            .unwrap_or_else(|| "<missing>".to_string());
         let labels = if child.class_labels.is_empty() {
             "<none>".to_string()
         } else {
@@ -153,7 +155,10 @@ fn print_enode(enode: &EnodeInspection) {
 
 /// Print inspection results for a specific variable.
 pub fn print_var_inspection(inspection: &VarInspection) {
-    println!("-- Var inspection [{}] {} --", inspection.label, inspection.var);
+    println!(
+        "-- Var inspection [{}] {} --",
+        inspection.label, inspection.var
+    );
 
     if let Some(ref line) = inspection.let_line {
         println!("  let: {}", line);
@@ -184,7 +189,10 @@ pub fn print_var_inspection(inspection: &VarInspection) {
         inspection.class_labels.join("|")
     };
 
-    println!("  class: {} type={} labels={}", class_id, class_type, labels);
+    println!(
+        "  class: {} type={} labels={}",
+        class_id, class_type, labels
+    );
     println!("  dtype: {}", dtype);
     println!("  enodes:");
     for enode in &inspection.enodes {
@@ -201,7 +209,6 @@ pub struct DebugReport {
     pub egglog_counts: BTreeMap<String, usize>,
     pub hlir_analysis: Option<LoweringAnalysis>,
     pub backend_analysis: Option<LoweringAnalysis>,
-    pub op_reports: Vec<OpLoweringReport>,
     pub var_inspections: Vec<VarInspection>,
     pub function_traces: Vec<FunctionChainAnalysis>,
     pub build_succeeded: bool,
@@ -228,13 +235,6 @@ impl DebugReport {
             print_lowering_analysis(analysis);
         }
 
-        if !self.op_reports.is_empty() {
-            for report in &self.op_reports {
-                println!();
-                print_op_lowering_report(report);
-            }
-        }
-
         if !self.function_traces.is_empty() {
             for trace in &self.function_traces {
                 println!();
@@ -251,7 +251,7 @@ impl DebugReport {
 
         println!();
         if self.build_succeeded {
-            println!("✅ build_search_space succeeded");
+            println!("√ build_search_space succeeded");
         } else {
             println!("❌ build_search_space failed");
         }

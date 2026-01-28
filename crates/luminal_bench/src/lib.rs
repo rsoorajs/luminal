@@ -9,15 +9,7 @@
 //! - **Micro benchmarks (L1)**: Single-operator performance tests (HLIR primitives)
 //! - **Pattern benchmarks (L2)**: Composite operator performance tests
 //!
-//! ## Usage
-//!
-//! ```bash
-//! # Run Metal micro benchmarks
-//! cargo bench -p luminal_bench --features metal --bench micro
-//!
-//! # Run Metal pattern benchmarks
-//! cargo bench -p luminal_bench --features metal --bench patterns
-//! ```
+//! Usage 和调试方式见 crate 根目录的 `README.md`。
 
 mod metrics;
 mod micro;

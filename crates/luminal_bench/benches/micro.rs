@@ -1,16 +1,6 @@
-//! Micro benchmark runner using criterion
+//! Micro benchmark runner using criterion.
 //!
-//! Run with:
-//! ```bash
-//! cargo bench -p luminal_bench --features metal --bench micro
-//! ```
-//!
-//! After running, find:
-//! - Time results: target/criterion/report/index.html
-//! - Metrics mapping: target/criterion/bench_metrics.json
-//! - Full report: target/criterion/bench_report.json
-//!
-//! Use the metrics mapping + Criterion time to compute MBU/MFU.
+//! Usage and output locations: see `crates/luminal_bench/README.md`.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::time::Duration;
@@ -43,14 +33,13 @@ fn run_metal_pattern_benchmark(
     let mut group = c.benchmark_group(&group_name);
 
     for size in pattern.sizes() {
-        // === Setup: Build graph and search ONCE per size ===
+        // Build graph and run search once per size; the benchmark loop only measures execution.
         let mut cx = Graph::default();
         pattern.build_graph(&mut cx, *size);
 
         cx.build_search_space::<MetalRuntime>();
         let mut rt = MetalRuntime::initialize(());
 
-        // Set up dummy input data
         let mut rng = rand::rng();
         for node in cx.graph.node_indices() {
             if let Some(Input { .. }) = (*cx.graph[node]).as_any().downcast_ref::<Input>() {
@@ -59,11 +48,9 @@ fn run_metal_pattern_benchmark(
             }
         }
 
-        // Search for best implementation (expensive, done once)
         let mut rt = cx.search(rt, 5);
         rt.allocate_intermediate_buffers(&cx.dyn_map);
 
-        // Collect metrics once
         let mut bench_metrics = None;
         if let Some(stats) = rt.execute_with_stats(&cx.dyn_map) {
             let metrics = BenchMetrics::new(stats.bytes_loaded, stats.bytes_stored, stats.flops);
@@ -71,10 +58,8 @@ fn run_metal_pattern_benchmark(
             bench_metrics = Some(metrics);
         }
 
-        // Clone dyn_map for use in closure
         let dyn_map = cx.dyn_map.clone();
 
-        // === Benchmark: Only timing, no search ===
         group.bench_with_input(BenchmarkId::from_parameter(size.name), size, |b, size| {
             b.iter_custom(|iters| {
                 let mut total_time = Duration::ZERO;
@@ -86,7 +71,6 @@ fn run_metal_pattern_benchmark(
                     }
                 }
 
-                // Record result for final report (use average time)
                 if let Some(ref metrics) = bench_metrics {
                     let avg_time_us = total_time.as_secs_f64() * 1_000_000.0 / iters as f64;
                     collector.add(pattern_name, size.name, size.value, avg_time_us, metrics);
@@ -102,10 +86,8 @@ fn run_metal_pattern_benchmark(
 
 #[cfg(feature = "metal")]
 fn metal_micro_benchmarks(c: &mut Criterion) {
-    // Get hardware info
     let hw = MetalBenchmark::hardware_info();
 
-    // Print hardware info
     println!("\n=== Metal Benchmark ===");
     println!("Device: {}", hw.device_name);
     println!("Memory: {:.1} GB", hw.memory_gb);
@@ -124,16 +106,13 @@ fn metal_micro_benchmarks(c: &mut Criterion) {
         peak_tflops: hw.peak_tflops.unwrap_or(1.0),
     };
 
-    // Create metrics map and result collector
     let mut metrics_map = BenchMetricsMap::new(hardware_spec.clone());
     let collector = BenchResultCollector::new(hardware_spec);
 
-    // Run all micro patterns
     for pattern in all_micro_patterns() {
         run_metal_pattern_benchmark(c, pattern.as_ref(), &mut metrics_map, &collector);
     }
 
-    // Save metrics mapping to file
     let metrics_path = std::path::Path::new("target/criterion/bench_metrics.json");
     if let Some(parent) = metrics_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -142,11 +121,9 @@ fn metal_micro_benchmarks(c: &mut Criterion) {
         eprintln!("Warning: Failed to save metrics mapping: {}", e);
     }
 
-    // Generate and print full report
     let report = collector.into_report();
     report.print_summary();
 
-    // Save full report to file
     let report_path = std::path::Path::new("target/criterion/bench_report.json");
     if let Err(e) = report.save(report_path) {
         eprintln!("Warning: Failed to save full report: {}", e);
