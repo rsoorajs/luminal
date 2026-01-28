@@ -1410,19 +1410,17 @@ impl MetalKernelOp for MetalGather {
 #[derive(Debug, Default, Clone)]
 pub struct MetalCast {
     target_dtype: DType,
-    shape: Vec<Expression>,
-    n_elements: Expression,
 }
 
 impl EgglogOp for MetalCast {
     fn term(&self) -> (String, Vec<OpParam>) {
-        ("MetalCast".to_string(), vec![Input, Dty, EList, Expr])
+        ("MetalCast".to_string(), vec![Input, Dty])
     }
 
     fn rewrites(&self) -> Vec<String> {
         vec![r#"(rule
-            ((= ?e (Cast ?inp ?dty ?shape ?n_elements)))
-            ((let ?me (MetalCast ?inp ?dty ?shape ?n_elements))
+            ((= ?e (Cast ?inp ?dty)))
+            ((let ?me (MetalCast ?inp ?dty))
              (union ?e ?me)
              (set (dtype ?me) ?dty))
             :name "metal MetalCast"
@@ -1438,15 +1436,13 @@ impl EgglogOp for MetalCast {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        _expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::{extract_dtype, extract_expr, extract_expr_list};
+        use luminal::graph::extract_dtype;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 target_dtype: extract_dtype(egraph, children[1]),
-                shape: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                n_elements: extract_expr(egraph, children[3], expr_cache).unwrap(),
             })),
             vec![children[0]],
         )
@@ -1489,8 +1485,9 @@ impl MetalKernelOp for MetalCast {
     }
 
     fn output_size(&self) -> Expression {
-        // Use n_elements directly - this is the physical element count
-        self.n_elements.clone()
+        // Cast doesn't know output size statically - it's determined by input buffer size at runtime
+        // Return 1 as placeholder; actual size comes from input buffer in encode()
+        Expression::from(1)
     }
 
     fn encode(
@@ -1499,9 +1496,11 @@ impl MetalKernelOp for MetalCast {
         pipeline: &ComputePipelineState,
         inputs: &[&Buffer],
         output: &Buffer,
-        dyn_map: &FxHashMap<char, usize>,
+        _dyn_map: &FxHashMap<char, usize>,
     ) {
-        let n_elements = self.n_elements.exec(dyn_map).unwrap() as u32;
+        // Get element count from input buffer size
+        let input_bytes = inputs[0].length() as usize;
+        let n_elements = (input_bytes / 4) as u32; // 4 bytes per element (f32 or i32)
 
         encoder.set_compute_pipeline_state(pipeline);
         encoder.set_buffer(0, Some(inputs[0]), 0);
@@ -1518,14 +1517,12 @@ impl MetalKernelOp for MetalCast {
     }
 
     // Cast is memory-bound: 1 read, 1 write, minimal compute
-    fn bytes_loaded(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
-        let n = self.n_elements.exec(dyn_map).unwrap_or(0);
-        n * 4 // Assuming 4 bytes per element (f32 or i32)
+    fn bytes_loaded(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {
+        0 // Unknown at compile time
     }
 
-    fn bytes_stored(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
-        let n = self.n_elements.exec(dyn_map).unwrap_or(0);
-        n * 4
+    fn bytes_stored(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {
+        0
     }
 
     fn flops(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {

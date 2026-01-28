@@ -194,23 +194,9 @@ impl ShapeTracker {
         self.dims.into_iter().product::<Expression>().max(1)
     }
 
-    /// The number of physical elements in the underlying buffer.
-    /// This excludes broadcast dimensions (where stride=0).
-    /// For example, shape (10, 2) with strides (1, 0) has 10 physical elements, not 20.
+    /// The number of elements in this tensor, not including pads and mask
     pub fn n_physical_elements(&self) -> Expression {
-        self.dims
-            .iter()
-            .zip(self.strides.iter())
-            .filter_map(|(dim, stride)| {
-                // Only count dimensions with non-zero stride (real data, not broadcast)
-                if *stride != Expression::from(0) {
-                    Some(*dim)
-                } else {
-                    None
-                }
-            })
-            .product::<Expression>()
-            .max(1)
+        self.n_elements()
     }
 
     /// The number of dimensions
