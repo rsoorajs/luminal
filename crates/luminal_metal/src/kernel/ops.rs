@@ -274,12 +274,12 @@ impl EgglogOp for MetalAdd {
         )"#
             .to_string(),
             r#"(rule
-            ((= ?e (Add ?shape ?a ?a_stride ?b ?b_stride ?out_stride)))
-            ((let ?me (MetalAdd ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
-             (union ?e ?me)
-             (set (dtype ?me) (F32)))
-            :name "metal MetalAdd (no dtype)"
-        )"#
+                ((= ?e (Add ?shape ?a ?a_stride ?b ?b_stride ?out_stride)))
+                ((let ?me (MetalAdd ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
+                 (union ?e ?me)
+                 (set (dtype ?me) (F32)))
+                :name "metal MetalAdd (no dtype)"
+            )"#
             .to_string(),
         ]
     }
@@ -1416,10 +1416,7 @@ pub struct MetalCast {
 
 impl EgglogOp for MetalCast {
     fn term(&self) -> (String, Vec<OpParam>) {
-        (
-            "MetalCast".to_string(),
-            vec![Input, Dty, EList, Expr],
-        )
+        ("MetalCast".to_string(), vec![Input, Dty, EList, Expr])
     }
 
     fn rewrites(&self) -> Vec<String> {

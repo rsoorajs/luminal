@@ -1,10 +1,11 @@
 //! Dependency chain tracing for dtype propagation analysis.
 
-use super::DTypeStatus;
+use super::{DTypeStatus, FactStatus};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// A node in the dependency graph.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepNode {
     pub var: String,
     pub op_type: String,
@@ -13,7 +14,7 @@ pub struct DepNode {
 }
 
 /// Dependency graph built from egglog program.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DependencyGraph {
     pub nodes: HashMap<String, DepNode>,
     pub roots: Vec<String>,
@@ -139,7 +140,7 @@ impl DependencyGraph {
 }
 
 /// Entry in a trace result.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceEntry {
     pub depth: usize,
     pub var: String,
@@ -160,8 +161,25 @@ impl TraceEntry {
     }
 }
 
+/// Entry in a function trace result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionTraceEntry {
+    pub depth: usize,
+    pub var: String,
+    pub op_type: String,
+    pub status: FactStatus,
+}
+
+impl FunctionTraceEntry {
+    pub fn format_tree(&self) -> String {
+        let indent = "  ".repeat(self.depth);
+        let prefix = if self.depth == 0 { "" } else { "├── " };
+        format!("{}{}{} ({}) {}", indent, prefix, self.var, self.op_type, self.status)
+    }
+}
+
 /// Result of dtype chain analysis.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DTypeChainAnalysis {
     pub target: String,
     pub chain: Vec<TraceEntry>,
@@ -186,4 +204,14 @@ impl DTypeChainAnalysis {
             all_resolved,
         }
     }
+}
+
+/// Result of function chain analysis.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FunctionChainAnalysis {
+    pub target: String,
+    pub fn_name: String,
+    pub chain: Vec<FunctionTraceEntry>,
+    pub first_missing: Option<String>,
+    pub all_resolved: bool,
 }

@@ -1,6 +1,10 @@
 //! Formatted output and reporting for egglog debug analysis.
 
-use super::{DTypeStatus, LoweringAnalysis, TraceEntry, DTypeChainAnalysis};
+use super::{
+    DTypeChainAnalysis, DTypeStatus, EnodeInspection, FunctionChainAnalysis, OpLoweringReport,
+    LoweringAnalysis, TraceEntry, VarInspection,
+};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Print HLIR node type summary.
@@ -83,8 +87,113 @@ pub fn print_dtype_chain(analysis: &DTypeChainAnalysis) {
     }
 }
 
+/// Print function chain analysis.
+pub fn print_function_chain(analysis: &FunctionChainAnalysis) {
+    println!(
+        "-- Function chain analysis for {} (fn={}) --",
+        analysis.target, analysis.fn_name
+    );
+
+    if analysis.all_resolved {
+        println!("  ✅ All nodes in chain have resolved value");
+    } else if let Some(ref first) = analysis.first_missing {
+        println!("  ❌ First missing at: {}", first);
+    }
+
+    println!("  Chain:");
+    for entry in &analysis.chain {
+        println!("{}", entry.format_tree());
+    }
+}
+
+/// Print op lowering report.
+pub fn print_op_lowering_report(report: &OpLoweringReport) {
+    println!(
+        "-- Op lowering [{}] {} -> {} --",
+        report.label, report.hlir_op, report.backend_op
+    );
+    println!("  total eclasses: {}", report.total_classes);
+    if report.missing.is_empty() {
+        println!("  ✅ All eclasses have backend equivalent");
+    } else {
+        println!("  ❌ Missing backend in {} eclasses:", report.missing.len());
+        for miss in &report.missing {
+            println!("    - class={} op={}", miss.class_id, miss.op);
+            for (idx, child) in miss.children.iter().enumerate() {
+                let labels = if child.class_labels.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    child.class_labels.join("|")
+                };
+                let dtype = child.dtype.clone().unwrap_or_else(|| "<missing>".to_string());
+                println!(
+                    "      [{}] class={} type={} labels={} dtype={}",
+                    idx, child.class_id, child.class_type, labels, dtype
+                );
+            }
+        }
+    }
+}
+
+fn print_enode(enode: &EnodeInspection) {
+    println!("    - {}", enode.label);
+    for (idx, child) in enode.children.iter().enumerate() {
+        let dtype = child.dtype.clone().unwrap_or_else(|| "<missing>".to_string());
+        let labels = if child.class_labels.is_empty() {
+            "<none>".to_string()
+        } else {
+            child.class_labels.join("|")
+        };
+        println!(
+            "      [{}] class={} type={} labels={} dtype={}",
+            idx, child.class_id, child.class_type, labels, dtype
+        );
+    }
+}
+
+/// Print inspection results for a specific variable.
+pub fn print_var_inspection(inspection: &VarInspection) {
+    println!("-- Var inspection [{}] {} --", inspection.label, inspection.var);
+
+    if let Some(ref line) = inspection.let_line {
+        println!("  let: {}", line);
+    }
+    if let Some(ref err) = inspection.eval_error {
+        println!("  eval error: {}", err);
+        return;
+    }
+
+    let class_id = inspection
+        .class_id
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("<unknown>");
+    let class_type = inspection
+        .class_type
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("<unknown>");
+    let dtype = inspection
+        .dtype
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("<missing>");
+    let labels = if inspection.class_labels.is_empty() {
+        "<none>".to_string()
+    } else {
+        inspection.class_labels.join("|")
+    };
+
+    println!("  class: {} type={} labels={}", class_id, class_type, labels);
+    println!("  dtype: {}", dtype);
+    println!("  enodes:");
+    for enode in &inspection.enodes {
+        print_enode(enode);
+    }
+}
+
 /// Summary report for a debug session.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DebugReport {
     pub case_name: String,
     pub size: usize,
@@ -92,6 +201,9 @@ pub struct DebugReport {
     pub egglog_counts: BTreeMap<String, usize>,
     pub hlir_analysis: Option<LoweringAnalysis>,
     pub backend_analysis: Option<LoweringAnalysis>,
+    pub op_reports: Vec<OpLoweringReport>,
+    pub var_inspections: Vec<VarInspection>,
+    pub function_traces: Vec<FunctionChainAnalysis>,
     pub build_succeeded: bool,
 }
 
@@ -114,6 +226,27 @@ impl DebugReport {
         if let Some(ref analysis) = self.backend_analysis {
             println!();
             print_lowering_analysis(analysis);
+        }
+
+        if !self.op_reports.is_empty() {
+            for report in &self.op_reports {
+                println!();
+                print_op_lowering_report(report);
+            }
+        }
+
+        if !self.function_traces.is_empty() {
+            for trace in &self.function_traces {
+                println!();
+                print_function_chain(trace);
+            }
+        }
+
+        if !self.var_inspections.is_empty() {
+            for inspection in &self.var_inspections {
+                println!();
+                print_var_inspection(inspection);
+            }
         }
 
         println!();

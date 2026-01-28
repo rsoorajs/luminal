@@ -21,7 +21,10 @@
 
 use luminal::prelude::*;
 use luminal_bench::egglog_debug::{
-    self, analyze_lowering, print_lowering_analysis, summarize_egglog_ops, summarize_hlir_ops,
+    analyze_backend_op_lowering, analyze_hlir_dtype_chain, analyze_hlir_function_chain,
+    analyze_lowering, inspect_var_hlir, print_dtype_chain, print_function_chain,
+    print_lowering_analysis, print_op_lowering_report, print_var_inspection, summarize_egglog_ops,
+    summarize_hlir_ops, DebugReport,
 };
 
 // ============================================================================
@@ -132,7 +135,22 @@ struct Args {
     dump_egglog: Option<std::path::PathBuf>,
     print_egglog: bool,
     analyze: bool,
+    trace_dtype: Option<String>,
+    trace_missing_dtype: bool,
+    inspect_vars: Vec<String>,
+    inspect_ops: Vec<(String, String)>,
+    trace_functions: Vec<(String, String)>,
+    checks: Vec<Check>,
+    json_out: Option<std::path::PathBuf>,
     all: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Check {
+    MissingBackend,
+    DType,
+    Function,
+    All,
 }
 
 fn parse_args() -> Args {
@@ -142,6 +160,13 @@ fn parse_args() -> Args {
         dump_egglog: None,
         print_egglog: false,
         analyze: false,
+        trace_dtype: None,
+        trace_missing_dtype: false,
+        inspect_vars: Vec::new(),
+        inspect_ops: Vec::new(),
+        trace_functions: Vec::new(),
+        checks: Vec::new(),
+        json_out: None,
         all: false,
     };
 
@@ -163,6 +188,49 @@ fn parse_args() -> Args {
             }
             "--print-egglog" => args.print_egglog = true,
             "--analyze" => args.analyze = true,
+            "--trace-dtype" => {
+                let val = iter.next().expect("Missing value for --trace-dtype");
+                args.trace_dtype = Some(val);
+            }
+            "--trace-missing-dtype" => args.trace_missing_dtype = true,
+            "--inspect-var" => {
+                let val = iter.next().expect("Missing value for --inspect-var");
+                args.inspect_vars.push(val);
+            }
+            "--inspect-op" => {
+                let val = iter.next().expect("Missing value for --inspect-op");
+                let mut parts = val.split(':');
+                let hlir = parts.next().unwrap_or("").to_string();
+                let backend = parts.next().unwrap_or("").to_string();
+                if hlir.is_empty() || backend.is_empty() || parts.next().is_some() {
+                    eprintln!("Invalid --inspect-op format. Expected HLIR:Backend, got {val}");
+                    std::process::exit(2);
+                }
+                args.inspect_ops.push((hlir, backend));
+            }
+            "--trace-fn" => {
+                let fn_name = iter.next().expect("Missing function name for --trace-fn");
+                let var = iter.next().expect("Missing variable for --trace-fn");
+                args.trace_functions.push((fn_name, var));
+            }
+            "--check" => {
+                let val = iter.next().expect("Missing value for --check");
+                let check = match val.as_str() {
+                    "missing-backend" => Check::MissingBackend,
+                    "dtype" => Check::DType,
+                    "fn" | "function" => Check::Function,
+                    "all" => Check::All,
+                    _ => {
+                        eprintln!("Unknown --check {val}. Use: missing-backend|dtype|fn|all");
+                        std::process::exit(2);
+                    }
+                };
+                args.checks.push(check);
+            }
+            "--json" => {
+                let val = iter.next().expect("Missing value for --json");
+                args.json_out = Some(val.into());
+            }
             "--all" => args.all = true,
             "--help" | "-h" => {
                 println!(
@@ -172,6 +240,13 @@ fn parse_args() -> Args {
                       --size <N>          Tensor size (default: 262144)\n  \
                       --all               Run all test cases\n  \
                       --analyze           Run lowering analysis\n  \
+                      --trace-dtype VAR   Trace dtype chain for VAR (e.g. t24)\n  \
+                      --trace-missing-dtype Trace first missing Add dtype (HLIR-only)\n  \
+                      --inspect-var VAR   Print detailed eclass + dtype info for VAR (HLIR-only)\n  \
+                      --inspect-op HLIR:Backend  Check backend coverage for an op mapping\n  \
+                      --trace-fn FN VAR    Trace function FN for VAR (HLIR-only)\n  \
+                      --check KIND         Run checks: missing-backend|dtype|fn|all\n  \
+                      --json PATH          Write JSON report (use '-' for stdout)\n  \
                       --dump-egglog PATH  Write egglog program to file\n  \
                       --print-egglog      Print egglog program to stdout\n  \
                       --help              Show this help"
@@ -241,13 +316,77 @@ where
     }
 
     // Run analysis if requested
+    let mut hlir_analysis = None;
+    let mut backend_analysis = None;
     if args.analyze {
         println!("-- Lowering analysis --");
-        let (hlir_analysis, backend_analysis) =
-            analyze_lowering::<B::Runtime>(&program, &root, B::ADD_OP_NAME);
+        let (hlir, backend) = analyze_lowering::<B::Runtime>(&program, &root, B::ADD_OP_NAME);
 
-        print_lowering_analysis(&hlir_analysis);
-        print_lowering_analysis(&backend_analysis);
+        print_lowering_analysis(&hlir);
+        print_lowering_analysis(&backend);
+        hlir_analysis = Some(hlir);
+        backend_analysis = Some(backend);
+
+        if args.trace_missing_dtype
+            || args.checks.contains(&Check::DType)
+            || args.checks.contains(&Check::All)
+        {
+            if let Some((var, status)) = hlir_analysis
+                .as_ref()
+                .unwrap()
+                .add_dtypes
+                .iter()
+                .find(|(_, dtype)| dtype.is_missing())
+            {
+                println!("-- Trace missing dtype: {} ({}) --", var, status);
+                let chain = analyze_hlir_dtype_chain(&program, var);
+                print_dtype_chain(&chain);
+            } else {
+                println!("-- Trace missing dtype --");
+                println!("  ✅ No missing Add dtype found in HLIR analysis");
+            }
+        }
+    }
+
+    if let Some(ref var) = args.trace_dtype {
+        println!("-- Trace dtype chain for {} (HLIR-only) --", var);
+        let chain = analyze_hlir_dtype_chain(&program, var);
+        print_dtype_chain(&chain);
+    }
+
+    let mut op_reports = Vec::new();
+    let do_missing_backend =
+        args.checks.contains(&Check::MissingBackend) || args.checks.contains(&Check::All);
+    if do_missing_backend && args.inspect_ops.is_empty() {
+        println!("-- Op lowering --");
+        println!("  ⚠️  --check missing-backend requires --inspect-op HLIR:Backend");
+    }
+    for (hlir_op, backend_op) in &args.inspect_ops {
+        let report = analyze_backend_op_lowering::<B::Runtime>(&program, hlir_op, backend_op);
+        print_op_lowering_report(&report);
+        op_reports.push(report);
+    }
+
+    let mut function_traces = Vec::new();
+    let do_fn_check =
+        args.checks.contains(&Check::Function) || args.checks.contains(&Check::All);
+    if do_fn_check && args.trace_functions.is_empty() {
+        println!("-- Function trace --");
+        println!("  ⚠️  --check fn requires --trace-fn FN VAR");
+    }
+    for (fn_name, var) in &args.trace_functions {
+        let trace = analyze_hlir_function_chain(&program, fn_name, var);
+        print_function_chain(&trace);
+        function_traces.push(trace);
+    }
+
+    let mut var_inspections = Vec::new();
+    if !args.inspect_vars.is_empty() {
+        for var in &args.inspect_vars {
+            let inspection = inspect_var_hlir(&program, var);
+            print_var_inspection(&inspection);
+            var_inspections.push(inspection);
+        }
     }
 
     // Try to build search space
@@ -258,9 +397,32 @@ where
     }));
     std::panic::set_hook(prev_hook);
 
+    let build_succeeded = result.is_ok();
     match result {
         Ok(()) => println!("✅ build_search_space succeeded"),
         Err(_) => println!("❌ build_search_space failed"),
+    }
+
+    if let Some(ref path) = args.json_out {
+        let report = DebugReport {
+            case_name: case.name().to_string(),
+            size,
+            hlir_counts,
+            egglog_counts,
+            hlir_analysis,
+            backend_analysis,
+            op_reports,
+            var_inspections,
+            function_traces,
+            build_succeeded,
+        };
+        let json = serde_json::to_string_pretty(&report).expect("failed to serialize report");
+        if path.as_os_str() == "-" {
+            println!("{}", json);
+        } else {
+            std::fs::write(path, json).expect("failed to write json report");
+            println!("Wrote JSON report to {}", path.display());
+        }
     }
 }
 

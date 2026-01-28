@@ -20,14 +20,15 @@
 //! ```
 
 mod analysis;
-mod trace;
 mod report;
+mod trace;
 
 pub use analysis::*;
-pub use trace::*;
 pub use report::*;
+pub use trace::*;
 
 use std::collections::BTreeMap;
+use serde::{Deserialize, Serialize};
 
 /// Extract the operation head from an egglog expression.
 ///
@@ -65,7 +66,7 @@ pub fn summarize_egglog_ops(program: &str) -> BTreeMap<String, usize> {
 }
 
 /// Result of dtype analysis for a node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DTypeStatus {
     /// dtype was successfully resolved
     Resolved(String),
@@ -88,6 +89,30 @@ impl std::fmt::Display for DTypeStatus {
         match self {
             DTypeStatus::Resolved(s) => write!(f, "{}", s),
             DTypeStatus::Missing(err) => write!(f, "<missing:{}>", err),
+        }
+    }
+}
+
+/// Result of evaluating an arbitrary egglog function for a node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FactStatus {
+    /// function value was successfully resolved
+    Resolved(String),
+    /// function lookup failed
+    Missing(String),
+}
+
+impl FactStatus {
+    pub fn is_missing(&self) -> bool {
+        matches!(self, FactStatus::Missing(_))
+    }
+}
+
+impl std::fmt::Display for FactStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FactStatus::Resolved(s) => write!(f, "{}", s),
+            FactStatus::Missing(err) => write!(f, "<missing:{}>", err),
         }
     }
 }
