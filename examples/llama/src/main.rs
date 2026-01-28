@@ -66,7 +66,7 @@ fn main() {
 
     // Set up tracing to perfetto
     let trace_session = luminal_tracing::subscriber()
-        // .perfetto("trace.pftrace")
+        .perfetto("trace.pftrace")
         .env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| {
             format!(
                 "{}=trace,luminal=trace,luminal_cuda=trace",
