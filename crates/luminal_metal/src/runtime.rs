@@ -192,8 +192,6 @@ impl Runtime for MetalRuntime {
         command_buffer.wait_until_completed();
     }
 
-    /// Execute and return detailed statistics for MBU/MFU calculation
-    /// Uses Metal GPU timestamps for precise timing (not wall-clock time).
     fn execute_with_stats(&mut self, dyn_map: &FxHashMap<char, usize>) -> Option<ExecutionStats> {
         let mut total_bytes_loaded = 0usize;
         let mut total_bytes_stored = 0usize;
