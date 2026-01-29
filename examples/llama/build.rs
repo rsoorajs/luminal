@@ -1,4 +1,3 @@
-use std::env;
 use std::process::Command;
 
 fn main() {
@@ -12,7 +11,6 @@ fn main() {
             "run",
             "--script",
             "setup/setup.py",
-            &env::var("LUMINAL_EXAMPLE_HF_MODEL").unwrap(),
         ])
         .status()
         .expect("Failed to execute setup script. Make sure 'uv' is installed.");

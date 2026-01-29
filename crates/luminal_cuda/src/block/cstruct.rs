@@ -219,9 +219,10 @@ impl<'a> CStruct<'a> {
     }
 }
 
-impl ToString for CStruct<'_> {
-    fn to_string(&self) -> String {
-        self.struct_types
+impl std::fmt::Display for CStruct<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = self
+            .struct_types
             .iter()
             .map(|(name, ty)| match ty {
                 CStructType::Bool => format!("bool {name};"),
@@ -236,6 +237,7 @@ impl ToString for CStruct<'_> {
                 CStructType::PtrArr(l) => format!("float* {name}[{l}];"),
                 CStructType::Bytes(l) => format!("char payload[{l}];"),
             })
-            .join("\n")
+            .join("\n");
+        write!(f, "{s}")
     }
 }

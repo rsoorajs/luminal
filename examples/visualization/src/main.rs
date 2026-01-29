@@ -4,8 +4,8 @@ use luminal::{
     self,
     op::IntoEgglogOp,
     prelude::{
-        egglog::{prelude::RustSpan, var},
-        egglog_ast::span::Span,
+        egglog::var,
+        egglog_ast::{RustSpan, Span},
         *,
     },
     visualization::{ToDot, ToHtml},

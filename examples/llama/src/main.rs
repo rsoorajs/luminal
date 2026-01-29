@@ -10,7 +10,7 @@ use tracing::{span, Level};
 /// Get the model directory, respecting HF_HUB_CACHE or HF_HOME environment variables.
 /// Falls back to "setup/" for backward compatibility.
 fn get_model_dir() -> PathBuf {
-    let repo_id = env::var("LUMINAL_EXAMPLE_HF_MODEL").unwrap();
+    let repo_id = "NousResearch/Meta-Llama-3-8B-Instruct".to_string();
 
     // Check HF_HUB_CACHE first, then derive from HF_HOME, then use default
     let cache_dir = std::env::var("HF_HUB_CACHE")
