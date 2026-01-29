@@ -28,11 +28,10 @@ pub trait Runtime {
 /// Timing method used for execution statistics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TimingMethod {
-    /// GPU-side timing using Metal timestamps or CUDA events.
-    /// Most accurate for measuring kernel performance.
-    GpuTimestamp,
-    /// Wall-clock timing using CPU Instant.
-    /// Includes CPU-GPU synchronization overhead.
+    /// Device-side timing (e.g. GPU timestamps / CUDA events).
+    DeviceTimestamp,
+    /// Host-side wall-clock timing.
+    /// Includes any host/device synchronization overhead.
     #[default]
     WallClock,
 }
@@ -40,7 +39,7 @@ pub enum TimingMethod {
 impl std::fmt::Display for TimingMethod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TimingMethod::GpuTimestamp => write!(f, "GPU"),
+            TimingMethod::DeviceTimestamp => write!(f, "Device"),
             TimingMethod::WallClock => write!(f, "Wall"),
         }
     }
@@ -48,15 +47,14 @@ impl std::fmt::Display for TimingMethod {
 
 /// Detailed execution statistics from a single run.
 ///
-/// This struct captures precise metrics for computing MBU (Memory Bandwidth
-/// Utilization) and MFU (Model FLOPs Utilization).
+/// This struct captures basic counters and timing.
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionStats {
-    /// GPU-side execution time in microseconds.
+    /// Execution time in microseconds.
     pub execution_time_us: f64,
-    /// Total bytes loaded from memory.
+    /// Total bytes read.
     pub bytes_loaded: usize,
-    /// Total bytes stored to memory.
+    /// Total bytes written.
     pub bytes_stored: usize,
     /// Total floating-point operations.
     pub flops: usize,
@@ -65,7 +63,6 @@ pub struct ExecutionStats {
 }
 
 impl ExecutionStats {
-    /// Create new execution stats with GPU timing.
     pub fn new(
         execution_time_us: f64,
         bytes_loaded: usize,
@@ -77,7 +74,7 @@ impl ExecutionStats {
             bytes_loaded,
             bytes_stored,
             flops,
-            timing_method: TimingMethod::GpuTimestamp,
+            timing_method: TimingMethod::DeviceTimestamp,
         }
     }
 
@@ -103,38 +100,6 @@ impl ExecutionStats {
         self.bytes_loaded + self.bytes_stored
     }
 
-    /// Achieved memory bandwidth in GB/s.
-    pub fn bandwidth_gbps(&self) -> f64 {
-        if self.execution_time_us <= 0.0 {
-            return 0.0;
-        }
-        let total_bytes = self.total_bytes() as f64;
-        // divide by 1000 to get GB/s.
-        total_bytes / self.execution_time_us / 1000.0
-    }
-
-    pub fn tflops(&self) -> f64 {
-        if self.execution_time_us <= 0.0 {
-            return 0.0;
-        }
-        // divide by 1_000_000 to get TFLOPS.
-        self.flops as f64 / self.execution_time_us / 1_000_000.0
-    }
-
-    pub fn mbu(&self, peak_bandwidth_gbps: f64) -> f64 {
-        if peak_bandwidth_gbps <= 0.0 {
-            return 0.0;
-        }
-        self.bandwidth_gbps() / peak_bandwidth_gbps * 100.0
-    }
-
-    pub fn mfu(&self, peak_tflops: f64) -> f64 {
-        if peak_tflops <= 0.0 {
-            return 0.0;
-        }
-        self.tflops() / peak_tflops * 100.0
-    }
-
     pub fn merge(&mut self, other: &ExecutionStats) {
         self.execution_time_us += other.execution_time_us;
         self.bytes_loaded += other.bytes_loaded;
@@ -147,12 +112,11 @@ impl std::fmt::Display for ExecutionStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ExecutionStats {{ time: {:.2}µs, bytes: {:.2}MB, flops: {:.2}M, bw: {:.2}GB/s, compute: {:.3}TFLOPS }}",
+            "ExecutionStats {{ time: {:.2}µs ({}), bytes: {:.2}MB, flops: {:.2}M }}",
             self.execution_time_us,
+            self.timing_method,
             self.total_bytes() as f64 / 1_000_000.0,
-            self.flops as f64 / 1_000_000.0,
-            self.bandwidth_gbps(),
-            self.tflops()
+            self.flops as f64 / 1_000_000.0
         )
     }
 }

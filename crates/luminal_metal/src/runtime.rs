@@ -315,6 +315,6 @@ impl MetalRuntime {
         let gpu_time_seconds = gpu_end - gpu_start;
         let gpu_time_us = gpu_time_seconds * 1_000_000.0;
 
-        (gpu_time_us, TimingMethod::GpuTimestamp)
+        (gpu_time_us, TimingMethod::DeviceTimestamp)
     }
 }
