@@ -1,7 +1,7 @@
 use crate::{block::*, graph::*, kernel::KernelOp};
 use cudarc::driver::{
     CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
-    sys::{CUdevice_attribute, CUfunction_attribute, CUevent_flags, CUgraphNode},
+    sys::{CUdevice_attribute, CUfunction_attribute, CUgraphNode},
 };
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
@@ -76,6 +76,8 @@ enum ExecutableKernel {
         last_dyn_values: FxHashMap<char, usize>,
         /// Last known buffer pointers (to detect changes requiring full rebuild)
         last_buffer_ptrs: FxHashMap<NodeIndex, u64>,
+        /// CUDA events for timing each kernel (one before each kernel + one at end)
+        timing_events: Vec<cudarc::driver::sys::CUevent>,
         /// Profiling: total bytes loaded expression
         total_bytes_loaded: Expression,
         /// Profiling: total bytes stored expression
@@ -156,7 +158,10 @@ pub struct CudaRuntime {
     cuda_stream: Arc<CudaStream>,
     exec_graph: StableGraph<ExecutableKernel, (), Directed>,
     node_to_exec: FxHashMap<NodeIndex, NodeIndex>,
+    /// Megakernel SM timings: (per-SM events, device start time, span UUID)
     pub(crate) timings: Vec<Vec<(Vec<SMEvent>, u64, Uuid)>>,
+    /// CUDA graph kernel timings: (kernel timings, span UUID)
+    pub(crate) cuda_graph_timings: Vec<(CudaGraphTiming, Uuid)>,
     last_dyn_map: FxHashMap<char, usize>,
     intermediate_buffer_dims: FxHashSet<char>,
     llir_to_hlir: FxHashMap<NodeIndex, NodeIndex>,
@@ -375,6 +380,7 @@ impl Runtime for CudaRuntime {
             llir_to_hlir: FxHashMap::default(),
             changed_hlir: FxHashSet::default(),
             timings: vec![],
+            cuda_graph_timings: vec![],
             last_dyn_map: FxHashMap::default(),
             intermediate_buffer_dims: FxHashSet::default(),
             last_kernel_stats: vec![],
@@ -481,6 +487,7 @@ impl Runtime for CudaRuntime {
                 module_constants,
                 last_dyn_values: FxHashMap::default(),
                 last_buffer_ptrs: FxHashMap::default(),
+                timing_events: Vec::new(),  // Will be created during graph build
                 total_bytes_loaded,
                 total_bytes_stored,
                 total_flops,
@@ -553,6 +560,7 @@ impl Runtime for CudaRuntime {
             sm_count,
         );
         self.timings.clear();
+        self.cuda_graph_timings.clear();
 
         let total_bytes: usize = self
             .last_kernel_stats
@@ -734,11 +742,15 @@ impl Runtime for CudaRuntime {
                     module_constants,
                     last_dyn_values,
                     last_buffer_ptrs,
+                    timing_events,
                     total_bytes_loaded,
                     total_bytes_stored,
                     total_flops,
                 } => {
-                    let span = span!(Level::INFO, "cuda_graph", kernels = kernel_info.len());
+                    // Generate a unique ID for this graph execution (for perfetto correlation)
+                    let graph_span_id = Uuid::new_v4();
+                    let span = span!(Level::INFO, "cuda_graph", kernels = kernel_info.len(), id = field::Empty);
+                    span.record("id", graph_span_id.to_string().as_str());
                     let _entered = span.enter();
 
                     // Update module constants with current dyn dim values
@@ -785,17 +797,28 @@ impl Runtime for CudaRuntime {
                     if needs_rebuild {
                         // Build new graph from scratch
                         let ctx = self.cuda_stream.context().clone();
-                        let mut new_graph = CudaGraphHandle::new(ctx)
+                        let mut new_graph = CudaGraphHandle::new(ctx.clone())
                             .expect("Failed to create CUDA graph");
 
-                        // Clear old state
+                        // Clear old state and destroy old timing events
                         node_to_graph_node.clear();
                         kernel_params.clear();
+                        for event in timing_events.drain(..) {
+                            destroy_cuda_event(&ctx, event);
+                        }
 
-                        // Map from LLIR node to CUDA graph node (for dependencies)
+                        // Create timing events: one before each kernel + one at the end
+                        // Total: kernel_info.len() + 1 events
+                        for _ in 0..kernel_info.len() + 1 {
+                            let event = create_cuda_event(&ctx)
+                                .expect("Failed to create timing event");
+                            timing_events.push(event);
+                        }
+
+                        // Track the last graph node for dependencies
                         let mut prev_graph_node: Option<CUgraphNode> = None;
 
-                        // Add each kernel to the graph
+                        // Add each kernel to the graph with event nodes for timing
                         for (idx, info) in kernel_info.iter().enumerate() {
                             let grid_dim = (
                                 info.launch_grid.0.exec(dyn_map).unwrap() as u32,
@@ -822,13 +845,15 @@ impl Runtime for CudaRuntime {
                             // Get raw function handle
                             let cu_func = unsafe { info.kernel.raw_function() };
 
-                            // Dependencies: sequential execution (each kernel depends on previous)
-                            let deps: Vec<CUgraphNode> = prev_graph_node.iter().cloned().collect();
+                            // Add event record node BEFORE this kernel
+                            let event_deps: Vec<CUgraphNode> = prev_graph_node.iter().cloned().collect();
+                            let event_node = new_graph.add_event_record_node(&event_deps, timing_events[idx])
+                                .expect("Failed to add event record node");
 
-                            // Add kernel node to graph
+                            // Add kernel node (depends on the event node)
                             let graph_node = unsafe {
                                 new_graph.add_kernel_node(
-                                    &deps,
+                                    &[event_node],
                                     cu_func,
                                     grid_dim,
                                     block_dim,
@@ -841,6 +866,11 @@ impl Runtime for CudaRuntime {
                             kernel_params.push(params);
                             prev_graph_node = Some(graph_node);
                         }
+
+                        // Add final event record node after the last kernel
+                        let final_deps: Vec<CUgraphNode> = prev_graph_node.iter().cloned().collect();
+                        let _final_event_node = new_graph.add_event_record_node(&final_deps, timing_events[kernel_info.len()])
+                            .expect("Failed to add final event record node");
 
                         // Instantiate the graph
                         let new_exec = new_graph.instantiate()
@@ -888,23 +918,41 @@ impl Runtime for CudaRuntime {
 
                     // Launch the graph
                     let exec = cuda_graph_exec.as_ref().unwrap();
-
-                    // Time the graph execution
-                    let start_event = self.cuda_stream
-                        .context()
-                        .new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
-                        .unwrap();
-                    let end_event = self.cuda_stream
-                        .context()
-                        .new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
-                        .unwrap();
-
-                    start_event.record(&self.cuda_stream).unwrap();
                     exec.launch(&self.cuda_stream).expect("Failed to launch CUDA graph");
-                    end_event.record(&self.cuda_stream).unwrap();
 
-                    let graph_time_ms = start_event.elapsed_ms(&end_event).unwrap();
-                    let graph_time_us = graph_time_ms as f64 * 1000.0;
+                    // Synchronize to ensure timing events are recorded
+                    self.cuda_stream.synchronize().expect("Failed to sync after graph launch");
+
+                    // Query timing from events and build CudaGraphTiming
+                    let ctx = self.cuda_stream.context();
+                    let mut kernel_timings = Vec::with_capacity(kernel_info.len());
+                    let mut cumulative_ns: u64 = 0;
+
+                    for (idx, info) in kernel_info.iter().enumerate() {
+                        let start_event = timing_events[idx];
+                        let end_event = timing_events[idx + 1];
+                        let elapsed_ms = event_elapsed_ms(ctx, start_event, end_event)
+                            .unwrap_or(0.0);
+                        let elapsed_ns = (elapsed_ms * 1_000_000.0) as u64;
+
+                        kernel_timings.push(CudaGraphKernelTiming {
+                            kernel_name: info.kernel_name,
+                            start_ns: cumulative_ns,
+                            end_ns: cumulative_ns + elapsed_ns,
+                        });
+                        cumulative_ns += elapsed_ns;
+                    }
+
+                    // Store timing data for perfetto
+                    let graph_timing = CudaGraphTiming {
+                        kernel_timings: kernel_timings.clone(),
+                        host_start_ns: 0, // Will be filled in by perfetto correlation
+                    };
+                    self.cuda_graph_timings.push((graph_timing, graph_span_id));
+
+                    // Calculate total graph time from events
+                    let graph_time_ns = cumulative_ns;
+                    let graph_time_us = graph_time_ns as f64 / 1000.0;
 
                     // Calculate metrics
                     let loaded = total_bytes_loaded.exec(dyn_map).unwrap_or(0);

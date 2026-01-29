@@ -434,9 +434,12 @@ struct ManualTrackBuilder {
 
 impl ManualTrackBuilder {
     pub fn new(core_index: u32, ts0: u64, clock_id: u32) -> Self {
+        Self::new_with_name(core_index, ts0, clock_id, format!("SM {core_index}"))
+    }
+
+    pub fn new_with_name(core_index: u32, ts0: u64, clock_id: u32, track_name: String) -> Self {
         let track_uuid = manual_track_uuid(core_index);
         let sequence_id = manual_sequence_id(core_index);
-        let track_name = format!("SM {core_index}");
         let synthetic_tid = 10_000 + core_index;
         let descriptor = schema::TracePacket {
             timestamp: Some(ts0.saturating_sub(1)),
@@ -878,6 +881,65 @@ impl CudaRuntime {
                 extra_packets.extend(builder.into_packets());
             }
         }
+
+        // Process CUDA graph timings
+        // Find host start times for each graph span by matching UUID
+        let graph_host_start_times: Vec<(u64, u32)> = self
+            .cuda_graph_timings
+            .iter()
+            .map(|(_, id)| {
+                trace
+                    .packet
+                    .iter()
+                    .find_map(|p| match &p.data {
+                        Some(trace_packet::Data::TrackEvent(TrackEvent {
+                            r#type: ty,
+                            debug_annotations,
+                            ..
+                        })) if *ty == Some(track_event::Type::SliceBegin as i32)
+                            && debug_annotations.iter().any(|a| {
+                                matches!(
+                                    (&a.name_field, &a.value),
+                                    (
+                                        Some(NameField::Name(k)),
+                                        Some(tracing_perfetto_sdk_schema::debug_annotation::Value::StringValue(v)),
+                                    ) if k == "id" && *v == format!("{id}")
+                                )
+                            }) =>
+                        {
+                            Some((p.timestamp?, p.timestamp_clock_id?))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or((0, 0)) // Skip if not found
+            })
+            .collect_vec();
+
+        // Emit CUDA graph kernel timings on a separate track
+        for (graph_idx, ((graph_timing, _span_id), (host_time, host_clock_id))) in
+            self.cuda_graph_timings.iter().zip(graph_host_start_times).enumerate()
+        {
+            if host_time == 0 {
+                continue; // Skip if we couldn't find the span
+            }
+
+            // Create a track for CUDA graph kernels (use index 1000+ to avoid collision with SM tracks)
+            let track_index = 1000 + graph_idx as u32;
+            let track_name = format!("CUDA Graph {}", graph_idx);
+            let mut builder = ManualTrackBuilder::new_with_name(track_index, host_time, host_clock_id, track_name);
+
+            for kernel_timing in &graph_timing.kernel_timings {
+                builder.push_slice(
+                    kernel_timing.kernel_name,
+                    kernel_timing.start_ns,
+                    kernel_timing.end_ns,
+                    host_time,
+                    host_clock_id,
+                );
+            }
+            extra_packets.extend(builder.into_packets());
+        }
+
         trace.packet.extend(extra_packets);
         let mut buf = Vec::with_capacity(trace.encoded_len());
         trace.encode(&mut buf).unwrap();

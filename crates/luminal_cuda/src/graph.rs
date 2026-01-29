@@ -11,7 +11,7 @@ use std::mem::MaybeUninit;
 use std::sync::Arc;
 
 use cudarc::driver::{
-    sys::{self, CUfunction, CUgraph, CUgraphExec, CUgraphNode},
+    sys::{self, CUevent, CUfunction, CUgraph, CUgraphExec, CUgraphNode},
     CudaContext, CudaFunction, CudaStream, DriverError,
 };
 
@@ -87,6 +87,33 @@ impl CudaGraphHandle {
                 dependencies.as_ptr(),
                 dependencies.len(),
                 &params,
+            )
+            .result()?;
+            Ok(node.assume_init())
+        }
+    }
+
+    /// Adds an event record node to the graph for timing.
+    ///
+    /// # Arguments
+    /// * `dependencies` - Graph nodes that must complete before this event is recorded
+    /// * `event` - The CUDA event to record
+    ///
+    /// Returns the graph node handle.
+    pub fn add_event_record_node(
+        &mut self,
+        dependencies: &[CUgraphNode],
+        event: CUevent,
+    ) -> Result<CUgraphNode, DriverError> {
+        self.ctx.bind_to_thread()?;
+        let mut node = MaybeUninit::uninit();
+        unsafe {
+            sys::cuGraphAddEventRecordNode(
+                node.as_mut_ptr(),
+                self.cu_graph,
+                dependencies.as_ptr(),
+                dependencies.len(),
+                event,
             )
             .result()?;
             Ok(node.assume_init())
@@ -262,6 +289,60 @@ impl KernelParams {
     pub fn update_input(&mut self, index: usize, ptr: u64) {
         self.values[1 + index] = ptr;
     }
+}
+
+/// Timing data for a single kernel in a CUDA graph.
+#[derive(Clone, Debug)]
+pub struct CudaGraphKernelTiming {
+    /// Name of the kernel
+    pub kernel_name: &'static str,
+    /// Start time in nanoseconds (relative to graph start)
+    pub start_ns: u64,
+    /// End time in nanoseconds (relative to graph start)
+    pub end_ns: u64,
+}
+
+/// Timing data for a CUDA graph execution.
+#[derive(Clone, Debug)]
+pub struct CudaGraphTiming {
+    /// Per-kernel timing data
+    pub kernel_timings: Vec<CudaGraphKernelTiming>,
+    /// Host timestamp when the graph started (used to correlate with perfetto)
+    pub host_start_ns: u64,
+}
+
+/// Helper to create a CUDA event for timing.
+pub fn create_cuda_event(ctx: &Arc<CudaContext>) -> Result<CUevent, DriverError> {
+    ctx.bind_to_thread()?;
+    let mut event = MaybeUninit::uninit();
+    unsafe {
+        sys::cuEventCreate(
+            event.as_mut_ptr(),
+            sys::CUevent_flags::CU_EVENT_DEFAULT as u32,
+        )
+        .result()?;
+        Ok(event.assume_init())
+    }
+}
+
+/// Destroy a CUDA event.
+pub fn destroy_cuda_event(ctx: &Arc<CudaContext>, event: CUevent) {
+    if !event.is_null() {
+        let _ = ctx.bind_to_thread();
+        unsafe {
+            let _ = sys::cuEventDestroy_v2(event);
+        }
+    }
+}
+
+/// Get elapsed time between two events in milliseconds.
+pub fn event_elapsed_ms(ctx: &Arc<CudaContext>, start: CUevent, end: CUevent) -> Result<f32, DriverError> {
+    ctx.bind_to_thread()?;
+    let mut ms: f32 = 0.0;
+    unsafe {
+        sys::cuEventElapsedTime(&mut ms, start, end).result()?;
+    }
+    Ok(ms)
 }
 
 #[cfg(test)]
