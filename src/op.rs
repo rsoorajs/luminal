@@ -109,20 +109,18 @@ impl ExecutionStats {
             return 0.0;
         }
         let total_bytes = self.total_bytes() as f64;
-        // bytes / us = MB/s, so divide by 1000 to get GB/s.
+        // divide by 1000 to get GB/s.
         total_bytes / self.execution_time_us / 1000.0
     }
 
-    /// Achieved compute throughput in TFLOPS.
     pub fn tflops(&self) -> f64 {
         if self.execution_time_us <= 0.0 {
             return 0.0;
         }
-        // flops / us = MFLOPS, so divide by 1_000_000 to get TFLOPS.
+        // divide by 1_000_000 to get TFLOPS.
         self.flops as f64 / self.execution_time_us / 1_000_000.0
     }
 
-    /// Memory Bandwidth Utilization (MBU) as percentage.
     pub fn mbu(&self, peak_bandwidth_gbps: f64) -> f64 {
         if peak_bandwidth_gbps <= 0.0 {
             return 0.0;
@@ -130,7 +128,6 @@ impl ExecutionStats {
         self.bandwidth_gbps() / peak_bandwidth_gbps * 100.0
     }
 
-    /// Model FLOPs Utilization (MFU) as percentage.
     pub fn mfu(&self, peak_tflops: f64) -> f64 {
         if peak_tflops <= 0.0 {
             return 0.0;
@@ -138,7 +135,6 @@ impl ExecutionStats {
         self.tflops() / peak_tflops * 100.0
     }
 
-    /// Merge stats from another execution (for accumulating across multiple kernels).
     pub fn merge(&mut self, other: &ExecutionStats) {
         self.execution_time_us += other.execution_time_us;
         self.bytes_loaded += other.bytes_loaded;

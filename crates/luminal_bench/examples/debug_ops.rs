@@ -1,8 +1,6 @@
 //! Debug script to locate which HLIR op(s) fail to lower to a backend dialect,
 //! leading to `No valid graphs present in the e-graph!`.
 //!
-//! ## Design
-//!
 //! This tool is backend-agnostic. The specific backend is selected via feature flags.
 //! All core analysis logic lives in `luminal_bench::egglog_debug` module.
 //!

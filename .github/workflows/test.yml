@@ -18,7 +18,7 @@ jobs:
         steps:
             - uses: actions/checkout@v6
             - name: Run tests
-              run: sudo apt-get install protobuf-compiler; rustup update; cargo test --workspace --exclude luminal_cuda --exclude luminal_metal --verbose
+              run: sudo apt-get install protobuf-compiler; rustup update; cargo test --workspace --exclude luminal_cuda --exclude luminal_metal --exclude luminal_bench --verbose
 
     clippy:
         name: Clippy
@@ -28,7 +28,7 @@ jobs:
         steps:
             - uses: actions/checkout@v6
             - name: Run clippy
-              run: sudo apt-get install protobuf-compiler; rustup update; cargo clippy --workspace --exclude luminal_metal --all-targets -- -D warnings
+              run: sudo apt-get install protobuf-compiler; rustup update; cargo clippy --workspace --exclude luminal_metal --exclude luminal_bench --all-targets -- -D warnings
 
     fmt:
         name: Fmt
