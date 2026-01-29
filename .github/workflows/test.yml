@@ -55,6 +55,8 @@ jobs:
                   sudo apt-get install -y --no-install-recommends \
                   protobuf-compiler \
                   cuda-nvrtc-12-8
+            - name: cuda-toolkit
+              uses: Jimver/cuda-toolkit@v0.2.30
             - name: Install Rust
               run: |
                   curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
