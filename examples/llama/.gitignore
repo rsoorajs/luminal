@@ -24,3 +24,6 @@ tokenizer.json
 
 *.dot 
 *.html
+
+egraph/
+llir_graphs/
