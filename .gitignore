@@ -16,3 +16,6 @@ proptest-regressions
 *.safetensors.index.json
 tokenizer.json
 **/.cache
+
+*.env
+*.claude
