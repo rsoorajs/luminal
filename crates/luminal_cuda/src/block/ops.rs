@@ -951,7 +951,7 @@ impl BlockOp for RowRope {
     }
 }
 
-use crate::TILE_SIZE;
+pub const TILE_SIZE: u32 = 64;
 const K_CHUNK_SIZE: usize = 4096;
 
 #[derive(Debug, Default)]
