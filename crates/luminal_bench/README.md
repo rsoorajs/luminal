@@ -1,85 +1,97 @@
 # `luminal_bench`
 
-Luminal 的基准测试与调试工具箱（Criterion benchmarks + egglog 调试工具）。
+Benchmarks and debugging utilities for Luminal (Criterion benchmarks + egglog lowering debug).
 
-## 运行基准测试
+## Running Benchmarks
 
-目前 crate 的 bench 默认以 Metal 为例（通过 feature 开关启用）。
+The benches in this crate are typically run with the Metal backend enabled via a feature flag.
 
 ```bash
-# L1: micro（单算子/HLIR primitive）
+# L1: micro (single op / HLIR primitive)
 cargo bench -p luminal_bench --features metal --bench micro
 
-# L2: patterns（组合算子/模式）
+# L2: patterns (composed patterns)
 cargo bench -p luminal_bench --features metal --bench patterns
 ```
 
-### 产物位置（Criterion）
+### Outputs (Criterion)
 
-运行后常见输出位于：
+After running, common outputs are under:
 
-- HTML 报告：`target/criterion/report/index.html`
-- micro 的 metrics 映射：`target/criterion/bench_metrics.json`
-- micro 的完整汇总：`target/criterion/bench_report.json`
-- patterns 的 metrics 映射：`target/criterion/pattern_metrics.json`
-- patterns 的完整汇总：`target/criterion/pattern_report.json`
+- HTML report: `target/criterion/report/index.html`
+- micro metrics mapping: `target/criterion/bench_metrics.json`
+- micro full report: `target/criterion/bench_report.json`
+- patterns metrics mapping: `target/criterion/pattern_metrics.json`
+- patterns full report: `target/criterion/pattern_report.json`
 
-这些 JSON（bytes/flops 等常量指标）结合 Criterion 的时间结果，可以计算吞吐、MBU、MFU 等派生指标。
+These JSON files (constant metrics such as bytes/flops) can be combined with Criterion timing to
+compute derived throughput metrics (MBU/MFU/etc.).
 
-## 基准覆盖范围（概览）
+## Coverage (Overview)
 
-### L1 micro（单算子）
+### L1 micro (single op)
 
-覆盖 HLIR primitives 的单算子性能（当前实现包含）：
+Measures single-op performance for HLIR primitives (currently includes):
 
-- Unary：`Exp2` / `Log2` / `Sin` / `Recip` / `Sqrt`
-- Binary：`Add` / `Mul` / `Mod` / `LessThan`
-- Indexing：`Gather` / `Cast`
-- Reduction：`Sum` / `Max`
+- Unary: `Exp2` / `Log2` / `Sin` / `Recip` / `Sqrt`
+- Binary: `Add` / `Mul` / `Mod` / `LessThan`
+- Indexing: `Gather` / `Cast`
+- Reduction: `Sum` / `Max`
 
-### L2 patterns（组合模式）
+### L2 patterns (composed patterns)
 
-覆盖常见组合模式（当前实现包含）：
+Covers common composed patterns (currently includes):
 
 - `MatMul`
 - `Softmax`
 - `GeLU`
 - `Attention`
-- `LayerNorm`（目前在 metal bench 中会跳过：需要尚未支持的 HLIR primitives）
+- `LayerNorm` (currently skipped in the Metal bench: requires unsupported HLIR primitives)
 
-## egglog 调试工具：`debug_ops`
+## egglog Debug Tool: `debug_ops`
 
-`examples/debug_ops.rs` 是一个通用的 egglog/降级调试工具，用来定位：
+`examples/debug_ops.rs` is a general egglog / lowering debug tool to help diagnose:
 
-- 为什么某个 HLIR op 没有被后端 op 命中（cleanup 后导致 `No valid graphs present...`）
-- 为什么某个 function（如 `dtype`）在某些节点上缺失
+- Why a particular HLIR op failed to lower into backend dialect ops (and cleanup triggers
+  `No valid graphs present in the e-graph!`)
+- Why a particular egglog function fact (e.g. `dtype`) is missing for some nodes
 
-### 常用命令（Metal 示例）
+### Common Commands (Metal examples)
 
 ```bash
-# 默认：只打印摘要（HLIR/egglog op 统计 + root），并运行 build_search_space（会打印 rule matches）
+# Default: print summaries (HLIR/egglog op counts + root) and try build_search_space
+# (which prints egglog rule match counts)
 cargo run -p luminal_bench --features metal --example debug_ops -- --case gelu-inner
 
-# 显式做 op 覆盖检查：指定 HLIR:Backend 映射
+# Explicit op coverage check: provide HLIR:Backend mapping(s)
 cargo run -p luminal_bench --features metal --example debug_ops -- --case gelu-inner --inspect-op Add:MetalAdd
 
-# 运行更完整的 lowering 分析输出
+# Print full analysis output (HLIR-only + Backend+HLIR)
 cargo run -p luminal_bench --features metal --example debug_ops -- --case gelu-inner --analyze --inspect-op Add:MetalAdd
 
-# 追踪“第一个缺失 dtype 的 Add”（HLIR-only）
-cargo run -p luminal_bench --features metal --example debug_ops -- --case gelu-inner --trace-missing-dtype
+# Trace an egglog function fact for a specific var (HLIR-only)
+cargo run -p luminal_bench --features metal --example debug_ops -- --case gelu-inner --trace-fact dtype t24
 
-# 追踪任意 egglog function 的链路（HLIR-only）
-cargo run -p luminal_bench --features metal --example debug_ops -- --case gelu-inner --trace-fn dtype t24
+# Scan all vars whose op-head is Add, find the first missing dtype, then trace it (HLIR-only)
+cargo run -p luminal_bench --features metal --example debug_ops -- --case gelu-inner \
+  --trace-first-missing-fact dtype --within-op Add
 
-# 查看某个变量的 eclass/enodes/children/dtype 事实（HLIR-only）
+# Inspect a var's eclass/enodes/children and dtype facts (HLIR-only)
 cargo run -p luminal_bench --features metal --example debug_ops -- --case gelu-inner --inspect-var t24
 
-# 导出结构化 JSON（便于复现与对比）
+# Dump the raw egglog program (the `(let tN ...)` program from `hlir_to_egglog`)
+cargo run -p luminal_bench --features metal --example debug_ops -- --case gelu-inner \
+  --dump-egglog target/gelu-inner.egg
+
+# Export structured JSON (useful for repro/diffing)
 cargo run -p luminal_bench --features metal --example debug_ops -- --case gelu-inner --json target/debug_ops.json
 ```
 
-更多参数见：
+Notes:
+- `--trace-fact` can only evaluate functions that exist in the egglog program (e.g. `dtype`).
+  Many values such as shape/strides are encoded as IR term parameters, not as function facts.
+
+For more options, see:
 
 ```bash
 cargo run -p luminal_bench --features metal --example debug_ops -- --help

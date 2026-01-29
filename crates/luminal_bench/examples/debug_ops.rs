@@ -8,10 +8,12 @@
 //!
 //! Usage examples: see `crates/luminal_bench/README.md`.
 
+use luminal::hlir::HLIROps;
+use luminal::op::IntoEgglogOp;
 use luminal::prelude::*;
 use luminal_bench::egglog_debug::{
     DebugReport, FactQuery, analyze_hlir_dtype_chain, analyze_hlir_function_chain,
-    analyze_lowering, inspect_var_hlir, print_dtype_chain, print_function_chain,
+    analyze_lowering, analyze_with_ops, inspect_var_hlir, print_dtype_chain, print_function_chain,
     print_lowering_analysis, print_var_inspection, summarize_egglog_ops, summarize_hlir_ops,
 };
 
@@ -134,14 +136,19 @@ struct Args {
     dump_egglog: Option<std::path::PathBuf>,
     print_egglog: bool,
     analyze: bool,
-    trace_dtype: Option<String>,
-    trace_missing_dtype: bool,
     inspect_vars: Vec<String>,
     inspect_ops: Vec<(String, String)>,
-    trace_functions: Vec<(String, String)>,
+    trace_facts: Vec<(String, String)>,
+    trace_first_missing_facts: Vec<TraceFirstMissingFact>,
     checks: Vec<Check>,
     json_out: Option<std::path::PathBuf>,
     all: bool,
+}
+
+#[derive(Clone, Debug)]
+struct TraceFirstMissingFact {
+    fn_name: String,
+    within_op: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,15 +166,18 @@ fn parse_args() -> Args {
         dump_egglog: None,
         print_egglog: false,
         analyze: false,
-        trace_dtype: None,
-        trace_missing_dtype: false,
         inspect_vars: Vec::new(),
         inspect_ops: Vec::new(),
-        trace_functions: Vec::new(),
+        trace_facts: Vec::new(),
+        trace_first_missing_facts: Vec::new(),
         checks: Vec::new(),
         json_out: None,
         all: false,
     };
+
+    // If the user writes: --trace-first-missing-fact dtype --within-op Add
+    // we attach the next --within-op to the last pending request.
+    let mut pending_within_op_for: Option<usize> = None;
 
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -191,11 +201,29 @@ fn parse_args() -> Args {
             }
             "--print-egglog" => args.print_egglog = true,
             "--analyze" => args.analyze = true,
-            "--trace-dtype" => {
-                let val = iter.next().expect("Missing value for --trace-dtype");
-                args.trace_dtype = Some(val);
+            "--trace-fact" => {
+                let fn_name = iter.next().expect("Missing function name for --trace-fact");
+                let var = iter.next().expect("Missing variable for --trace-fact");
+                args.trace_facts.push((fn_name, var));
             }
-            "--trace-missing-dtype" => args.trace_missing_dtype = true,
+            "--trace-first-missing-fact" => {
+                let fn_name = iter
+                    .next()
+                    .expect("Missing function name for --trace-first-missing-fact");
+                args.trace_first_missing_facts.push(TraceFirstMissingFact {
+                    fn_name,
+                    within_op: String::new(),
+                });
+                pending_within_op_for = Some(args.trace_first_missing_facts.len() - 1);
+            }
+            "--within-op" => {
+                let op = iter.next().expect("Missing op head for --within-op");
+                let Some(idx) = pending_within_op_for.take() else {
+                    eprintln!("--within-op must follow a --trace-first-missing-fact");
+                    std::process::exit(2);
+                };
+                args.trace_first_missing_facts[idx].within_op = op;
+            }
             "--inspect-var" => {
                 let val = iter.next().expect("Missing value for --inspect-var");
                 args.inspect_vars.push(val);
@@ -210,11 +238,6 @@ fn parse_args() -> Args {
                     std::process::exit(2);
                 }
                 args.inspect_ops.push((hlir, backend));
-            }
-            "--trace-fn" => {
-                let fn_name = iter.next().expect("Missing function name for --trace-fn");
-                let var = iter.next().expect("Missing variable for --trace-fn");
-                args.trace_functions.push((fn_name, var));
             }
             "--check" => {
                 let val = iter.next().expect("Missing value for --check");
@@ -244,11 +267,11 @@ fn parse_args() -> Args {
                       --size <N>          Tensor size (default: 262144)\n  \
                       --all               Run all test cases\n  \
                       --analyze           Run lowering analysis\n  \
-                      --trace-dtype VAR   Trace dtype chain for VAR (e.g. t24)\n  \
-                      --trace-missing-dtype Trace first missing Add dtype (HLIR-only)\n  \
+                      --trace-fact FN VAR            Trace fact FN for VAR (HLIR-only), e.g. dtype t24\n  \
+                      --trace-first-missing-fact FN  Find first missing FN within an op-head, then trace it (HLIR-only)\n  \
+                      --within-op OPHEAD             Used with --trace-first-missing-fact (e.g. Add)\n  \
                       --inspect-var VAR   Print detailed eclass + dtype info for VAR (HLIR-only)\n  \
                       --inspect-op HLIR:Backend  Check backend coverage for an op mapping\n  \
-                      --trace-fn FN VAR    Trace function FN for VAR (HLIR-only)\n  \
                       --check KIND         Run checks: missing-backend|dtype|fn|all\n  \
                       --json PATH          Write JSON report (use '-' for stdout)\n  \
                       --dump-egglog PATH  Write egglog program to file\n  \
@@ -269,14 +292,24 @@ fn parse_args() -> Args {
         args.checks = vec![Check::MissingBackend, Check::DType, Check::Function];
     }
     if args.checks.contains(&Check::DType) {
-        args.trace_missing_dtype = true;
+        // Preserve the previous semantics: scan Add for missing dtype, then trace.
+        let already_has_add_dtype = args
+            .trace_first_missing_facts
+            .iter()
+            .any(|r| r.fn_name == "dtype" && r.within_op == "Add");
+        if !already_has_add_dtype {
+            args.trace_first_missing_facts.push(TraceFirstMissingFact {
+                fn_name: "dtype".to_string(),
+                within_op: "Add".to_string(),
+            });
+        }
     }
     if args.checks.contains(&Check::MissingBackend) && args.inspect_ops.is_empty() {
         eprintln!("--check missing-backend requires at least one --inspect-op HLIR:Backend");
         std::process::exit(2);
     }
-    if args.checks.contains(&Check::Function) && args.trace_functions.is_empty() {
-        eprintln!("--check fn requires at least one --trace-fn FN VAR");
+    if args.checks.contains(&Check::Function) && args.trace_facts.is_empty() {
+        eprintln!("--check fn requires at least one --trace-fact FN VAR");
         std::process::exit(2);
     }
 
@@ -362,69 +395,129 @@ where
         vars
     };
 
-    // Run lowering analysis only when explicitly requested.
+    // Validate any pending --within-op pairing.
+    for req in &args.trace_first_missing_facts {
+        if req.within_op.is_empty() {
+            eprintln!(
+                "--trace-first-missing-fact {} requires --within-op OPHEAD",
+                req.fn_name
+            );
+            std::process::exit(2);
+        }
+    }
+
+    // Prepare fact queries needed for scan-first-missing-fact.
     let mut hlir_analysis = None;
     let mut backend_analysis = None;
-    let needs_lowering_analysis =
-        args.analyze || !args.inspect_ops.is_empty() || args.trace_missing_dtype;
-    if needs_lowering_analysis {
-        let mut fact_queries: Vec<FactQuery> = Vec::new();
-        if args.trace_missing_dtype {
-            fact_queries.push(FactQuery {
-                fn_name: "dtype".to_string(),
-                vars: find_vars_by_head("Add"),
-            });
-        }
+    let mut fact_queries: Vec<FactQuery> = Vec::new();
+    for req in &args.trace_first_missing_facts {
+        fact_queries.push(FactQuery {
+            fn_name: req.fn_name.clone(),
+            vars: find_vars_by_head(&req.within_op),
+        });
+    }
 
+    // Only compute backend analysis if requested; compute HLIR analysis if needed
+    // for either --analyze or scan-first-missing-fact.
+    let need_backend_analysis = args.analyze || !args.inspect_ops.is_empty();
+    let need_hlir_analysis = args.analyze || !fact_queries.is_empty();
+
+    if need_backend_analysis {
         let (hlir, backend) =
             analyze_lowering::<B::Runtime>(&program, &root, &fact_queries, &args.inspect_ops);
         hlir_analysis = Some(hlir);
         backend_analysis = Some(backend);
+    } else if need_hlir_analysis {
+        let hlir_ops = <HLIROps as IntoEgglogOp>::into_vec();
+        hlir_analysis = Some(analyze_with_ops(
+            &program,
+            &root,
+            hlir_ops,
+            "HLIR",
+            &fact_queries,
+            &[],
+        ));
+    }
 
-        if args.analyze {
-            println!("-- Lowering analysis --");
-            print_lowering_analysis(hlir_analysis.as_ref().unwrap());
-            print_lowering_analysis(backend_analysis.as_ref().unwrap());
-        } else if !args.inspect_ops.is_empty() {
-            // Just print the backend-side report.
-            print_lowering_analysis(backend_analysis.as_ref().unwrap());
+    if args.analyze {
+        println!("-- Lowering analysis --");
+        if let Some(ref hlir) = hlir_analysis {
+            print_lowering_analysis(hlir);
+        }
+        if let Some(ref backend) = backend_analysis {
+            print_lowering_analysis(backend);
+        }
+    } else if !args.inspect_ops.is_empty() {
+        if let Some(ref backend) = backend_analysis {
+            print_lowering_analysis(backend);
         }
     }
 
-    if let Some(ref var) = args.trace_dtype {
-        println!("-- Trace dtype chain for {} (HLIR-only) --", var);
-        let chain = analyze_hlir_dtype_chain(&program, var);
-        print_dtype_chain(&chain);
+    // Trace facts for explicit variables.
+    let mut function_traces = Vec::new();
+    for (fn_name, var) in &args.trace_facts {
+        if fn_name == "dtype" {
+            println!("-- Trace dtype chain for {} (HLIR-only) --", var);
+            let chain = analyze_hlir_dtype_chain(&program, var);
+            print_dtype_chain(&chain);
+            // Also record a function-trace entry for JSON output.
+            function_traces.push(analyze_hlir_function_chain(&program, fn_name, var));
+        } else {
+            let trace = analyze_hlir_function_chain(&program, fn_name, var);
+            print_function_chain(&trace);
+            function_traces.push(trace);
+        }
     }
 
-    if args.trace_missing_dtype {
-        if let Some(ref hlir) = hlir_analysis {
-            let dtype_table = hlir.facts.get("dtype");
-            let first_missing = dtype_table.and_then(|table| {
-                table
-                    .iter()
-                    .find(|(_, status)| status.is_missing())
-                    .map(|(var, status)| (var.clone(), status.clone()))
-            });
-            if let Some((var, status)) = first_missing {
-                println!("-- Trace missing dtype: {} ({}) --", var, status);
+    // Scan for first missing fact within an op-head, then trace.
+    for req in &args.trace_first_missing_facts {
+        let Some(ref hlir) = hlir_analysis else {
+            println!(
+                "-- Trace first missing fact (fn={}) within op={} --",
+                req.fn_name, req.within_op
+            );
+            println!("  error  Skipped: HLIR analysis did not run");
+            continue;
+        };
+
+        let vars = find_vars_by_head(&req.within_op);
+        if vars.is_empty() {
+            println!(
+                "-- Trace first missing fact (fn={}) within op={} --",
+                req.fn_name, req.within_op
+            );
+            println!("  √ No matching vars found (op head not present)");
+            continue;
+        }
+
+        let table = hlir.facts.get(&req.fn_name);
+        let first_missing = table.and_then(|t| {
+            vars.iter()
+                .find_map(|v| t.get(v).and_then(|s| s.is_missing().then(|| v.clone())))
+        });
+
+        if let Some(var) = first_missing {
+            println!(
+                "-- Trace first missing fact (fn={}) within op={} --",
+                req.fn_name, req.within_op
+            );
+            println!("  ❌ first missing at: {}", var);
+            if req.fn_name == "dtype" {
                 let chain = analyze_hlir_dtype_chain(&program, &var);
                 print_dtype_chain(&chain);
+                function_traces.push(analyze_hlir_function_chain(&program, "dtype", &var));
             } else {
-                println!("-- Trace missing dtype --");
-                println!("  √ No missing dtype found for Add nodes");
+                let trace = analyze_hlir_function_chain(&program, &req.fn_name, &var);
+                print_function_chain(&trace);
+                function_traces.push(trace);
             }
         } else {
-            println!("-- Trace missing dtype --");
-            println!("  error  Skipped: lowering analysis did not run");
+            println!(
+                "-- Trace first missing fact (fn={}) within op={} --",
+                req.fn_name, req.within_op
+            );
+            println!("  √ No missing values found");
         }
-    }
-
-    let mut function_traces = Vec::new();
-    for (fn_name, var) in &args.trace_functions {
-        let trace = analyze_hlir_function_chain(&program, fn_name, var);
-        print_function_chain(&trace);
-        function_traces.push(trace);
     }
 
     let mut var_inspections = Vec::new();
