@@ -58,21 +58,7 @@ enum ExecutableKernel {
         work_queue: TaskQueue,
         node_to_task_index: FxHashMap<NodeIndex, usize>,
     },
-    Kernel {
-        kernel: CudaFunction,
-        launch_grid: (Expression, Expression, Expression),
-        launch_threadblock: (Expression, Expression, Expression),
-        shared_mem: Expression,
-        inputs: Vec<NodeIndex>,
-        output: NodeIndex,
-        constants: FxHashMap<char, CudaSlice<u8>>,
-        // Profiling metrics
-        kernel_name: &'static str,
-        bytes_loaded: Expression,
-        bytes_stored: Expression,
-        flops: Expression,
-    },
-    /// A CUDA Graph containing multiple kernel ops for reduced launch overhead
+    /// A CUDA Graph containing one or more kernel ops for reduced launch overhead
     CudaGraphExec {
         /// The CUDA graph handle (None until first execution builds it)
         cuda_graph: Option<CudaGraphHandle>,
@@ -136,12 +122,6 @@ impl Drop for ExecutableKernel {
                     std::mem::forget(v);
                 }
             }
-            ExecutableKernel::Kernel { constants, .. } => {
-                let m = std::mem::take(constants);
-                for (_k, v) in m {
-                    std::mem::forget(v);
-                }
-            }
             ExecutableKernel::CudaGraphExec { module_constants, .. } => {
                 // Prevent Drop of CudaSlice<u8> for module constants
                 for constants in module_constants.iter_mut() {
@@ -163,7 +143,6 @@ impl Debug for ExecutableKernel {
             "{}",
             match self {
                 Self::Megakernel { work_queue, .. } => format!("Megakernel ({})", work_queue.len()),
-                Self::Kernel { .. } => "Kernel".to_string(),
                 Self::CudaGraphExec { kernel_info, .. } => format!("CudaGraph ({})", kernel_info.len()),
             }
         )
@@ -446,99 +425,69 @@ impl Runtime for CudaRuntime {
             .collect::<FxHashSet<_>>();
         let kernel_subgraphs = partition_marked_convex(llir_graph, &kernel_ops_in_graph).unwrap();
 
-        // Add kernels - group into CUDA graphs where beneficial
+        // Add kernels - wrap all kernel subgraphs in CUDA graphs
         for subgraph in kernel_subgraphs {
-            if subgraph.len() >= 2 {
-                // Create a CUDA graph for this subgraph
-                // The actual graph is built lazily on first execute (needs buffer pointers)
-                let mut kernel_info = Vec::with_capacity(subgraph.len());
-                let mut module_constants = Vec::with_capacity(subgraph.len());
-                let mut total_bytes_loaded = Expression::from(0);
-                let mut total_bytes_stored = Expression::from(0);
-                let mut total_flops = Expression::from(0);
+            // Create a CUDA graph for this subgraph (even single kernels)
+            // The actual graph is built lazily on first execute (needs buffer pointers)
+            let mut kernel_info = Vec::with_capacity(subgraph.len());
+            let mut module_constants = Vec::with_capacity(subgraph.len());
+            let mut total_bytes_loaded = Expression::from(0);
+            let mut total_bytes_stored = Expression::from(0);
+            let mut total_flops = Expression::from(0);
 
-                // Get topological order for kernels in this subgraph
-                let topo_order: Vec<_> = toposort(llir_graph, None)
-                    .unwrap()
-                    .into_iter()
-                    .filter(|n| subgraph.contains(n))
-                    .collect();
+            // Get topological order for kernels in this subgraph
+            let topo_order: Vec<_> = toposort(llir_graph, None)
+                .unwrap()
+                .into_iter()
+                .filter(|n| subgraph.contains(n))
+                .collect();
 
-                for kernel in &topo_order {
-                    let kernel_op = llir_graph[*kernel].to_dialect::<dyn KernelOp>().unwrap();
-                    let (kernel_function, _, _, grid, tb, shared_mem, constants) =
-                        kernel_op.compile(&self.cuda_stream);
-                    let inputs = llir_graph
-                        .edges_directed(*kernel, Direction::Incoming)
-                        .sorted_by_key(|e| e.id())
-                        .map(|e| e.source())
-                        .collect_vec();
+            for kernel in &topo_order {
+                let kernel_op = llir_graph[*kernel].to_dialect::<dyn KernelOp>().unwrap();
+                let (kernel_function, _, _, grid, tb, shared_mem, constants) =
+                    kernel_op.compile(&self.cuda_stream);
+                let inputs = llir_graph
+                    .edges_directed(*kernel, Direction::Incoming)
+                    .sorted_by_key(|e| e.id())
+                    .map(|e| e.source())
+                    .collect_vec();
 
-                    total_bytes_loaded = total_bytes_loaded + kernel_op.bytes_loaded();
-                    total_bytes_stored = total_bytes_stored + kernel_op.bytes_stored();
-                    total_flops = total_flops + kernel_op.flops();
+                total_bytes_loaded = total_bytes_loaded + kernel_op.bytes_loaded();
+                total_bytes_stored = total_bytes_stored + kernel_op.bytes_stored();
+                total_flops = total_flops + kernel_op.flops();
 
-                    kernel_info.push(CudaGraphKernelNode {
-                        llir_node: *kernel,
-                        kernel: kernel_function,
-                        launch_grid: grid,
-                        launch_threadblock: tb,
-                        shared_mem,
-                        inputs,
-                        output: *kernel,
-                        kernel_name: kernel_op.kernel_name(),
-                        bytes_loaded: kernel_op.bytes_loaded(),
-                        bytes_stored: kernel_op.bytes_stored(),
-                        flops: kernel_op.flops(),
-                    });
-                    module_constants.push(constants);
-                }
-
-                let exec_node = exec_graph.add_node(ExecutableKernel::CudaGraphExec {
-                    cuda_graph: None,  // Will be built on first execute
-                    cuda_graph_exec: None,  // Will be instantiated after building
-                    node_to_graph_node: FxHashMap::default(),
-                    kernel_params: Vec::new(),  // Will be populated during graph build
-                    kernel_info,
-                    module_constants,
-                    last_dyn_values: FxHashMap::default(),
-                    last_buffer_ptrs: FxHashMap::default(),
-                    total_bytes_loaded,
-                    total_bytes_stored,
-                    total_flops,
+                kernel_info.push(CudaGraphKernelNode {
+                    llir_node: *kernel,
+                    kernel: kernel_function,
+                    launch_grid: grid,
+                    launch_threadblock: tb,
+                    shared_mem,
+                    inputs,
+                    output: *kernel,
+                    kernel_name: kernel_op.kernel_name(),
+                    bytes_loaded: kernel_op.bytes_loaded(),
+                    bytes_stored: kernel_op.bytes_stored(),
+                    flops: kernel_op.flops(),
                 });
+                module_constants.push(constants);
+            }
 
-                for node in subgraph {
-                    node_to_exec.insert(node, exec_node);
-                }
-            } else {
-                // Single kernel - don't use CUDA graph (overhead not worth it)
-                for kernel in subgraph {
-                    let kernel_op = llir_graph[kernel].to_dialect::<dyn KernelOp>().unwrap();
-                    let (kernel_function, _, _, grid, tb, shared_mem, constants) =
-                        kernel_op.compile(&self.cuda_stream);
-                    let inputs = llir_graph
-                        .edges_directed(kernel, Direction::Incoming)
-                        .sorted_by_key(|e| e.id())
-                        .map(|e| e.source())
-                        .collect_vec();
-                    node_to_exec.insert(
-                        kernel,
-                        exec_graph.add_node(ExecutableKernel::Kernel {
-                            kernel: kernel_function,
-                            launch_grid: grid,
-                            launch_threadblock: tb,
-                            inputs,
-                            output: kernel,
-                            shared_mem,
-                            constants,
-                            kernel_name: kernel_op.kernel_name(),
-                            bytes_loaded: kernel_op.bytes_loaded(),
-                            bytes_stored: kernel_op.bytes_stored(),
-                            flops: kernel_op.flops(),
-                        }),
-                    );
-                }
+            let exec_node = exec_graph.add_node(ExecutableKernel::CudaGraphExec {
+                cuda_graph: None,  // Will be built on first execute
+                cuda_graph_exec: None,  // Will be instantiated after building
+                node_to_graph_node: FxHashMap::default(),
+                kernel_params: Vec::new(),  // Will be populated during graph build
+                kernel_info,
+                module_constants,
+                last_dyn_values: FxHashMap::default(),
+                last_buffer_ptrs: FxHashMap::default(),
+                total_bytes_loaded,
+                total_bytes_stored,
+                total_flops,
+            });
+
+            for node in subgraph {
+                node_to_exec.insert(node, exec_node);
             }
         }
         // Add edges
@@ -680,102 +629,6 @@ impl Runtime for CudaRuntime {
         let total_start = std::time::Instant::now();
         for exec_node in toposort(&self.exec_graph, None).unwrap() {
             match &mut self.exec_graph[exec_node] {
-                ExecutableKernel::Kernel {
-                    kernel,
-                    launch_grid,
-                    launch_threadblock,
-                    inputs,
-                    output,
-                    shared_mem,
-                    constants,
-                    kernel_name,
-                    bytes_loaded,
-                    bytes_stored,
-                    flops,
-                } => {
-                    for (dyn_dim, val) in dyn_map {
-                        if let Some(global) = constants.get_mut(dyn_dim) {
-                            let mut view = global.as_view_mut();
-                            let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
-                            self.cuda_stream
-                                .memcpy_htod(&[*val as i32], &mut symbol)
-                                .unwrap();
-                        }
-                    }
-                    let cfg = LaunchConfig {
-                        grid_dim: (
-                            launch_grid.0.exec(dyn_map).unwrap() as u32,
-                            launch_grid.1.exec(dyn_map).unwrap() as u32,
-                            launch_grid.2.exec(dyn_map).unwrap() as u32,
-                        ),
-                        block_dim: (
-                            launch_threadblock.0.exec(dyn_map).unwrap() as u32,
-                            launch_threadblock.1.exec(dyn_map).unwrap() as u32,
-                            launch_threadblock.2.exec(dyn_map).unwrap() as u32,
-                        ),
-                        shared_mem_bytes: shared_mem.exec(dyn_map).unwrap() as u32,
-                    };
-                    let mut ptrs = vec![];
-                    for inp in inputs {
-                        if let Some(buf) = self.buffers.get(inp) {
-                            ptrs.push(buf.device_ptr(&self.cuda_stream).0);
-                        } else {
-                            ptrs.push(match &self.hlir_buffers[&self.llir_to_hlir[inp]] {
-                                CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
-                                CudaInput::Ptr(p) => *p,
-                            });
-                        }
-                    }
-                    let mut lb = self.cuda_stream.launch_builder(kernel);
-                    lb.arg(&self.buffers[output]);
-                    for ptr in &ptrs {
-                        lb.arg(ptr);
-                    }
-                    let span = span!(Level::INFO, "kernel", kernel = field::Empty);
-                    span.record("kernel", &kernel_name);
-                    let _entered = span.enter();
-
-                    // Use CUDA events for accurate GPU-side timing
-                    let start_event = self
-                        .cuda_stream
-                        .context()
-                        .new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
-                        .unwrap();
-                    let end_event = self
-                        .cuda_stream
-                        .context()
-                        .new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
-                        .unwrap();
-
-                    start_event.record(&self.cuda_stream).unwrap();
-                    unsafe { lb.launch(cfg) }.unwrap();
-                    end_event.record(&self.cuda_stream).unwrap();
-
-                    // elapsed_ms synchronizes internally
-                    let kernel_time_ms = start_event.elapsed_ms(&end_event).unwrap();
-                    let kernel_time_us = kernel_time_ms as f64 * 1000.0;
-
-                    // Calculate metrics
-                    let loaded = bytes_loaded.exec(dyn_map).unwrap_or(0);
-                    let stored = bytes_stored.exec(dyn_map).unwrap_or(0);
-                    let flop_count = flops.exec(dyn_map).unwrap_or(0);
-
-                    // Calculate bandwidth (GB/s) and compute (TFLOPS)
-                    // Total memory traffic = bytes loaded + bytes stored
-                    let total_bytes = loaded + stored;
-                    let bandwidth_gbps = (total_bytes as f64) / (kernel_time_us * 1e-6) / 1e9;
-                    let tflops = (flop_count as f64) / (kernel_time_us * 1e-6) / 1e12;
-
-                    kernel_stats.push(KernelStats {
-                        name: kernel_name,
-                        execution_time_us: kernel_time_us,
-                        bytes_loaded: loaded,
-                        bytes_stored: stored,
-                        flops: flop_count,
-                        bandwidth_gbps,
-                        tflops,
-                    });
-                }
                 ExecutableKernel::Megakernel {
                     interpreter,
                     interpreter_constants,

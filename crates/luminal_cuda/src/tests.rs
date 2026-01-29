@@ -477,10 +477,10 @@ fn test_cuda_graph_dyn_dims_surgical_update() {
     assert_close(&result2, &expected2);
 }
 
-/// Test that a single kernel operation doesn't create a CUDA graph.
-/// CUDA graphs only benefit multiple kernels due to launch overhead savings.
+/// Test that a single kernel operation works correctly in a CUDA graph.
+/// All kernel ops are now wrapped in CUDA graphs for consistency.
 #[test]
-fn test_single_kernel_no_graph() {
+fn test_single_kernel_in_graph() {
     let Some(stream) = get_cuda_stream() else {
         return;
     };
@@ -506,13 +506,12 @@ fn test_single_kernel_no_graph() {
     let expected: Vec<f32> = data_a.iter().zip(&data_b).map(|(a, b)| a + b).collect();
     assert_close(&result, &expected);
 
-    // Check that profiling shows "Add" kernel, not "CudaGraph"
-    for stat in &rt.last_kernel_stats {
-        assert_ne!(
-            stat.name, "CudaGraph",
-            "Single kernel should not use CUDA graph"
-        );
-    }
+    // Single kernel is now wrapped in a CUDA graph
+    // Verify it appears as CudaGraph in stats
+    let cuda_graph_count = rt.last_kernel_stats.iter()
+        .filter(|s| s.name == "CudaGraph")
+        .count();
+    assert!(cuda_graph_count >= 1, "Single kernel should be wrapped in CUDA graph");
 }
 
 /// Test CUDA graph with larger tensor chain for performance.
