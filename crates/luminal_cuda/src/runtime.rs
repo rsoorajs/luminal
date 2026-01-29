@@ -648,7 +648,7 @@ impl Runtime for CudaRuntime {
                     let mut ptrs = vec![];
                     for inp in inputs {
                         if let Some(buf) = self.buffers.get(inp) {
-                            ptrs.push(buf.device_ptr(&self.cuda_stream).0);                            
+                            ptrs.push(buf.device_ptr(&self.cuda_stream).0);
                         } else {
                             ptrs.push(match &self.hlir_buffers[&self.llir_to_hlir[inp]] {
                                 CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
