@@ -7,11 +7,7 @@ fn main() {
 
     // Run the setup script with uv
     let status = Command::new("uv")
-        .args([
-            "run",
-            "--script",
-            "setup/setup.py",
-        ])
+        .args(["run", "--script", "setup/setup.py"])
         .status()
         .expect("Failed to execute setup script. Make sure 'uv' is installed.");
 
