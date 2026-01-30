@@ -4,14 +4,18 @@ use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream};
 use luminal::prelude::*;
-use tracing_perfetto_sdk_schema::{self as schema, TrackEvent, debug_annotation::NameField, trace_packet, track_event};
+use tracing_perfetto_sdk_schema::{
+    self as schema, TrackEvent, debug_annotation::NameField, trace_packet, track_event,
+};
 use uuid::Uuid;
 
 pub mod cuda_graph;
-pub mod ops;
+pub mod hlir;
+pub mod other_ops;
 
 pub use cuda_graph::*;
-pub use ops::Ops;
+
+pub type Ops = (hlir::Ops, other_ops::Ops);
 
 /// Record CUDA graph kernel timings as nested slices in perfetto trace
 pub fn record_cuda_graph_timings(
@@ -40,17 +44,25 @@ pub fn record_cuda_graph_timings(
                 _ => None,
             }
         });
-        let Some((host_time, clock_id, track_uuid, sequence_id)) = parent_info else { continue };
+        let Some((host_time, clock_id, track_uuid, sequence_id)) = parent_info else {
+            continue;
+        };
         let launch_offset = graph_timing.launch_latency_ns;
         for kernel_timing in &graph_timing.kernel_timings {
             packets.push(schema::TracePacket {
                 timestamp: Some(host_time + launch_offset + kernel_timing.start_ns),
                 timestamp_clock_id: Some(clock_id),
-                optional_trusted_packet_sequence_id: Some(trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(sequence_id)),
+                optional_trusted_packet_sequence_id: Some(
+                    trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
+                        sequence_id,
+                    ),
+                ),
                 data: Some(trace_packet::Data::TrackEvent(schema::TrackEvent {
                     track_uuid: Some(track_uuid),
                     r#type: Some(track_event::Type::SliceBegin as i32),
-                    name_field: Some(track_event::NameField::Name(kernel_timing.kernel_name.to_owned())),
+                    name_field: Some(track_event::NameField::Name(
+                        kernel_timing.kernel_name.to_owned(),
+                    )),
                     ..Default::default()
                 })),
                 ..Default::default()
@@ -58,11 +70,17 @@ pub fn record_cuda_graph_timings(
             packets.push(schema::TracePacket {
                 timestamp: Some(host_time + launch_offset + kernel_timing.end_ns),
                 timestamp_clock_id: Some(clock_id),
-                optional_trusted_packet_sequence_id: Some(trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(sequence_id)),
+                optional_trusted_packet_sequence_id: Some(
+                    trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
+                        sequence_id,
+                    ),
+                ),
                 data: Some(trace_packet::Data::TrackEvent(schema::TrackEvent {
                     track_uuid: Some(track_uuid),
                     r#type: Some(track_event::Type::SliceEnd as i32),
-                    name_field: Some(track_event::NameField::Name(kernel_timing.kernel_name.to_owned())),
+                    name_field: Some(track_event::NameField::Name(
+                        kernel_timing.kernel_name.to_owned(),
+                    )),
                     ..Default::default()
                 })),
                 ..Default::default()

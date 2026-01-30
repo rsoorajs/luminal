@@ -49,7 +49,8 @@ impl EgglogOp for RowAdd {
                 (= (MNum 1) (nth_from_end ?a_stride 0))
                 (= (MNum 1) (nth_from_end ?b_stride 0))
                 (= (MNum 1) (nth_from_end ?out_stride 0))
-                ;(= (F32) (dtype ?a))
+                (= (F32) (dtype ?a))
+                (= (F32) (dtype ?b))
             )
             (
                 (let ?new_shape (RemoveNthFromEnd ?shape 0))
@@ -202,7 +203,8 @@ impl EgglogOp for RowSwishMul {
                     (ECons ?width (ECons (MNum 1) (ENil)))
                     (ECons ?width (ECons (MNum 1) (ENil)))
                 ))
-                ;(= (F32) (dtype ?self))
+                (= (F32) (dtype ?self))
+                (= (F32) (dtype ?other))
             )
             (
                 (let ?rsm (RowSwishMul
@@ -369,7 +371,7 @@ impl EgglogOp for RowRMSNorm {
                     )
                 )
                 (= ?inv_div_factor
-                    (Recip (ECons ?batch (ENil)) (Cast (Iota ?width (MNum 1)) (F32))
+                    (Recip (ECons ?batch (ENil)) (Cast (Iota ?width (MNum 1)) (MNum 1) (F32))
                                     (ECons (MNum 0) (ENil))  ; broadcast the constant
                                     (ECons (MNum 1) (ENil)))) ; produce per-batch vector
 
@@ -424,7 +426,7 @@ impl EgglogOp for RowRMSNorm {
                         ?inp_stride
                     )
                 )
-                ;(= (F32) (dtype ?x))
+                (= (F32) (dtype ?x))
             )
             (
                 (let ?new
@@ -623,7 +625,7 @@ impl EgglogOp for RowRope {
                 ;; -----------------------------
                 ;; inv_freq construction (exact literals as in dump)
                 ;; -----------------------------
-                (= ?freq_indices        (Cast (Iota (MMul (MIter) (MNum 2)) (MNum 64)) (F32)))
+                (= ?freq_indices        (Cast (Iota (MMul (MIter) (MNum 2)) (MNum 64)) (MNum 64) (F32)))
                 (= ?c_inv_head_dim      (Constant 0.007812))
                 (= ?freq_scaled         (Mul (ECons (MNum 64) (ENil)) ?freq_indices
                                              (ECons (MNum 1) (ENil)) ?c_inv_head_dim
@@ -644,7 +646,7 @@ impl EgglogOp for RowRope {
                 ;; -----------------------------
                 ;; emb = pos_ids @ inv_freq
                 ;; -----------------------------
-                (= ?pos_f32             (Cast ?pos_ids (F32)))
+                (= ?pos_f32             (Cast ?pos_ids ?cast_sh (F32)))
                 (= ?pos_times_invfreq_bcast
                    (Mul (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil))))
                         ?pos_f32
@@ -682,6 +684,7 @@ impl EgglogOp for RowRope {
                      ?inp
                      (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
                      ?inp_strides))
+                (= (F32) (dtype ?inp))
 
                 ;; -----------------------------
                 ;; cos(emb) = sin(-emb + pi/2), sin(emb)
@@ -1416,6 +1419,7 @@ impl EgglogOp for TileMatmulFullSplit {
                 (= ?b_k_stride (MNum 1))
 
                 (= (F32) (dtype ?a))
+                (= (F32) (dtype ?b))
             )
             (
                 ; Compute tiled dimensions
@@ -1778,7 +1782,7 @@ impl EgglogOp for RowEmbed {
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
                     (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
                     (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
-                    (= ?token_ids_cast (Cast ?token_ids ?cast_dtype))
+                    (= ?token_ids_cast (Cast ?token_ids ?cast_size ?cast_dtype))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
@@ -1796,7 +1800,7 @@ impl EgglogOp for RowEmbed {
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
                     (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
                     (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
-                    (= ?token_ids_cast (Cast ?token_ids ?cast_dtype))
+                    (= ?token_ids_cast (Cast ?token_ids ?cast_size ?cast_dtype))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))

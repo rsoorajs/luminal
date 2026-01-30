@@ -6,14 +6,17 @@ use cudarc::driver::{
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
 use luminal::hlir::*;
-use luminal::prelude::{
-    petgraph::{
-        Directed, Direction,
-        algo::{Cycle, toposort},
-        prelude::StableGraph,
-        visit::{EdgeRef, NodeIndexable},
+use luminal::{
+    prelude::{
+        petgraph::{
+            Directed, Direction,
+            algo::{Cycle, toposort},
+            prelude::StableGraph,
+            visit::{EdgeRef, NodeIndexable},
+        },
+        *,
     },
-    *,
+    visualization::display_graph,
 };
 use memmap2::MmapOptions;
 use prost::Message;
@@ -28,6 +31,7 @@ pub enum CudaInput {
 }
 
 #[allow(dead_code)]
+#[derive(Debug)]
 struct CudaGraphKernelNode {
     llir_node: NodeIndex,
     kernel: CudaFunction,
@@ -37,6 +41,7 @@ struct CudaGraphKernelNode {
     inputs: Vec<NodeIndex>,
     output: NodeIndex,
     kernel_name: &'static str,
+    kernel_str: String,
     bytes_loaded: Expression,
     bytes_stored: Expression,
     flops: Expression,
@@ -122,15 +127,12 @@ impl Drop for ExecutableKernel {
 
 impl Debug for ExecutableKernel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::Megakernel { work_queue, .. } => format!("Megakernel ({})", work_queue.len()),
-                Self::CudaGraphExec { kernel_info, .. } =>
-                    format!("CudaGraph ({})", kernel_info.len()),
+        match self {
+            Self::Megakernel { work_queue, .. } => write!(f, "Megakernel ({})", work_queue.len()),
+            Self::CudaGraphExec { kernel_info, .. } => {
+                write!(f, "CudaGraph ({})", kernel_info.len())
             }
-        )
+        }
     }
 }
 
@@ -287,12 +289,13 @@ impl CudaRuntime {
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
-                self.intermediate_buffer_dims
-                    .extend(op.output_size().dyn_vars());
+                let out_size = op.output_size();
+                let exec_size = out_size.exec(dyn_dims).unwrap();
+                self.intermediate_buffer_dims.extend(out_size.dyn_vars());
                 self.buffers.insert(
                     node,
                     self.cuda_stream
-                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
+                        .alloc_zeros(exec_size * size_of::<f32>())
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
@@ -430,7 +433,7 @@ impl Runtime for CudaRuntime {
 
             for kernel in &topo_order {
                 let kernel_op = llir_graph[*kernel].to_dialect::<dyn KernelOp>().unwrap();
-                let (kernel_function, _, _, grid, tb, shared_mem, constants) =
+                let (kernel_function, _, kernel_str, grid, tb, shared_mem, constants) =
                     kernel_op.compile(&self.cuda_stream);
                 let inputs = llir_graph
                     .edges_directed(*kernel, Direction::Incoming)
@@ -449,6 +452,7 @@ impl Runtime for CudaRuntime {
                     launch_threadblock: tb,
                     shared_mem,
                     inputs,
+                    kernel_str,
                     output: *kernel,
                     kernel_name: kernel_op.kernel_name(),
                     bytes_loaded: kernel_op.bytes_loaded(),
@@ -511,6 +515,7 @@ impl Runtime for CudaRuntime {
                 .insert(NodeIndex::new(hlir_node), llir_node);
             self.changed_hlir.insert(NodeIndex::new(hlir_node));
         }
+        // display_graph(&self.exec_graph, None, "exec.txt");
     }
 
     #[tracing::instrument(skip_all)]
@@ -583,13 +588,14 @@ impl Runtime for CudaRuntime {
 
     #[tracing::instrument(skip_all)]
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
-        if self.buffers.is_empty()
-            || dyn_map.len() != self.last_dyn_map.len()
-            || dyn_map
-                .iter()
-                .filter(|(d, _)| self.intermediate_buffer_dims.contains(*d))
-                .any(|(d, v)| self.last_dyn_map.get(d).map(|n| *n != *v).unwrap_or(true))
-        {
+        let buffers_empty = self.buffers.is_empty();
+        let dyn_map_len_changed = dyn_map.len() != self.last_dyn_map.len();
+        let dyn_dims_changed = dyn_map
+            .iter()
+            .filter(|(d, _)| self.intermediate_buffer_dims.contains(*d))
+            .any(|(d, v)| self.last_dyn_map.get(d).map(|n| *n != *v).unwrap_or(true));
+        let needs_realloc = buffers_empty || dyn_map_len_changed || dyn_dims_changed;
+        if needs_realloc {
             self.last_dyn_map = dyn_map.clone();
             self.allocate_intermediate_buffers(dyn_map);
         }
@@ -1468,7 +1474,9 @@ impl CudaRuntime {
 
     /// Record GPU timings to an existing perfetto trace file.
     pub fn record_cuda_perfetto_trace(&self, file_path: impl AsRef<std::path::Path>) {
-        let ops: Vec<Arc<Box<dyn BlockOp>>> = self.llir_graph.node_indices()
+        let ops: Vec<Arc<Box<dyn BlockOp>>> = self
+            .llir_graph
+            .node_indices()
             .filter_map(|n| self.llir_graph[n].to_dialect::<dyn BlockOp>())
             .map(|bo| (bo.op_name(), bo.clone()))
             .collect::<std::collections::HashMap<_, _>>()
@@ -1629,7 +1637,6 @@ fn partition_marked_convex<T, E>(
             let Some(&xpos) = idx_to_pos.get(&x) else {
                 continue;
             };
-
             // Sx = reachable-from-x ∩ component
             let mut sx = reach[xpos].clone();
             sx.intersect_with(&in_comp_pos);
@@ -1761,5 +1768,7 @@ fn would_violate(
 fn intersects(a: &FixedBitSet, b: &FixedBitSet) -> bool {
     let mut tmp = a.clone();
     tmp.intersect_with(b);
-    !tmp.is_empty()
+    // Note: is_empty() checks if length is 0, not if there are no bits set
+    // Use count_ones() to check if there are any set bits after intersection
+    tmp.count_ones(..) > 0
 }

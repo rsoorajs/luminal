@@ -194,6 +194,7 @@ impl CudaFunctionExt for CudaFunction {
 }
 
 /// Stored kernel parameters that persist for the lifetime of a CUDA graph.
+#[derive(Debug)]
 pub struct KernelParams {
     values: Box<[u64]>,
     ptrs: Box<[*mut c_void]>,

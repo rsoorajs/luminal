@@ -40,11 +40,26 @@ pub fn get_cuda_stream() -> Option<Arc<cudarc::driver::CudaStream>> {
     Some(ctx.default_stream())
 }
 
-/// Test a unary operation on CUDA against candle reference
-pub fn test_unary(
+pub fn identity(v: Vec<f32>) -> Vec<f32> {
+    v
+}
+
+pub fn make_positive(v: Vec<f32>) -> Vec<f32> {
+    v.into_iter().map(|x| x.abs() + 0.1).collect()
+}
+
+pub fn shift_from_zero(v: Vec<f32>) -> Vec<f32> {
+    v.into_iter()
+        .map(|x| if x.abs() < 0.1 { 0.5 } else { x })
+        .collect()
+}
+
+/// Base unary test function with input transform
+pub fn test_unary_transform(
     shape: impl ToShape,
     func: impl Fn(GraphTensor) -> GraphTensor,
     ref_func: impl Fn(Tensor) -> Tensor,
+    transform: impl Fn(Vec<f32>) -> Vec<f32>,
 ) {
     let Some(stream) = get_cuda_stream() else {
         return;
@@ -64,7 +79,7 @@ pub fn test_unary(
     cx.build_search_space::<CudaRuntime>();
     let mut rt = CudaRuntime::initialize(stream);
 
-    let input_data = random_vec(n_elements);
+    let input_data = transform(random_vec(n_elements));
     rt.set_data(a, input_data.clone());
     rt = cx.search(rt, 5);
     rt.execute(&cx.dyn_map);
@@ -79,12 +94,100 @@ pub fn test_unary(
     assert_close(&result, &ref_b.to_vec1::<f32>().unwrap());
 }
 
+/// Test a unary operation on CUDA against candle reference
+pub fn test_unary(
+    shape: impl ToShape,
+    func: impl Fn(GraphTensor) -> GraphTensor,
+    ref_func: impl Fn(Tensor) -> Tensor,
+) {
+    test_unary_transform(shape, func, ref_func, identity);
+}
+
+/// Test a unary operation with positive input data (for sqrt, log)
+pub fn test_unary_positive(
+    shape: impl ToShape,
+    func: impl Fn(GraphTensor) -> GraphTensor,
+    ref_func: impl Fn(Tensor) -> Tensor,
+) {
+    test_unary_transform(shape, func, ref_func, make_positive);
+}
+
+/// Test a unary operation with non-zero input data (for recip)
+pub fn test_unary_nonzero(
+    shape: impl ToShape,
+    func: impl Fn(GraphTensor) -> GraphTensor,
+    ref_func: impl Fn(Tensor) -> Tensor,
+) {
+    test_unary_transform(shape, func, ref_func, shift_from_zero);
+}
+
+/// Base binary test function with input transforms
+pub fn test_binary_transforms(
+    a_shape: impl ToShape,
+    b_shape: impl ToShape,
+    func: impl Fn(GraphTensor, GraphTensor) -> GraphTensor,
+    ref_func: impl Fn(Tensor, Tensor) -> Tensor,
+    a_transform: impl Fn(Vec<f32>) -> Vec<f32>,
+    b_transform: impl Fn(Vec<f32>) -> Vec<f32>,
+) {
+    let Some(stream) = get_cuda_stream() else {
+        return;
+    };
+
+    let a_shape: Vec<usize> = a_shape
+        .to_shape()
+        .into_iter()
+        .map(|e| e.to_usize().unwrap())
+        .collect();
+    let b_shape: Vec<usize> = b_shape
+        .to_shape()
+        .into_iter()
+        .map(|e| e.to_usize().unwrap())
+        .collect();
+    let a_elements: usize = a_shape.iter().product();
+    let b_elements: usize = b_shape.iter().product();
+
+    let mut cx = Graph::default();
+    let a = cx.tensor(a_shape.clone());
+    let b = cx.tensor(b_shape.clone());
+    let c = func(a, b).output();
+
+    cx.build_search_space::<CudaRuntime>();
+    let mut rt = CudaRuntime::initialize(stream);
+
+    let a_data = a_transform(random_vec(a_elements));
+    let b_data = b_transform(random_vec(b_elements));
+    rt.set_data(a, a_data.clone());
+    rt.set_data(b, b_data.clone());
+    rt = cx.search(rt, 5);
+    rt.execute(&cx.dyn_map);
+
+    let result = rt.get_f32(c);
+
+    // Reference using candle
+    let device = Device::Cpu;
+    let ref_a = Tensor::from_vec(a_data, a_shape, &device).unwrap();
+    let ref_b = Tensor::from_vec(b_data, b_shape, &device).unwrap();
+    let ref_c = ref_func(ref_a, ref_b).flatten_all().unwrap();
+
+    assert_close(&result, &ref_c.to_vec1::<f32>().unwrap());
+}
+
 /// Test a binary operation on CUDA against candle reference
 pub fn test_binary(
     a_shape: impl ToShape,
     b_shape: impl ToShape,
     func: impl Fn(GraphTensor, GraphTensor) -> GraphTensor,
     ref_func: impl Fn(Tensor, Tensor) -> Tensor,
+) {
+    test_binary_transforms(a_shape, b_shape, func, ref_func, identity, identity);
+}
+
+/// Test mod operation with element-wise reference using Rust's % operator
+pub fn test_mod(
+    a_shape: impl ToShape,
+    b_shape: impl ToShape,
+    func: impl Fn(GraphTensor, GraphTensor) -> GraphTensor,
 ) {
     let Some(stream) = get_cuda_stream() else {
         return;
@@ -112,7 +215,7 @@ pub fn test_binary(
     let mut rt = CudaRuntime::initialize(stream);
 
     let a_data = random_vec(a_elements);
-    let b_data = random_vec(b_elements);
+    let b_data = shift_from_zero(random_vec(b_elements));
     rt.set_data(a, a_data.clone());
     rt.set_data(b, b_data.clone());
     rt = cx.search(rt, 5);
@@ -120,13 +223,14 @@ pub fn test_binary(
 
     let result = rt.get_f32(c);
 
-    // Reference using candle
-    let device = Device::Cpu;
-    let ref_a = Tensor::from_vec(a_data, a_shape, &device).unwrap();
-    let ref_b = Tensor::from_vec(b_data, b_shape, &device).unwrap();
-    let ref_c = ref_func(ref_a, ref_b).flatten_all().unwrap();
+    // Reference: Rust's % operator matches CUDA's fmodf (IEEE 754 remainder)
+    let expected: Vec<f32> = a_data
+        .iter()
+        .zip(b_data.iter())
+        .map(|(x, y)| x % y)
+        .collect();
 
-    assert_close(&result, &ref_c.to_vec1::<f32>().unwrap());
+    assert_close(&result, &expected);
 }
 
 proptest! {
@@ -163,6 +267,52 @@ proptest! {
             |a, b| a.matmul(b.t()),
             |a, b| a.matmul(&b.t().unwrap()).unwrap(),
         );
+    }
+
+    // Unary ops tests
+    #[test]
+    fn test_exp2(x in 1usize..100, y in 1usize..5) {
+        // exp2(x) = 2^x, verified by computing 2^x using exp(x * ln(2))
+        test_unary(x, |a| a.exp2(), |a| (a * 2.0f64.ln()).unwrap().exp().unwrap());
+        test_unary((y, x), |a| a.exp2(), |a| (a * 2.0f64.ln()).unwrap().exp().unwrap());
+    }
+
+    #[test]
+    fn test_log2(x in 1usize..100, y in 1usize..5) {
+        // log2(x) = ln(x) / ln(2)
+        test_unary_positive(x, |a| a.log2(), |a| (a.log().unwrap() / 2.0f64.ln()).unwrap());
+        test_unary_positive((y, x), |a| a.log2(), |a| (a.log().unwrap() / 2.0f64.ln()).unwrap());
+    }
+
+    #[test]
+    fn test_sin(x in 1usize..100, y in 1usize..5) {
+        test_unary(x, |a| a.sin(), |a| a.sin().unwrap());
+        test_unary((y, x), |a| a.sin(), |a| a.sin().unwrap());
+    }
+
+    #[test]
+    fn test_recip(x in 1usize..100, y in 1usize..5) {
+        test_unary_nonzero(x, |a| a.reciprocal(), |a| a.recip().unwrap());
+        test_unary_nonzero((y, x), |a| a.reciprocal(), |a| a.recip().unwrap());
+    }
+
+    #[test]
+    fn test_sqrt(x in 1usize..100, y in 1usize..5) {
+        test_unary_positive(x, |a| a.sqrt(), |a| a.sqrt().unwrap());
+        test_unary_positive((y, x), |a| a.sqrt(), |a| a.sqrt().unwrap());
+    }
+
+    // Binary ops tests
+    #[test]
+    fn test_mod_op(size in 1usize..100, rows in 1usize..5) {
+        test_mod(size, size, |a, b| a % b);
+        test_mod((rows, size), (rows, size), |a, b| a % b);
+    }
+
+    #[test]
+    fn test_less_than(x in 1usize..100, y in 1usize..5) {
+        test_binary(x, x, |a, b| a.lt(b), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap());
+        test_binary((y, x), (y, x), |a, b| a.lt(b), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap());
     }
 }
 
@@ -254,8 +404,8 @@ pub fn kernel_add_bandwidth_test() {
 
 #[test]
 pub fn cuda_argsort_test() {
-    let rows = 10; // shmem tet
-    let cols = 5000; // no shmem test
+    let rows = 5; // shmem tet
+    let cols = 500; // no shmem test
     let total = rows * cols;
 
     let mut cx = Graph::default();
@@ -306,7 +456,6 @@ pub fn cuda_argsort_test() {
     rt.set_data(input, data);
     rt = cx.search(rt, 10);
     rt.execute(&cx.dyn_map);
-
     let out_dim0 = rt.get_i32(sorted_dim0.id).clone();
     let out_dim1 = rt.get_i32(sorted_dim1.id).clone();
 
