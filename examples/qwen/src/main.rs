@@ -1,11 +1,15 @@
+mod hf;
 mod model;
 
+use hf::prepare_hf_model;
 use luminal::prelude::*;
 use luminal_cuda::{cudarc::driver::CudaContext, runtime::CudaRuntime};
 use model::*;
 use std::{io::Write, time::Duration};
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
+
+const REPO_ID: &str = "Qwen/Qwen3-4B";
 
 // This example compiles and runs Qwen3-4B on CUDA.
 
@@ -15,21 +19,16 @@ fn main() {
     let search_graphs = 5; // the number of graphs we want to search during compilation
     let prompt = "The capital of France is";
 
-    // Set up tracing to perfetto
-    let trace_session = luminal_tracing::subscriber()
-        .perfetto("trace.pftrace")
-        .env_filter(format!(
-            "{}=trace,luminal=trace,luminal_cuda=trace",
-            env!("CARGO_PKG_NAME")
-        ))
-        .init();
-
     // Set up cuda context and stream
     let ctx = CudaContext::new(0).unwrap();
     let stream = ctx.default_stream();
 
+    // Download model if needed and prepare weights (converts to FP32)
+    let model_dir = prepare_hf_model(REPO_ID).expect("Failed to prepare model");
+    println!("Using model directory: {}", model_dir.display());
+
     // Tokenize prompt
-    let tokenizer = Tokenizer::from_file("setup/tokenizer.json").unwrap();
+    let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
     let mut sentence = tokenizer.encode(prompt, true).unwrap().get_ids().to_vec();
 
     // Allocate kv cache
@@ -49,7 +48,8 @@ fn main() {
     // Load model weights from safetensors file
     println!("Loading weights...");
     let mut runtime = CudaRuntime::initialize(stream);
-    runtime.load_safetensors(&cx, "setup/model_combined.safetensors");
+    let weights_path = model_dir.join("model_combined.safetensors");
+    runtime.load_safetensors(&cx, weights_path.to_str().unwrap());
 
     // Run search process
     println!("Compiling...");
@@ -113,12 +113,6 @@ fn main() {
             .as_secs_f64()
             * 1_000.
     );
-    runtime.print_execution_stats();
-    // Dump cuda trace to timeline
-    trace_session.stop();
-    if let Some(path) = trace_session.perfetto_path {
-        runtime.record_cuda_perfetto_trace(path);
-    }
 }
 
 #[tracing::instrument(skip_all)]
