@@ -1,20 +1,25 @@
 use crate::{egglog_utils, hlir::CustomOpHLIR, op::*, prelude::*};
-use std::{
-    any::TypeId,
-    fmt::Debug,
-    io::Write,
-    ops::{Deref, DerefMut},
-    sync::Arc,
+use crate::{
+    egglog_utils::SerializedEGraph,
+    op::{EgglogOp, IntoEgglogOp, LLIROp},
+    visualization::{ToDot, ToHtml},
 };
-
 use colored::Colorize;
-use egglog::{CommandOutput, prelude::RustSpan, var};
-use egglog_ast::span::Span;
+use egglog::{CommandOutput, ast::Span, prelude::RustSpan, var};
 use egraph_serialize::{ClassId, NodeId};
 use itertools::Itertools;
 use petgraph::{Direction, stable_graph::StableGraph, visit::EdgeRef};
 use rustc_hash::{FxHashMap, FxHashSet};
-use tracing::info;
+use std::{
+    any::TypeId,
+    fmt::Debug,
+    fs,
+    io::Write,
+    ops::{Deref, DerefMut},
+    path::Path,
+    sync::Arc,
+};
+use tracing::{self, Level, enabled, info};
 
 pub type LLIRGraph = StableGraph<LLIROp, ()>;
 pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ShapeTracker>;
@@ -431,7 +436,15 @@ fn run_egglog(
         )
         .green()
     );
-
+    if enabled!(Level::DEBUG) {
+        let log_dir = Path::new("egraph");
+        if log_dir.exists() {
+            fs::remove_dir_all(log_dir).unwrap();
+        }
+        fs::create_dir(log_dir).unwrap();
+        fs::write(log_dir.join("egraph.dot"), egraph.to_dot().unwrap()).unwrap();
+        fs::write(log_dir.join("egraph.html"), egraph.to_html().unwrap()).unwrap();
+    }
     let (sort, value) = egraph.eval_expr(&var!(root))?;
     let s = egraph.serialize(egglog::SerializeConfig {
         root_eclasses: vec![(sort, value)],
@@ -686,6 +699,14 @@ pub fn egglog_to_llir(
     limit: usize,
 ) -> Vec<LLIRGraph> {
     // Get maps for all e-classes to e-node options
+    if enabled!(Level::DEBUG) {
+        let log_dir = Path::new("llir_graphs");
+
+        if log_dir.exists() {
+            fs::remove_dir_all(log_dir).unwrap();
+        }
+        fs::create_dir(log_dir).unwrap();
+    }
     let mut choices = vec![FxHashMap::default()];
     for (eclass, (label, enodes)) in &egraph.eclasses {
         if !label.contains("IR") && !label.contains("IList") {
@@ -708,7 +729,7 @@ pub fn egglog_to_llir(
     let mut graphs = vec![];
     let mut c = FxHashMap::default();
     let mut lc = FxHashMap::default();
-    for choice in choices {
+    for (i, choice) in choices.iter().enumerate() {
         // Make reachability set from root
         let mut reachable = FxHashSet::default();
         reachable.insert(choice[&egraph.roots[0]]);
@@ -790,7 +811,35 @@ pub fn egglog_to_llir(
             }
         }
         for (src, dest) in edges_to_place {
-            graph.add_edge(enode_to_node[src], enode_to_node[dest], ());
+            let src_node_id = *enode_to_node.get(&src).unwrap_or_else(|| {
+                panic!(
+                    "Source enode {:?} not found in enode_to_node map during edge placement",
+                    src
+                )
+            });
+            let dest_node_id = *enode_to_node.get(&dest).unwrap_or_else(|| {
+                panic!(
+                    "Destination enode {:?} not found in enode_to_node map during edge placement",
+                    dest
+                )
+            });
+
+            tracing::trace!(
+                src_enode = ?src,
+                dest_enode = ?dest,
+                src_node = ?src_node_id,
+                dest_node = ?dest_node_id,
+                "Adding edge to LLIR graph"
+            );
+
+            graph.add_edge(src_node_id, dest_node_id, ());
+        }
+        if enabled!(Level::TRACE) {
+            fs::write(
+                format!("llir_graphs/llir_{}.dot", i),
+                graph.clone().to_dot().unwrap(),
+            )
+            .unwrap();
         }
 
         graphs.push(graph);
