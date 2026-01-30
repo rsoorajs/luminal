@@ -255,7 +255,7 @@ impl GraphTensor {
         let ax_size = self.dims()[axis];
         let a = self.expand_dim(axis + 1, ax_size);
         let b = self.expand_dim(axis, ax_size) + 1e-9; // eps for stable sort
-        let mut ind = if descending { a.lt(b) } else { a.gt(b) };
+        let mut ind = if descending { a.gt(b) } else { a.lt(b) };
         ind = ind.sum(axis).cast(DType::Int);
         ind.inverse_permutation(axis)
     }
@@ -267,7 +267,7 @@ impl GraphTensor {
 
     /// Sort and retrieve top-k **indexes**
     pub fn topk_indexes(self, k: usize, axis: usize) -> GraphTensor {
-        self.argsort(axis, false).slice_along(..k, axis)
+        self.argsort(axis, true).slice_along(..k, axis)
     }
 
     /// Apply a cumulative reduction operation along dimensions

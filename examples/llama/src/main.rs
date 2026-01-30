@@ -2,7 +2,7 @@ mod hf;
 mod model;
 
 use hf::prepare_hf_model;
-use luminal::prelude::*;
+use luminal::{prelude::*, visualization::display_graph};
 use luminal_cuda::{cudarc::driver::CudaContext, runtime::CudaRuntime};
 use model::*;
 use std::{env, io::Write, time::Duration};
@@ -17,7 +17,7 @@ fn main() {
     let max_seq_len = 4096;
     let gen_tokens = 10;
     let search_graphs = 5; // the number of graphs we want to search during compilation
-    let prompt = "Hello, how are you";
+    let prompt = "Hello";
 
     // Set up tracing to perfetto
     let trace_session = luminal_tracing::subscriber()
@@ -54,7 +54,7 @@ fn main() {
 
     // Build search space
     println!("Building E-Graph...");
-    cx.build_search_space::<CudaRuntime>();
+    cx.build_search_space_exclude_ops::<CudaRuntime, luminal_cuda::block::Ops>();
 
     // Load model weights from safetensors file
     println!("Loading weights...");
@@ -70,6 +70,7 @@ fn main() {
     runtime.set_data(token_ids, vec![0]);
     runtime = cx.search(runtime, search_graphs);
     kv_cache.reset();
+    display_graph(&runtime.llir_graph, None, "llir.txt");
 
     print!("{prompt}");
     std::io::stdout().flush().unwrap();

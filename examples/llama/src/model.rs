@@ -11,7 +11,7 @@ use luminal_cuda::{
 use luminal_nn::LayerNorm;
 use std::{fmt::Debug, sync::Arc};
 
-// Llama 7b hyperparams
+// Llama 3 8B hyperparams
 pub const LAYERS: usize = 32;
 pub const HIDDEN: usize = 4096;
 pub const INTERMEDIATE: usize = 14336;
