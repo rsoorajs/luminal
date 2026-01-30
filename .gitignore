@@ -2,6 +2,8 @@
 /crates/**/target
 /examples/**/target
 
+*.env
+.claude/
 .DS_Store
 *.vscode
 Cargo.lock
@@ -10,7 +12,8 @@ Cargo.lock
 *.npz
 *.model
 *.gguf
-proptest-regressions
+
+*.proptest-regressions
 *.pftrace
 *.safetensors
 *.safetensors.index.json
