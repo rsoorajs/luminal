@@ -363,7 +363,7 @@ impl Runtime for CudaRuntime {
         crate::logical::Ops,
         crate::kernel::Ops,
         crate::block::Ops,
-        crate::host::Ops,
+        // crate::host::Ops,
     );
     type CompileArg = Arc<CudaStream>;
     type ExecReturn = ();
