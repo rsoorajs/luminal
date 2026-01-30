@@ -19,3 +19,4 @@ Cargo.lock
 *.safetensors.index.json
 tokenizer.json
 **/.cache
+**/proptest-regressions
