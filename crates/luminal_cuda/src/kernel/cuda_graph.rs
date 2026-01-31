@@ -527,8 +527,8 @@ mod tests {
         let b = cx.tensor(size);
         let mut result = a + b;
         for _ in 0..5 {
-            result = result + a;
-            result = result * b;
+            result += a;
+            result *= b;
         }
         let output = result.output();
         cx.build_search_space_exclude_ops::<CudaRuntime, crate::block::Ops>();
