@@ -16,15 +16,15 @@ const REPO_ID: &str = "NousResearch/Meta-Llama-3-8B-Instruct";
 fn main() {
     let max_seq_len = 4096;
     let gen_tokens = 10;
-    let search_graphs = 5; // the number of graphs we want to search during compilation
-    let prompt = "Hello, how are you";
+    let search_graphs = 30; // the number of graphs we want to search during compilation
+    let prompt = "Hello";
 
     // Set up tracing to perfetto
     let trace_session = luminal_tracing::subscriber()
-        .perfetto("trace.pftrace")
+        // .perfetto("trace.pftrace")
         .env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| {
             format!(
-                "{}=trace,luminal=trace,luminal_cuda=trace",
+                "{}=info,luminal=info,luminal_cuda=info",
                 env!("CARGO_PKG_NAME")
             )
         }))

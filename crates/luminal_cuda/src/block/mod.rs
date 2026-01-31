@@ -17,7 +17,6 @@ use luminal::{
     },
     shape::{Expression, flatten_z_strides},
 };
-use prost::Message;
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -32,7 +31,7 @@ use tracing_perfetto_sdk_schema::{
     track_event,
 };
 
-use crate::{block::cstruct::CStruct, runtime::CudaRuntime};
+use crate::block::cstruct::CStruct;
 
 #[allow(unused_variables)]
 pub trait BlockOp: Debug + as_any::AsAny {
@@ -317,7 +316,7 @@ fn get_barrier_strides(
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub(crate) struct SMEvent {
+pub struct SMEvent {
     pub start: u64,
     pub stop: u64,
     pub event: i32,
@@ -554,6 +553,79 @@ fn hash32<T: Hash>(val: T) -> u32 {
     (hash64(val) & 0xffff_ffff) as u32
 }
 
+/// Record block op timings from megakernels to perfetto trace packets
+pub fn record_block_op_timings(
+    trace: &schema::Trace,
+    ops: &[Arc<Box<dyn BlockOp>>],
+    timings: &[Vec<(Vec<SMEvent>, u64, uuid::Uuid)>],
+) -> Vec<schema::TracePacket> {
+    let host_start_times: Vec<(u64, u32)> = timings
+        .iter()
+        .flatten()
+        .map(|(_, _, id)| {
+            trace.packet.iter().find_map(|p| match &p.data {
+                Some(trace_packet::Data::TrackEvent(TrackEvent { r#type: ty, debug_annotations, .. }))
+                    if *ty == Some(track_event::Type::SliceBegin as i32)
+                        && debug_annotations.iter().any(|a| {
+                            matches!((&a.name_field, &a.value),
+                                (Some(NameField::Name(k)), Some(tracing_perfetto_sdk_schema::debug_annotation::Value::StringValue(v)))
+                                if k == "id" && *v == format!("{id}"))
+                        }) => Some((p.timestamp?, p.timestamp_clock_id?)),
+                _ => None,
+            }).expect("Couldn't find span with correct uuid for gpu timing dump")
+        })
+        .collect();
+
+    let mut packets = Vec::new();
+    let n_ops = ops.len();
+    for ((device_timings, device_start_time, _), (host_time, host_clock_id)) in
+        timings.iter().flatten().zip(host_start_times)
+    {
+        for (sm, sm_timings) in device_timings.chunks(1000).enumerate() {
+            let mut builder = ManualTrackBuilder::new(sm as u32, host_time, host_clock_id);
+            for n_op in 0..sm_timings.len() - 1 {
+                let event = sm_timings[n_op].event as usize;
+                let op_label = if event == 0 {
+                    "Issue".to_string()
+                } else if event == 1 {
+                    "Wait".to_string()
+                } else if event >= 2 && event < 2 + n_ops {
+                    ops[event - 2].op_name().to_string()
+                } else if event >= 2 + n_ops {
+                    let prologue_event = event - 2 - n_ops;
+                    let op_idx = prologue_event / 3;
+                    let prologue_type = prologue_event % 3;
+                    if op_idx < n_ops {
+                        let suffix = match prologue_type {
+                            0 => "prologue A",
+                            1 => "prologue B",
+                            2 => "prologue C",
+                            _ => "prologue ?",
+                        };
+                        format!("{} ({})", ops[op_idx].op_name(), suffix)
+                    } else {
+                        format!("Unknown({})", event)
+                    }
+                } else {
+                    format!("Unknown({})", event)
+                };
+                if sm_timings[n_op + 1].start == 0 {
+                    break;
+                }
+                builder.push_slice(
+                    &op_label,
+                    sm_timings[n_op].start - *device_start_time,
+                    sm_timings[n_op + 1].start - *device_start_time,
+                    host_time,
+                    host_clock_id,
+                );
+            }
+            packets.extend(builder.into_packets());
+        }
+    }
+    packets
+}
+
 #[tracing::instrument(skip_all)]
 fn compile_interpreter(
     cuda_stream: &Arc<CudaStream>,
@@ -774,114 +846,6 @@ fn compile_interpreter(
         })
         .collect();
     (func, expression_map, constants)
-}
-
-impl CudaRuntime {
-    pub fn record_cuda_perfetto_trace(&self, file_path: impl AsRef<std::path::Path>) {
-        let ops = self
-            .llir_graph
-            .node_indices()
-            .filter_map(|n| self.llir_graph[n].to_dialect::<dyn BlockOp>())
-            .map(|bo| (bo.op_name(), bo.clone()))
-            .collect::<HashMap<_, _>>()
-            .into_iter()
-            .sorted_by_key(|(n, _)| *n)
-            .map(|(_, o)| o)
-            .collect_vec();
-        let data = std::fs::read(&file_path).unwrap();
-        let mut trace = tracing_perfetto_sdk_schema::Trace::decode(data.as_slice()).unwrap();
-        let host_start_times: Vec<(u64, u32)> = self
-            .timings
-            .iter()
-            .flatten()
-            .map(|(_, _, id)| {
-                trace
-                    .packet
-                    .iter()
-                    .find_map(|p| match &p.data {
-                        Some(trace_packet::Data::TrackEvent(TrackEvent {
-                            r#type: ty,
-                            debug_annotations,
-                            ..
-                        })) if *ty == Some(track_event::Type::SliceBegin as i32)
-                            && debug_annotations.iter().any(|a| {
-                                matches!(
-                                    (&a.name_field, &a.value),
-                                    (
-                                        Some(NameField::Name(k)),
-                                        Some(tracing_perfetto_sdk_schema::debug_annotation::Value::StringValue(v)),
-                                    ) if k == "id" && *v == format!("{id}")
-                                )
-                            }) =>
-                        {
-                            Some((p.timestamp?, p.timestamp_clock_id?))
-                        }
-                        _ => {
-                            None
-                        },
-                    })
-                    .expect("Couldn't find span with correct uuid for gpu timing dump")
-            })
-            .collect_vec();
-        let mut extra_packets = Vec::new();
-        let n_ops = ops.len();
-        for ((device_timings, device_start_time, _span_id), (host_time, host_clock_id)) in
-            self.timings.iter().flatten().zip(host_start_times)
-        {
-            for (sm, sm_timings) in device_timings.chunks(1000).enumerate() {
-                let mut builder = ManualTrackBuilder::new(sm as u32, host_time, host_clock_id);
-                for n_op in 0..sm_timings.len() - 1 {
-                    let event = sm_timings[n_op].event as usize;
-                    // Event encoding:
-                    // 0: Issue
-                    // 1: Wait
-                    // 2 to 2 + n_ops - 1: Main ops
-                    // 2 + n_ops + op_idx * 3 + 0: Prologue A
-                    // 2 + n_ops + op_idx * 3 + 1: Prologue B
-                    // 2 + n_ops + op_idx * 3 + 2: Prologue C
-                    let op_label = if event == 0 {
-                        "Issue".to_string()
-                    } else if event == 1 {
-                        "Wait".to_string()
-                    } else if event >= 2 && event < 2 + n_ops {
-                        ops[event - 2].op_name().to_string()
-                    } else if event >= 2 + n_ops {
-                        let prologue_event = event - 2 - n_ops;
-                        let op_idx = prologue_event / 3;
-                        let prologue_type = prologue_event % 3;
-                        if op_idx < n_ops {
-                            let suffix = match prologue_type {
-                                0 => "prologue A",
-                                1 => "prologue B",
-                                2 => "prologue C",
-                                _ => "prologue ?",
-                            };
-                            format!("{} ({})", ops[op_idx].op_name(), suffix)
-                        } else {
-                            format!("Unknown({})", event)
-                        }
-                    } else {
-                        format!("Unknown({})", event)
-                    };
-                    if sm_timings[n_op + 1].start == 0 {
-                        break;
-                    }
-                    builder.push_slice(
-                        &op_label,
-                        sm_timings[n_op].start - *device_start_time,
-                        sm_timings[n_op + 1].start - *device_start_time,
-                        host_time,
-                        host_clock_id,
-                    );
-                }
-                extra_packets.extend(builder.into_packets());
-            }
-        }
-        trace.packet.extend(extra_packets);
-        let mut buf = Vec::with_capacity(trace.encoded_len());
-        trace.encode(&mut buf).unwrap();
-        std::fs::write(file_path, buf).unwrap();
-    }
 }
 
 #[allow(clippy::type_complexity)]
