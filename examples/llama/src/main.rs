@@ -4,10 +4,12 @@ mod model;
 use hf::prepare_hf_model;
 use luminal::prelude::*;
 use luminal_cuda::{cudarc::driver::CudaContext, runtime::CudaRuntime};
+use luminal_tracing::*;
 use model::*;
-use std::{env, io::Write, time::Duration};
+use std::{io::Write, time::Duration};
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 const REPO_ID: &str = "NousResearch/Meta-Llama-3-8B-Instruct";
 
@@ -16,18 +18,15 @@ const REPO_ID: &str = "NousResearch/Meta-Llama-3-8B-Instruct";
 fn main() {
     let max_seq_len = 4096;
     let gen_tokens = 10;
-    let search_graphs = 30; // the number of graphs we want to search during compilation
+    let search_graphs = 3; // the number of graphs we want to search during compilation
     let prompt = "Hello";
 
-    // Set up tracing to perfetto
-    let trace_session = luminal_tracing::subscriber()
-        // .perfetto("trace.pftrace")
-        .env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| {
-            format!(
-                "{}=info,luminal=info,luminal_cuda=info",
-                env!("CARGO_PKG_NAME")
-            )
-        }))
+    // Tracing
+    let (perfetto_layer, perfetto_guard) = perfetto_layer("trace.pftrace");
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(luminal_filter())
+        .with(perfetto_layer)
         .init();
 
     // Set up cuda context and stream
@@ -126,11 +125,9 @@ fn main() {
             * 1_000.
     );
     runtime.print_execution_stats();
-    // Dump cuda trace to timeline
-    trace_session.stop();
-    if let Some(path) = trace_session.perfetto_path {
-        runtime.record_cuda_perfetto_trace(path);
-    }
+
+    println!("Dumping perfetto megakenel trace...");
+    runtime.record_cuda_perfetto_trace(perfetto_guard);
 }
 
 #[tracing::instrument(skip_all)]

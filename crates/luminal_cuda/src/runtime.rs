@@ -28,6 +28,7 @@ use luminal::prelude::{
     *,
 };
 
+use luminal_tracing::PerfettoGuard;
 use memmap2::MmapOptions;
 use prost::Message;
 use safetensors::SafeTensors;
@@ -1562,7 +1563,8 @@ impl CudaRuntime {
     }
 
     /// Record GPU timings to an existing perfetto trace file.
-    pub fn record_cuda_perfetto_trace(&self, file_path: impl AsRef<std::path::Path>) {
+    pub fn record_cuda_perfetto_trace(&self, perfetto_guard: PerfettoGuard) {
+        perfetto_guard.stop();
         let ops: Vec<Arc<Box<dyn BlockOp>>> = self
             .llir_graph
             .node_indices()
@@ -1573,14 +1575,14 @@ impl CudaRuntime {
             .sorted_by_key(|(n, _)| *n)
             .map(|(_, o)| o)
             .collect();
-        let data = std::fs::read(&file_path).unwrap();
+        let data = std::fs::read(&perfetto_guard.path).unwrap();
         let mut trace = tracing_perfetto_sdk_schema::Trace::decode(data.as_slice()).unwrap();
         let mut extra_packets = record_block_op_timings(&trace, &ops, &self.timings);
         extra_packets.extend(record_cuda_graph_timings(&trace, &self.cuda_graph_timings));
         trace.packet.extend(extra_packets);
         let mut buf = Vec::with_capacity(trace.encoded_len());
         trace.encode(&mut buf).unwrap();
-        std::fs::write(file_path, buf).unwrap();
+        std::fs::write(perfetto_guard.path, buf).unwrap();
     }
 }
 

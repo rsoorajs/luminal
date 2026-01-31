@@ -107,7 +107,6 @@ impl Qwen {
         }
     }
 
-    #[tracing::instrument(skip_all)]
     pub fn forward(
         &self,
         token_ids: GraphTensor,
