@@ -488,9 +488,9 @@ impl Runtime for CudaRuntime {
                     .map(|e| e.source())
                     .collect_vec();
 
-                total_bytes_loaded = total_bytes_loaded + kernel_op.bytes_loaded();
-                total_bytes_stored = total_bytes_stored + kernel_op.bytes_stored();
-                total_flops = total_flops + kernel_op.flops();
+                total_bytes_loaded += kernel_op.bytes_loaded();
+                total_bytes_stored += kernel_op.bytes_stored();
+                total_flops += kernel_op.flops();
 
                 kernel_info.push(CudaGraphKernelNode {
                     llir_node: *kernel,

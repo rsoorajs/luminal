@@ -1,3 +1,4 @@
+#![allow(clippy::missing_safety_doc, clippy::not_unsafe_ptr_arg_deref)]
 //! CUDA Graph API wrappers for explicit graph construction and surgical updates.
 
 use std::ffi::c_void;
@@ -275,7 +276,7 @@ pub fn event_elapsed_ms(
     ctx.bind_to_thread()?;
     let mut ms: f32 = 0.0;
     unsafe {
-        sys::cuEventElapsedTime(&mut ms, start, end).result()?;
+        sys::cuEventElapsedTime_v2(&mut ms, start, end).result()?;
     }
     Ok(ms)
 }

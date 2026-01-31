@@ -578,7 +578,9 @@ pub fn record_block_op_timings(
 
     let mut packets = Vec::new();
     let n_ops = ops.len();
-    for ((device_timings, device_start_time, _), (host_time, host_clock_id)) in timings.iter().flatten().zip(host_start_times) {
+    for ((device_timings, device_start_time, _), (host_time, host_clock_id)) in
+        timings.iter().flatten().zip(host_start_times)
+    {
         for (sm, sm_timings) in device_timings.chunks(1000).enumerate() {
             let mut builder = ManualTrackBuilder::new(sm as u32, host_time, host_clock_id);
             for n_op in 0..sm_timings.len() - 1 {
@@ -594,12 +596,29 @@ pub fn record_block_op_timings(
                     let op_idx = prologue_event / 3;
                     let prologue_type = prologue_event % 3;
                     if op_idx < n_ops {
-                        let suffix = match prologue_type { 0 => "prologue A", 1 => "prologue B", 2 => "prologue C", _ => "prologue ?" };
+                        let suffix = match prologue_type {
+                            0 => "prologue A",
+                            1 => "prologue B",
+                            2 => "prologue C",
+                            _ => "prologue ?",
+                        };
                         format!("{} ({})", ops[op_idx].op_name(), suffix)
-                    } else { format!("Unknown({})", event) }
-                } else { format!("Unknown({})", event) };
-                if sm_timings[n_op + 1].start == 0 { break; }
-                builder.push_slice(&op_label, sm_timings[n_op].start - *device_start_time, sm_timings[n_op + 1].start - *device_start_time, host_time, host_clock_id);
+                    } else {
+                        format!("Unknown({})", event)
+                    }
+                } else {
+                    format!("Unknown({})", event)
+                };
+                if sm_timings[n_op + 1].start == 0 {
+                    break;
+                }
+                builder.push_slice(
+                    &op_label,
+                    sm_timings[n_op].start - *device_start_time,
+                    sm_timings[n_op + 1].start - *device_start_time,
+                    host_time,
+                    host_clock_id,
+                );
             }
             packets.extend(builder.into_packets());
         }
