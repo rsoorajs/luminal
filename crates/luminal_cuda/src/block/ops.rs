@@ -49,8 +49,8 @@ impl EgglogOp for RowAdd {
                 (= (MNum 1) (nth_from_end ?a_stride 0))
                 (= (MNum 1) (nth_from_end ?b_stride 0))
                 (= (MNum 1) (nth_from_end ?out_stride 0))
-                (= (F32) (dtype ?a))
-                (= (F32) (dtype ?b))
+                ;(= (F32) (dtype ?a))
+                ;(= (F32) (dtype ?b))
             )
             (
                 (let ?new_shape (RemoveNthFromEnd ?shape 0))
@@ -203,8 +203,8 @@ impl EgglogOp for RowSwishMul {
                     (ECons ?width (ECons (MNum 1) (ENil)))
                     (ECons ?width (ECons (MNum 1) (ENil)))
                 ))
-                (= (F32) (dtype ?self))
-                (= (F32) (dtype ?other))
+                ;(= (F32) (dtype ?self))
+                ;(= (F32) (dtype ?other))
             )
             (
                 (let ?rsm (RowSwishMul
@@ -426,7 +426,7 @@ impl EgglogOp for RowRMSNorm {
                         ?inp_stride
                     )
                 )
-                (= (F32) (dtype ?x))
+               ;(= (F32) (dtype ?x))
             )
             (
                 (let ?new
@@ -684,7 +684,7 @@ impl EgglogOp for RowRope {
                      ?inp
                      (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
                      ?inp_strides))
-                (= (F32) (dtype ?inp))
+                ;(= (F32) (dtype ?inp))
 
                 ;; -----------------------------
                 ;; cos(emb) = sin(-emb + pi/2), sin(emb)
@@ -1024,7 +1024,7 @@ impl EgglogOp for TileMatmulSplitK {
                 ; Assert B has contiguous k (col-major B / transposed)
                 (= ?b_k_stride (MNum 1))
 
-                (= (F32) (dtype ?a))
+                ;(= (F32) (dtype ?a))
             )
             (
                 ; Create tiled shape with K chunks
@@ -1418,8 +1418,8 @@ impl EgglogOp for TileMatmulFullSplit {
                 ; Assert B has contiguous k (col-major B / transposed)
                 (= ?b_k_stride (MNum 1))
 
-                (= (F32) (dtype ?a))
-                (= (F32) (dtype ?b))
+                ;(= (F32) (dtype ?a))
+                ;(= (F32) (dtype ?b))
             )
             (
                 ; Compute tiled dimensions

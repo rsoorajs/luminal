@@ -94,10 +94,10 @@ impl Llama {
         pos_ids: GraphTensor,
         kv_cache: &KVCache,
     ) -> GraphTensor {
-        let batch = token_ids.dims1();
+        let seq = token_ids.dims1();
         let mut x = self.embedding.gather(
             (token_ids * HIDDEN).expand_dim(1, HIDDEN)
-                + token_ids.graph().arange(HIDDEN).expand_dim(0, batch),
+                + token_ids.graph().arange(HIDDEN).expand_dim(0, seq),
         );
         for (layer, (k_cache, v_cache)) in self.layers.iter().zip(&kv_cache.layers) {
             x = layer.forward(

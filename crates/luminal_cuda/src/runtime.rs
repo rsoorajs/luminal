@@ -1,34 +1,37 @@
 use crate::{
-    block::{BlockOp, SMEvent, TaskQueue, make_megakernel_from_llir_graph},
+    block::{
+        BlockOp, SMEvent, TaskQueue, make_megakernel_from_llir_graph, record_block_op_timings,
+    },
     host::HostOp,
-    kernel::KernelOp,
+    kernel::{
+        CudaFunctionExt, CudaGraphExecHandle, CudaGraphHandle, CudaGraphKernelTiming,
+        CudaGraphTiming, KernelOp, KernelParams, create_cuda_event, destroy_cuda_event,
+        event_elapsed_ms, record_cuda_graph_timings, record_event_on_stream,
+    },
 };
 use cudarc::driver::{
     CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
-    sys::{CUdevice_attribute, CUfunction_attribute, CUgraphNode},
+    sys::CUgraphNode,
 };
 
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
 use luminal::hlir::*;
-use luminal::{
-    prelude::{
-        petgraph::{
-            Directed, Direction,
-            algo::{Cycle, toposort},
-            prelude::StableGraph,
-            visit::{EdgeRef, NodeIndexable},
-        },
-        *,
+use luminal::prelude::{
+    petgraph::{
+        Directed, Direction,
+        algo::{Cycle, toposort},
+        prelude::StableGraph,
+        visit::{EdgeRef, NodeIndexable},
     },
-    visualization::display_graph,
+    *,
 };
 
 use memmap2::MmapOptions;
 use prost::Message;
 use safetensors::SafeTensors;
 use std::{collections::VecDeque, fmt::Debug, fs::File, mem::size_of, sync::Arc, time::Duration};
-use tracing::{Level, field, span, trace};
+use tracing::{Level, enabled, field, span, trace};
 use uuid::Uuid;
 
 pub enum CudaInput {
@@ -145,7 +148,7 @@ impl Debug for ExecutableKernel {
             Self::CudaGraphExec { kernel_info, .. } => {
                 write!(f, "CudaGraph ({})", kernel_info.len())
             }
-            Self::HostOp { internal, .. } => write!(f, "HostOp: ({:?})", internal),
+            Self::HostOp { internal, .. } => write!(f, "HostOp: ({internal:?})"),
         }
     }
 }
@@ -389,7 +392,7 @@ impl Runtime for CudaRuntime {
         crate::logical::Ops,
         crate::kernel::Ops,
         crate::block::Ops,
-        // crate::host::Ops,
+        crate::host::Ops,
     );
     type CompileArg = Arc<CudaStream>;
     type ExecReturn = ();
@@ -578,7 +581,6 @@ impl Runtime for CudaRuntime {
                 .insert(NodeIndex::new(hlir_node), llir_node);
             self.changed_hlir.insert(NodeIndex::new(hlir_node));
         }
-        // display_graph(&self.exec_graph, None, "exec.txt");
     }
 
     #[tracing::instrument(skip_all)]
@@ -769,7 +771,8 @@ impl Runtime for CudaRuntime {
                         unsafe { lb.launch(cfg) }.unwrap();
                         self.cuda_stream.synchronize().unwrap();
                     }
-                    {
+                    if enabled!(Level::TRACE) {
+                        // TODO: this is very slow, especially when we have many megakernels in a run. Lets only do this when tracing
                         let _span = span!(Level::INFO, "mk_timings").entered();
                         timings.push((
                             self.cuda_stream.clone_dtoh(&timing_buffer).unwrap(),
@@ -803,6 +806,7 @@ impl Runtime for CudaRuntime {
                     let _span =
                         span!(Level::INFO, "host_op_execute", n_inputs = inputs.len()).entered();
                     internal.execute(stream, &host_op_buffers, dyn_map).unwrap();
+                }
                 ExecutableKernel::CudaGraphExec {
                     cuda_graph,
                     cuda_graph_exec,

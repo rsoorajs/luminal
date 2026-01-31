@@ -156,15 +156,8 @@ impl Graph {
         let mut ops = Rt::Ops::into_vec();
         ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
         let (program, root) = hlir_to_egglog(self);
-        self.egraph = Some(
-            run_egglog(
-                &program,
-                &root,
-                &ops,
-                TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>(), // need to ignore hlir op cleanups if we're on native runtime
-            )
-            .unwrap(),
-        );
+        let cleanup_hlir = TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>(); // need to ignore hlir op cleanups if we're on native runtime
+        self.egraph = Some(run_egglog(&program, &root, &ops, cleanup_hlir).unwrap());
         self.ops = Some(ops);
     }
 
@@ -178,15 +171,8 @@ impl Graph {
         ops.retain(|o| !exclude_ops.contains(&o.term().0));
         ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
         let (program, root) = hlir_to_egglog(self);
-        self.egraph = Some(
-            run_egglog(
-                &program,
-                &root,
-                &ops,
-                TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>(), // need to ignore hlir op cleanups if we're on native runtime
-            )
-            .unwrap(),
-        );
+        let cleanup_hlir = TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>(); // need to ignore hlir op cleanups if we're on native runtime
+        self.egraph = Some(run_egglog(&program, &root, &ops, cleanup_hlir).unwrap());
         self.ops = Some(ops);
     }
 
