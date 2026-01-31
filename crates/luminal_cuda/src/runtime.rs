@@ -1,6 +1,7 @@
 use crate::{
     block::{
-        BlockOp, SMEvent, TaskQueue, make_megakernel_from_llir_graph, record_block_op_timings,
+        BlockOp, N_TIMING_SLOTS, SMEvent, TaskQueue, make_megakernel_from_llir_graph,
+        record_block_op_timings,
     },
     host::HostOp,
     kernel::{
@@ -711,10 +712,10 @@ impl Runtime for CudaRuntime {
                     let d_head = self.cuda_stream.clone_htod(&[0i32]).unwrap();
                     let queue_lock = self.cuda_stream.clone_htod(&[0i32]).unwrap();
                     // Set up timing buffer storing (start_u64, stop_u64, event_i32) tuples
-                    // for up to 1000 events per SM
+                    // for up to N_TIMING_SLOTS events per SM
                     let timing_buffer = self
                         .cuda_stream
-                        .alloc_zeros::<SMEvent>(sm_count as usize * 1000)
+                        .alloc_zeros::<SMEvent>(sm_count as usize * N_TIMING_SLOTS)
                         .unwrap();
                     let start_time = self
                         .cuda_stream
@@ -1147,7 +1148,7 @@ impl CudaRuntime {
         let mut wait_count: usize = 0;
 
         for (sm_timings, _start_time, _) in timings {
-            for sm_chunk in sm_timings.chunks(1000) {
+            for sm_chunk in sm_timings.chunks(N_TIMING_SLOTS) {
                 for event in sm_chunk.iter() {
                     if event.start == 0 {
                         break; // No more events recorded for this SM

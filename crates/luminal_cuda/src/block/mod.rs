@@ -33,6 +33,8 @@ use tracing_perfetto_sdk_schema::{
 
 use crate::block::cstruct::CStruct;
 
+pub const N_TIMING_SLOTS: usize = 1000;
+
 #[allow(unused_variables)]
 pub trait BlockOp: Debug + as_any::AsAny {
     fn op_name(&self) -> &'static str;
@@ -650,6 +652,10 @@ fn compile_interpreter(
     kernel = kernel.replace(
         "const int N_OPS = 0;",
         &format!("const int N_OPS = {};", n_ops),
+    );
+    kernel = kernel.replace(
+        "const int N_TIMING_SLOTS = 0;",
+        &format!("const int N_TIMING_SLOTS = {N_TIMING_SLOTS};"),
     );
     kernel = kernel.replace(
         "//%extra_op_codes%",
