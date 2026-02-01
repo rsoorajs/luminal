@@ -14,7 +14,7 @@ const REPO_ID: &str = "unsloth/gemma-3-4b-it";
 
 fn main() {
     let max_seq_len = 4096;
-    let gen_tokens = 30;
+    let gen_tokens = 100;
     let search_graphs = 5; // the number of graphs we want to search during compilation
     let prompt = "Explain what a neural network is in simple terms:";
 
