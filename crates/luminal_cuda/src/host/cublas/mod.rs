@@ -161,7 +161,7 @@ impl HostOp for CuBlasSgemmV2 {
             m * n * 4
         );
 
-        let _sgemm_span: span::EnteredSpan = span!(
+        let _sgemm_span = span!(
             Level::INFO,
             "cuBLAS_SGEMM_V2",
             m,

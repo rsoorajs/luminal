@@ -244,6 +244,10 @@ pub struct CudaGraphTiming {
     pub kernel_timings: Vec<CudaGraphKernelTiming>,
     /// Time from launch call until first kernel started on GPU
     pub launch_latency_ns: u64,
+    /// Elapsed time (in nanoseconds) from span entry to just before graph launch.
+    /// This captures the setup overhead (constants, buffers, graph building) that
+    /// occurs before the GPU actually starts executing.
+    pub setup_duration_ns: u64,
 }
 
 pub fn create_cuda_event(ctx: &Arc<CudaContext>) -> Result<CUevent, DriverError> {

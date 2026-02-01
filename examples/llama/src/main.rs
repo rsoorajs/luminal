@@ -17,9 +17,9 @@ const REPO_ID: &str = "NousResearch/Meta-Llama-3-8B-Instruct";
 
 fn main() {
     let max_seq_len = 4096;
-    let gen_tokens = 10;
-    let search_graphs = 10; // the number of graphs we want to search during compilation
-    let prompt = "Hello";
+    let gen_tokens = 1;
+    let search_graphs = 5; // the number of graphs we want to search during compilation
+    let prompt = "Hello, how are you";
 
     // Tracing
     let (perfetto_layer, perfetto_guard) = perfetto_layer("trace.pftrace");
@@ -40,6 +40,7 @@ fn main() {
     // Tokenize prompt
     let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
     let mut sentence = tokenizer.encode(prompt, true).unwrap().get_ids().to_vec();
+    sentence = [vec![0; 128 - sentence.len()], sentence].concat();
 
     // Allocate kv cache
     let mut kv_cache = KVCache::new(&stream, max_seq_len);

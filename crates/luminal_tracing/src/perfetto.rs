@@ -1,21 +1,3 @@
-//! Luminal tracing infrastructure.
-//!
-//! This crate provides a composable Perfetto tracing layer that integrates
-//! with the `tracing-subscriber` ecosystem.
-//!
-//! # Example
-//!
-//! ```rust,ignore
-//! use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-//!
-//! let (perfetto, guard) = luminal_tracing::perfetto_layer("trace.pftrace");
-//!
-//! tracing_subscriber::registry()
-//!     .with(tracing_subscriber::fmt::layer())  // Console output
-//!     .with(perfetto)                          // Perfetto trace file
-//!     .init();
-//!
-
 use std::{
     fs::File,
     path::{Path, PathBuf},
@@ -146,7 +128,7 @@ impl PerfettoGuard {
 fn default_perfetto_config() -> TraceConfig {
     TraceConfig {
         buffers: vec![BufferConfig {
-            size_kb: Some(32_000),
+            size_kb: Some(256_000), // 256 MB
             ..Default::default()
         }],
         data_sources: vec![DataSource {

@@ -393,7 +393,7 @@ impl Runtime for CudaRuntime {
     type Ops = (
         crate::logical::Ops,
         crate::kernel::Ops,
-        crate::block::Ops,
+        // crate::block::Ops,
         crate::host::Ops,
     );
     type CompileArg = Arc<CudaStream>;
@@ -611,8 +611,6 @@ impl Runtime for CudaRuntime {
             &self.last_dyn_map,
             sm_count,
         );
-        self.timings.clear();
-        self.cuda_graph_timings.clear();
 
         let total_bytes: usize = self
             .last_kernel_stats
@@ -833,6 +831,8 @@ impl Runtime for CudaRuntime {
                     );
                     span.record("id", graph_span_id.to_string().as_str());
                     let _entered = span.enter();
+                    // Capture span entry time to measure setup overhead
+                    let span_entry_instant = std::time::Instant::now();
 
                     // Update module constants with current dyn dim values
                     for constants in module_constants.iter_mut() {
@@ -990,6 +990,8 @@ impl Runtime for CudaRuntime {
                         create_cuda_event(ctx).expect("Failed to create pre-launch event");
                     record_event_on_stream(ctx, pre_launch_event, &self.cuda_stream)
                         .expect("Failed to record pre-launch event");
+                    // Measure elapsed time from span entry to launch for accurate timeline positioning
+                    let setup_duration_ns = span_entry_instant.elapsed().as_nanos() as u64;
                     cuda_graph_exec
                         .as_ref()
                         .unwrap()
@@ -1024,6 +1026,7 @@ impl Runtime for CudaRuntime {
                         CudaGraphTiming {
                             kernel_timings: kernel_timings.clone(),
                             launch_latency_ns,
+                            setup_duration_ns,
                         },
                         graph_span_id,
                     ));
@@ -1580,6 +1583,8 @@ impl CudaRuntime {
         let mut extra_packets = record_block_op_timings(&trace, &ops, &self.timings);
         extra_packets.extend(record_cuda_graph_timings(&trace, &self.cuda_graph_timings));
         trace.packet.extend(extra_packets);
+        // Sort ALL packets by timestamp for proper Perfetto visualization
+        trace.packet.sort_by_key(|p| p.timestamp.unwrap_or(0));
         let mut buf = Vec::with_capacity(trace.encoded_len());
         trace.encode(&mut buf).unwrap();
         std::fs::write(perfetto_guard.path, buf).unwrap();
