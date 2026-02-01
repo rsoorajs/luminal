@@ -20,7 +20,8 @@ pub type Ops = (hlir::Ops, other_ops::Ops);
 /// Build a mapping from interned string IDs to their string values for a given sequence.
 fn build_interned_strings(trace: &schema::Trace) -> std::collections::HashMap<(u32, u64), String> {
     use tracing_perfetto_sdk_schema::trace_packet;
-    let mut interned: std::collections::HashMap<(u32, u64), String> = std::collections::HashMap::new();
+    let mut interned: std::collections::HashMap<(u32, u64), String> =
+        std::collections::HashMap::new();
     for packet in &trace.packet {
         let seq_id = match &packet.optional_trusted_packet_sequence_id {
             Some(trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(seq)) => {
@@ -49,9 +50,10 @@ fn annotation_matches_id(
 ) -> bool {
     let key_matches = match &a.name_field {
         Some(NameField::Name(k)) => k == "id",
-        Some(NameField::NameIid(iid)) => {
-            interned.get(&(seq_id, *iid)).map(|s| s == "id").unwrap_or(false)
-        }
+        Some(NameField::NameIid(iid)) => interned
+            .get(&(seq_id, *iid))
+            .map(|s| s == "id")
+            .unwrap_or(false),
         None => false,
     };
     if !key_matches {
@@ -70,7 +72,7 @@ pub fn record_cuda_graph_timings(
     trace: &schema::Trace,
     cuda_graph_timings: &[(CudaGraphTiming, Uuid)],
 ) -> Vec<schema::TracePacket> {
-    use tracing_perfetto_sdk_schema::trace_packet;
+    use tracing_perfetto_sdk_schema::{trace_packet, track_descriptor};
 
     // Build interned string lookup table
     let interned = build_interned_strings(trace);
@@ -95,12 +97,7 @@ pub fn record_cuda_graph_timings(
                         .iter()
                         .any(|a| annotation_matches_id(a, id, &interned, seq_id)) =>
                 {
-                    Some((
-                        p.timestamp?,
-                        p.timestamp_clock_id?,
-                        (*track_uuid)?,
-                        seq_id,
-                    ))
+                    Some((p.timestamp?, p.timestamp_clock_id?, (*track_uuid)?, seq_id))
                 }
                 _ => None,
             }

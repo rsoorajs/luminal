@@ -7,7 +7,7 @@ use crate::{
     kernel::{
         CudaFunctionExt, CudaGraphExecHandle, CudaGraphHandle, CudaGraphKernelTiming,
         CudaGraphTiming, KernelOp, KernelParams, create_cuda_event, destroy_cuda_event,
-        event_elapsed_ms, record_cuda_graph_timings, record_event_on_stream,
+        event_elapsed_ms, record_cuda_graph_timings,
     },
 };
 use cudarc::driver::{
@@ -806,6 +806,7 @@ impl Runtime for CudaRuntime {
                     let _span =
                         span!(Level::INFO, "host_op_execute", n_inputs = inputs.len()).entered();
                     internal.execute(stream, &host_op_buffers, dyn_map).unwrap();
+                    self.cuda_stream.synchronize().unwrap();
                 }
                 ExecutableKernel::CudaGraphExec {
                     cuda_graph,
@@ -833,6 +834,10 @@ impl Runtime for CudaRuntime {
                     let _entered = span.enter();
                     // Capture span entry time to measure setup overhead
                     let span_entry_instant = std::time::Instant::now();
+
+                    self.cuda_stream.synchronize().expect("Failed to pre-sync");
+
+                    let setup_span = span!(Level::INFO, "cg_setup").entered();
 
                     // Update module constants with current dyn dim values
                     for constants in module_constants.iter_mut() {
@@ -984,12 +989,11 @@ impl Runtime for CudaRuntime {
                         }
                         *last_dyn_values = dyn_map.clone();
                     }
+                    self.cuda_stream.synchronize().unwrap();
+                    drop(setup_span);
 
                     let ctx = self.cuda_stream.context();
-                    let pre_launch_event =
-                        create_cuda_event(ctx).expect("Failed to create pre-launch event");
-                    record_event_on_stream(ctx, pre_launch_event, &self.cuda_stream)
-                        .expect("Failed to record pre-launch event");
+
                     // Measure elapsed time from span entry to launch for accurate timeline positioning
                     let setup_duration_ns = span_entry_instant.elapsed().as_nanos() as u64;
                     cuda_graph_exec
@@ -997,15 +1001,11 @@ impl Runtime for CudaRuntime {
                         .unwrap()
                         .launch(&self.cuda_stream)
                         .expect("Failed to launch CUDA graph");
-                    self.cuda_stream.synchronize().expect("Failed to sync");
+                    self.cuda_stream.synchronize().unwrap();
+                    let _teardown_span = span!(Level::INFO, "cg_teardown").entered();
 
-                    let launch_latency_ns = if !timing_events.is_empty() {
-                        (event_elapsed_ms(ctx, pre_launch_event, timing_events[0]).unwrap_or(0.0)
-                            * 1_000_000.0) as u64
-                    } else {
-                        0
-                    };
-                    destroy_cuda_event(ctx, pre_launch_event);
+                    // With pre-sync, launch latency should be minimal
+                    let launch_latency_ns: u64 = 0;
 
                     let mut kernel_timings = Vec::with_capacity(kernel_info.len());
                     let mut cumulative_ns: u64 = 0;
