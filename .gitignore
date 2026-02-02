@@ -3,7 +3,7 @@
 /examples/**/target
 
 *.env
-*.claude
+.claude/
 .DS_Store
 *.vscode
 Cargo.lock
