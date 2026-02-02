@@ -557,7 +557,8 @@ fn hash32<T: Hash>(val: T) -> u32 {
 
 /// Build a mapping from interned string IDs to their string values for a given sequence.
 fn build_interned_strings(trace: &schema::Trace) -> std::collections::HashMap<(u32, u64), String> {
-    let mut interned: std::collections::HashMap<(u32, u64), String> = std::collections::HashMap::new();
+    let mut interned: std::collections::HashMap<(u32, u64), String> =
+        std::collections::HashMap::new();
     for packet in &trace.packet {
         let seq_id = match &packet.optional_trusted_packet_sequence_id {
             Some(trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(seq)) => {
@@ -586,9 +587,10 @@ fn annotation_matches_id(
 ) -> bool {
     let key_matches = match &a.name_field {
         Some(NameField::Name(k)) => k == "id",
-        Some(NameField::NameIid(iid)) => {
-            interned.get(&(seq_id, *iid)).map(|s| s == "id").unwrap_or(false)
-        }
+        Some(NameField::NameIid(iid)) => interned
+            .get(&(seq_id, *iid))
+            .map(|s| s == "id")
+            .unwrap_or(false),
         None => false,
     };
     if !key_matches {

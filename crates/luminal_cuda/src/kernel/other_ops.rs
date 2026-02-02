@@ -105,7 +105,11 @@ impl KernelOp for KernelMeanReduce {
         let n_outputs: Expression = self.out_shape.iter().copied().product();
         let threads_per_block = 256; // 8 warps per block
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
 
         let kernel = format!(
             "

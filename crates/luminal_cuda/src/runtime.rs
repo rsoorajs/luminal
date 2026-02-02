@@ -58,6 +58,25 @@ struct CudaGraphKernelNode {
     flops: Expression,
 }
 
+struct CudaGraphExecData {
+    cuda_graph: Option<CudaGraphHandle>,
+    cuda_graph_exec: Option<CudaGraphExecHandle>,
+    node_to_graph_node: FxHashMap<NodeIndex, CUgraphNode>,
+    kernel_params: Vec<KernelParams>,
+    kernel_info: Vec<CudaGraphKernelNode>,
+    /// Shared device buffer for dynamic dimensions (all kernels read from this)
+    dyn_dims_buffer: Option<CudaSlice<i32>>,
+    /// Order of dynamic dimensions in the buffer (sorted alphabetically)
+    dyn_dims_order: Vec<char>,
+    last_dyn_values: FxHashMap<char, usize>,
+    last_buffer_ptrs: FxHashMap<NodeIndex, u64>,
+    timing_events: Vec<cudarc::driver::sys::CUevent>,
+    // Profiling
+    total_bytes_loaded: Expression,
+    total_bytes_stored: Expression,
+    total_flops: Expression,
+}
+
 enum ExecutableKernel {
     Megakernel {
         interpreter: CudaFunction,
@@ -66,24 +85,7 @@ enum ExecutableKernel {
         work_queue: TaskQueue,
         node_to_task_index: FxHashMap<NodeIndex, usize>,
     },
-    CudaGraphExec {
-        cuda_graph: Option<CudaGraphHandle>,
-        cuda_graph_exec: Option<CudaGraphExecHandle>,
-        node_to_graph_node: FxHashMap<NodeIndex, CUgraphNode>,
-        kernel_params: Vec<KernelParams>,
-        kernel_info: Vec<CudaGraphKernelNode>,
-        /// Shared device buffer for dynamic dimensions (all kernels read from this)
-        dyn_dims_buffer: Option<CudaSlice<i32>>,
-        /// Order of dynamic dimensions in the buffer (sorted alphabetically)
-        dyn_dims_order: Vec<char>,
-        last_dyn_values: FxHashMap<char, usize>,
-        last_buffer_ptrs: FxHashMap<NodeIndex, u64>,
-        timing_events: Vec<cudarc::driver::sys::CUevent>,
-        // Profiling
-        total_bytes_loaded: Expression,
-        total_bytes_stored: Expression,
-        total_flops: Expression,
-    },
+    CudaGraphExec(Box<CudaGraphExecData>),
     HostOp {
         stream: Arc<CudaStream>,
         inputs: Vec<NodeIndex>,
@@ -129,19 +131,14 @@ impl Drop for ExecutableKernel {
                     std::mem::forget(v);
                 }
             }
-            ExecutableKernel::CudaGraphExec {
-                timing_events,
-                cuda_graph_exec,
-                dyn_dims_buffer,
-                ..
-            } => {
+            ExecutableKernel::CudaGraphExec(data) => {
                 // Prevent Drop of dyn_dims_buffer (it's managed by the runtime's allocator)
-                if let Some(buf) = dyn_dims_buffer.take() {
+                if let Some(buf) = data.dyn_dims_buffer.take() {
                     std::mem::forget(buf);
                 }
                 // Destroy timing events using the context from CudaGraphExecHandle
-                if let Some(exec) = cuda_graph_exec.as_ref() {
-                    for event in timing_events.drain(..) {
+                if let Some(exec) = data.cuda_graph_exec.as_ref() {
+                    for event in data.timing_events.drain(..) {
                         destroy_cuda_event(&exec.ctx, event);
                     }
                 }
@@ -156,8 +153,8 @@ impl Debug for ExecutableKernel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Megakernel { work_queue, .. } => write!(f, "Megakernel ({})", work_queue.len()),
-            Self::CudaGraphExec { kernel_info, .. } => {
-                write!(f, "CudaGraph ({})", kernel_info.len())
+            Self::CudaGraphExec(data) => {
+                write!(f, "CudaGraph ({})", data.kernel_info.len())
             }
             Self::HostOp { internal, .. } => write!(f, "HostOp: ({internal:?})"),
         }
@@ -426,20 +423,20 @@ impl CudaRuntime {
         // 3. Build all CUDA graphs
         let tracing_enabled = enabled!(Level::TRACE);
         for exec_node in toposort(&self.exec_graph, None).unwrap() {
-            if let ExecutableKernel::CudaGraphExec {
-                cuda_graph,
-                cuda_graph_exec,
-                node_to_graph_node,
-                kernel_params,
-                kernel_info,
-                dyn_dims_buffer,
-                dyn_dims_order,
-                last_dyn_values,
-                last_buffer_ptrs,
-                timing_events,
-                ..
-            } = &mut self.exec_graph[exec_node]
-            {
+            if let ExecutableKernel::CudaGraphExec(data) = &mut self.exec_graph[exec_node] {
+                let CudaGraphExecData {
+                    cuda_graph,
+                    cuda_graph_exec,
+                    node_to_graph_node,
+                    kernel_params,
+                    kernel_info,
+                    dyn_dims_buffer,
+                    dyn_dims_order,
+                    last_dyn_values,
+                    last_buffer_ptrs,
+                    timing_events,
+                    ..
+                } = &mut **data;
                 // Skip if already built
                 if cuda_graph.is_some() {
                     continue;
@@ -589,12 +586,10 @@ impl CudaRuntime {
                     prev_graph_node = Some(graph_node);
                 }
 
-                if tracing_enabled {
-                    if let Some(prev) = prev_graph_node {
-                        new_graph
-                            .add_event_record_node(&[prev], timing_events[kernel_info.len()])
-                            .expect("Failed to add final event node");
-                    }
+                if tracing_enabled && let Some(prev) = prev_graph_node {
+                    new_graph
+                        .add_event_record_node(&[prev], timing_events[kernel_info.len()])
+                        .expect("Failed to add final event node");
                 }
 
                 let new_exec = new_graph
@@ -834,21 +829,23 @@ impl Runtime for CudaRuntime {
                 let mut dyn_dims_order: Vec<char> = all_dyn_dims.into_iter().collect();
                 dyn_dims_order.sort();
 
-                let exec_node = exec_graph.add_node(ExecutableKernel::CudaGraphExec {
-                    cuda_graph: None,
-                    cuda_graph_exec: None,
-                    node_to_graph_node: FxHashMap::default(),
-                    kernel_params: Vec::new(),
-                    kernel_info,
-                    dyn_dims_buffer: None,
-                    dyn_dims_order,
-                    last_dyn_values: FxHashMap::default(),
-                    last_buffer_ptrs: FxHashMap::default(),
-                    timing_events: Vec::new(),
-                    total_bytes_loaded,
-                    total_bytes_stored,
-                    total_flops,
-                });
+                let exec_node = exec_graph.add_node(ExecutableKernel::CudaGraphExec(Box::new(
+                    CudaGraphExecData {
+                        cuda_graph: None,
+                        cuda_graph_exec: None,
+                        node_to_graph_node: FxHashMap::default(),
+                        kernel_params: Vec::new(),
+                        kernel_info,
+                        dyn_dims_buffer: None,
+                        dyn_dims_order,
+                        last_dyn_values: FxHashMap::default(),
+                        last_buffer_ptrs: FxHashMap::default(),
+                        timing_events: Vec::new(),
+                        total_bytes_loaded,
+                        total_bytes_stored,
+                        total_flops,
+                    },
+                )));
 
                 for node in subgraph {
                     node_to_exec.insert(node, exec_node);
@@ -1147,21 +1144,22 @@ impl Runtime for CudaRuntime {
                     internal.execute(stream, &host_op_buffers, dyn_map).unwrap();
                     self.cuda_stream.synchronize().unwrap();
                 }
-                ExecutableKernel::CudaGraphExec {
-                    cuda_graph,
-                    cuda_graph_exec,
-                    node_to_graph_node,
-                    kernel_params,
-                    kernel_info,
-                    dyn_dims_buffer,
-                    dyn_dims_order,
-                    last_dyn_values,
-                    last_buffer_ptrs,
-                    timing_events,
-                    total_bytes_loaded,
-                    total_bytes_stored,
-                    total_flops,
-                } => {
+                ExecutableKernel::CudaGraphExec(data) => {
+                    let CudaGraphExecData {
+                        cuda_graph,
+                        cuda_graph_exec,
+                        node_to_graph_node,
+                        kernel_params,
+                        kernel_info,
+                        dyn_dims_buffer,
+                        dyn_dims_order,
+                        last_dyn_values,
+                        last_buffer_ptrs,
+                        timing_events,
+                        total_bytes_loaded,
+                        total_bytes_stored,
+                        total_flops,
+                    } = &mut **data;
                     // Generate a unique ID for this graph execution (for perfetto correlation)
                     let graph_span_id = Uuid::new_v4();
                     let span = span!(
@@ -1375,15 +1373,10 @@ impl Runtime for CudaRuntime {
                         }
 
                         // Add final timing event if tracing
-                        if tracing_enabled {
-                            if let Some(prev) = prev_graph_node {
-                                new_graph
-                                    .add_event_record_node(
-                                        &[prev],
-                                        timing_events[kernel_info.len()],
-                                    )
-                                    .expect("Failed to add final event node");
-                            }
+                        if tracing_enabled && let Some(prev) = prev_graph_node {
+                            new_graph
+                                .add_event_record_node(&[prev], timing_events[kernel_info.len()])
+                                .expect("Failed to add final event node");
                         }
 
                         let new_exec = new_graph

@@ -119,7 +119,11 @@ impl KernelOp for KernelMaxReduce {
         let n_outputs: Expression = self.out_shape.iter().copied().product();
         let threads_per_block = 256; // 8 warps per block
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
 
         let kernel = format!(
             "
@@ -306,7 +310,11 @@ impl KernelOp for KernelSumReduce {
         let dtype = cuda_dtype(self.dtype);
         let n_outputs: Expression = self.out_shape.iter().copied().product();
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
 
         let kernel = format!(
             "
@@ -461,7 +469,11 @@ impl KernelOp for KernelAdd {
         let b_dtype = cuda_dtype(self.b_dtype);
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
         // Add dyn_dims parameter if we have dynamic dimensions
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
         let kernel = format!(
             "
 {dyn_defines}
@@ -602,7 +614,11 @@ impl KernelOp for KernelMul {
         let dtype = cuda_dtype(self.dtype);
         let b_dtype = cuda_dtype(self.b_dtype);
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
         let kernel = format!(
             "
 {dyn_defines}
@@ -744,7 +760,11 @@ impl KernelOp for KernelGather {
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
         let kernel = format!(
             "
 {dyn_defines}
@@ -867,7 +887,11 @@ impl KernelOp for KernelIota {
     ) {
         let vars = self.expr.dyn_vars().into_iter().collect::<FxHashSet<_>>();
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
         let kernel = format!(
             "
 {dyn_defines}
@@ -1004,7 +1028,11 @@ impl KernelOp for KernelExp2 {
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
         let kernel = format!(
             "
 {dyn_defines}
@@ -1139,7 +1167,11 @@ impl KernelOp for KernelLog2 {
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
         let kernel = format!(
             "
 {dyn_defines}
@@ -1274,7 +1306,11 @@ impl KernelOp for KernelSin {
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
         let kernel = format!(
             "
 {dyn_defines}
@@ -1409,7 +1445,11 @@ impl KernelOp for KernelRecip {
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
         let kernel = format!(
             "
 {dyn_defines}
@@ -1544,7 +1584,11 @@ impl KernelOp for KernelSqrt {
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
         let kernel = format!(
             "
 {dyn_defines}
@@ -1683,7 +1727,11 @@ impl KernelOp for KernelMod {
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
         let kernel = format!(
             "
 {dyn_defines}
@@ -1823,7 +1871,11 @@ impl KernelOp for KernelLessThan {
         let dtype = cuda_dtype(self.dtype);
         let b_dtype = cuda_dtype(self.b_dtype);
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
-        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
         let kernel = format!(
             "
 {dyn_defines}
