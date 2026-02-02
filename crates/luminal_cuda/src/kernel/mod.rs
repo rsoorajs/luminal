@@ -159,6 +159,7 @@ pub trait KernelOp: luminal::op::EgglogOp {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,

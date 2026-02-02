@@ -95,6 +95,7 @@ impl KernelOp for KernelMaxReduce {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -179,9 +180,15 @@ extern \"C\" {{
             iter_stride = self.iter_stride.to_kernel(),
         );
 
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("reduce_max_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("reduce_max_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
 
         let constants = vars
             .into_iter()
@@ -283,6 +290,7 @@ impl KernelOp for KernelSumReduce {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -335,9 +343,15 @@ extern \"C\" {{
             iter_stride = self.iter_stride.to_kernel(),
         );
 
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("reduce_sum_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("reduce_sum_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
 
         let constants = vars
             .into_iter()
@@ -438,6 +452,7 @@ impl KernelOp for KernelAdd {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -473,9 +488,15 @@ extern \"C\" {{
             flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
         );
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("add_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("add_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
         let constants = vars
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
@@ -576,6 +597,7 @@ impl KernelOp for KernelMul {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -611,9 +633,15 @@ extern \"C\" {{
             flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel(),
         );
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("mul_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("mul_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
         let constants = vars
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
@@ -716,6 +744,7 @@ impl KernelOp for KernelGather {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -753,9 +782,15 @@ extern \"C\" {{
             flatten_mul_strides(&self.out_shape, &self.index_stride).to_kernel(),
             flatten_mul_strides(&self.data_shape, &self.data_stride).to_kernel()
         );
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("gather").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("gather").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
         let constants = vars
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
@@ -846,6 +881,7 @@ impl KernelOp for KernelIota {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -870,9 +906,15 @@ extern \"C\" {{
                 .join("\n"),
             self.expr.to_kernel(),
         );
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("iota_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("iota_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
         let constants = vars
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
@@ -974,6 +1016,7 @@ impl KernelOp for KernelExp2 {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -1006,9 +1049,15 @@ extern \"C\" {{
             flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
             flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
         );
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("exp2_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("exp2_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
         let constants = vars
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
@@ -1107,6 +1156,7 @@ impl KernelOp for KernelLog2 {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -1139,9 +1189,15 @@ extern \"C\" {{
             flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
             flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
         );
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("log2_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("log2_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
         let constants = vars
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
@@ -1240,6 +1296,7 @@ impl KernelOp for KernelSin {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -1272,9 +1329,15 @@ extern \"C\" {{
             flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
             flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
         );
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("sin_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("sin_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
         let constants = vars
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
@@ -1373,6 +1436,7 @@ impl KernelOp for KernelRecip {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -1405,9 +1469,15 @@ extern \"C\" {{
             flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
             flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
         );
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("recip_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("recip_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
         let constants = vars
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
@@ -1506,6 +1576,7 @@ impl KernelOp for KernelSqrt {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -1538,9 +1609,15 @@ extern \"C\" {{
             flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
             flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
         );
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("sqrt_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("sqrt_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
         let constants = vars
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
@@ -1642,6 +1719,7 @@ impl KernelOp for KernelMod {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -1676,9 +1754,15 @@ extern \"C\" {{
             flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
         );
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("mod_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("mod_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
         let constants = vars
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
@@ -1779,6 +1863,7 @@ impl KernelOp for KernelLessThan {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -1814,9 +1899,15 @@ extern \"C\" {{
             flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
         );
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("less_than_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("less_than_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
         let constants = vars
             .into_iter()
             .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
@@ -1914,6 +2005,7 @@ impl KernelOp for KernelConstant {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -1932,9 +2024,15 @@ extern \"C\" {{
 }}",
             self.value
         );
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("constant_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("constant_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
         (
             func,
             module,
@@ -2022,6 +2120,7 @@ impl KernelOp for KernelCast {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -2043,9 +2142,15 @@ extern \"C\" {{
     }}
 }}"
         );
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("cast_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("cast_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
         (
             func,
             module,

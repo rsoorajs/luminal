@@ -81,6 +81,7 @@ impl KernelOp for KernelMeanReduce {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,
@@ -164,9 +165,15 @@ extern \"C\" {{
             iter_stride = self.iter_stride.to_kernel(),
         );
 
-        let ptx = compile_ptx(&kernel).unwrap();
-        let module = stream.context().load_module(ptx).unwrap();
-        let func = module.load_function("reduce_mean_k").unwrap();
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_ptx(&kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("reduce_mean_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
 
         let constants = vars
             .into_iter()
