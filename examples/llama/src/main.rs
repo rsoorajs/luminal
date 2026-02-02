@@ -8,7 +8,7 @@ use luminal_tracing::*;
 use model::*;
 use std::{io::Write, time::Duration};
 use tokenizers::Tokenizer;
-use tracing::{span, Level};
+use tracing::{level_filters::LevelFilter, span, Level};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 const REPO_ID: &str = "NousResearch/Meta-Llama-3-8B-Instruct";
@@ -25,7 +25,7 @@ fn main() {
     let (perfetto_layer, perfetto_guard) = perfetto_layer("trace.pftrace");
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(luminal_filter())
+        .with(luminal_filter().with_target("luminal", LevelFilter::TRACE))
         .with(perfetto_layer)
         .init();
 

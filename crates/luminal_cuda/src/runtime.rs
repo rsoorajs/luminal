@@ -11,8 +11,8 @@ use crate::{
     },
 };
 use cudarc::driver::{
-    CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
-    sys::CUgraphNode,
+    CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PinnedHostSlice,
+    PushKernelArg, sys::CUgraphNode,
 };
 
 use fixedbitset::FixedBitSet;
@@ -155,15 +155,31 @@ impl Debug for ExecutableKernel {
     }
 }
 
+/// Pending timing data using pinned memory for async copies
+struct PendingTimingData {
+    timing_buffer_idx: usize,
+    start_time_idx: usize,
+    span_id: Uuid,
+}
+
 pub struct CudaRuntime {
     pub hlir_buffers: FxHashMap<NodeIndex, CudaInput>,
     pub buffers: FxHashMap<NodeIndex, CudaSlice<u8>>,
     pub llir_graph: luminal::graph::LLIRGraph,
     cuda_stream: Arc<CudaStream>,
+    timing_stream: Arc<CudaStream>,
     exec_graph: StableGraph<ExecutableKernel, (), Directed>,
     node_to_exec: FxHashMap<NodeIndex, NodeIndex>,
     pub(crate) timings: Vec<Vec<(Vec<SMEvent>, u64, Uuid)>>,
     pub(crate) cuda_graph_timings: Vec<(CudaGraphTiming, Uuid)>,
+    /// Pending timing data collected asynchronously using pinned memory
+    pending_timing_data: Vec<PendingTimingData>,
+    /// Pool of pre-allocated pinned timing buffers (one per slot)
+    pinned_timing_pool: Vec<PinnedHostSlice<SMEvent>>,
+    /// Pool of pre-allocated pinned start time buffers (one per slot)
+    pinned_start_pool: Vec<PinnedHostSlice<u64>>,
+    /// Index of next available slot in the pinned buffer pools
+    next_pinned_slot: usize,
     last_dyn_map: FxHashMap<char, usize>,
     intermediate_buffer_dims: FxHashSet<char>,
     llir_to_hlir: FxHashMap<NodeIndex, NodeIndex>,
@@ -172,6 +188,7 @@ pub struct CudaRuntime {
     pub last_kernel_stats: Vec<KernelStats>,
     pub last_total_time_us: f64,
     kernel_cache: FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
+    num_sms: usize,
 }
 
 impl CudaRuntime {
@@ -319,7 +336,6 @@ impl CudaRuntime {
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
-                trace!("node: {:?} ptr: {:?}", self.llir_graph[node], ptr);
                 self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
                 let out_size = op.output_size();
@@ -332,7 +348,6 @@ impl CudaRuntime {
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
-                trace!("node: {:?} ptr: {:?}", self.llir_graph[node], ptr);
                 self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
                 self.buffers.insert(
@@ -341,8 +356,7 @@ impl CudaRuntime {
                         .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
                         .unwrap(),
                 );
-                let ptr: u64 = self.buffers[&node].device_ptr(&self.cuda_stream).0;
-                trace!("node: {:?}  ptr: {:?}", self.llir_graph[node], ptr);
+                let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.register_buffer(node, ptr);
             }
         }
@@ -401,10 +415,44 @@ impl Runtime for CudaRuntime {
     type ProfileMetric = Duration;
 
     fn initialize(stream: Self::CompileArg) -> Self {
+        let ctx = stream.context();
+        let num_sms = ctx
+            .attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            )
+            .unwrap() as usize;
+        let timing_stream = ctx.new_stream().expect("Failed to create timing stream");
+
+        // Pre-allocate pinned buffer pools for async timing collection
+        // We allocate enough slots to handle many megakernels between flushes
+        const PINNED_POOL_SIZE: usize = 64;
+        let timing_len = num_sms * N_TIMING_SLOTS;
+        let pinned_timing_pool;
+        let pinned_start_pool;
+        if enabled!(Level::TRACE) {
+            pinned_timing_pool = (0..PINNED_POOL_SIZE)
+                .map(|_| unsafe {
+                    ctx.alloc_pinned::<SMEvent>(timing_len)
+                        .expect("Failed to allocate pinned timing buffer")
+                })
+                .collect::<Vec<_>>();
+            pinned_start_pool = (0..PINNED_POOL_SIZE)
+                .map(|_| unsafe {
+                    ctx.alloc_pinned::<u64>(num_sms)
+                        .expect("Failed to allocate pinned start time buffer")
+                })
+                .collect::<Vec<_>>();
+        } else {
+            pinned_timing_pool = vec![];
+            pinned_start_pool = vec![]
+        }
+
         Self {
+            num_sms,
             hlir_buffers: FxHashMap::default(),
             buffers: FxHashMap::default(),
             cuda_stream: stream,
+            timing_stream,
             llir_graph: StableGraph::default(),
             exec_graph: StableGraph::default(),
             node_to_exec: FxHashMap::default(),
@@ -413,6 +461,10 @@ impl Runtime for CudaRuntime {
             changed_hlir: FxHashSet::default(),
             timings: vec![],
             cuda_graph_timings: vec![],
+            pending_timing_data: vec![],
+            pinned_timing_pool,
+            pinned_start_pool,
+            next_pinned_slot: 0,
             last_dyn_map: FxHashMap::default(),
             intermediate_buffer_dims: FxHashSet::default(),
             last_kernel_stats: vec![],
@@ -597,19 +649,15 @@ impl Runtime for CudaRuntime {
         self.execute(dyn_map);
         let duration = start.elapsed();
 
+        // Flush pending timing data so it's available for stats
+        self.flush_pending_timings();
+
         // Compute aggregates for profile display
-        let sm_count = self
-            .cuda_stream
-            .context()
-            .attribute(
-                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
-            )
-            .unwrap() as usize;
         let block_op_stats = Self::compute_block_op_stats(
             &self.llir_graph,
-            self.timings.last().unwrap(),
+            self.timings.last().unwrap_or(&vec![]),
             &self.last_dyn_map,
-            sm_count,
+            self.num_sms,
         );
 
         let total_bytes: usize = self
@@ -683,7 +731,6 @@ impl Runtime for CudaRuntime {
             }
             self.changed_hlir.clear();
         }
-        let mut timings = Vec::new();
         let mut kernel_stats = Vec::new();
         let total_start = std::time::Instant::now();
         for exec_node in toposort(&self.exec_graph, None).unwrap() {
@@ -701,7 +748,7 @@ impl Runtime for CudaRuntime {
                         .context()
                         .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
                         .unwrap();
-                    let span = span!(Level::INFO, "megakernel_setup");
+                    let span = span!(Level::TRACE, "megakernel_setup");
                     // Upload queue, barriers and program counter
                     let d_barriers = self
                         .cuda_stream
@@ -764,7 +811,7 @@ impl Runtime for CudaRuntime {
                     drop(span);
                     let mk_span_id = Uuid::new_v4();
                     {
-                        let span = span!(Level::INFO, "megakernel", id = field::Empty);
+                        let span = span!(Level::TRACE, "megakernel", id = field::Empty);
                         // Record fields after span creation to work around tracing-perfetto-sdk-layer sync span bug
                         span.record("id", mk_span_id.to_string().as_str());
                         let _entered = span.enter();
@@ -772,18 +819,24 @@ impl Runtime for CudaRuntime {
                         self.cuda_stream.synchronize().unwrap();
                     }
                     if enabled!(Level::TRACE) {
-                        // TODO: this is very slow, especially when we have many megakernels in a run. Lets only do this when tracing
-                        let _span = span!(Level::INFO, "mk_timings").entered();
-                        timings.push((
-                            self.cuda_stream.clone_dtoh(&timing_buffer).unwrap(),
-                            self.cuda_stream
-                                .clone_dtoh(&start_time)
-                                .unwrap()
-                                .into_iter()
-                                .min()
-                                .unwrap(),
-                            mk_span_id,
-                        ));
+                        // Use pre-allocated pinned buffers from pool for async copy
+                        let slot = self.next_pinned_slot;
+                        if slot < self.pinned_timing_pool.len() {
+                            self.next_pinned_slot += 1;
+                            // These copies are truly async with pinned memory
+                            self.timing_stream
+                                .memcpy_dtoh(&timing_buffer, &mut self.pinned_timing_pool[slot])
+                                .expect("Failed to copy timing buffer");
+                            self.timing_stream
+                                .memcpy_dtoh(&start_time, &mut self.pinned_start_pool[slot])
+                                .expect("Failed to copy start time buffer");
+                            self.pending_timing_data.push(PendingTimingData {
+                                timing_buffer_idx: slot,
+                                start_time_idx: slot,
+                                span_id: mk_span_id,
+                            });
+                        }
+                        // If pool is exhausted, skip timing collection for this megakernel
                     }
                 }
                 ExecutableKernel::HostOp {
@@ -804,7 +857,7 @@ impl Runtime for CudaRuntime {
                         }
                     }));
                     let _span =
-                        span!(Level::INFO, "host_op_execute", n_inputs = inputs.len()).entered();
+                        span!(Level::TRACE, "host_op_execute", n_inputs = inputs.len()).entered();
                     internal.execute(stream, &host_op_buffers, dyn_map).unwrap();
                     self.cuda_stream.synchronize().unwrap();
                 }
@@ -825,7 +878,7 @@ impl Runtime for CudaRuntime {
                     // Generate a unique ID for this graph execution (for perfetto correlation)
                     let graph_span_id = Uuid::new_v4();
                     let span = span!(
-                        Level::INFO,
+                        Level::TRACE,
                         "cuda_graph",
                         kernels = kernel_info.len(),
                         id = field::Empty
@@ -837,7 +890,7 @@ impl Runtime for CudaRuntime {
 
                     self.cuda_stream.synchronize().expect("Failed to pre-sync");
 
-                    let setup_span = span!(Level::INFO, "cg_setup").entered();
+                    let setup_span = span!(Level::TRACE, "cg_setup").entered();
 
                     // Update module constants with current dyn dim values
                     for constants in module_constants.iter_mut() {
@@ -1002,7 +1055,7 @@ impl Runtime for CudaRuntime {
                         .launch(&self.cuda_stream)
                         .expect("Failed to launch CUDA graph");
                     self.cuda_stream.synchronize().unwrap();
-                    let _teardown_span = span!(Level::INFO, "cg_teardown").entered();
+                    let _teardown_span = span!(Level::TRACE, "cg_teardown").entered();
 
                     // With pre-sync, launch latency should be minimal
                     let launch_latency_ns: u64 = 0;
@@ -1059,8 +1112,6 @@ impl Runtime for CudaRuntime {
                 }
             }
         }
-        self.timings.push(timings);
-
         // Save raw stats for lazy interpretation in print_execution_stats
         self.last_kernel_stats = kernel_stats;
         self.last_total_time_us = total_start.elapsed().as_secs_f64() * 1_000_000.0;
@@ -1565,8 +1616,47 @@ impl CudaRuntime {
         }
     }
 
+    /// Flush pending timing data to the timings collection.
+    fn flush_pending_timings(&mut self) {
+        if self.pending_timing_data.is_empty() {
+            return;
+        }
+
+        // Sync timing stream first to ensure all async copies are complete
+        self.timing_stream
+            .synchronize()
+            .expect("Failed to sync timing stream");
+
+        // Extract data from pinned memory pool
+        let mut timing_entries = Vec::with_capacity(self.pending_timing_data.len());
+        for pending in self.pending_timing_data.drain(..) {
+            let timing_data = self.pinned_timing_pool[pending.timing_buffer_idx]
+                .as_slice()
+                .expect("Failed to read timing buffer")
+                .to_vec();
+            let min_start = self.pinned_start_pool[pending.start_time_idx]
+                .as_slice()
+                .expect("Failed to read start time buffer")
+                .iter()
+                .copied()
+                .min()
+                .unwrap_or(0);
+            timing_entries.push((timing_data, min_start, pending.span_id));
+        }
+
+        // Reset pool index so buffers can be reused
+        self.next_pinned_slot = 0;
+
+        if !timing_entries.is_empty() {
+            self.timings.push(timing_entries);
+        }
+    }
+
     /// Record GPU timings to an existing perfetto trace file.
-    pub fn record_cuda_perfetto_trace(&self, perfetto_guard: PerfettoGuard) {
+    pub fn record_cuda_perfetto_trace(&mut self, perfetto_guard: PerfettoGuard) {
+        // Flush any pending timing copies first
+        self.flush_pending_timings();
+
         perfetto_guard.stop();
         let ops: Vec<Arc<Box<dyn BlockOp>>> = self
             .llir_graph
