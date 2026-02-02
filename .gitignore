@@ -20,3 +20,4 @@ tokenizer.json
 
 *.env
 *.claude
+**/proptest-regressions
