@@ -2,6 +2,8 @@
 /crates/**/target
 /examples/**/target
 
+*.env
+*.claude
 .DS_Store
 *.vscode
 Cargo.lock
@@ -17,7 +19,4 @@ Cargo.lock
 *.safetensors.index.json
 tokenizer.json
 **/.cache
-
-*.env
-*.claude
 **/proptest-regressions
