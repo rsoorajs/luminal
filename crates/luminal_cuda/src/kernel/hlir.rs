@@ -118,6 +118,8 @@ impl KernelOp for KernelMaxReduce {
         let dtype = cuda_dtype(self.dtype);
         let n_outputs: Expression = self.out_shape.iter().copied().product();
         let threads_per_block = 256; // 8 warps per block
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
 
         let kernel = format!(
             "
@@ -125,9 +127,9 @@ impl KernelOp for KernelMaxReduce {
 #define THREADS_PER_BLOCK 256
 #define FULL_MASK 0xffffffff
 #define NEG_INF_F __int_as_float(0xff800000)
-{constants}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void reduce_max_k({dtype} *out, const {dtype} *in) {{
+    __global__ void reduce_max_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
         __shared__ {dtype} warp_sums[THREADS_PER_BLOCK / WARP_SIZE];
         long long const_z = blockIdx.x;
 
@@ -169,10 +171,6 @@ extern \"C\" {{
         }}
     }}
 }}",
-            constants = vars
-                .iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             dtype = dtype,
             in_index = flatten_mul_strides(&self.out_shape, &self.in_stride).to_kernel(),
             out_index = flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
@@ -190,11 +188,6 @@ extern \"C\" {{
             (module, func)
         };
 
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
-
         (
             func,
             module,
@@ -202,7 +195,7 @@ extern \"C\" {{
             (n_outputs, 1.into(), 1.into()),                // grid
             (threads_per_block.into(), 1.into(), 1.into()), // blocks
             32.into(),                                      // shmem size
-            constants,
+            FxHashMap::default(),
         )
     }
 
@@ -312,12 +305,14 @@ impl KernelOp for KernelSumReduce {
 
         let dtype = cuda_dtype(self.dtype);
         let n_outputs: Expression = self.out_shape.iter().copied().product();
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
 
         let kernel = format!(
             "
-{constants}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void reduce_sum_k({dtype} *out, const {dtype} *in) {{
+    __global__ void reduce_sum_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
         long long const_z = blockIdx.x;
 
         long long in_start = {in_index};
@@ -332,10 +327,6 @@ extern \"C\" {{
         out[{out_index}] = sum;
     }}
 }}",
-            constants = vars
-                .iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             dtype = dtype,
             in_index = flatten_mul_strides(&self.out_shape, &self.in_stride).to_kernel(),
             out_index = flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
@@ -353,10 +344,6 @@ extern \"C\" {{
             (module, func)
         };
 
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
         (
             func,
             module,
@@ -364,7 +351,7 @@ extern \"C\" {{
             (n_outputs, 1.into(), 1.into()), // grid
             (1.into(), 1.into(), 1.into()),  // blocks (single-threaded)
             0.into(),                        // shmem size
-            constants,
+            FxHashMap::default(),
         )
     }
 
@@ -472,18 +459,18 @@ impl KernelOp for KernelAdd {
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
         let b_dtype = cuda_dtype(self.b_dtype);
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        // Add dyn_dims parameter if we have dynamic dimensions
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
         let kernel = format!(
             "
-{}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void add_k({dtype} *C, const {dtype} *A, const {b_dtype} *B) {{
+    __global__ void add_k({dtype} *C, const {dtype} *A, const {b_dtype} *B{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
         C[{}] = A[{}] + ({dtype})B[{}];
     }}
 }}",
-            vars.iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
@@ -497,10 +484,7 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
+        // Return empty constants map - we now use shared dyn_dims buffer
         let out_size = self.out_shape.iter().copied().product::<Expression>();
         (
             func,
@@ -509,7 +493,7 @@ extern \"C\" {{
             (out_size.ceil_div(128), 1.into(), 1.into()),
             (out_size.min(128), 1.into(), 1.into()),
             0.into(),
-            constants,
+            FxHashMap::default(), // No per-module constants needed
         )
     }
 
@@ -617,18 +601,17 @@ impl KernelOp for KernelMul {
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
         let b_dtype = cuda_dtype(self.b_dtype);
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
         let kernel = format!(
             "
-{}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void mul_k({dtype} *C, const {dtype} *A, const {b_dtype} *B) {{
+    __global__ void mul_k({dtype} *C, const {dtype} *A, const {b_dtype} *B{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
         C[{}] = A[{}] * ({dtype})B[{}];
     }}
 }}",
-            vars.iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel(),
@@ -642,10 +625,6 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
         let out_size = self.out_shape.iter().copied().product::<Expression>();
         (
             func,
@@ -654,7 +633,7 @@ extern \"C\" {{
             (out_size.ceil_div(128), 1.into(), 1.into()),
             (out_size.min(128), 1.into(), 1.into()),
             0.into(),
-            constants,
+            FxHashMap::default(),
         )
     }
 
@@ -764,20 +743,19 @@ impl KernelOp for KernelGather {
             .chain(self.out_stride.iter().flat_map(|e| e.dyn_vars()))
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
         let kernel = format!(
             "
-{}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void gather({dtype} *C, const int *indexes, const {dtype} *data) {{
+    __global__ void gather({dtype} *C, const int *indexes, const {dtype} *data{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
         {dtype}* out = C + {};
         const_z = indexes[{}];
         *out = data[{}];
     }}
 }}",
-            vars.iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.index_stride).to_kernel(),
             flatten_mul_strides(&self.data_shape, &self.data_stride).to_kernel()
@@ -791,10 +769,6 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
         (
             func,
             module,
@@ -802,7 +776,7 @@ extern \"C\" {{
             (self.out_shape.iter().copied().product(), 1.into(), 1.into()),
             (1.into(), 1.into(), 1.into()),
             0.into(),
-            constants,
+            FxHashMap::default(),
         )
     }
 
@@ -892,18 +866,17 @@ impl KernelOp for KernelIota {
         FxHashMap<char, CudaSlice<u8>>,
     ) {
         let vars = self.expr.dyn_vars().into_iter().collect::<FxHashSet<_>>();
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
         let kernel = format!(
             "
-{}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void iota_k(int *C) {{
+    __global__ void iota_k(int *C{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
         C[const_z] = {};
     }}
 }}",
-            vars.iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             self.expr.to_kernel(),
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
@@ -915,10 +888,6 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
         (
             func,
             module,
@@ -926,7 +895,7 @@ extern \"C\" {{
             (self.range, 1.into(), 1.into()),
             (1.into(), 1.into(), 1.into()),
             0.into(),
-            constants,
+            FxHashMap::default(),
         )
     }
 
@@ -1034,18 +1003,17 @@ impl KernelOp for KernelExp2 {
             .chain(self.out_strides.iter().flat_map(|e| e.dyn_vars()))
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
         let kernel = format!(
             "
-{}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void exp2_k({dtype} *out, const {dtype} *in) {{
+    __global__ void exp2_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
         out[{}] = exp2f(in[{}]);
     }}
 }}",
-            vars.iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
             flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
         );
@@ -1058,10 +1026,6 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
         let out_size = self.shape.iter().copied().product::<Expression>();
         (
             func,
@@ -1070,7 +1034,7 @@ extern \"C\" {{
             (out_size.ceil_div(128), 1.into(), 1.into()),
             (out_size.min(128), 1.into(), 1.into()),
             0.into(),
-            constants,
+            FxHashMap::default(),
         )
     }
 
@@ -1174,18 +1138,17 @@ impl KernelOp for KernelLog2 {
             .chain(self.out_strides.iter().flat_map(|e| e.dyn_vars()))
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
         let kernel = format!(
             "
-{}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void log2_k({dtype} *out, const {dtype} *in) {{
+    __global__ void log2_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
         out[{}] = log2f(in[{}]);
     }}
 }}",
-            vars.iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
             flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
         );
@@ -1198,10 +1161,6 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
         let out_size = self.shape.iter().copied().product::<Expression>();
         (
             func,
@@ -1210,7 +1169,7 @@ extern \"C\" {{
             (out_size.ceil_div(128), 1.into(), 1.into()),
             (out_size.min(128), 1.into(), 1.into()),
             0.into(),
-            constants,
+            FxHashMap::default(),
         )
     }
 
@@ -1314,18 +1273,17 @@ impl KernelOp for KernelSin {
             .chain(self.out_strides.iter().flat_map(|e| e.dyn_vars()))
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
         let kernel = format!(
             "
-{}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void sin_k({dtype} *out, const {dtype} *in) {{
+    __global__ void sin_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
         out[{}] = sinf(in[{}]);
     }}
 }}",
-            vars.iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
             flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
         );
@@ -1338,10 +1296,6 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
         let out_size = self.shape.iter().copied().product::<Expression>();
         (
             func,
@@ -1350,7 +1304,7 @@ extern \"C\" {{
             (out_size.ceil_div(128), 1.into(), 1.into()),
             (out_size.min(128), 1.into(), 1.into()),
             0.into(),
-            constants,
+            FxHashMap::default(),
         )
     }
 
@@ -1454,18 +1408,17 @@ impl KernelOp for KernelRecip {
             .chain(self.out_strides.iter().flat_map(|e| e.dyn_vars()))
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
         let kernel = format!(
             "
-{}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void recip_k({dtype} *out, const {dtype} *in) {{
+    __global__ void recip_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
         out[{}] = 1.0f / in[{}];
     }}
 }}",
-            vars.iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
             flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
         );
@@ -1478,10 +1431,6 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
         let out_size = self.shape.iter().copied().product::<Expression>();
         (
             func,
@@ -1490,7 +1439,7 @@ extern \"C\" {{
             (out_size.ceil_div(128), 1.into(), 1.into()),
             (out_size.min(128), 1.into(), 1.into()),
             0.into(),
-            constants,
+            FxHashMap::default(),
         )
     }
 
@@ -1594,18 +1543,17 @@ impl KernelOp for KernelSqrt {
             .chain(self.out_strides.iter().flat_map(|e| e.dyn_vars()))
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
         let kernel = format!(
             "
-{}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void sqrt_k({dtype} *out, const {dtype} *in) {{
+    __global__ void sqrt_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
         out[{}] = sqrtf(in[{}]);
     }}
 }}",
-            vars.iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
             flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
         );
@@ -1618,10 +1566,6 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
         let out_size = self.shape.iter().copied().product::<Expression>();
         (
             func,
@@ -1630,7 +1574,7 @@ extern \"C\" {{
             (out_size.ceil_div(128), 1.into(), 1.into()),
             (out_size.min(128), 1.into(), 1.into()),
             0.into(),
-            constants,
+            FxHashMap::default(),
         )
     }
 
@@ -1738,18 +1682,17 @@ impl KernelOp for KernelMod {
             .chain(self.out_stride.iter().flat_map(|e| e.dyn_vars()))
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
         let kernel = format!(
             "
-{}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void mod_k({dtype} *C, const {dtype} *A, const {dtype} *B) {{
+    __global__ void mod_k({dtype} *C, const {dtype} *A, const {dtype} *B{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
         C[{}] = fmodf(A[{}], B[{}]);
     }}
 }}",
-            vars.iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
@@ -1763,10 +1706,6 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
         let out_size = self.out_shape.iter().copied().product::<Expression>();
         (
             func,
@@ -1775,7 +1714,7 @@ extern \"C\" {{
             (out_size.ceil_div(128), 1.into(), 1.into()),
             (out_size.min(128), 1.into(), 1.into()),
             0.into(),
-            constants,
+            FxHashMap::default(),
         )
     }
 
@@ -1883,18 +1822,17 @@ impl KernelOp for KernelLessThan {
             .collect::<FxHashSet<_>>();
         let dtype = cuda_dtype(self.dtype);
         let b_dtype = cuda_dtype(self.b_dtype);
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
         let kernel = format!(
             "
-{}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void less_than_k({dtype} *C, const {dtype} *A, const {b_dtype} *B) {{
+    __global__ void less_than_k({dtype} *C, const {dtype} *A, const {b_dtype} *B{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
         C[{}] = A[{}] < ({dtype})B[{}] ? 1.0f : 0.0f;
     }}
 }}",
-            vars.iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
             flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
@@ -1908,10 +1846,6 @@ extern \"C\" {{
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
         let out_size = self.out_shape.iter().copied().product::<Expression>();
         (
             func,
@@ -1920,7 +1854,7 @@ extern \"C\" {{
             (out_size.ceil_div(128), 1.into(), 1.into()),
             (out_size.min(128), 1.into(), 1.into()),
             0.into(),
-            constants,
+            FxHashMap::default(),
         )
     }
 
@@ -2181,4 +2115,28 @@ extern \"C\" {{
     fn kernel_name(&self) -> &'static str {
         "Cast"
     }
+}
+
+/// Generate #define macros for dynamic dimensions that read from a shared dyn_dims buffer.
+/// The buffer layout is alphabetically sorted by dim char for consistency.
+/// Returns (defines_string, sorted_dims) where sorted_dims gives the order of dims in the buffer.
+pub fn generate_dyn_dims_defines(vars: &FxHashSet<char>) -> (String, Vec<char>) {
+    if vars.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let mut sorted_dims: Vec<char> = vars.iter().copied().collect();
+    sorted_dims.sort();
+    let defines = sorted_dims
+        .iter()
+        .enumerate()
+        .map(|(idx, dim)| format!("#define const_{dim} (dyn_dims + {idx})"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (defines, sorted_dims)
+}
+
+/// Get the offset for a dynamic dimension in the shared dyn_dims buffer.
+/// Returns None if the dim is not in the set.
+pub fn get_dyn_dim_offset(dim: char, sorted_dims: &[char]) -> Option<usize> {
+    sorted_dims.iter().position(|&d| d == dim)
 }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{cuda_dtype, kernel::KernelOp};
+use crate::{cuda_dtype, kernel::KernelOp, kernel::hlir::generate_dyn_dims_defines};
 use cudarc::{
     driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream},
     nvrtc::{CompileOptions, compile_ptx},
@@ -104,15 +104,17 @@ impl KernelOp for KernelMeanReduce {
         let dtype = cuda_dtype(self.dtype);
         let n_outputs: Expression = self.out_shape.iter().copied().product();
         let threads_per_block = 256; // 8 warps per block
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() { "" } else { ", const int* dyn_dims" };
 
         let kernel = format!(
             "
 #define WARP_SIZE 32
 #define THREADS_PER_BLOCK 256
 #define FULL_MASK 0xffffffff
-{constants}
+{dyn_defines}
 extern \"C\" {{
-    __global__ void reduce_mean_k({dtype} *out, const {dtype} *in) {{
+    __global__ void reduce_mean_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
         __shared__ {dtype} warp_sums[THREADS_PER_BLOCK / WARP_SIZE];
         long long const_z = blockIdx.x;
 
@@ -154,10 +156,6 @@ extern \"C\" {{
         }}
     }}
 }}",
-            constants = vars
-                .iter()
-                .map(|i| format!("__constant__ int const_{i}[1];"))
-                .join("\n"),
             dtype = dtype,
             in_index = flatten_mul_strides(&self.out_shape, &self.in_stride).to_kernel(),
             out_index = flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
@@ -175,11 +173,6 @@ extern \"C\" {{
             (module, func)
         };
 
-        let constants = vars
-            .into_iter()
-            .map(|d| (d, module.get_global(&format!("const_{d}"), stream).unwrap()))
-            .collect();
-
         (
             func,
             module,
@@ -187,7 +180,7 @@ extern \"C\" {{
             (n_outputs, 1.into(), 1.into()),                // grid
             (threads_per_block.into(), 1.into(), 1.into()), // blocks
             32.into(),                                      // shmem size
-            constants,
+            FxHashMap::default(),
         )
     }
 

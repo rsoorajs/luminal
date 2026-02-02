@@ -40,10 +40,6 @@ impl CudaGraphHandle {
         shared_mem_bytes: u32,
         kernel_params: *mut *mut c_void,
     ) -> Result<CUgraphNode, DriverError> {
-        self.ctx.bind_to_thread()?;
-
-        // CUDA_KERNEL_NODE_PARAMS (v2) requires additional kern and ctx fields
-        // which can be null/default for basic usage
         let params = sys::CUDA_KERNEL_NODE_PARAMS {
             func,
             gridDimX: grid_dim.0,
@@ -79,7 +75,6 @@ impl CudaGraphHandle {
         dependencies: &[CUgraphNode],
         event: CUevent,
     ) -> Result<CUgraphNode, DriverError> {
-        self.ctx.bind_to_thread()?;
         let mut node = MaybeUninit::uninit();
         unsafe {
             sys::cuGraphAddEventRecordNode(
@@ -142,8 +137,6 @@ impl CudaGraphExecHandle {
         shared_mem_bytes: u32,
         kernel_params: *mut *mut c_void,
     ) -> Result<(), DriverError> {
-        self.ctx.bind_to_thread()?;
-
         let params = sys::CUDA_KERNEL_NODE_PARAMS {
             func,
             gridDimX: grid_dim.0,
@@ -199,6 +192,8 @@ impl CudaFunctionExt for CudaFunction {
 pub struct KernelParams {
     values: Box<[u64]>,
     ptrs: Box<[*mut c_void]>,
+    /// Index of the dyn_dims pointer in values array (if present)
+    dyn_dims_idx: Option<usize>,
 }
 
 impl KernelParams {
@@ -214,6 +209,26 @@ impl KernelParams {
         Self {
             values,
             ptrs: ptrs.into_boxed_slice(),
+            dyn_dims_idx: None,
+        }
+    }
+
+    /// Create kernel params with a dyn_dims pointer as the last parameter.
+    pub fn with_dyn_dims(output_ptr: u64, input_ptrs: &[u64], dyn_dims_ptr: u64) -> Self {
+        let mut values: Vec<u64> = Vec::with_capacity(2 + input_ptrs.len());
+        values.push(output_ptr);
+        values.extend_from_slice(input_ptrs);
+        let dyn_dims_idx = values.len();
+        values.push(dyn_dims_ptr);
+        let values = values.into_boxed_slice();
+        let ptrs: Vec<*mut c_void> = values
+            .iter()
+            .map(|v| v as *const u64 as *mut c_void)
+            .collect();
+        Self {
+            values,
+            ptrs: ptrs.into_boxed_slice(),
+            dyn_dims_idx: Some(dyn_dims_idx),
         }
     }
 
@@ -227,6 +242,13 @@ impl KernelParams {
 
     pub fn update_input(&mut self, index: usize, ptr: u64) {
         self.values[1 + index] = ptr;
+    }
+
+    /// Update the dyn_dims pointer if this kernel uses one.
+    pub fn update_dyn_dims(&mut self, ptr: u64) {
+        if let Some(idx) = self.dyn_dims_idx {
+            self.values[idx] = ptr;
+        }
     }
 }
 
