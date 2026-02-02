@@ -160,9 +160,8 @@ impl HostOp for CuBlasSgemmV2 {
             inputs[0].len(),
             m * n * 4
         );
-
-        let _sgemm_span: span::EnteredSpan = span!(
-            Level::INFO,
+        let _sgemm_span = span!(
+            Level::TRACE,
             "cuBLAS_SGEMM_V2",
             m,
             n,
@@ -199,6 +198,7 @@ impl HostOp for CuBlasSgemmV2 {
                 ldc,
             )
         };
+        stream.synchronize().unwrap();
 
         if status != cublasStatus_t::CUBLAS_STATUS_SUCCESS {
             return Err(anyhow::anyhow!(

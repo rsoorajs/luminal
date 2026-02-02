@@ -833,12 +833,12 @@ impl EgglogOp for RowRope {
                         (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
                         (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))))
 
-                ;; Final identity mul "* 1.0" with output shape/strides (4096 -> ?hidden_dim)
+                ;; Final identity mul "* 1.0" with output shape/strides
                 (= ?c_one (Constant 1.000000))
                 (= ?rope_out
                    (Mul (ECons (MVar "s") (ECons ?n_heads (ECons (MNum 128) (ENil))))
                         ?interleaved_rot
-                        (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil))))
+                        (ECons (MNum 128) (ECons (MMul (MVar "s") (MNum 128)) (ECons (MNum 1) (ENil))))
                         ?c_one
                         (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ENil))))
                         (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil)))))
@@ -855,7 +855,7 @@ impl EgglogOp for RowRope {
                 ; we want to subsume all terms up to ?inp and ?pos_ids. don't know how to do this.
                 (delete (Mul (ECons (MVar "s") (ECons ?n_heads (ECons (MNum 128) (ENil))))
                      ?interleaved_rot
-                     (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil))))
+                     (ECons (MNum 128) (ECons (MMul (MVar "s") (MNum 128)) (ECons (MNum 1) (ENil))))
                      ?c_one
                      (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ENil))))
                      (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil))))))

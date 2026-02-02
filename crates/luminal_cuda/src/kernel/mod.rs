@@ -17,40 +17,103 @@ pub use cuda_graph::*;
 
 pub type Ops = (hlir::Ops, other_ops::Ops);
 
+/// Build a mapping from interned string IDs to their string values for a given sequence.
+fn build_interned_strings(trace: &schema::Trace) -> std::collections::HashMap<(u32, u64), String> {
+    use tracing_perfetto_sdk_schema::trace_packet;
+    let mut interned: std::collections::HashMap<(u32, u64), String> =
+        std::collections::HashMap::new();
+    for packet in &trace.packet {
+        let seq_id = match &packet.optional_trusted_packet_sequence_id {
+            Some(trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(seq)) => {
+                *seq
+            }
+            _ => 0,
+        };
+        // interned_data is a field on TracePacket, not a Data variant
+        if let Some(data) = &packet.interned_data {
+            for entry in &data.debug_annotation_names {
+                if let Some(name) = &entry.name {
+                    interned.insert((seq_id, entry.iid()), name.clone());
+                }
+            }
+        }
+    }
+    interned
+}
+
+/// Check if a debug annotation has key "id" and the given UUID value.
+fn annotation_matches_id(
+    a: &schema::DebugAnnotation,
+    id: &Uuid,
+    interned: &std::collections::HashMap<(u32, u64), String>,
+    seq_id: u32,
+) -> bool {
+    let key_matches = match &a.name_field {
+        Some(NameField::Name(k)) => k == "id",
+        Some(NameField::NameIid(iid)) => interned
+            .get(&(seq_id, *iid))
+            .map(|s| s == "id")
+            .unwrap_or(false),
+        None => false,
+    };
+    if !key_matches {
+        return false;
+    }
+    match &a.value {
+        Some(tracing_perfetto_sdk_schema::debug_annotation::Value::StringValue(v)) => {
+            *v == format!("{id}")
+        }
+        _ => false,
+    }
+}
+
 /// Record CUDA graph kernel timings as nested slices in perfetto trace
 pub fn record_cuda_graph_timings(
     trace: &schema::Trace,
     cuda_graph_timings: &[(CudaGraphTiming, Uuid)],
 ) -> Vec<schema::TracePacket> {
+    use tracing_perfetto_sdk_schema::{trace_packet, track_descriptor};
+
+    // Build interned string lookup table
+    let interned = build_interned_strings(trace);
+
     let mut packets = Vec::new();
     for (graph_timing, id) in cuda_graph_timings {
         let parent_info = trace.packet.iter().find_map(|p| {
+            let seq_id = match &p.optional_trusted_packet_sequence_id {
+                Some(trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
+                    seq,
+                )) => *seq,
+                _ => 0,
+            };
             match &p.data {
                 Some(trace_packet::Data::TrackEvent(TrackEvent {
-                    r#type: ty, track_uuid, debug_annotations, ..
+                    r#type: ty,
+                    track_uuid,
+                    debug_annotations,
+                    ..
                 })) if *ty == Some(track_event::Type::SliceBegin as i32)
-                    && debug_annotations.iter().any(|a| {
-                        matches!((&a.name_field, &a.value),
-                            (Some(NameField::Name(k)), Some(tracing_perfetto_sdk_schema::debug_annotation::Value::StringValue(v)))
-                            if k == "id" && *v == format!("{id}"))
-                    }) =>
+                    && debug_annotations
+                        .iter()
+                        .any(|a| annotation_matches_id(a, id, &interned, seq_id)) =>
                 {
-                    Some((p.timestamp?, p.timestamp_clock_id?, (*track_uuid)?,
-                        match &p.optional_trusted_packet_sequence_id {
-                            Some(trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(seq)) => *seq,
-                            _ => 0,
-                        }))
+                    Some((p.timestamp?, p.timestamp_clock_id?, (*track_uuid)?, seq_id))
                 }
                 _ => None,
             }
         });
-        let Some((host_time, clock_id, track_uuid, sequence_id)) = parent_info else {
+        let Some((span_start_time, clock_id, track_uuid, sequence_id)) = parent_info else {
             continue;
         };
-        let launch_offset = graph_timing.launch_latency_ns;
+        // Use span_start_time + setup_duration + launch_latency as the base for kernel timings.
+        // - setup_duration_ns: time spent on host between span entry and launch call
+        // - launch_latency_ns: GPU-side time from launch to first kernel execution
+        // This ensures kernel spans are accurately positioned within the cuda_graph span.
+        let base_time =
+            span_start_time + graph_timing.setup_duration_ns + graph_timing.launch_latency_ns;
         for kernel_timing in &graph_timing.kernel_timings {
             packets.push(schema::TracePacket {
-                timestamp: Some(host_time + launch_offset + kernel_timing.start_ns),
+                timestamp: Some(base_time + kernel_timing.start_ns),
                 timestamp_clock_id: Some(clock_id),
                 optional_trusted_packet_sequence_id: Some(
                     trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
@@ -68,7 +131,7 @@ pub fn record_cuda_graph_timings(
                 ..Default::default()
             });
             packets.push(schema::TracePacket {
-                timestamp: Some(host_time + launch_offset + kernel_timing.end_ns),
+                timestamp: Some(base_time + kernel_timing.end_ns),
                 timestamp_clock_id: Some(clock_id),
                 optional_trusted_packet_sequence_id: Some(
                     trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
@@ -87,6 +150,7 @@ pub fn record_cuda_graph_timings(
             });
         }
     }
+
     packets
 }
 
@@ -95,6 +159,7 @@ pub trait KernelOp: luminal::op::EgglogOp {
     fn compile(
         &self,
         stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     ) -> (
         CudaFunction,
         Arc<CudaModule>,

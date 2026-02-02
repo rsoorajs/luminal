@@ -829,14 +829,6 @@ pub fn egglog_to_llir(
                 )
             });
 
-            tracing::trace!(
-                src_enode = ?src,
-                dest_enode = ?dest,
-                src_node = ?src_node_id,
-                dest_node = ?dest_node_id,
-                "Adding edge to LLIR graph"
-            );
-
             graph.add_edge(src_node_id, dest_node_id, ());
         }
         // if enabled!(Level::TRACE) {

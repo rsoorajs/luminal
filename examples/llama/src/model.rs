@@ -2,7 +2,7 @@ use luminal::{
     graph::Graph,
     op::{CustomOp, DType, LLIROp},
     prelude::{F32Pow, GraphTensor},
-    shape::{flatten_mul_strides, Expression, ToShape},
+    shape::{flatten_mul_strides, Expression, ShapeTracker, ToShape},
 };
 use luminal_cuda::{
     block::{cstruct::CStruct, BlockOp},
@@ -153,7 +153,8 @@ fn llama_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> Grap
 
     // Combine back into output
     let mut s = x0_out.concat_along(x1_out, 3);
-    s.shape = input.shape; // need to have a proper merge_dims!
+    let (n_heads, seq_dim, _) = input.dims3();
+    s.shape = ShapeTracker::new((n_heads, seq_dim, HEAD_DIM));
     s = s.transpose(0, 1) * 1.0;
     s.shape = orig_shape;
     s

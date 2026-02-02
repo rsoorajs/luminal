@@ -555,26 +555,96 @@ fn hash32<T: Hash>(val: T) -> u32 {
     (hash64(val) & 0xffff_ffff) as u32
 }
 
+/// Build a mapping from interned string IDs to their string values for a given sequence.
+fn build_interned_strings(trace: &schema::Trace) -> std::collections::HashMap<(u32, u64), String> {
+    let mut interned: std::collections::HashMap<(u32, u64), String> =
+        std::collections::HashMap::new();
+    for packet in &trace.packet {
+        let seq_id = match &packet.optional_trusted_packet_sequence_id {
+            Some(trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(seq)) => {
+                *seq
+            }
+            _ => 0,
+        };
+        // interned_data is a field on TracePacket, not a Data variant
+        if let Some(data) = &packet.interned_data {
+            for entry in &data.debug_annotation_names {
+                if let Some(name) = &entry.name {
+                    interned.insert((seq_id, entry.iid()), name.clone());
+                }
+            }
+        }
+    }
+    interned
+}
+
+/// Check if a debug annotation has key "id" and the given UUID value.
+fn annotation_matches_id(
+    a: &schema::DebugAnnotation,
+    id: &uuid::Uuid,
+    interned: &std::collections::HashMap<(u32, u64), String>,
+    seq_id: u32,
+) -> bool {
+    let key_matches = match &a.name_field {
+        Some(NameField::Name(k)) => k == "id",
+        Some(NameField::NameIid(iid)) => interned
+            .get(&(seq_id, *iid))
+            .map(|s| s == "id")
+            .unwrap_or(false),
+        None => false,
+    };
+    if !key_matches {
+        return false;
+    }
+    match &a.value {
+        Some(tracing_perfetto_sdk_schema::debug_annotation::Value::StringValue(v)) => {
+            *v == format!("{id}")
+        }
+        _ => false,
+    }
+}
+
 /// Record block op timings from megakernels to perfetto trace packets
 pub fn record_block_op_timings(
     trace: &schema::Trace,
     ops: &[Arc<Box<dyn BlockOp>>],
     timings: &[Vec<(Vec<SMEvent>, u64, uuid::Uuid)>],
 ) -> Vec<schema::TracePacket> {
+    // Build interned string lookup table
+    let interned = build_interned_strings(trace);
+
     let host_start_times: Vec<(u64, u32)> = timings
         .iter()
         .flatten()
         .map(|(_, _, id)| {
-            trace.packet.iter().find_map(|p| match &p.data {
-                Some(trace_packet::Data::TrackEvent(TrackEvent { r#type: ty, debug_annotations, .. }))
-                    if *ty == Some(track_event::Type::SliceBegin as i32)
-                        && debug_annotations.iter().any(|a| {
-                            matches!((&a.name_field, &a.value),
-                                (Some(NameField::Name(k)), Some(tracing_perfetto_sdk_schema::debug_annotation::Value::StringValue(v)))
-                                if k == "id" && *v == format!("{id}"))
-                        }) => Some((p.timestamp?, p.timestamp_clock_id?)),
-                _ => None,
-            }).expect("Couldn't find span with correct uuid for gpu timing dump")
+            trace
+                .packet
+                .iter()
+                .find_map(|p| {
+                    let seq_id = match &p.optional_trusted_packet_sequence_id {
+                        Some(
+                            trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
+                                seq,
+                            ),
+                        ) => *seq,
+                        _ => 0,
+                    };
+                    match &p.data {
+                        Some(trace_packet::Data::TrackEvent(TrackEvent {
+                            r#type: ty,
+                            debug_annotations,
+                            ..
+                        })) if *ty == Some(track_event::Type::SliceBegin as i32)
+                            && debug_annotations
+                                .iter()
+                                .any(|a| annotation_matches_id(a, id, &interned, seq_id)) =>
+                        {
+                            Some((p.timestamp?, p.timestamp_clock_id?))
+                        }
+                        _ => None,
+                    }
+                })
+                .expect("Couldn't find span with correct uuid for gpu timing dump")
         })
         .collect();
 

@@ -10,7 +10,6 @@ luminal = { path = "../.." }
 luminal_nn = { path = "../../crates/luminal_nn" }
 luminal_cuda = { path = "../../crates/luminal_cuda" }
 tokenizers = "0.22.2"
-tracing = "0.1.43"
 
 # HuggingFace model download
 hf-hub = {version = "0.4", default-features = false, features = ["rustls-tls", "ureq"]}
