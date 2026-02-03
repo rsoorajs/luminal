@@ -61,6 +61,8 @@ pub enum DType {
     Bf16,
     /// 32-bit integer
     Int,
+    /// Boolean (stored as u8, 0 or 1)
+    Bool,
 }
 
 impl Display for DType {
@@ -74,6 +76,7 @@ impl DType {
         match self {
             DType::F32 | DType::Int => 4,
             DType::Bf16 | DType::F16 => 2,
+            DType::Bool => 1,
         }
     }
 }
