@@ -15,7 +15,7 @@ use luminal_bench::{
 use luminal::hlir::Input;
 
 #[cfg(feature = "metal")]
-use luminal::op::Runtime;
+use luminal::op::{Runtime, RuntimeStats};
 
 #[cfg(feature = "metal")]
 use luminal::prelude::*;

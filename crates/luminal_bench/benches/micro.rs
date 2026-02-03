@@ -22,7 +22,7 @@ fn run_metal_pattern_benchmark(
     collector: &BenchResultCollector,
 ) {
     use luminal::hlir::Input;
-    use luminal::op::Runtime;
+    use luminal::op::{Runtime, RuntimeStats};
     use luminal_metal::runtime::MetalRuntime;
     use rand::Rng;
 

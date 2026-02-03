@@ -3,7 +3,7 @@ use itertools::Itertools;
 use luminal::{
     graph::LLIRGraph,
     hlir::{Input, Output},
-    op::{ExecutionStats, Runtime, TimingMethod},
+    op::{ExecutionStats, Runtime, RuntimeStats, TimingMethod},
     prelude::{
         petgraph::{algo::toposort, prelude::StableGraph, visit::EdgeRef, Direction},
         FxHashMap, NodeIndex, ToId,
@@ -191,7 +191,9 @@ impl Runtime for MetalRuntime {
         command_buffer.commit();
         command_buffer.wait_until_completed();
     }
+}
 
+impl RuntimeStats for MetalRuntime {
     fn execute_with_stats(&mut self, dyn_map: &FxHashMap<char, usize>) -> Option<ExecutionStats> {
         let mut total_bytes_loaded = 0usize;
         let mut total_bytes_stored = 0usize;

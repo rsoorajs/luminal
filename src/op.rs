@@ -15,14 +15,16 @@ pub trait Runtime {
     fn initialize(arg: Self::CompileArg) -> Self;
     fn load_llir(&mut self, llir_graph: &LLIRGraph);
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn;
-    fn execute_with_stats(&mut self, _dyn_map: &FxHashMap<char, usize>) -> Option<ExecutionStats> {
-        None
-    }
     fn profile(
         &mut self,
         llir_graph: &LLIRGraph,
         dyn_map: &FxHashMap<char, usize>,
     ) -> (Self::ProfileMetric, String);
+}
+
+/// Optional runtime instrumentation for collecting execution statistics.
+pub trait RuntimeStats: Runtime {
+    fn execute_with_stats(&mut self, dyn_map: &FxHashMap<char, usize>) -> Option<ExecutionStats>;
 }
 
 /// Timing method used for execution statistics.
