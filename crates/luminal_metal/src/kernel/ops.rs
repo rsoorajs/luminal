@@ -1409,18 +1409,19 @@ impl MetalKernelOp for MetalGather {
 // This is a pure element-wise operation with no data movement or reshaping.
 #[derive(Debug, Default, Clone)]
 pub struct MetalCast {
+    size: Expression,
     target_dtype: DType,
 }
 
 impl EgglogOp for MetalCast {
     fn term(&self) -> (String, Vec<OpParam>) {
-        ("MetalCast".to_string(), vec![Input, Dty])
+        ("MetalCast".to_string(), vec![Input, Expr, Dty])
     }
 
     fn rewrites(&self) -> Vec<String> {
         vec![r#"(rule
-            ((= ?e (Cast ?inp ?dty)))
-            ((let ?me (MetalCast ?inp ?dty))
+            ((= ?e (Cast ?inp ?size ?dty)))
+            ((let ?me (MetalCast ?inp ?size ?dty))
              (union ?e ?me)
              (set (dtype ?me) ?dty))
             :name "metal MetalCast"
@@ -1439,10 +1440,11 @@ impl EgglogOp for MetalCast {
         _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         _expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_dtype;
+        use luminal::graph::{extract_dtype, extract_expr};
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
-                target_dtype: extract_dtype(egraph, children[1]),
+                size: extract_expr(egraph, children[1], _expr_cache).unwrap(),
+                target_dtype: extract_dtype(egraph, children[2]),
             })),
             vec![children[0]],
         )
@@ -1485,9 +1487,7 @@ impl MetalKernelOp for MetalCast {
     }
 
     fn output_size(&self) -> Expression {
-        // Cast doesn't know output size statically - it's determined by input buffer size at runtime
-        // Return 1 as placeholder; actual size comes from input buffer in encode()
-        Expression::from(1)
+        self.size
     }
 
     fn encode(
@@ -1496,11 +1496,9 @@ impl MetalKernelOp for MetalCast {
         pipeline: &ComputePipelineState,
         inputs: &[&Buffer],
         output: &Buffer,
-        _dyn_map: &FxHashMap<char, usize>,
+        dyn_map: &FxHashMap<char, usize>,
     ) {
-        // Get element count from input buffer size
-        let input_bytes = inputs[0].length() as usize;
-        let n_elements = (input_bytes / 4) as u32; // 4 bytes per element (f32 or i32)
+        let n_elements = self.size.exec(dyn_map).unwrap_or(0) as u32;
 
         encoder.set_compute_pipeline_state(pipeline);
         encoder.set_buffer(0, Some(inputs[0]), 0);
@@ -1517,12 +1515,16 @@ impl MetalKernelOp for MetalCast {
     }
 
     // Cast is memory-bound: 1 read, 1 write, minimal compute
-    fn bytes_loaded(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {
-        0 // Unknown at compile time
+    fn bytes_loaded(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let n = self.size.exec(dyn_map).unwrap_or(0);
+        // TODO: input dtype is not encoded; treat as 4B for now (matches current MetalRuntime IO path).
+        n * std::mem::size_of::<f32>()
     }
 
-    fn bytes_stored(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {
-        0
+    fn bytes_stored(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let n = self.size.exec(dyn_map).unwrap_or(0);
+        // TODO: output dtype sizing should be wired through MetalRuntime allocation.
+        n * std::mem::size_of::<f32>()
     }
 
     fn flops(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {
