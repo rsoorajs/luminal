@@ -26,9 +26,8 @@ fn main() {
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(
-            luminal_filter()
-                .with_target("luminal", LevelFilter::TRACE)
-                .with_target("llama", Level::TRACE),
+            luminal_filter(), // .with_target("luminal", LevelFilter::TRACE)
+                              // .with_target("llama", Level::TRACE),
         )
         .with(perfetto_layer)
         .init();

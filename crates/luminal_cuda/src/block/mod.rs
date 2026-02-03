@@ -22,7 +22,6 @@ use std::{
     fmt::Debug,
     hash::{DefaultHasher, Hash, Hasher},
     iter::once,
-    ptr::{null, null_mut},
     sync::Arc,
 };
 use tracing::{Level, span};
@@ -330,26 +329,36 @@ unsafe impl ValidAsZeroBits for SMEvent {}
 pub(crate) struct TaskQueue {
     data: Vec<u8>,
     task_stride: usize,
+    payload_align: usize,
     num_tasks: usize,
 }
 
 impl TaskQueue {
-    pub fn new(payload_size: usize) -> Self {
+    pub fn new(payload_size: usize, payload_align: usize) -> Self {
         // Task layout (must match C struct with alignment):
         // - 11 ints (44 bytes at offset 0)
-        // - 4 bytes padding for 8-byte alignment of pointers
-        // - 3 pointers (24 bytes at offset 48)
-        // - 1 pointer (8 bytes at offset 72)
-        // = 80 bytes base + payload_size, aligned to 8 bytes
+        // - 3 source indices (12 bytes at offset 44)
+        // - 1 out index (4 bytes at offset 56)
+        // = 60 bytes base, then padding for payload alignment, then payload
         let int_section = size_of::<i32>() * 11; // 44 bytes
-        let int_section_aligned = (int_section + 7) & !7; // 48 bytes (aligned for pointers)
-        let ptr_section = size_of::<*const f32>() * 3 + size_of::<*mut f32>(); // 32 bytes
-        let base_size = int_section_aligned + ptr_section; // 80 bytes
-        let total = base_size + payload_size;
-        let task_stride = (total + 7) & !7; // Align to 8 bytes
+        let index_section = size_of::<i32>() * 4; // 16 bytes (3 source + 1 out)
+        let base_size = int_section + index_section; // 60 bytes
+
+        // Add padding before payload if needed for alignment
+        let payload_offset = if payload_align > 1 {
+            (base_size + payload_align - 1) & !(payload_align - 1)
+        } else {
+            base_size
+        };
+        let total = payload_offset + payload_size;
+
+        // Final alignment is max of 4 (for int fields) and payload_align
+        let struct_align = 4.max(payload_align);
+        let task_stride = (total + struct_align - 1) & !(struct_align - 1);
         Self {
             data: Vec::new(),
             task_stride,
+            payload_align,
             num_tasks: 0,
         }
     }
@@ -368,8 +377,8 @@ impl TaskQueue {
         in_dep_c_base: i32,
         out_dep_stride: i32,
         out_dep_base: i32,
-        source_ptrs: [*const f32; 3],
-        out_ptr: *mut f32,
+        source_indices: [i32; 3],
+        out_index: i32,
         payload: &[u8],
         expressions: &FxHashMap<Expression, i32>,
     ) {
@@ -385,35 +394,17 @@ impl TaskQueue {
             .int("in_dep_c_base", in_dep_c_base)
             .int("out_dep_stride", out_dep_stride)
             .int("out_dep_base", out_dep_base)
-            .ptr_const_f32_arr("source_ptrs", source_ptrs.as_slice())
-            .ptr_mut_f32("out_ptr", out_ptr)
-            .bytes(1, "payload", payload) // Add payload with byte alignment
+            .int_arr("source_indices", &source_indices)
+            .int("out_index", out_index)
+            .bytes(self.payload_align, "payload", payload) // Add payload with proper alignment
             .finish_struct();
 
         // Pad to task_stride
         bytes.resize(self.task_stride, 0);
 
+
         self.data.extend_from_slice(&bytes);
         self.num_tasks += 1;
-    }
-
-    pub fn set_out_ptr(&mut self, index: usize, ptr: *mut f32) {
-        // Layout: 11 ints (44 bytes) + padding (4 bytes) + 3 ptrs (24 bytes) + out_ptr (8 bytes)
-        let ints_size = size_of::<i32>() * 11; // 44
-        let padding = (8 - (ints_size % 8)) % 8; // 4 bytes padding to align to 8
-        let offset = index * self.task_stride + ints_size + padding + size_of::<*const f32>() * 3;
-        let bytes = (ptr as usize).to_ne_bytes();
-        self.data[offset..offset + size_of::<*mut f32>()].copy_from_slice(&bytes);
-    }
-
-    pub fn set_source_ptr(&mut self, index: usize, input_num: usize, ptr: *const f32) {
-        // Layout: 11 ints (44 bytes) + padding (4 bytes) + source_ptrs[input_num]
-        let ints_size = size_of::<i32>() * 11; // 44
-        let padding = (8 - (ints_size % 8)) % 8; // 4 bytes padding to align to 8
-        let offset =
-            index * self.task_stride + ints_size + padding + size_of::<*const f32>() * input_num;
-        let bytes = (ptr as usize).to_ne_bytes();
-        self.data[offset..offset + size_of::<*const f32>()].copy_from_slice(&bytes);
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -776,7 +767,7 @@ fn compile_interpreter(
     );
     kernel = kernel.replace("//%extra_op_calls%", &ops.iter().map(|op| {
             let op_name = op.op_name();
-            format!("case OpCode::{op_name}Op: {op_name}_function(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); break;")
+            format!("case OpCode::{op_name}Op: {op_name}_function(t->payload.{op_name}, source_ptrs, out_ptr, nt.current, threadIdx.x, scratchpad); break;")
         }).join("\n"));
 
     // Generate prologue functions (only for non-empty prologues)
@@ -828,7 +819,7 @@ fn compile_interpreter(
             } else {
                 // Event code: 2 + N_OPS + op_idx * 3 + 0
                 let event_code = 2 + n_ops + i * 3;
-                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); {op_name}_prologue_a(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); __syncthreads(); if (threadIdx.x == 0) record_event(timings, &recorded_event, 1); break;"))
+                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); {op_name}_prologue_a(t->payload.{op_name}, source_ptrs, out_ptr, nt.current, threadIdx.x, scratchpad); __syncthreads(); if (threadIdx.x == 0) record_event(timings, &recorded_event, 1); break;"))
             }
         }).join("\n"),
     );
@@ -843,7 +834,7 @@ fn compile_interpreter(
             } else {
                 // Event code: 2 + N_OPS + op_idx * 3 + 1
                 let event_code = 2 + n_ops + i * 3 + 1;
-                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); {op_name}_prologue_b(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); if (threadIdx.x == 0) record_event(timings, &recorded_event, 1); __syncthreads(); break;"))
+                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); {op_name}_prologue_b(t->payload.{op_name}, source_ptrs, out_ptr, nt.current, threadIdx.x, scratchpad); if (threadIdx.x == 0) record_event(timings, &recorded_event, 1); __syncthreads(); break;"))
             }
         }).join("\n"),
     );
@@ -858,7 +849,7 @@ fn compile_interpreter(
             } else {
                 // Event code: 2 + N_OPS + op_idx * 3 + 2
                 let event_code = 2 + n_ops + i * 3 + 2;
-                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); {op_name}_prologue_c(t->payload.{op_name}, t->source_ptrs, t->out_ptr, nt.current, threadIdx.x, scratchpad); if (threadIdx.x == 0) record_event(timings, &recorded_event, 1); __syncthreads(); break;"))
+                Some(format!("case OpCode::{op_name}Op: if (threadIdx.x == 0) record_event(timings, &recorded_event, {event_code}); {op_name}_prologue_c(t->payload.{op_name}, source_ptrs, out_ptr, nt.current, threadIdx.x, scratchpad); if (threadIdx.x == 0) record_event(timings, &recorded_event, 1); __syncthreads(); break;"))
             }
         }).join("\n"),
     );
@@ -936,6 +927,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
     Expression,
     TaskQueue,
     FxHashMap<NodeIndex, usize>,
+    FxHashMap<NodeIndex, i32>,  // node_to_buffer_index mapping
 ) {
     let block_ops = llir_graph
         .node_indices()
@@ -999,16 +991,16 @@ pub(crate) fn make_megakernel_from_llir_graph(
         .map(|(i, e)| (*e, i as i32))
         .collect::<FxHashMap<_, _>>();
 
-    // Calculate actual max payload size from the ops being used
-    let max_payload_size = block_ops
+    // Calculate actual max payload size and alignment from the ops being used
+    let (max_payload_size, max_payload_align) = block_ops
         .iter()
         .map(|op| {
             op.build_payload(cuda_stream, CStruct::new(Some(&temp_expression_map)))
-                .finish_struct()
-                .len()
+                .size_and_align()
         })
-        .max()
-        .unwrap_or(0);
+        .fold((0, 1), |(max_size, max_align), (size, align)| {
+            (max_size.max(size), max_align.max(align))
+        });
 
     let (interpreter, expressions, interpreter_constants) = compile_interpreter(
         cuda_stream,
@@ -1018,9 +1010,21 @@ pub(crate) fn make_megakernel_from_llir_graph(
         kernel_cache,
     );
 
-    // Build task queue with dynamic payload size
-    let mut tasks = TaskQueue::new(max_payload_size);
+    // Build task queue with dynamic payload size and alignment
+    let mut tasks = TaskQueue::new(max_payload_size, max_payload_align);
     let mut node_to_task_index = FxHashMap::default();
+    let mut node_to_buffer_index: FxHashMap<NodeIndex, i32> = FxHashMap::default();
+    let mut next_buffer_index: i32 = 0;
+
+    // Helper to get or assign buffer index for a node
+    let mut get_buffer_index = |node: NodeIndex| -> i32 {
+        *node_to_buffer_index.entry(node).or_insert_with(|| {
+            let idx = next_buffer_index;
+            next_buffer_index += 1;
+            idx
+        })
+    };
+
     for node in toposort(&llir_graph, None).unwrap() {
         if !subgraph.contains(&node) {
             continue;
@@ -1030,6 +1034,15 @@ pub(crate) fn make_megakernel_from_llir_graph(
             .sorted_by_key(|e| e.id())
             .map(|e| e.source())
             .collect_vec();
+
+        // Assign buffer indices for source nodes and output node
+        let source_indices: [i32; 3] = [
+            get_buffer_index(sources[0]),
+            sources.get(1).map(|&n| get_buffer_index(n)).unwrap_or(0),
+            sources.get(2).map(|&n| get_buffer_index(n)).unwrap_or(0),
+        ];
+        let out_index = get_buffer_index(node);
+
         let op = llir_graph[node].to_dialect::<dyn BlockOp>().unwrap();
         let op_code = block_ops
             .iter()
@@ -1091,8 +1104,8 @@ pub(crate) fn make_megakernel_from_llir_graph(
             in_dep_c_base_val,
             out_dep_stride_val,
             out_dep_base_val,
-            [null(); 3],
-            null_mut(),
+            source_indices,
+            out_index,
             &payload,
             &expressions,
         );
@@ -1103,5 +1116,6 @@ pub(crate) fn make_megakernel_from_llir_graph(
         n_barriers,
         tasks,
         node_to_task_index,
+        node_to_buffer_index,
     )
 }

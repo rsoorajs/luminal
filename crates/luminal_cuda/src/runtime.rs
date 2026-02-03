@@ -83,7 +83,10 @@ enum ExecutableKernel {
         interpreter_constants: FxHashMap<char, CudaSlice<u8>>,
         n_barriers: Expression,
         work_queue: TaskQueue,
-        node_to_task_index: FxHashMap<NodeIndex, usize>,
+        // Buffer array for indirect buffer access
+        buffer_array: Vec<u64>,                        // Host-side buffer pointers
+        node_to_buffer_index: FxHashMap<NodeIndex, i32>, // Node -> buffer index mapping
+        buffer_array_device: Option<CudaSlice<u64>>,   // Device-side buffer array
     },
     CudaGraphExec(Box<CudaGraphExecData>),
     HostOp {
@@ -123,12 +126,17 @@ impl Drop for ExecutableKernel {
         match self {
             ExecutableKernel::Megakernel {
                 interpreter_constants,
+                buffer_array_device,
                 ..
             } => {
                 // Prevent Drop of CudaSlice<u8> (likely calls cuMemFree).
                 let m = std::mem::take(interpreter_constants);
                 for (_k, v) in m {
                     std::mem::forget(v);
+                }
+                // Prevent Drop of buffer_array_device
+                if let Some(buf) = buffer_array_device.take() {
+                    std::mem::forget(buf);
                 }
             }
             ExecutableKernel::CudaGraphExec(data) => {
@@ -287,42 +295,27 @@ impl CudaRuntime {
             .collect_vec()
     }
 
-    fn register_buffer(&mut self, llir_node: NodeIndex, ptr: u64) {
-        // Remap pointers in work queue
-        if let Some(ExecutableKernel::Megakernel {
-            work_queue,
-            node_to_task_index,
-            ..
-        }) = self
-            .node_to_exec
-            .get(&llir_node)
-            .and_then(|n| self.exec_graph.node_weight_mut(*n))
-            && self.llir_graph[llir_node].to_op::<Input>().is_none()
-        {
-            work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
-        }
-        let outgoing_edges: Vec<_> = self
-            .llir_graph
-            .edges_directed(llir_node, Direction::Outgoing)
-            .collect();
-        for edge in outgoing_edges {
-            let dest = edge.target();
-            let n_input = self
-                .llir_graph
-                .edges_directed(dest, Direction::Incoming)
-                .sorted_by_key(|e| e.id())
-                .position(|e| e.id() == edge.id())
-                .unwrap();
-            if let Some(ExecutableKernel::Megakernel {
-                work_queue,
-                node_to_task_index,
+    /// Update all megakernel buffer arrays from cached_buffer_ptrs.
+    /// Must be called after all buffers are allocated.
+    fn update_megakernel_buffers(&mut self) {
+        // Iterate through all megakernels and update their buffer arrays
+        for exec_node in self.exec_graph.node_indices().collect_vec() {
+            if let ExecutableKernel::Megakernel {
+                buffer_array,
+                node_to_buffer_index,
                 ..
-            }) = self
-                .node_to_exec
-                .get(&dest)
-                .and_then(|n| self.exec_graph.node_weight_mut(*n))
+            } = &mut self.exec_graph[exec_node]
             {
-                work_queue.set_source_ptr(node_to_task_index[&dest], n_input, ptr as *const f32);
+                for (&llir_node, &buffer_index) in node_to_buffer_index.iter() {
+                    if let Some(&ptr) = self.cached_buffer_ptrs.get(&llir_node) {
+                        buffer_array[buffer_index as usize] = ptr;
+                    } else {
+                        eprintln!(
+                            "WARNING: No cached pointer for node {:?} (buffer_index={})",
+                            llir_node, buffer_index
+                        );
+                    }
+                }
             }
         }
     }
@@ -345,7 +338,6 @@ impl CudaRuntime {
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.cached_buffer_ptrs.insert(node, ptr);
-                self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
                 let out_size = op.output_size();
                 let exec_size = out_size.exec(dyn_dims).unwrap();
@@ -358,7 +350,6 @@ impl CudaRuntime {
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.cached_buffer_ptrs.insert(node, ptr);
-                self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
                 self.buffers.insert(
                     node,
@@ -368,9 +359,11 @@ impl CudaRuntime {
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.cached_buffer_ptrs.insert(node, ptr);
-                self.register_buffer(node, ptr);
             }
         }
+        // Note: Don't call update_megakernel_buffers here - HLIR input pointers
+        // aren't cached yet. The caller should call update_megakernel_buffers
+        // after processing HLIR inputs.
     }
 
     /// Prebuild all CUDA graphs with the given dynamic dimension values.
@@ -388,14 +381,16 @@ impl CudaRuntime {
     #[tracing::instrument(skip_all)]
     pub fn prebuild_graphs(&mut self, dyn_map: &FxHashMap<char, usize>) {
         // 1. Allocate intermediate buffers (needed for buffer pointers)
-        if self.buffers.is_empty() {
+        let needs_alloc = self.buffers.is_empty();
+        if needs_alloc {
             self.last_dyn_map = dyn_map.clone();
             self.allocate_intermediate_buffers(dyn_map);
         }
 
         // 2. Process changed HLIR inputs to get their buffer pointers
         // Only process inputs that have data in hlir_buffers
-        if !self.changed_hlir.is_empty() {
+        let had_changed_hlir = !self.changed_hlir.is_empty();
+        if had_changed_hlir {
             // First pass: collect nodes and pointers (immutable borrows)
             let to_process: Vec<(NodeIndex, NodeIndex, u64)> = self
                 .changed_hlir
@@ -415,9 +410,12 @@ impl CudaRuntime {
             // Second pass: apply mutations
             for (hlir_node, llir_node, ptr) in to_process {
                 self.cached_buffer_ptrs.insert(llir_node, ptr);
-                self.register_buffer(llir_node, ptr);
                 self.changed_hlir.remove(&hlir_node);
             }
+        }
+        // Update megakernel buffer arrays if any pointers changed
+        if needs_alloc || had_changed_hlir {
+            self.update_megakernel_buffers();
         }
 
         // 3. Build all CUDA graphs
@@ -722,6 +720,8 @@ impl Runtime for CudaRuntime {
         // reallocated and re-registered with the new work_queue
         self.buffers.clear();
         self.cached_buffer_ptrs.clear();
+        // Mark all HLIR inputs as changed so their pointers get re-cached in execute
+        self.changed_hlir.extend(self.hlir_buffers.keys().copied());
         self.exec_graph.clear();
         let mut exec_graph = StableGraph::default();
         let mut node_to_exec = FxHashMap::default();
@@ -735,19 +735,23 @@ impl Runtime for CudaRuntime {
                 .collect::<FxHashSet<_>>();
             let block_subgraphs = partition_marked_convex(llir_graph, &block_ops_in_graph).unwrap();
             for subgraph in block_subgraphs {
-                let (interpreter, constants, n_barriers, tasks, node_to_task_index) =
+                let (interpreter, constants, n_barriers, tasks, _node_to_task_index, node_to_buffer_index) =
                     make_megakernel_from_llir_graph(
                         llir_graph,
                         &subgraph,
                         &self.cuda_stream,
                         &mut self.kernel_cache,
                     );
+                // Initialize buffer_array with correct size (all zeros as placeholders)
+                let buffer_count = node_to_buffer_index.values().map(|&i| i + 1).max().unwrap_or(0) as usize;
                 let exec_node = exec_graph.add_node(ExecutableKernel::Megakernel {
                     interpreter,
                     interpreter_constants: constants,
                     n_barriers,
                     work_queue: tasks,
-                    node_to_task_index,
+                    buffer_array: vec![0u64; buffer_count],
+                    node_to_buffer_index,
+                    buffer_array_device: None,
                 });
                 for node in subgraph {
                     node_to_exec.insert(node, exec_node);
@@ -1002,7 +1006,9 @@ impl Runtime for CudaRuntime {
         }
         self.cuda_stream.synchronize().unwrap();
 
-        if !self.changed_hlir.is_empty() {
+        // Cache HLIR input pointers
+        let had_changed_hlir = !self.changed_hlir.is_empty();
+        if had_changed_hlir {
             for hlir_node in self.changed_hlir.clone() {
                 let llir_node = self.hlir_to_llir[&hlir_node];
                 let ptr = match &self.hlir_buffers[&hlir_node] {
@@ -1010,9 +1016,13 @@ impl Runtime for CudaRuntime {
                     CudaInput::Ptr(p) => *p,
                 };
                 self.cached_buffer_ptrs.insert(llir_node, ptr);
-                self.register_buffer(llir_node, ptr);
             }
             self.changed_hlir.clear();
+        }
+        // Update megakernel buffer arrays if any pointers changed
+        // (either intermediate buffers from realloc or HLIR inputs)
+        if needs_realloc || had_changed_hlir {
+            self.update_megakernel_buffers();
         }
         let mut kernel_stats = Vec::new();
         let total_start = std::time::Instant::now();
@@ -1024,6 +1034,8 @@ impl Runtime for CudaRuntime {
                     interpreter_constants,
                     n_barriers,
                     work_queue,
+                    buffer_array,
+                    buffer_array_device,
                     ..
                 } => {
                     let sm_count = self
@@ -1033,9 +1045,10 @@ impl Runtime for CudaRuntime {
                         .unwrap();
                     let span = span!(Level::TRACE, "megakernel_setup");
                     // Upload queue, barriers and program counter
+                    let n_barriers_val = n_barriers.exec(dyn_map).unwrap();
                     let d_barriers = self
                         .cuda_stream
-                        .alloc_zeros::<i32>(n_barriers.exec(dyn_map).unwrap())
+                        .alloc_zeros::<i32>(n_barriers_val)
                         .unwrap();
                     let d_tasks = self.cuda_stream.clone_htod(work_queue.as_slice()).unwrap();
                     let d_head = self.cuda_stream.clone_htod(&[0i32]).unwrap();
@@ -1050,6 +1063,17 @@ impl Runtime for CudaRuntime {
                         .cuda_stream
                         .alloc_zeros::<u64>(sm_count as usize)
                         .unwrap();
+
+                    // Upload buffer array to device
+                    let d_buffers = if buffer_array_device.is_none() || buffer_array_device.as_ref().map(|b| b.len()) != Some(buffer_array.len()) {
+                        let buf = self.cuda_stream.clone_htod(buffer_array.as_slice()).unwrap();
+                        *buffer_array_device = Some(buf);
+                        buffer_array_device.as_ref().unwrap()
+                    } else {
+                        // Update existing buffer array on device
+                        self.cuda_stream.memcpy_htod(buffer_array.as_slice(), buffer_array_device.as_mut().unwrap()).unwrap();
+                        buffer_array_device.as_ref().unwrap()
+                    };
 
                     // Set up dyn dims
                     for (dyn_dim, val) in dyn_map {
@@ -1077,11 +1101,15 @@ impl Runtime for CudaRuntime {
                             .unwrap();
 
                     // Launch kernel
+                    // Synchronize to ensure all uploads complete before kernel launch
+                    self.cuda_stream.synchronize().unwrap();
+
                     let cfg = LaunchConfig {
                         grid_dim: (sm_count as u32, 1, 1), // One block per SM
-                        block_dim: (1024, 1, 1), // 1024 threads (32 warps) for max latency hiding
+                        block_dim: (256, 1, 1),
                         shared_mem_bytes: (max_dynamic_allowed / 2) as u32,
                     };
+
                     let mut lb = self.cuda_stream.launch_builder(interpreter);
                     let n_tasks = work_queue.len() as i32;
                     lb.arg(&d_tasks);
@@ -1091,6 +1119,7 @@ impl Runtime for CudaRuntime {
                     lb.arg(&queue_lock);
                     lb.arg(&timing_buffer);
                     lb.arg(&start_time);
+                    lb.arg(d_buffers);
                     drop(span);
                     let mk_span_id = Uuid::new_v4();
                     {

@@ -23,8 +23,8 @@ struct Task {
   int in_dep_c_base;
   int out_dep_stride;
   int out_dep_base;
-  const float *source_ptrs[3];
-  float *out_ptr;
+  int source_indices[3];
+  int out_index;
   Payload payload;
 };
 
@@ -127,11 +127,12 @@ __device__ inline void record_event(SMEvent *__restrict__ timings,
 }
 
 extern "C" {
-__global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
-                              int *__restrict__ head, int *__restrict__ ready,
-                              int *__restrict__ queue_lock,
-                              SMEvent *__restrict__ timings,
-                              unsigned long long *__restrict__ start_times) {
+__global__ void worker_kernel(Task * __restrict__ tasks, int num_tasks,
+                              int * __restrict__ head, int * __restrict__ ready,
+                              int * __restrict__ queue_lock,
+                              SMEvent * __restrict__ timings,
+                              unsigned long long * __restrict__ start_times,
+                              float * const * buffers) { // Remove __restrict__ to allow proper reads
   __shared__ NextTask nt;
   __shared__ int done;
   __shared__ int dep_out;
@@ -140,6 +141,8 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
   __shared__ bool run_c_prologue;
   __shared__ bool stop_wait_loop;
   __shared__ float scratchpad[8192]; // 32 KB scratchpad
+  __shared__ const float* source_ptrs[3];
+  __shared__ float* out_ptr;
   int recorded_event = 0;
   timings += blockIdx.x * N_TIMING_SLOTS;
   if (threadIdx.x == 0) {
@@ -155,6 +158,16 @@ __global__ void worker_kernel(Task *__restrict__ tasks, int num_tasks,
       break;
 
     const Task *t = &tasks[nt.task_idx];
+
+    // Resolve buffer pointers from indices
+    if (threadIdx.x == 0) {
+      source_ptrs[0] = buffers[t->source_indices[0]];
+      source_ptrs[1] = buffers[t->source_indices[1]];
+      source_ptrs[2] = buffers[t->source_indices[2]];
+      out_ptr = buffers[t->out_index];
+    }
+    __syncthreads();
+
     int dep_a = 0;
     int dep_b = 0;
     int dep_c = 0;
