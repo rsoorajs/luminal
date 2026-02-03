@@ -1,5 +1,5 @@
 use std::{
-    fmt::Debug,
+    fmt::{Debug, Display},
     sync::{Arc, Mutex},
 };
 
@@ -160,6 +160,21 @@ pub enum DType {
     Bf16,
     /// 32-bit integer
     Int,
+}
+
+impl Display for DType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl DType {
+    pub fn sizeof(&self) -> usize {
+        match self {
+            DType::F32 | DType::Int => 4,
+            DType::Bf16 | DType::F16 => 2,
+        }
+    }
 }
 
 /// The main HLIROp trait.

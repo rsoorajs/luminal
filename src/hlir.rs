@@ -309,15 +309,15 @@ impl NativeOp for Iota {
 }
 
 #[derive(Clone, PartialEq, Debug, Default)]
-pub struct Cast(pub DType);
+pub struct Cast(pub Expression, pub DType);
 impl HLIROp for Cast {
     fn to_egglog(&self, inp: &[(NodeIndex, String, ShapeTracker)]) -> String {
-        format!("(Cast {} ({:?}))", inp[0].1, self.0)
+        format!("(Cast {} {} ({:?}))", inp[0].1, self.0.to_egglog(), self.1)
     }
 }
 impl EgglogOp for Cast {
     fn term(&self) -> (String, Vec<OpParam>) {
-        ("Cast".to_string(), vec![Input, Dty])
+        ("Cast".to_string(), vec![Input, Expr, Dty])
     }
 
     fn cleanup(&self) -> bool {
@@ -327,7 +327,7 @@ impl EgglogOp for Cast {
     fn rewrites(&self) -> Vec<String> {
         vec![
             "(rule
-           ((= ?e (Cast ?inp ?dty)))
+           ((= ?e (Cast ?inp ?size ?dty)))
            ((set (dtype ?e) ?dty))
         )"
             .to_string(),
@@ -338,17 +338,20 @@ impl EgglogOp for Cast {
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
         _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        _: &mut FxHashMap<&'a ENodeId, Expression>,
+        ec: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
-            LLIROp::new::<dyn NativeOp>(Box::new(Self(extract_dtype(egraph, children[1])))),
+            LLIROp::new::<dyn NativeOp>(Box::new(Self(
+                extract_expr(egraph, children[1], ec).unwrap(),
+                extract_dtype(egraph, children[2]),
+            ))),
             vec![children[0]],
         )
     }
 }
 impl NativeOp for Cast {
     fn execute(&self, input: Vec<&NativeData>, _: &FxHashMap<char, usize>) -> NativeData {
-        match self.0 {
+        match self.1 {
             DType::F32 => NativeData::F32(match &input[0] {
                 NativeData::F32(f) => f.clone(),
                 NativeData::F16(f) => f.iter().map(|f| f.to_f32()).collect(),
