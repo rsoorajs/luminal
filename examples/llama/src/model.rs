@@ -2,7 +2,7 @@ use luminal::{
     graph::Graph,
     op::{CustomOp, DType, LLIROp},
     prelude::{F32Pow, GraphTensor},
-    shape::{flatten_mul_strides, Expression, ToShape},
+    shape::{flatten_mul_strides, Expression, ShapeTracker, ToShape},
 };
 use luminal_cuda::{
     block::{cstruct::CStruct, BlockOp},
@@ -11,7 +11,7 @@ use luminal_cuda::{
 use luminal_nn::LayerNorm;
 use std::{fmt::Debug, sync::Arc};
 
-// Llama 7b hyperparams
+// Llama 3 8B hyperparams
 pub const LAYERS: usize = 32;
 pub const HIDDEN: usize = 4096;
 pub const INTERMEDIATE: usize = 14336;
@@ -94,10 +94,10 @@ impl Llama {
         pos_ids: GraphTensor,
         kv_cache: &KVCache,
     ) -> GraphTensor {
-        let batch = token_ids.dims1();
+        let seq = token_ids.dims1();
         let mut x = self.embedding.gather(
             (token_ids * HIDDEN).expand_dim(1, HIDDEN)
-                + token_ids.graph().arange(HIDDEN).expand_dim(0, batch),
+                + token_ids.graph().arange(HIDDEN).expand_dim(0, seq),
         );
         for (layer, (k_cache, v_cache)) in self.layers.iter().zip(&kv_cache.layers) {
             x = layer.forward(
@@ -153,7 +153,8 @@ fn llama_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> Grap
 
     // Combine back into output
     let mut s = x0_out.concat_along(x1_out, 3);
-    s.shape = input.shape; // need to have a proper merge_dims!
+    let (n_heads, seq_dim, _) = input.dims3();
+    s.shape = ShapeTracker::new((n_heads, seq_dim, HEAD_DIM));
     s = s.transpose(0, 1) * 1.0;
     s.shape = orig_shape;
     s

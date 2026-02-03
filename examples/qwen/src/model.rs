@@ -1,8 +1,8 @@
 use luminal::{
     graph::Graph,
-    op::{CustomOp, LLIROp},
-    prelude::GraphTensor,
-    shape::{flatten_mul_strides, Expression, ToShape},
+    op::{CustomOp, DType, LLIROp},
+    prelude::{F32Pow, GraphTensor},
+    shape::{flatten_mul_strides, Expression, ShapeTracker, ToShape},
 };
 use luminal_cuda::{
     block::{cstruct::CStruct, BlockOp},
@@ -23,6 +23,7 @@ pub const Q_DIM: usize = N_HEADS * HEAD_DIM; // = 4096
 pub const KV_DIM: usize = N_KV_HEADS * HEAD_DIM; // = 1024
 pub const VOCAB_SIZE: usize = 151936;
 pub const RMS_NORM_EPS: f32 = 1e-6;
+const ROPE_BASE: f32 = 1_000_000.0;
 
 pub struct Qwen {
     embedding: GraphTensor,
@@ -80,7 +81,7 @@ impl Qwen {
                     RMS_NORM_EPS,
                     cx,
                 ),
-                // QK-Norm weights (not yet implemented - needs fused CUDA kernel)
+                // QK-Norm weights
                 q_norm: cx.named_tensor(
                     format!("model.layers.{l}.self_attn.q_norm.weight"),
                     HEAD_DIM,
@@ -107,7 +108,6 @@ impl Qwen {
         }
     }
 
-    #[tracing::instrument(skip_all)]
     pub fn forward(
         &self,
         token_ids: GraphTensor,
@@ -142,134 +142,66 @@ struct QwenLayer {
     o_proj: GraphTensor,
     attn_rms: LayerNorm,
     mlp_rms: LayerNorm,
-    // QK-Norm weights for fused QK-Norm + RoPE kernel
+    // QK-Norm weights
     q_norm: GraphTensor,
     k_norm: GraphTensor,
 }
 
-/// Fused QK-Norm + RoPE custom operation
-/// TODO: generalize elementwise fusion and remove rope operations
-#[derive(Debug, Clone)]
-pub struct QwenQKNormRoPE {
-    range: Vec<Expression>,      // [seq]
-    inp_stride: Vec<Expression>, // Input strides
-    row_width: Expression,       // Total width (n_heads * head_dim)
-}
+/// Apply QK-Norm + RoPE
+fn qwen_qk_norm_rope(
+    mut input: GraphTensor,
+    norm_weight: GraphTensor,
+    pos_ids: GraphTensor,
+    _n_heads: usize,
+) -> GraphTensor {
+    let orig_shape = input.shape;
 
-impl QwenQKNormRoPE {
-    fn new(seq: Expression, row_width: Expression) -> Self {
-        Self {
-            range: vec![seq],
-            inp_stride: vec![row_width],
-            row_width,
-        }
-    }
-}
+    // Reshape: (seq, dim) -> (n_heads, seq, head_dim)
+    input = input.split_dims(1, HEAD_DIM).transpose(0, 1);
 
-impl CustomOp for QwenQKNormRoPE {
-    fn to_llir_op(&self) -> LLIROp {
-        LLIROp::new::<dyn BlockOp>(Box::new(self.clone()))
-    }
-}
+    // Apply QK-Norm: RMS norm along head_dim with learnable weights
+    input = input.std_norm(2, RMS_NORM_EPS);
+    input = input * norm_weight.expand_lhs(&input.dims()[..input.dims().len() - 1]);
 
-impl BlockOp for QwenQKNormRoPE {
-    fn op_name(&self) -> &'static str {
-        "QwenQKNormRoPE"
-    }
+    // Get freqs: theta_i = base^(-2i/d) for i in [0, d/2)
+    let freqs = input
+        .graph()
+        .arange_options(0, HEAD_DIM, 2)
+        .cast(DType::F32)
+        / HEAD_DIM as f32;
+    let inv_freqs = ROPE_BASE.pow(freqs).reciprocal();
 
-    fn launch_range(&self) -> Vec<Expression> {
-        self.range.clone()
-    }
+    // emb = pos * inv_freqs, shape (seq, head_dim/2)
+    let emb = pos_ids
+        .cast(DType::F32)
+        .expand_dim(1, 1)
+        .matmul(inv_freqs.expand_dim(0, 1));
 
-    fn output_size(&self) -> Expression {
-        self.range.iter().copied().product::<Expression>() * self.row_width
-    }
+    // Split input into first half (x0) and second half (x1) - SPLIT-HALF style!
+    // input: (n_heads, seq, head_dim) -> split into (n_heads, seq, head_dim/2) each
+    let half_dim = HEAD_DIM / 2;
+    let x0 = input.slice((.., .., ..half_dim)); // First half: indices 0-63
+    let x1 = input.slice((.., .., half_dim..)); // Second half: indices 64-127
 
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
-        vec![true; self.range.len()]
-    }
+    // Apply rotary embeddings:
+    // x0_out = x0 * cos(emb) - x1 * sin(emb)
+    // x1_out = x1 * cos(emb) + x0 * sin(emb)
+    let cos_emb = emb.cos().expand_dim(0, x0.dims()[0]);
+    let sin_emb = emb.sin().expand_dim(0, x0.dims()[0]);
 
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
-        // 3 inputs: input tensor, norm weight, position ids
-        vec![
-            vec![true; self.range.len()],
-            vec![true; self.range.len()],
-            vec![true; self.range.len()],
-        ]
-    }
+    let x0_out = x0 * cos_emb - x1 * sin_emb;
+    let x1_out = x1 * cos_emb + x0 * sin_emb;
 
-    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
-        payload
-            .expr("inp", flatten_mul_strides(&self.range, &self.inp_stride))
-            .expr("out", flatten_mul_strides(&self.range, &self.inp_stride))
-            .expr("row_width", self.row_width)
-            .expr("weight", 0)
-            .expr("token_ids", 'z')
-    }
+    // Concatenate back: [first_half | second_half]
+    let mut s = x0_out.concat_along(x1_out, 2);
 
-    fn cuda_function(&self) -> String {
-        format!(
-            r#"
-        __shared__ float rms_scale_shared;
-
-        const float* inp = source_ptrs[0] + eval_expression(payload.inp, current);
-        float*       out = out_ptr + eval_expression(payload.out, current);
-        const float* weight = source_ptrs[1];  // Weight is [head_dim], no offset needed
-        const int* token_ids = (const int*)source_ptrs[2] + eval_expression(payload.token_ids, current);
-
-        const int D_total = eval_expression(payload.row_width, 0);
-        const int d_head  = {HEAD_DIM};
-        const int n_heads = D_total / d_head;
-
-        const int pos  = token_ids[0];
-        const float base = 1000000.0f;
-        const float eps = {RMS_NORM_EPS}f;
-
-        const int half = d_head / 2;
-
-        // Process each head
-        for (int h = 0; h < n_heads; ++h) {{
-            const float* head_in  = inp + h * d_head;
-            float*       head_out = out + h * d_head;
-
-            // Step 1: Compute sum of squares for RMS norm (single thread for simplicity)
-            if (t == 0) {{
-                float sum_sq = 0.0f;
-                for (int k = 0; k < d_head; ++k) {{
-                    float val = head_in[k];
-                    sum_sq += val * val;
-                }}
-                rms_scale_shared = rsqrtf(sum_sq / (float)d_head + eps);
-            }}
-            __syncthreads();
-            float rms_scale = rms_scale_shared;
-
-            // Step 2: Apply RMS norm + weight and RoPE
-            for (int k = t; k < half; k += blockDim.x) {{
-                const int j0 = k;
-                const int j1 = k + half;
-
-                // Apply RMS norm and weight
-                float x0 = head_in[j0] * rms_scale * weight[j0];
-                float x1 = head_in[j1] * rms_scale * weight[j1];
-
-                // Compute RoPE rotation
-                const float exponent = -(2.0f * (float)k) / (float)d_head;
-                const float theta = (float)pos * __powf(base, exponent);
-
-                float s, c;
-                __sincosf(theta, &s, &c);
-
-                head_out[j0] = x0 * c - x1 * s;
-                head_out[j1] = x1 * c + x0 * s;
-            }}
-            __syncthreads();
-        }}
-        "#,
-            HEAD_DIM = HEAD_DIM,
-            RMS_NORM_EPS = RMS_NORM_EPS
-        )
-    }
+    // Set proper strides and reshape back
+    let n_heads = input.dims()[0];
+    let seq_dim = input.dims()[1];
+    s.shape = ShapeTracker::new((n_heads, seq_dim, HEAD_DIM));
+    s = s.transpose(0, 1) * 1.0;
+    s.shape = orig_shape;
+    s
 }
 
 impl QwenLayer {
@@ -285,19 +217,9 @@ impl QwenLayer {
         let k = x_attn.matmul(self.k_proj.t());
         let v = x_attn.matmul(self.v_proj.t());
 
-        // Apply QK-Norm + RoPE using fused custom kernel
-        let q_rope = x.graph().custom_op(
-            QwenQKNormRoPE::new(q.dims()[0], q.dims()[1]),
-            (q, self.q_norm, pos_ids),
-            q.shape,
-            q.dtype,
-        );
-        let k_rope = x.graph().custom_op(
-            QwenQKNormRoPE::new(k.dims()[0], k.dims()[1]),
-            (k, self.k_norm, pos_ids),
-            k.shape,
-            k.dtype,
-        );
+        // Apply QK-Norm + RoPE using HLIR operations
+        let q_rope = qwen_qk_norm_rope(q, self.q_norm, pos_ids, N_HEADS);
+        let k_rope = qwen_qk_norm_rope(k, self.k_norm, pos_ids, N_KV_HEADS);
 
         let attn_out = x.graph().custom_op(
             QwenAttention::new(k_cache, v_cache, q_rope.dims()[0], 'p'.into()),

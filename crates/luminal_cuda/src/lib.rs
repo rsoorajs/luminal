@@ -5,9 +5,6 @@ pub mod logical;
 pub mod runtime;
 use std::sync::Arc;
 
-/// Tile size for matmul tiling. Used by TileMatmul.
-pub const TILE_SIZE: u32 = 64;
-
 pub use cudarc;
 
 #[cfg(test)]

@@ -30,7 +30,7 @@ pub fn download_hf_model(repo_id: &str) -> Result<PathBuf, Box<dyn std::error::E
     let tokenizer_path = repo.get("tokenizer.json")?;
     let model_dir = tokenizer_path.parent().unwrap().to_path_buf();
     // Try to download single shard model first
-    if let Ok(_) = repo.get("model.safetensors") {
+    if repo.get("model.safetensors").is_ok() {
         return Ok(model_dir);
     }
     // Otherwise download sharded model

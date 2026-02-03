@@ -11,7 +11,7 @@ use luminal::{
     },
     prelude::*,
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracing::{Level, span, trace};
 
 use crate::{cudarc::driver::CudaSlice, host::HostOp};
@@ -28,7 +28,7 @@ fn parse_cublas_op(s: &str) -> cublasOperation_t {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[allow(dead_code)]
 pub struct CuBlasSgemmV2 {
     m: Expression,
@@ -39,6 +39,8 @@ pub struct CuBlasSgemmV2 {
     lda: Expression,
     ldb: Expression,
     ldc: Expression,
+    /// Lazily initialized cuBLAS handle - created on first execute
+    cublas: OnceLock<Arc<CudaBlas>>,
 }
 
 // Useless default for IntoEgglogOp
@@ -53,6 +55,7 @@ impl Default for CuBlasSgemmV2 {
             lda: Expression::default(),
             ldb: Expression::default(),
             ldc: Expression::default(),
+            cublas: OnceLock::new(),
         }
     }
 }
@@ -108,6 +111,7 @@ impl EgglogOp for CuBlasSgemmV2 {
             lda,
             ldb,
             ldc,
+            cublas: OnceLock::new(),
         };
         trace!(?extracted_state);
 
@@ -128,8 +132,6 @@ impl HostOp for CuBlasSgemmV2 {
         inputs: &[&CudaSlice<u8>],
         dyn_map: &FxHashMap<char, usize>,
     ) -> anyhow::Result<()> {
-        let blas = CudaBlas::new(stream.clone())?;
-
         // GEMM parameters
         let m = self.m.exec(dyn_map).unwrap() as i32;
         let n = self.n.exec(dyn_map).unwrap() as i32;
@@ -158,9 +160,8 @@ impl HostOp for CuBlasSgemmV2 {
             inputs[0].len(),
             m * n * 4
         );
-
-        let _sgemm_span: span::EnteredSpan = span!(
-            Level::INFO,
+        let _sgemm_span = span!(
+            Level::TRACE,
             "cuBLAS_SGEMM_V2",
             m,
             n,
@@ -175,9 +176,13 @@ impl HostOp for CuBlasSgemmV2 {
         )
         .entered();
 
+        let cublas = self
+            .cublas
+            .get_or_init(|| Arc::new(CudaBlas::new(stream.clone()).unwrap()));
+
         let status = unsafe {
             cublasSgemm_v2(
-                *blas.handle(),
+                *cublas.handle(),
                 a_layout,
                 b_layout,
                 m,
@@ -193,6 +198,7 @@ impl HostOp for CuBlasSgemmV2 {
                 ldc,
             )
         };
+        stream.synchronize().unwrap();
 
         if status != cublasStatus_t::CUBLAS_STATUS_SUCCESS {
             return Err(anyhow::anyhow!(

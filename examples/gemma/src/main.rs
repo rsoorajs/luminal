@@ -7,7 +7,6 @@ use luminal_cuda::{cudarc::driver::CudaContext, runtime::CudaRuntime};
 use model::*;
 use std::{io::Write, time::Duration};
 use tokenizers::Tokenizer;
-use tracing::{span, Level};
 
 const REPO_ID: &str = "unsloth/gemma-3-4b-it";
 
@@ -15,7 +14,7 @@ const REPO_ID: &str = "unsloth/gemma-3-4b-it";
 
 fn main() {
     let max_seq_len = 4096;
-    let gen_tokens = 30;
+    let gen_tokens = 100;
     let search_graphs = 5; // the number of graphs we want to search during compilation
     let prompt = "Explain what a neural network is in simple terms:";
 
@@ -66,14 +65,8 @@ fn main() {
     // Decode loop
     let mut prev_seq = 0;
     let mut fwd_durations = vec![];
-    for i in 0..gen_tokens {
+    for _ in 0..gen_tokens {
         let start = std::time::Instant::now();
-        let _span = if i == 0 {
-            span!(Level::INFO, "prefill")
-        } else {
-            span!(Level::INFO, "decode")
-        }
-        .entered();
 
         // Set runtime dimensions
         let seq_len = sentence.len();
@@ -95,8 +88,6 @@ fn main() {
         let logits_data = runtime.get_f32(logits);
 
         // Sample next token
-        let _sample_span = span!(Level::INFO, "sample_full").entered();
-
         sentence = vec![*sample(&logits_data, VOCAB_SIZE).last().unwrap()];
         prev_seq += seq_len;
         print!("{}", tokenizer.decode(&sentence, true).unwrap());
@@ -116,7 +107,6 @@ fn main() {
     );
 }
 
-#[tracing::instrument(skip_all)]
 fn sample(logits: &[f32], vocab_size: usize) -> Vec<u32> {
     logits
         .chunks_exact(vocab_size)
