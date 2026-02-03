@@ -1,9 +1,13 @@
-use crate::{block::*, kernel::KernelOp};
-use cudarc::driver::CudaModule;
-use cudarc::driver::sys::{CUdevice_attribute, CUfunction_attribute};
-use cudarc::driver::{
-    CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg, sys::CUevent_flags,
+use crate::{
+    block::{BlockOp, SMEvent, TaskQueue, make_megakernel_from_llir_graph},
+    host::HostOp,
+    kernel::KernelOp,
 };
+use cudarc::driver::{
+    CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
+    sys::CUevent_flags,
+};
+
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
 use luminal::hlir::*;
@@ -16,10 +20,11 @@ use luminal::prelude::{
     },
     *,
 };
+
 use memmap2::MmapOptions;
 use safetensors::SafeTensors;
-use std::{collections::VecDeque, fmt::Debug, fs::File, sync::Arc, time::Duration};
-use tracing::{Level, field, span};
+use std::{collections::VecDeque, fmt::Debug, fs::File, mem::size_of, sync::Arc, time::Duration};
+use tracing::{Level, field, span, trace};
 use uuid::Uuid;
 
 pub enum CudaInput {
@@ -49,6 +54,12 @@ enum ExecutableKernel {
         bytes_loaded: Expression,
         bytes_stored: Expression,
         flops: Expression,
+    },
+    HostOp {
+        stream: Arc<CudaStream>,
+        inputs: Vec<NodeIndex>,
+        output: NodeIndex,
+        internal: Arc<Box<dyn HostOp>>,
     },
 }
 
@@ -95,6 +106,7 @@ impl Drop for ExecutableKernel {
                     std::mem::forget(v);
                 }
             }
+            ExecutableKernel::HostOp { .. } => {}
         }
     }
 }
@@ -106,7 +118,8 @@ impl Debug for ExecutableKernel {
             "{}",
             match self {
                 Self::Megakernel { work_queue, .. } => format!("Megakernel ({})", work_queue.len()),
-                Self::Kernel { .. } => "Kernel".to_string(),
+                Self::Kernel { kernel_name, .. } => format!("Kernel: ({})", kernel_name),
+                Self::HostOp { internal, .. } => format!("HostOp: ({:?})", internal),
             }
         )
     }
@@ -132,6 +145,19 @@ pub struct CudaRuntime {
 }
 
 impl CudaRuntime {
+    /// Creates a new CudaRuntime with default configuration:
+    /// - Device 0
+    /// - Blocking sync scheduling
+    /// - Default stream
+    pub fn new() -> Result<Self, cudarc::driver::DriverError> {
+        let ctx = cudarc::driver::CudaContext::new(0)?;
+        ctx.bind_to_thread()?;
+        ctx.set_flags(cudarc::driver::sys::CUctx_flags::CU_CTX_SCHED_BLOCKING_SYNC)?;
+        let stream = ctx.default_stream();
+
+        Ok(Self::initialize(stream))
+    }
+
     #[tracing::instrument(skip_all)]
     pub fn load_safetensors(&mut self, cx: &Graph, file_path: &str) {
         let f = File::open(file_path).unwrap();
@@ -182,7 +208,7 @@ impl CudaRuntime {
             .unwrap();
         let _span = span!(Level::TRACE, "dtoh").entered();
         self.cuda_stream
-            .memcpy_dtov(
+            .clone_dtoh(
                 self.buffers
                     .get(&data_id)
                     .expect("Cannot find tensor in runtime!"),
@@ -263,6 +289,7 @@ impl CudaRuntime {
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+                trace!("node: {:?} ptr: {:?}", self.llir_graph[node], ptr);
                 self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
                 self.intermediate_buffer_dims
@@ -274,6 +301,17 @@ impl CudaRuntime {
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+                trace!("node: {:?} ptr: {:?}", self.llir_graph[node], ptr);
+                self.register_buffer(node, ptr);
+            } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
+                self.buffers.insert(
+                    node,
+                    self.cuda_stream
+                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
+                        .unwrap(),
+                );
+                let ptr: u64 = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+                trace!("node: {:?}  ptr: {:?}", self.llir_graph[node], ptr);
                 self.register_buffer(node, ptr);
             }
         }
@@ -284,23 +322,11 @@ pub trait ToCudaInput {
     fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput;
 }
 
-impl ToCudaInput for Vec<f32> {
-    fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
-        CudaInput::Buffer(
-            stream
-                .memcpy_stod(unsafe {
-                    std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
-                })
-                .unwrap(),
-        )
-    }
-}
-
 impl ToCudaInput for &[f32] {
     fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
         CudaInput::Buffer(
             stream
-                .memcpy_stod(unsafe {
+                .clone_htod(unsafe {
                     std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
                 })
                 .unwrap(),
@@ -312,7 +338,19 @@ impl ToCudaInput for Vec<i32> {
     fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
         CudaInput::Buffer(
             stream
-                .memcpy_stod(unsafe {
+                .clone_htod(unsafe {
+                    std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
+                })
+                .unwrap(),
+        )
+    }
+}
+
+impl ToCudaInput for Vec<f32> {
+    fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        CudaInput::Buffer(
+            stream
+                .clone_htod(unsafe {
                     std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
                 })
                 .unwrap(),
@@ -321,7 +359,12 @@ impl ToCudaInput for Vec<i32> {
 }
 
 impl Runtime for CudaRuntime {
-    type Ops = (crate::logical::Ops, crate::kernel::Ops, crate::block::Ops);
+    type Ops = (
+        crate::logical::Ops,
+        crate::kernel::Ops,
+        crate::block::Ops,
+        // crate::host::Ops,
+    );
     type CompileArg = Arc<CudaStream>;
     type ExecReturn = ();
     type ProfileMetric = Duration;
@@ -404,6 +447,25 @@ impl Runtime for CudaRuntime {
                         bytes_loaded: kernel_op.bytes_loaded(),
                         bytes_stored: kernel_op.bytes_stored(),
                         flops: kernel_op.flops(),
+                    }),
+                );
+            }
+        }
+        // Add host ops
+        for host_op_node_index in llir_graph.node_indices() {
+            if let Some(host_op) = llir_graph[host_op_node_index].to_dialect::<dyn HostOp>() {
+                let inputs = llir_graph
+                    .edges_directed(host_op_node_index, Direction::Incoming)
+                    .sorted_by_key(|e| e.id())
+                    .map(|e| e.source())
+                    .collect_vec();
+                node_to_exec.insert(
+                    host_op_node_index,
+                    exec_graph.add_node(ExecutableKernel::HostOp {
+                        stream: Arc::clone(&self.cuda_stream),
+                        inputs,
+                        output: host_op_node_index,
+                        internal: Arc::clone(host_op),
                     }),
                 );
             }
@@ -542,10 +604,11 @@ impl Runtime for CudaRuntime {
             }
             self.changed_hlir.clear();
         }
-        let mut timings = vec![];
+        let mut timings = Vec::new();
         let mut kernel_stats = Vec::new();
         let total_start = std::time::Instant::now();
         for exec_node in toposort(&self.exec_graph, None).unwrap() {
+            trace!("Executing: {:?}", self.exec_graph[exec_node]);
             match &mut self.exec_graph[exec_node] {
                 ExecutableKernel::Kernel {
                     kernel,
@@ -661,9 +724,9 @@ impl Runtime for CudaRuntime {
                         .cuda_stream
                         .alloc_zeros::<i32>(n_barriers.exec(dyn_map).unwrap())
                         .unwrap();
-                    let d_tasks = self.cuda_stream.memcpy_stod(work_queue.as_slice()).unwrap();
-                    let d_head = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
-                    let queue_lock = self.cuda_stream.memcpy_stod(&[0i32]).unwrap();
+                    let d_tasks = self.cuda_stream.clone_htod(work_queue.as_slice()).unwrap();
+                    let d_head = self.cuda_stream.clone_htod(&[0i32]).unwrap();
+                    let queue_lock = self.cuda_stream.clone_htod(&[0i32]).unwrap();
                     // Set up timing buffer storing (start_u64, stop_u64, event_i32) tuples
                     // for up to 1000 events per SM
                     let timing_buffer = self
@@ -687,18 +750,18 @@ impl Runtime for CudaRuntime {
                     }
 
                     let per_block_optin = self.cuda_stream.context().attribute(
-                        CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
-                    ).unwrap();
+                            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN
+                        ).unwrap();
                     let static_shared = interpreter
-                        .get_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)
-                        .unwrap();
+                            .get_attribute(cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)
+                            .unwrap();
                     let max_dynamic_allowed = (per_block_optin - static_shared).max(0);
                     interpreter
-                        .set_attribute(
-                            CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                            max_dynamic_allowed,
-                        )
-                        .unwrap();
+                            .set_attribute(
+                                cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                                max_dynamic_allowed,
+                            )
+                            .unwrap();
 
                     // Launch kernel
                     let cfg = LaunchConfig {
@@ -728,9 +791,9 @@ impl Runtime for CudaRuntime {
                     {
                         let _span = span!(Level::INFO, "mk_timings").entered();
                         timings.push((
-                            self.cuda_stream.memcpy_dtov(&timing_buffer).unwrap(),
+                            self.cuda_stream.clone_dtoh(&timing_buffer).unwrap(),
                             self.cuda_stream
-                                .memcpy_dtov(&start_time)
+                                .clone_dtoh(&start_time)
                                 .unwrap()
                                 .into_iter()
                                 .min()
@@ -738,6 +801,27 @@ impl Runtime for CudaRuntime {
                             mk_span_id,
                         ));
                     }
+                }
+                ExecutableKernel::HostOp {
+                    stream,
+                    inputs,
+                    output,
+                    internal,
+                } => {
+                    let mut host_op_buffers: Vec<&CudaSlice<u8>> = vec![&self.buffers[output]];
+                    host_op_buffers.extend(inputs.iter().map(|inp| {
+                        if let Some(buf) = self.buffers.get(inp) {
+                            buf
+                        } else {
+                            match &self.hlir_buffers[&self.llir_to_hlir[inp]] {
+                                CudaInput::Buffer(buf) => buf,
+                                CudaInput::Ptr(_) => unimplemented!(),
+                            }
+                        }
+                    }));
+                    let _span =
+                        span!(Level::INFO, "host_op_execute", n_inputs = inputs.len()).entered();
+                    internal.execute(stream, &host_op_buffers, dyn_map).unwrap();
                 }
             }
         }

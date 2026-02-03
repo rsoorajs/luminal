@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::cuda_bandwidth_gbps;
 use crate::runtime::CudaRuntime;
+use tracing::{Level, enabled};
 
 fn random_vec(n: usize) -> Vec<f32> {
     let mut rng = StdRng::seed_from_u64(0);
@@ -211,7 +212,9 @@ pub fn kernel_add_bandwidth_test() {
         "Total memory traffic: {} MB (2 reads + 1 write)",
         size * 4 * 3 / 1024 / 1024
     );
-    rt.print_execution_stats();
+    if enabled!(Level::INFO) {
+        rt.print_execution_stats();
+    }
 
     // Verify correctness (spot check)
     let result = rt.get_f32(output);

@@ -593,8 +593,7 @@ fn compile_interpreter(
                 format!(
                     "struct {}Payload {{{}}};",
                     op.op_name(),
-                    op.build_payload(cuda_stream, CStruct::new(Some(&expression_map)))
-                        .to_string(),
+                    op.build_payload(cuda_stream, CStruct::new(Some(&expression_map))),
                 )
             })
             .join("\n"),

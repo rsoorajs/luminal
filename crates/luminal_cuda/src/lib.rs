@@ -1,4 +1,5 @@
 pub mod block;
+pub mod host;
 pub mod kernel;
 pub mod logical;
 pub mod runtime;
