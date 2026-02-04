@@ -3,8 +3,12 @@ use std::{fmt::Debug, sync::Arc};
 use crate::cudarc::driver::{CudaSlice, CudaStream};
 use luminal::{op::EgglogOp, prelude::*};
 mod cublas;
+mod cublaslt; 
 
-pub type Ops = (cublas::CuBlasSgemmV2,);
+pub type Ops = (
+    // cublas::CuBlasSgemmV2,
+    cublaslt::CuBlasLt,
+);
 
 pub trait HostOp: Debug + as_any::AsAny + EgglogOp {
     /// With the convention, and this is a bad way to do it, that the first is the output buffer.

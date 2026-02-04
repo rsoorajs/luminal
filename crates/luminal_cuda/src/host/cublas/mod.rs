@@ -1,23 +1,30 @@
-use cudarc::cublas::{
-    CudaBlas,
-    sys::{cublasOperation_t, cublasSgemm_v2, cublasStatus_t},
-};
-use cudarc::driver::{CudaStream, DevicePtr};
+use std::sync::{Arc, OnceLock};
+
 use luminal::{
     graph::extract_expr,
     op::{
         EgglogOp, LLIROp,
         OpParam::{self, *},
     },
-    prelude::*,
+    prelude::{
+        tracing::{Level, span, trace},
+        *,
+    },
 };
-use std::sync::{Arc, OnceLock};
-use tracing::{Level, span, trace};
 
-use crate::{cudarc::driver::CudaSlice, host::HostOp};
+use crate::{
+    cudarc::{
+        cublas::{
+            CudaBlas,
+            sys::{cublasOperation_t, cublasSgemm_v2, cublasStatus_t},
+        },
+        driver::{CudaSlice, CudaStream, DevicePtr},
+    },
+    host::HostOp,
+};
 
 /// Parse cuBLAS operation from egglog string (e.g., "\"T\"" -> CUBLAS_OP_T)
-fn parse_cublas_op(s: &str) -> cublasOperation_t {
+pub fn parse_cublas_op(s: &str) -> cublasOperation_t {
     // Strip quotes if present (egglog strings are stored with quotes)
     let stripped = s.trim_matches('"');
     match stripped {
@@ -212,102 +219,5 @@ impl HostOp for CuBlasSgemmV2 {
 
     fn output_size(&self) -> Expression {
         self.m * self.n
-    }
-}
-
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct CuBlasLt {
-    m: Expression,
-    n: Expression,
-    k: Expression,
-    a_layout: cublasOperation_t,
-    b_layout: cublasOperation_t,
-    lda: Expression,
-    ldb: Expression,
-    ldc: Expression,
-    /// Lazily initialized cuBLAS handle - created on first execute
-    cublas: OnceLock<Arc<CudaBlas>>,
-}
-
-// Useless default for IntoEgglogOp
-impl Default for CuBlasLt {
-    fn default() -> Self {
-        Self {
-            m: Expression::default(),
-            n: Expression::default(),
-            k: Expression::default(),
-            a_layout: cublasOperation_t::CUBLAS_OP_N, // IGNORE NOT REAL
-            b_layout: cublasOperation_t::CUBLAS_OP_T, // IGNORE NOT REAL
-            lda: Expression::default(),
-            ldb: Expression::default(),
-            ldc: Expression::default(),
-            cublas: OnceLock::new(),
-        }
-    }
-}
-
-impl EgglogOp for CuBlasLt {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        (
-            "cublaslt".to_string(),
-            //    A      B      m     n      k  , A input Layout, B input Layout,
-            vec![Input, Input, Expr, Expr, Expr, Str, Str, Expr, Expr, Expr],
-        )
-    }
-
-    fn rewrites(&self) -> Vec<String> {
-        vec![
-            include_str!["sgemm_v2_RmRm_rewrite.egg"].to_string(), // row row
-            include_str!["sgemm_v2_RmCm_rewrite.egg"].to_string(), // row col
-            include_str!["sgemm_v2_CmRm_rewrite.egg"].to_string(), // col row
-            include_str!["sgemm_v2_CmCm_rewrite.egg"].to_string(), // col col
-        ]
-    }
-
-    #[allow(unused_variables)]
-    fn extract<'a>(
-        &'a self,
-        egraph: &'a luminal::egglog_utils::SerializedEGraph,
-        children: &[&'a ENodeId],
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
-        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
-    ) -> (LLIROp, Vec<&'a ENodeId>) {
-        // Extract dimensions from egglog
-        let m = extract_expr(egraph, children[2], expr_cache).unwrap();
-        let n = extract_expr(egraph, children[3], expr_cache).unwrap();
-        let k = extract_expr(egraph, children[4], expr_cache).unwrap();
-
-        // Extract layout strings from egglog
-        let a_layout_str = &egraph.enodes[children[5]].0;
-        let b_layout_str = &egraph.enodes[children[6]].0;
-        let a_layout = parse_cublas_op(a_layout_str);
-        let b_layout = parse_cublas_op(b_layout_str);
-
-        // Extract leading dimensions from egglog
-        let lda = extract_expr(egraph, children[7], expr_cache).unwrap();
-        let ldb = extract_expr(egraph, children[8], expr_cache).unwrap();
-        let ldc = extract_expr(egraph, children[9], expr_cache).unwrap();
-
-        let extracted_state = Self {
-            m,
-            n,
-            k,
-            a_layout,
-            b_layout,
-            lda,
-            ldb,
-            ldc,
-            cublas: OnceLock::new(),
-        };
-        trace!(?extracted_state);
-
-        let extracted = LLIROp::new::<dyn HostOp>(Box::new(extracted_state) as Box<dyn HostOp>);
-
-        (extracted, vec![children[0], children[1]])
-    }
-
-    fn cleanup(&self) -> bool {
-        false
     }
 }
