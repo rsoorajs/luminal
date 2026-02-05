@@ -5,7 +5,7 @@ use itertools::Itertools;
 pub use ops::*;
 
 use cudarc::{
-    driver::{CudaFunction, CudaModule, CudaSlice, CudaStream, DeviceRepr, ValidAsZeroBits},
+    driver::{CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DeviceRepr, ValidAsZeroBits},
     nvrtc::{CompileOptions, compile_ptx_with_opts},
 };
 use luminal::{
@@ -316,7 +316,7 @@ fn get_barrier_strides(
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct SMEvent {
     pub start: u64,
     pub stop: u64,
@@ -325,7 +325,7 @@ pub struct SMEvent {
 unsafe impl DeviceRepr for SMEvent {}
 unsafe impl ValidAsZeroBits for SMEvent {}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct TaskQueue {
     data: Vec<u8>,
     task_stride: usize,
@@ -695,9 +695,12 @@ fn compile_interpreter(
     ops: &Vec<Arc<Box<dyn BlockOp>>>,
     expressions: &FxHashSet<Expression>,
     payload_size: usize,
+    n_tasks: usize,
+    n_barriers: &Expression,
     kernel_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
 ) -> (
     CudaFunction,
+    Arc<CudaModule>,
     FxHashMap<Expression, i32>,
     FxHashMap<char, CudaSlice<u8>>,
 ) {
@@ -717,6 +720,15 @@ fn compile_interpreter(
     kernel = kernel.replace(
         "const int N_TIMING_SLOTS = 0;",
         &format!("const int N_TIMING_SLOTS = {N_TIMING_SLOTS};"),
+    );
+    kernel = kernel.replace(
+        "const int N_TASKS = 0;",
+        &format!("const int N_TASKS = {n_tasks};"),
+    );
+    // N_BARRIERS is an expression that may depend on dyn dims, render it as a macro
+    kernel = kernel.replace(
+        "//%n_barriers_const%",
+        &format!("#define N_BARRIERS ({})", n_barriers.simplify().to_kernel()),
     );
     kernel = kernel.replace(
         "//%extra_op_codes%",
@@ -887,6 +899,7 @@ fn compile_interpreter(
     let (module, func) = if let Some((module, kernel)) = kernel_cache.get(&kernel) {
         (module.clone(), kernel.clone())
     } else {
+
         let _span = span!(Level::TRACE, "nvrtc").entered();
         let ptx = compile_ptx_with_opts(
             &kernel,
@@ -901,18 +914,238 @@ fn compile_interpreter(
         kernel_cache.insert(kernel.clone(), (module.clone(), func.clone()));
         (module, func)
     };
-    let constants = constants
+    let constants: FxHashMap<char, CudaSlice<u8>> = constants
         .into_iter()
         .map(|d| {
-            (
-                d,
-                module
-                    .get_global(&format!("const_{d}"), cuda_stream)
-                    .unwrap(),
-            )
+            let global = module
+                .get_global(&format!("const_{d}"), cuda_stream)
+                .unwrap();
+            (d, global)
         })
         .collect();
-    (func, expression_map, constants)
+    (func, module, expression_map, constants)
+}
+
+/// A compiled megakernel that implements KernelOp.
+/// This allows megakernels to flow through the same compilation pipeline as regular kernels.
+///
+/// Internal buffers are managed via the `internal_buffers()` method, which returns
+/// the buffers the kernel needs allocated and passed as parameters.
+///
+/// Note: Device buffers are managed separately in the runtime.
+/// This struct holds only compile-time information.
+#[derive(Debug)]
+pub struct MegakernelOp {
+    /// The compiled interpreter kernel function
+    pub interpreter: CudaFunction,
+    /// The CUDA module containing the kernel
+    pub module: Arc<CudaModule>,
+    /// Device-side constants for dynamic dimensions
+    pub interpreter_constants: FxHashMap<char, CudaSlice<u8>>,
+    /// Number of barriers needed for synchronization
+    pub n_barriers: Expression,
+    /// Serialized task queue (all operations to execute)
+    pub(crate) work_queue: TaskQueue,
+    /// Mapping from LLIR node to buffer index
+    pub node_to_buffer_index: FxHashMap<NodeIndex, i32>,
+    /// Number of SMs on the device (for grid size)
+    pub sm_count: i32,
+}
+
+
+impl crate::kernel::KernelOp for MegakernelOp {
+    fn compile(
+        &self,
+        _stream: &Arc<CudaStream>,
+        _compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
+    ) -> (
+        CudaFunction,
+        Arc<CudaModule>,
+        String,
+        (Expression, Expression, Expression),
+        (Expression, Expression, Expression),
+        Expression,
+        FxHashMap<char, CudaSlice<u8>>,
+    ) {
+        // Return the pre-compiled interpreter function with appropriate launch config.
+        (
+            self.interpreter.clone(),
+            self.module.clone(),
+            "megakernel".to_string(),
+            (self.sm_count.into(), 1.into(), 1.into()), // grid: one block per SM
+            (256.into(), 1.into(), 1.into()),           // block: 256 threads
+            0.into(),                                    // No dynamic shared memory (static scratchpad is sufficient)
+            self.interpreter_constants.clone(),          // Return constants for runtime to manage
+        )
+    }
+
+    fn output_size(&self) -> Expression {
+        // Megakernels don't have a single output size - they write to multiple buffers.
+        // Return 0 as a placeholder; the actual buffer allocation is handled by the
+        // individual BlockOps that make up the megakernel.
+        0.into()
+    }
+
+    fn kernel_name(&self) -> &'static str {
+        "Megakernel"
+    }
+
+    fn allocate_internal_buffers(
+        &self,
+        stream: &Arc<CudaStream>,
+        dyn_map: &FxHashMap<char, usize>,
+    ) -> Vec<CudaSlice<u8>> {
+        let buffer_count = self.buffer_count();
+        let n_barriers = self.n_barriers.exec(dyn_map).unwrap();
+
+        vec![
+            // 0: tasks - upload task queue
+            stream.clone_htod(self.work_queue.as_slice()).unwrap(),
+            // 1: head - reset in-kernel
+            stream.alloc_zeros::<u8>(std::mem::size_of::<i32>()).unwrap(),
+            // 2: ready - barrier array, reset in-kernel
+            stream.alloc_zeros::<u8>(n_barriers * std::mem::size_of::<i32>()).unwrap(),
+            // 3: queue_lock - reset in-kernel
+            stream.alloc_zeros::<u8>(std::mem::size_of::<i32>()).unwrap(),
+            // 4: timings - per-SM timing events
+            stream.alloc_zeros::<u8>(self.sm_count as usize * N_TIMING_SLOTS * std::mem::size_of::<SMEvent>()).unwrap(),
+            // 5: start_times - per-SM start times
+            stream.alloc_zeros::<u8>(self.sm_count as usize * std::mem::size_of::<u64>()).unwrap(),
+            // 6: buffers - array of buffer pointers
+            stream.alloc_zeros::<u8>(buffer_count * std::mem::size_of::<u64>()).unwrap(),
+        ]
+    }
+
+    fn build_params(
+        &self,
+        stream: &Arc<CudaStream>,
+        _output_ptr: u64,
+        _input_ptrs: &[u64],
+        internal_bufs: &[CudaSlice<u8>],
+        _dyn_dims_ptr: u64,
+    ) -> Vec<u64> {
+        // Megakernel params: [tasks, head, ready, queue_lock, timings, start_times, buffers, dyn_dims]
+        // dyn_dims is handled via constants, pass 0
+        internal_bufs.iter()
+            .map(|buf| buf.device_ptr(stream).0)
+            .chain(std::iter::once(0u64)) // dyn_dims placeholder
+            .collect()
+    }
+
+    fn pre_execute(
+        &self,
+        stream: &Arc<CudaStream>,
+        internal_bufs: &mut [CudaSlice<u8>],
+        _constants: &mut FxHashMap<char, CudaSlice<u8>>,
+        all_buffer_ptrs: &FxHashMap<NodeIndex, u64>,
+        dyn_map: &FxHashMap<char, usize>,
+    ) {
+        // Update dyn dims in interpreter constants by getting fresh handles from the module.
+        // We do NOT use the `_constants` parameter because CudaSlice.clone() creates copies,
+        // not references to the original __constant__ memory.
+        for (dyn_dim, val) in dyn_map {
+            let global_name = format!("const_{}", dyn_dim);
+            if let Ok(mut global) = self.module.get_global(&global_name, stream) {
+                let mut view = global.as_view_mut();
+                let mut symbol = unsafe { view.transmute_mut::<i32>(1).unwrap() };
+                stream.memcpy_htod(&[*val as i32], &mut symbol).expect("Failed to update dyn dim constant");
+                // IMPORTANT: Don't drop `global` - it would try to free __constant__ memory!
+                // Leak it intentionally to prevent the Drop from running.
+                std::mem::forget(global);
+            }
+        }
+
+        // Re-upload tasks with remaining=-1 (index 0)
+        // This ensures fresh task state for each execution
+        let task_data = self.work_queue.as_slice();
+        stream.memcpy_htod(task_data, &mut internal_bufs[0].as_view_mut())
+            .expect("Failed to re-upload tasks");
+
+        // Reset head to 0 (index 1)
+        {
+            let mut head_view = internal_bufs[1].as_view_mut();
+            let mut head_typed = unsafe { head_view.transmute_mut::<i32>(1).unwrap() };
+            stream.memcpy_htod(&[0i32], &mut head_typed).expect("Failed to reset head");
+        }
+
+        // Reset barriers to 0 (index 2)
+        // Use the allocated size to avoid buffer overflow
+        let allocated_barrier_size = internal_bufs[2].len();
+        let allocated_n_barriers = allocated_barrier_size / std::mem::size_of::<i32>();
+        {
+            let zeros: Vec<i32> = vec![0; allocated_n_barriers];
+            let mut ready_view = internal_bufs[2].as_view_mut();
+            let mut ready_typed = unsafe { ready_view.transmute_mut::<i32>(allocated_n_barriers).unwrap() };
+            stream.memcpy_htod(&zeros, &mut ready_typed).expect("Failed to reset barriers");
+        }
+
+        // Reset queue_lock to 0 (index 3)
+        {
+            let mut lock_view = internal_bufs[3].as_view_mut();
+            let mut lock_typed = unsafe { lock_view.transmute_mut::<i32>(1).unwrap() };
+            stream.memcpy_htod(&[0i32], &mut lock_typed).expect("Failed to reset queue_lock");
+        }
+
+        // Update buffer array (index 6)
+        let buffer_count = self.buffer_count();
+        let mut buffer_array: Vec<u64> = vec![0; buffer_count];
+        for (node, &buffer_idx) in &self.node_to_buffer_index {
+            if let Some(&ptr) = all_buffer_ptrs.get(node) {
+                buffer_array[buffer_idx as usize] = ptr;
+            }
+        }
+
+        let mut buffers_view = internal_bufs[6].as_view_mut();
+        let mut buffers_typed = unsafe { buffers_view.transmute_mut::<u64>(buffer_count).expect("Failed to transmute buffers") };
+        stream.memcpy_htod(&buffer_array, &mut buffers_typed).expect("Failed to update buffer array");
+
+        // Ensure all uploads complete before kernel execution
+        stream.synchronize().expect("Failed to sync after pre_execute");
+    }
+
+    fn timing_buffer_indices(&self) -> Option<(usize, usize, usize)> {
+        // timings at index 4, start_times at index 5, sm_count
+        Some((4, 5, self.sm_count as usize))
+    }
+
+    fn internal_buffer_dyn_dims(&self) -> FxHashSet<char> {
+        // The barrier buffer size depends on n_barriers, which may contain dynamic dimensions
+        self.n_barriers.dyn_vars().into_iter().collect()
+    }
+}
+
+impl MegakernelOp {
+    /// Create a new MegakernelOp from the LLIR graph compilation result.
+    pub fn new(
+        llir_graph: &LLIRGraph,
+        subgraph: &FxHashSet<NodeIndex>,
+        cuda_stream: &Arc<CudaStream>,
+        kernel_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
+    ) -> Self {
+        let (interpreter, module, interpreter_constants, n_barriers, work_queue, _node_to_task_index, node_to_buffer_index) =
+            make_megakernel_from_llir_graph(llir_graph, subgraph, cuda_stream, kernel_cache);
+
+        // Get device properties
+        let ctx = cuda_stream.context();
+        let sm_count = ctx
+            .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+            .expect("Failed to get SM count");
+
+        Self {
+            interpreter,
+            module,
+            interpreter_constants,
+            n_barriers,
+            work_queue,
+            node_to_buffer_index,
+            sm_count,
+        }
+    }
+
+    /// Returns the number of buffers this megakernel uses.
+    pub fn buffer_count(&self) -> usize {
+        self.node_to_buffer_index.values().map(|&i| i + 1).max().unwrap_or(0) as usize
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -923,6 +1156,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
     kernel_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
 ) -> (
     CudaFunction,
+    Arc<CudaModule>,  // Module (needed for device globals)
     FxHashMap<char, CudaSlice<u8>>,
     Expression,
     TaskQueue,
@@ -1002,11 +1236,19 @@ pub(crate) fn make_megakernel_from_llir_graph(
             (max_size.max(size), max_align.max(align))
         });
 
-    let (interpreter, expressions, interpreter_constants) = compile_interpreter(
+    // Count number of tasks (one per BlockOp node in subgraph)
+    let n_tasks = subgraph
+        .iter()
+        .filter(|n| llir_graph[**n].to_dialect::<dyn BlockOp>().is_some())
+        .count();
+
+    let (interpreter, module, expressions, interpreter_constants) = compile_interpreter(
         cuda_stream,
         &block_ops,
         &expressions,
         max_payload_size,
+        n_tasks,
+        &n_barriers,
         kernel_cache,
     );
 
@@ -1112,6 +1354,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
     }
     (
         interpreter,
+        module,
         interpreter_constants,
         n_barriers,
         tasks,

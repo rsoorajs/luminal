@@ -8,7 +8,7 @@ use luminal_tracing::*;
 use model::*;
 use std::{io::Write, time::Duration};
 use tokenizers::Tokenizer;
-use tracing::{level_filters::LevelFilter, span, Level};
+use tracing::{span, Level};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 const REPO_ID: &str = "NousResearch/Meta-Llama-3-8B-Instruct";
