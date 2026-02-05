@@ -329,19 +329,34 @@ impl CudaRuntime {
                 continue;
             }
             if let Some(op) = self.llir_graph[node].to_dialect::<dyn BlockOp>() {
-                self.intermediate_buffer_dims
-                    .extend(op.output_size().dyn_vars());
+                let out_size = op.output_size();
+                let exec_size = out_size.exec(dyn_dims).unwrap();
+                // Skip allocation for ops with zero output size
+                if exec_size == 0 {
+                    continue;
+                }
+                self.intermediate_buffer_dims.extend(out_size.dyn_vars());
+                let alloc_bytes = exec_size * size_of::<f32>();
                 self.buffers.insert(
                     node,
                     self.cuda_stream
-                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
-                        .unwrap(),
+                        .alloc_zeros(alloc_bytes)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "Failed to alloc {} bytes for BlockOp node {:?}: {:?}",
+                                alloc_bytes, node, e
+                            )
+                        }),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.cached_buffer_ptrs.insert(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
                 let out_size = op.output_size();
                 let exec_size = out_size.exec(dyn_dims).unwrap();
+                // Skip allocation for kernels with zero output size (e.g., megakernels)
+                if exec_size == 0 {
+                    continue;
+                }
                 self.intermediate_buffer_dims.extend(out_size.dyn_vars());
                 self.buffers.insert(
                     node,
@@ -352,10 +367,15 @@ impl CudaRuntime {
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.cached_buffer_ptrs.insert(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
+                let exec_size = op.output_size().exec(dyn_dims).unwrap();
+                // Skip allocation for ops with zero output size
+                if exec_size == 0 {
+                    continue;
+                }
                 self.buffers.insert(
                     node,
                     self.cuda_stream
-                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
+                        .alloc_zeros(exec_size * size_of::<f32>())
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
@@ -714,6 +734,7 @@ impl Runtime for CudaRuntime {
 
         // Explicitly drop CUDA graph handles before clearing exec_graph
         // to ensure proper destruction order
+        let ctx = self.cuda_stream.context().clone();
         for node in self.exec_graph.node_indices().collect::<Vec<_>>() {
             if let ExecutableKernel::CudaGraphExec {
                 kernels,
@@ -727,8 +748,10 @@ impl Runtime for CudaRuntime {
             {
                 // Clear kernels first (drops internal_bufs)
                 kernels.clear();
-                // Clear timing events
-                timing_events.clear();
+                // Properly destroy timing events before clearing
+                for event in timing_events.drain(..) {
+                    destroy_cuda_event(&ctx, event);
+                }
                 // Clear dyn_dims buffer
                 *dyn_dims_buffer = None;
                 // Clear kernel params
@@ -750,80 +773,32 @@ impl Runtime for CudaRuntime {
         // Mark all HLIR inputs as changed so their pointers get re-cached in execute
         self.changed_hlir.extend(self.hlir_buffers.keys().copied());
         self.exec_graph.clear();
+
+        // Sync after clearing all buffers to ensure CUDA resources are freed
+        self.cuda_stream
+            .synchronize()
+            .expect("Failed to sync after clearing buffers");
+
+        // Rebind CUDA context to thread after cleanup to ensure valid state
+        self.cuda_stream
+            .context()
+            .bind_to_thread()
+            .expect("Failed to bind CUDA context after cleanup");
+
         let mut exec_graph = StableGraph::default();
         let mut node_to_exec = FxHashMap::default();
 
-        // Add block op kernels (compiled into megakernels via KernelOp)
-        {
-            let _span = span!(Level::TRACE, "compile_block_ops").entered();
-            let block_ops_in_graph = llir_graph
-                .node_indices()
-                .filter(|n| llir_graph[*n].to_dialect::<dyn BlockOp>().is_some())
-                .collect::<FxHashSet<_>>();
-            let block_subgraphs = partition_marked_convex(llir_graph, &block_ops_in_graph).unwrap();
+        // Clone llir_graph so we can modify it to add megakernel nodes
+        let mut llir_graph = llir_graph.clone();
 
-            for subgraph in &block_subgraphs {
-                // Create MegakernelOp which implements KernelOp
-                let kernel_op: Arc<Box<dyn KernelOp>> =
-                    Arc::new(Box::new(crate::block::MegakernelOp::new(
-                        llir_graph,
-                        &subgraph,
-                        &self.cuda_stream,
-                        &mut self.kernel_cache,
-                    )));
+        // Compile BlockOp subgraphs into MegakernelOps and add them to the llir_graph
+        let megakernel_to_blocks = crate::block::compile_megakernels(
+            &mut llir_graph,
+            &self.cuda_stream,
+            &mut self.kernel_cache,
+        );
 
-                // Compile the kernel
-                let (kernel_function, _, kernel_str, grid, tb, shared_mem, constants) =
-                    kernel_op.compile(&self.cuda_stream, &mut self.kernel_cache);
-
-                // Use first node as representative (for graph building)
-                let first_node = *subgraph.iter().next().unwrap();
-
-                // Collect all buffer nodes this kernel uses
-                let inputs: Vec<NodeIndex> = subgraph.iter().copied().collect();
-
-                let kernel_node = KernelNode {
-                    llir_node: first_node,
-                    kernel: kernel_function,
-                    launch_grid: grid,
-                    launch_threadblock: tb,
-                    shared_mem,
-                    inputs: inputs.clone(),
-                    output: first_node, // Not used for block ops
-                    kernel_name: kernel_op.kernel_name(),
-                    kernel_str,
-                    bytes_loaded: kernel_op.bytes_loaded(),
-                    bytes_stored: kernel_op.bytes_stored(),
-                    flops: kernel_op.flops(),
-                    internal_bufs: Vec::new(), // Allocated in prebuild_graphs
-                    constants,
-                    kernel_op,
-                    graph_node: None,
-                };
-
-                // Create exec data with unified KernelNode
-                let exec_node = exec_graph.add_node(ExecutableKernel::CudaGraphExec {
-                    cuda_graph: None,
-                    cuda_graph_exec: None,
-                    node_to_graph_node: FxHashMap::default(),
-                    kernel_params: Vec::new(),
-                    kernels: vec![kernel_node],
-                    dyn_dims_buffer: None,
-                    dyn_dims_order: vec![],
-                    last_dyn_values: FxHashMap::default(),
-                    last_buffer_ptrs: FxHashMap::default(),
-                    timing_events: Vec::new(),
-                    total_bytes_loaded: Expression::from(0),
-                    total_bytes_stored: Expression::from(0),
-                    total_flops: Expression::from(0),
-                });
-                for node in subgraph.iter() {
-                    node_to_exec.insert(*node, exec_node);
-                }
-            }
-        }
-
-        // Add regular kernels
+        // Add kernels (including megakernels which now implement KernelOp)
         {
             let _span = span!(Level::TRACE, "compile_kernels").entered();
             let kernel_ops_in_graph = llir_graph
@@ -831,7 +806,7 @@ impl Runtime for CudaRuntime {
                 .filter(|n| llir_graph[*n].to_dialect::<dyn KernelOp>().is_some())
                 .collect::<FxHashSet<_>>();
             let kernel_subgraphs =
-                partition_marked_convex(llir_graph, &kernel_ops_in_graph).unwrap();
+                partition_marked_convex(&llir_graph, &kernel_ops_in_graph).unwrap();
             let mut compile_cache = FxHashMap::default();
             for subgraph in kernel_subgraphs {
                 let mut kernels = Vec::with_capacity(subgraph.len());
@@ -841,7 +816,7 @@ impl Runtime for CudaRuntime {
                 let mut total_flops = Expression::from(0);
 
                 // Get topological order for kernels in this subgraph
-                let topo_order: Vec<_> = toposort(llir_graph, None)
+                let topo_order: Vec<_> = toposort(&llir_graph, None)
                     .unwrap()
                     .into_iter()
                     .filter(|n| subgraph.contains(n))
@@ -855,11 +830,19 @@ impl Runtime for CudaRuntime {
                     let (kernel_function, _, kernel_str, grid, tb, shared_mem, constants) =
                         kernel_op_ref.compile(&self.cuda_stream, &mut compile_cache);
                     drop(span);
-                    let inputs = llir_graph
+
+                    // For megakernels, inputs should include all block op nodes in the subgraph
+                    // (for buffer pointer collection) plus external input edges (for exec_graph deps)
+                    let mut inputs: Vec<NodeIndex> = llir_graph
                         .edges_directed(*kernel_node_idx, Direction::Incoming)
                         .sorted_by_key(|e| e.id())
                         .map(|e| e.source())
                         .collect_vec();
+
+                    // If this is a megakernel, include all its block op nodes for buffer access
+                    if let Some(block_nodes) = megakernel_to_blocks.get(kernel_node_idx) {
+                        inputs.extend(block_nodes.iter().copied());
+                    }
 
                     total_bytes_loaded += kernel_op_ref.bytes_loaded();
                     total_bytes_stored += kernel_op_ref.bytes_stored();
@@ -922,6 +905,12 @@ impl Runtime for CudaRuntime {
 
                 for node in subgraph {
                     node_to_exec.insert(node, exec_node);
+                    // If this is a megakernel node, also map all its block op nodes to this exec_node
+                    if let Some(block_nodes) = megakernel_to_blocks.get(&node) {
+                        for &block_node in block_nodes {
+                            node_to_exec.insert(block_node, exec_node);
+                        }
+                    }
                 }
             }
         }
@@ -2088,7 +2077,7 @@ fn format_flops(flops: usize) -> String {
     }
 }
 
-fn partition_marked_convex<T, E>(
+pub(crate) fn partition_marked_convex<T, E>(
     g: &StableGraph<T, E, Directed>,
     marked: &FxHashSet<NodeIndex>,
 ) -> Result<Vec<FxHashSet<NodeIndex>>, Cycle<NodeIndex>> {
