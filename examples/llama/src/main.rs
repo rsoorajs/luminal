@@ -27,14 +27,15 @@ fn main() {
     let prompt = "Hello, how are you";
 
     // Tracing
-    // let (perfetto_layer, perfetto_guard) = perfetto_layer("trace.pftrace");
+    //let (perfetto_layer, perfetto_guard) = perfetto_layer("trace.pftrace");
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(
-            luminal_filter(), // .with_target("luminal", LevelFilter::TRACE)
-                              // .with_target("llama", Level::TRACE),
+            luminal_filter()
+                //.with_target("luminal", LevelFilter::TRACE)
+                //.with_target("llama", Level::TRACE),
         )
-        // .with(perfetto_layer)
+        //.with(perfetto_layer)
         .init();
 
     // Set up cuda context and stream
@@ -134,8 +135,9 @@ fn main() {
     );
     runtime.print_execution_stats();
 
-    // println!("Dumping device execution trace to perfetto...");
-    // runtime.record_cuda_perfetto_trace(perfetto_guard);
+    println!("Dumping device execution trace to perfetto...");
+    //runtime.record_cuda_perfetto_trace(perfetto_guard);
+
 }
 
 #[tracing::instrument(skip_all)]
