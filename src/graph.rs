@@ -1,11 +1,13 @@
-use crate::{egglog_utils, hlir::CustomOpHLIR, op::*, prelude::*};
+use crate::egglog_utils::{
+    egglog_to_llir, extract_generation, hash_choice_set, hlir_to_egglog, random_initial_choice,
+    run_egglog,
+};
 use crate::{
     egglog_utils::SerializedEGraph,
     op::{EgglogOp, IntoEgglogOp, LLIROp},
 };
+use crate::{hlir::CustomOpHLIR, op::*, prelude::*};
 use colored::Colorize;
-use egglog::{CommandOutput, ast::Span, prelude::RustSpan, var};
-use egraph_serialize::{ClassId, NodeId};
 use itertools::Itertools;
 use petgraph::{Direction, stable_graph::StableGraph, visit::EdgeRef};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -16,7 +18,7 @@ use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-use tracing::{self, info};
+use tracing::{self, trace};
 
 pub type LLIRGraph = StableGraph<LLIROp, ()>;
 pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ShapeTracker>;
@@ -176,23 +178,44 @@ impl Graph {
         self.ops = Some(ops);
     }
 
+    /// Get a reference to the e-graph search space (if built)
+    pub fn egraph(&self) -> Option<&SerializedEGraph> {
+        self.egraph.as_ref()
+    }
+
+    /// Get a reference to the available ops (if search space is built)
+    pub fn egglog_ops(&self) -> Option<&Vec<Arc<Box<dyn EgglogOp>>>> {
+        self.ops.as_ref()
+    }
+
+    const DEFAULT_GENERATION_SIZE: usize = 50;
+    const MUTATIONS_PER_OFFSPRING: usize = 40;
+    const TRIALS_PER_PROFILE: usize = 5;
+
     #[tracing::instrument(skip_all)]
     pub fn search<R: Runtime>(&mut self, mut runtime: R, limit: usize) -> R {
-        let llir_graphs = egglog_to_llir(
-            self.egraph.as_ref().unwrap(),
-            self.ops.as_ref().unwrap(),
-            &self.custom_ops,
-            limit,
-        );
-        let n_graphs = llir_graphs.len();
-        let start = std::time::Instant::now();
-        let mut best_graph = StableGraph::default();
-        let mut best_metric: Option<R::ProfileMetric> = None;
-        let total = llir_graphs.len();
-        let bar_width = 24;
+        let mut rng = rand::rng();
+        let egraph = self.egraph.as_ref().unwrap();
+        let ops = self.ops.as_ref().unwrap();
 
-        let progress_bar = |i| {
-            let head = ((i as f32 / total as f32) * bar_width as f32)
+        // Initialize tracking state
+        let mut prev_selected: FxHashSet<u64> = FxHashSet::default();
+        let mut list_cache = FxHashMap::default();
+        let mut expr_cache = FxHashMap::default();
+
+        // Start with a random initial genome
+        let mut best_genome = random_initial_choice(egraph, &mut rng);
+        prev_selected.insert(hash_choice_set(&best_genome));
+
+        let start = std::time::Instant::now();
+        let mut best_graph;
+        let mut best_metric;
+        let bar_width = 24;
+        let mut n_graphs;
+
+        let progress_bar = |searched: usize, limit: usize| {
+            let total = limit;
+            let head = ((searched as f32 / total as f32) * bar_width as f32)
                 .clamp(0.0, bar_width as f32)
                 .floor() as usize;
             let bar = if head == 0 {
@@ -207,45 +230,106 @@ impl Graph {
                 )
             };
             print!(
-                "\r\x1b[2K  {:>6}  {bar} {i}/{total}",
+                "\r\x1b[2K  {:>6}  {bar} {searched}/{total}",
                 "Searching".cyan().bold(),
             );
             std::io::stdout().flush().unwrap();
         };
 
-        // Search loop
-        for (i, llir_graph) in llir_graphs.into_iter().enumerate() {
-            progress_bar(i + 1);
-            let (new_metric, display_metric) = runtime.profile(&llir_graph, &self.dyn_map);
-            let mut new_best = false;
-            if let Some(old_metric) = &best_metric {
-                if old_metric.gt(&new_metric) {
-                    best_metric = Some(new_metric);
-                    best_graph = llir_graph;
-                    new_best = true;
-                }
-            } else {
-                best_metric = Some(new_metric);
-                best_graph = llir_graph;
-                new_best = true;
-            }
-            print!("\r\x1b[2K"); // clear line
+        // Profile initial genome
+        {
+            let llir_graph = egglog_to_llir(
+                egraph,
+                best_genome.clone(),
+                ops,
+                &self.custom_ops,
+                &mut list_cache,
+                &mut expr_cache,
+            );
+            let (new_metric, display_metric) =
+                runtime.profile(&llir_graph, &self.dyn_map, Self::TRIALS_PER_PROFILE);
+            best_metric = Some(new_metric);
+            best_graph = llir_graph;
+            n_graphs = 1;
+            progress_bar(n_graphs, limit);
+            print!("\r\x1b[2K");
             std::io::stdout().flush().unwrap();
             println!(
-                "   {:>6}  Graph {}: {}",
+                "   {:>6}  Graph {n_graphs}[0]: {}",
                 "Searched".green().bold(),
-                i + 1,
-                if new_best {
-                    display_metric.bold().green().to_string()
-                } else {
-                    display_metric
-                }
+                display_metric.bold().green()
             );
         }
 
-        info!(
+        // Genetic algorithm search loop
+        let mut generation = 0;
+        while n_graphs < limit {
+            generation += 1;
+            // Extract offspring from the current best genome
+            let offspring = extract_generation(
+                egraph,
+                &best_genome,
+                (limit - n_graphs).min(Self::DEFAULT_GENERATION_SIZE),
+                Self::MUTATIONS_PER_OFFSPRING,
+                &mut prev_selected,
+                &mut rng,
+            );
+
+            // If no offspring could be generated, search space is exhausted
+            if offspring.is_empty() {
+                break;
+            }
+
+            // Profile each offspring
+            for genome in offspring {
+                n_graphs += 1;
+                progress_bar(n_graphs, limit);
+                list_cache.clear();
+                expr_cache.clear();
+
+                let llir_graph = egglog_to_llir(
+                    egraph,
+                    genome.clone(),
+                    ops,
+                    &self.custom_ops,
+                    &mut list_cache,
+                    &mut expr_cache,
+                );
+                let (new_metric, display_metric) =
+                    runtime.profile(&llir_graph, &self.dyn_map, Self::TRIALS_PER_PROFILE);
+
+                let mut new_best = false;
+                if let Some(old_metric) = &best_metric {
+                    if old_metric.gt(&new_metric) {
+                        best_metric = Some(new_metric);
+                        best_graph = llir_graph;
+                        best_genome = genome;
+                        new_best = true;
+                    }
+                } else {
+                    best_metric = Some(new_metric);
+                    best_graph = llir_graph;
+                    best_genome = genome;
+                    new_best = true;
+                }
+
+                print!("\r\x1b[2K");
+                std::io::stdout().flush().unwrap();
+                println!(
+                    "   {:>6}  Graph {n_graphs}[{generation}]: {}",
+                    "Searched".green().bold(),
+                    if new_best {
+                        display_metric.bold().green().to_string()
+                    } else {
+                        display_metric
+                    }
+                );
+            }
+        }
+
+        trace!(
             target: "luminal::search",
-            graphs = n_graphs,
+            n_graphs,
             limit,
             limit_reached = n_graphs >= limit,
             duration_ms = start.elapsed().as_millis() as u64,
@@ -290,557 +374,4 @@ impl NewOp<'_> {
         self.num_srcs += 1;
         self
     }
-}
-
-pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
-    use std::cmp::Reverse;
-    use std::collections::{BinaryHeap, HashMap};
-
-    // 1. Topo-order with tie-break: lower NodeIndex first
-    let mut indeg: HashMap<NodeIndex, usize> = graph
-        .node_indices()
-        .map(|n| (n, graph.neighbors_directed(n, Direction::Incoming).count()))
-        .collect();
-
-    let mut ready: BinaryHeap<(Reverse<usize>, NodeIndex)> = BinaryHeap::new();
-    for (n, &d) in &indeg {
-        if d == 0 {
-            ready.push((Reverse(n.index()), *n));
-        }
-    }
-
-    let mut topo_order: Vec<NodeIndex> = Vec::with_capacity(indeg.len());
-    while let Some((_, n)) = ready.pop() {
-        topo_order.push(n);
-        for succ in graph.neighbors_directed(n, Direction::Outgoing) {
-            let e = indeg.get_mut(&succ).unwrap();
-            *e -= 1;
-            if *e == 0 {
-                ready.push((Reverse(succ.index()), succ));
-            }
-        }
-    }
-
-    // 2. Map <node-id> → <egglog var name>
-    let mut names: HashMap<NodeIndex, String> = HashMap::new();
-    let mut out = String::new();
-
-    let mut curr_id = 0;
-    for n in topo_order {
-        let sources = graph
-            .get_sources(n)
-            .into_iter()
-            .zip(
-                graph
-                    .edges_directed(n, Direction::Incoming)
-                    .sorted_by_key(|e| e.id())
-                    .map(|e| names[&e.source()].clone()),
-            )
-            .map(|((n, sh), name)| (n, name, sh))
-            .collect_vec();
-        let code = graph[n].to_egglog(&sources);
-        out.push_str(&format!("(let t{curr_id} {code})\n"));
-        names.insert(n, format!("t{curr_id}"));
-        curr_id += 1;
-    }
-
-    // Join outputs using dummy op
-    let names = graph
-        .externals(Direction::Outgoing)
-        .map(|n| names.remove(&n).unwrap())
-        .collect_vec();
-    let mut root = names[0].clone();
-    for node in names.into_iter().skip(1) {
-        curr_id += 1;
-        out.push_str(&format!("(let t{curr_id} (OutputJoin {root} {node}))\n"));
-        root = format!("t{curr_id}");
-    }
-    (out.replace("(MVar \"z\")", "(MIter)"), root)
-}
-
-pub fn elist_to_egglog(shape: &[Expression]) -> String {
-    list_to_egglog(
-        &shape.iter().map(|e| e.to_egglog()).collect_vec(),
-        "ECons",
-        "ENil",
-    )
-}
-
-pub fn list_to_egglog(list: &[impl ToString], cons: &str, nil: &str) -> String {
-    if list.is_empty() {
-        format!("({nil})")
-    } else {
-        format!(
-            "({cons} {} {})",
-            list[0].to_string(),
-            list_to_egglog(&list[1..], cons, nil)
-        )
-    }
-}
-
-fn termdag_to_egglog(td: &egglog::TermDag, root: egglog::TermId) -> (String, String) {
-    let mut out = String::new();
-    for id in 0..td.size() {
-        let code = match td.get(id) {
-            egglog::Term::Lit(lit) => format!("{lit}"),
-            egglog::Term::Var(v) => v.clone(),
-            egglog::Term::App(head, args) => format!(
-                "({head} {})",
-                args.iter().map(|s| format!("t{s}")).join(" ")
-            ),
-        };
-        out.push_str(&format!("(let t{id} {code})\n"));
-    }
-    (out.replace("(MVar \"z\")", "(MIter)"), format!("t{root}"))
-}
-
-#[tracing::instrument(skip_all)]
-fn run_egglog(
-    program: &str,
-    root: &str,
-    ops: &[Arc<Box<dyn EgglogOp>>],
-    cleanup: bool,
-) -> Result<SerializedEGraph, egglog::Error> {
-    let start = std::time::Instant::now();
-    let code = egglog_utils::early_egglog(program, root, ops, cleanup);
-    let mut egraph = egglog::EGraph::default();
-    let commands = egraph.parser.get_program_from_string(None, &code)?;
-    let outputs = egraph.run_program(commands)?;
-    let CommandOutput::ExtractBest(termdag, _cost, term) = outputs.last().unwrap() else {
-        panic!();
-    };
-    let (program, root) = termdag_to_egglog(termdag, termdag.lookup(term));
-    let code = egglog_utils::full_egglog(&program, ops, cleanup);
-    let mut egraph = egglog::EGraph::default();
-    let commands = egraph.parser.get_program_from_string(None, &code)?;
-    info!("{}", "Egglog running...".green());
-    let _outputs = egraph.run_program(commands)?;
-    info!("{}", "---- Egglog Rule Matches ----".green());
-    let run_report = egraph.get_overall_run_report();
-    info!(
-        "{}",
-        run_report
-            .num_matches_per_rule
-            .iter()
-            .filter(|(k, _)| !k.contains("("))
-            .map(|(k, v)| format!(
-                "{k}: {v} ({})",
-                pretty_duration::pretty_duration(
-                    &run_report.search_and_apply_time_per_rule[k],
-                    None
-                )
-            ))
-            .join("\n")
-            .green()
-    );
-    info!(
-        "{}",
-        format!(
-            "---- Egglog Took {} ----",
-            pretty_duration::pretty_duration(&start.elapsed(), None).bold()
-        )
-        .green()
-    );
-    // if enabled!(Level::DEBUG) {
-    //     let log_dir = Path::new("egraph");
-    //     if log_dir.exists() {
-    //         fs::remove_dir_all(log_dir).unwrap();
-    //     }
-    //     fs::create_dir(log_dir).unwrap();
-    //     fs::write(log_dir.join("egraph.dot"), egraph.to_dot().unwrap()).unwrap();
-    //     fs::write(log_dir.join("egraph.html"), egraph.to_html().unwrap()).unwrap();
-    // }
-    let (sort, value) = egraph.eval_expr(&var!(root))?;
-    let s = egraph.serialize(egglog::SerializeConfig {
-        root_eclasses: vec![(sort, value)],
-        max_functions: None,
-        include_temporary_functions: false,
-        max_calls_per_function: None,
-    });
-    // Convert to SerializedEGraph
-    let mut classes = FxHashMap::default();
-    for (node_id, node) in &s.egraph.nodes {
-        classes
-            .entry(node.eclass.clone())
-            .or_insert(vec![])
-            .push(node_id.clone())
-    }
-    let mut egraph = SerializedEGraph {
-        roots: s.egraph.root_eclasses,
-        node_to_class: s
-            .egraph
-            .nodes
-            .iter()
-            .map(|(n, enode)| (n.clone(), enode.eclass.clone()))
-            .collect(),
-        enodes: s
-            .egraph
-            .nodes
-            .iter()
-            .map(|(n, enode)| {
-                (
-                    n.clone(),
-                    (
-                        enode.op.clone(),
-                        enode
-                            .children
-                            .iter()
-                            .map(|n| s.egraph.nodes[n].eclass.clone())
-                            .collect(),
-                    ),
-                )
-            })
-            .collect(),
-        eclasses: s
-            .egraph
-            .class_data
-            .iter()
-            .map(|(c, eclass)| (c.clone(), (eclass.typ.clone().unwrap(), classes[c].clone())))
-            .collect(),
-    };
-    // Strip out all [...] enodes
-    egraph.enodes.retain(|_, (label, _)| label != "[...]");
-    loop {
-        let mut to_remove = vec![];
-        for (id, (_, children)) in &egraph.enodes {
-            if children.iter().any(|c| {
-                !egraph.eclasses[c]
-                    .1
-                    .iter()
-                    .any(|n| egraph.enodes.contains_key(n))
-            }) {
-                to_remove.push(id.clone());
-            }
-        }
-        for n in &to_remove {
-            egraph.enodes.remove(n);
-        }
-        if to_remove.is_empty() {
-            break;
-        }
-    }
-    // Correct the eclass mapping
-    for (_, enodes) in egraph.eclasses.values_mut() {
-        enodes.retain(|n| egraph.enodes.contains_key(n));
-    }
-    egraph.eclasses.retain(|_, (_, c)| !c.is_empty());
-    egraph
-        .node_to_class
-        .retain(|n, _| egraph.enodes.contains_key(n));
-    assert!(
-        egraph.roots.iter().all(|c| egraph.eclasses.contains_key(c)),
-        "No valid graphs present in the e-graph!"
-    );
-
-    Ok(egraph)
-}
-
-pub fn extract_expr_list<'a>(
-    egraph: &'a SerializedEGraph,
-    node: &'a NodeId,
-    list_cache: &mut FxHashMap<&'a NodeId, Vec<Expression>>,
-    expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
-) -> Option<Vec<Expression>> {
-    if let Some(l) = list_cache.get(node) {
-        return Some(l.clone());
-    }
-    if egraph.enodes[node].0 == "ENil" {
-        return Some(vec![]);
-    }
-    let eclass = &egraph.enodes[node].1[0];
-    let expr = extract_expr(egraph, &egraph.eclasses[eclass].1[0], expr_cache)?;
-    match egraph.enodes[&egraph.eclasses[&egraph.enodes[node].1[1]].1[0]]
-        .0
-        .as_str()
-    {
-        "ENil" => Some(vec![expr]),
-        "ECons" => {
-            let mut rest = extract_expr_list(
-                egraph,
-                &egraph.eclasses[&egraph.enodes[node].1[1]].1[0],
-                list_cache,
-                expr_cache,
-            )?;
-            rest.insert(0, expr);
-            list_cache.insert(node, rest.clone());
-            Some(rest)
-        }
-        _ => unreachable!(),
-    }
-}
-
-pub fn extract_dtype<'a>(egraph: &'a SerializedEGraph, node: &'a NodeId) -> DType {
-    match egraph.enodes[node].0.as_str() {
-        "F32" => DType::F32,
-        "F16" => DType::F16,
-        "Bf16" => DType::Bf16,
-        "Int" => DType::Int,
-        "Bool" => DType::Bool,
-        other => panic!("unknown dtype {other}"),
-    }
-}
-
-pub fn extract_expr<'a>(
-    egraph: &'a SerializedEGraph,
-    node: &'a NodeId,
-    expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
-) -> Option<Expression> {
-    if let Some(e) = expr_cache.get(node) {
-        return Some(*e);
-    }
-
-    fn extract_shortest<'a>(
-        egraph: &'a SerializedEGraph,
-        class: &'a ClassId,
-        seen: &mut FxHashMap<&'a NodeId, usize>,
-        cache: &mut FxHashMap<&'a NodeId, Option<Vec<&'a NodeId>>>,
-    ) -> Option<Vec<&'a NodeId>> {
-        const MAX_CYCLES: usize = 1;
-        egraph.eclasses[class]
-            .1
-            .iter()
-            .filter_map(|en| {
-                if *seen.get(en).unwrap_or(&0) >= MAX_CYCLES || egraph.enodes[en].0 == "[...]" {
-                    return None;
-                }
-                if let Some(c) = cache.get(en) {
-                    return c.clone();
-                }
-                *seen.entry(en).or_insert(0) += 1;
-                let out = if egraph.enodes[en].1.is_empty() {
-                    Some(vec![en])
-                } else {
-                    egraph.enodes[en]
-                        .1
-                        .iter()
-                        .try_fold(vec![en], |mut acc, ch| {
-                            extract_shortest(egraph, ch, seen, cache).map(|p| {
-                                acc.extend(p);
-                                acc
-                            })
-                        })
-                };
-                *seen.get_mut(en).unwrap() -= 1;
-                cache.insert(en, out.clone());
-                out
-            })
-            .min_by_key(|p| p.len())
-    }
-
-    let traj = extract_shortest(
-        egraph,
-        &egraph.node_to_class[node],
-        &mut FxHashMap::default(),
-        &mut FxHashMap::default(),
-    )?;
-    fn build_expression(
-        egraph: &SerializedEGraph,
-        trajectory: &[&NodeId],
-        current: &mut usize,
-    ) -> Expression {
-        let nid = trajectory[*current];
-        let op = egraph.enodes[nid].0.as_str();
-        match op {
-            // unary math
-            "MNeg" | "MRecip" => {
-                *current += 1;
-                let c0 = build_expression(egraph, trajectory, current);
-                match op {
-                    "MNeg" => c0 * -1,
-                    "MRecip" => 1 / c0,
-                    _ => unreachable!(),
-                }
-            }
-            // binary math
-            "MAdd" | "MSub" | "MMul" | "MDiv" | "MMod" | "MMin" | "MMax" | "MAnd" | "MOr"
-            | "MGte" | "MLt" | "MFloorTo" | "MCeilDiv" => {
-                *current += 1;
-                let lhs = build_expression(egraph, trajectory, current);
-                *current += 1;
-                let rhs = build_expression(egraph, trajectory, current);
-                match op {
-                    "MAdd" => lhs + rhs,
-                    "MSub" => lhs - rhs,
-                    "MMul" => lhs * rhs,
-                    "MDiv" => lhs / rhs,
-                    "MMod" => lhs % rhs,
-                    "MMin" => lhs.min(rhs),
-                    "MMax" => lhs.max(rhs),
-                    "MAnd" => lhs & rhs,
-                    "MOr" => lhs | rhs,
-                    "MGte" => lhs.gte(rhs),
-                    "MLt" => lhs.lt(rhs),
-                    "MCeilDiv" => lhs.ceil_div(rhs),
-                    "MFloorTo" => lhs / rhs * rhs, // TODO: real floorto in Expression
-                    _ => unreachable!(),
-                }
-            }
-            // wrappers around a literal/var child
-            "MNum" | "MVar" => {
-                *current += 1;
-                build_expression(egraph, trajectory, current)
-            }
-            "MIter" => Expression::from('z'),
-            op if op.starts_with("Boxed(\"") => {
-                let name = op.replace("Boxed(\"", "").replace("\")", "");
-                Expression::from(name.chars().next().unwrap())
-            }
-            op => op
-                .parse::<i32>()
-                .map(Expression::from)
-                .or_else(|_| op.replace('"', "").parse::<char>().map(Expression::from))
-                .unwrap_or_else(|_| panic!("unsupported expression op '{op}'")),
-        }
-    }
-    let e = build_expression(egraph, &traj, &mut 0);
-    expr_cache.insert(node, e);
-    Some(e)
-}
-
-#[tracing::instrument(skip_all)]
-pub fn egglog_to_llir(
-    egraph: &SerializedEGraph,
-    ops: &Vec<Arc<Box<dyn EgglogOp>>>,
-    custom_ops: &[Box<dyn CustomOp>],
-    limit: usize,
-) -> Vec<LLIRGraph> {
-    // Get maps for all e-classes to e-node options
-    // if enabled!(Level::DEBUG) {
-    //     let log_dir = Path::new("llir_graphs");
-
-    //     if log_dir.exists() {
-    //         fs::remove_dir_all(log_dir).unwrap();
-    //     }
-    //     fs::create_dir(log_dir).unwrap();
-    // }
-    let mut choices = vec![FxHashMap::default()];
-    for (eclass, (label, enodes)) in &egraph.eclasses {
-        if !label.contains("IR") && !label.contains("IList") {
-            continue;
-        }
-        choices = enodes
-            .iter()
-            .flat_map(|enode| {
-                choices.iter().cloned().map(move |mut choice_map| {
-                    choice_map.insert(eclass, enode);
-                    choice_map
-                })
-            })
-            .rev()
-            .take(limit)
-            .collect();
-    }
-
-    // Create IR graphs
-    let mut graphs = vec![];
-    let mut c = FxHashMap::default();
-    let mut lc = FxHashMap::default();
-    for choice in &choices {
-        // Make reachability set from root
-        let mut reachable = FxHashSet::default();
-        reachable.insert(choice[&egraph.roots[0]]);
-        let mut reachability_stack = vec![choice[&egraph.roots[0]]];
-        while let Some(r) = reachability_stack.pop() {
-            for ch in &egraph.enodes[r].1 {
-                if egraph.eclasses[ch].0.contains("IR") || egraph.eclasses[ch].0.contains("IList") {
-                    let n = choice[ch];
-                    if !reachable.contains(n) {
-                        reachability_stack.push(n);
-                        reachable.insert(n);
-                    }
-                }
-            }
-        }
-        let mut graph = LLIRGraph::default();
-        let mut edges_to_place = vec![];
-        let mut enode_to_node = FxHashMap::default();
-        for &node in choice.values() {
-            if !reachable.contains(node) {
-                continue;
-            }
-            if egraph.eclasses[&egraph.node_to_class[node]].0 != "IR" {
-                // Skip IList
-                continue;
-            }
-            let ch = egraph.enodes[node]
-                .1
-                .iter()
-                .map(|c| {
-                    if egraph.eclasses[c].0.contains("IR") || egraph.eclasses[c].0.contains("IList")
-                    {
-                        choice[c]
-                    } else {
-                        &egraph.eclasses[c].1[0]
-                    }
-                })
-                .collect_vec();
-            if egraph.enodes[node].0.as_str() == "CustomOpHLIR" {
-                // Extract custom op inputs and id
-                let mut inputs = vec![];
-                // Walk through the IList to get inputs - use choice[] for IR eclasses to get the chosen enode
-                let ilist_eclass = &egraph.enodes[node].1[0];
-                let mut ch = &egraph.eclasses[ilist_eclass].1[0];
-                loop {
-                    if egraph.enodes[ch].0 == "INil" {
-                        break;
-                    } else {
-                        // The first child of ICons is an IR node - use choice[] to get the chosen enode
-                        let input_eclass = &egraph.enodes[ch].1[0];
-                        inputs.push(choice[input_eclass]);
-                        // The second child of ICons is the rest of the IList
-                        ch = &egraph.eclasses[&egraph.enodes[ch].1[1]].1[0];
-                    }
-                }
-                let id: usize = egraph.enodes[&egraph.eclasses[&egraph.enodes[node].1[1]].1[0]]
-                    .0
-                    .parse()
-                    .unwrap();
-                let r = graph.add_node(custom_ops[id].to_llir_op());
-                enode_to_node.insert(node, r);
-                for source in inputs {
-                    edges_to_place.push((source, node));
-                }
-            } else if egraph.enodes[node].0.as_str() != "OutputJoin" {
-                let Some(op) = ops
-                    .iter()
-                    .find(|op| egraph.enodes[node].0.as_str() == op.term().0)
-                else {
-                    todo!("{} extraction not implemented!", egraph.enodes[node].0);
-                };
-                // Extract this op
-                let (op_instance, sources) = op.extract(egraph, &ch, &mut lc, &mut c);
-                let r = graph.add_node(op_instance);
-                enode_to_node.insert(node, r);
-                for source in sources {
-                    edges_to_place.push((source, node));
-                }
-            }
-        }
-        for (src, dest) in edges_to_place {
-            let src_node_id = *enode_to_node.get(&src).unwrap_or_else(|| {
-                panic!(
-                    "Source enode {:?} not found in enode_to_node map during edge placement",
-                    src
-                )
-            });
-            let dest_node_id = *enode_to_node.get(&dest).unwrap_or_else(|| {
-                panic!(
-                    "Destination enode {:?} not found in enode_to_node map during edge placement",
-                    dest
-                )
-            });
-
-            graph.add_edge(src_node_id, dest_node_id, ());
-        }
-        // if enabled!(Level::TRACE) {
-        //     fs::write(
-        //         format!("llir_graphs/llir_{}.dot", i),
-        //         graph.clone().to_dot().unwrap(),
-        //     )
-        //     .unwrap();
-        // }
-
-        graphs.push(graph);
-    }
-    graphs
 }

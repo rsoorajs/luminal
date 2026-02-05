@@ -32,7 +32,10 @@ use luminal_tracing::PerfettoGuard;
 use memmap2::MmapOptions;
 use prost::Message;
 use safetensors::SafeTensors;
-use std::{collections::VecDeque, fmt::Debug, fs::File, mem::size_of, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque, fmt::Debug, fs::File, mem::size_of, num::NonZero, sync::Arc,
+    time::Duration,
+};
 use tracing::{Level, enabled, field, span, trace};
 use uuid::Uuid;
 
@@ -126,6 +129,7 @@ impl Drop for ExecutableKernel {
                 ..
             } => {
                 // Prevent Drop of CudaSlice<u8> (likely calls cuMemFree).
+                // These CudaSlices point to module memory, not separately allocated memory.
                 let m = std::mem::take(interpreter_constants);
                 for (_k, v) in m {
                     std::mem::forget(v);
@@ -195,7 +199,7 @@ pub struct CudaRuntime {
     cached_buffer_ptrs: FxHashMap<NodeIndex, u64>,
     pub last_kernel_stats: Vec<KernelStats>,
     pub last_total_time_us: f64,
-    kernel_cache: FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
+    kernel_cache: lru::LruCache<String, (Arc<CudaModule>, CudaFunction)>,
     num_sms: usize,
 }
 
@@ -272,12 +276,10 @@ impl CudaRuntime {
     }
 
     pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
-        let bytes = self.get_output_data(id);
-        let bytes = bytes.leak();
-        let n_bytes = bytes.len();
-        let bytes_ptr = bytes.as_mut_ptr();
-        let float_ptr = bytes_ptr as *mut f32;
-        unsafe { Vec::from_raw_parts(float_ptr, n_bytes / 4, n_bytes / 4) }
+        self.get_output_data(id)
+            .chunks_exact(4)
+            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect_vec()
     }
 
     pub fn get_i32(&self, id: impl ToId) -> Vec<i32> {
@@ -648,7 +650,7 @@ impl ToCudaInput for Vec<f32> {
 impl Runtime for CudaRuntime {
     type Ops = (
         crate::logical::Ops,
-        crate::kernel::Ops,
+        // crate::kernel::Ops,
         crate::block::Ops,
         crate::host::Ops,
     );
@@ -712,17 +714,19 @@ impl Runtime for CudaRuntime {
             intermediate_buffer_dims: FxHashSet::default(),
             last_kernel_stats: vec![],
             last_total_time_us: 0.0,
-            kernel_cache: FxHashMap::default(),
+            kernel_cache: lru::LruCache::new(NonZero::new(100).unwrap()),
         }
     }
 
     #[tracing::instrument(skip_all)]
     fn load_llir(&mut self, llir_graph: &LLIRGraph) {
+        // Synchronize to ensure all CUDA operations are complete before clearing
+        self.cuda_stream.synchronize().unwrap();
         // Clear intermediate buffers when loading new graph - they need to be
         // reallocated and re-registered with the new work_queue
-        self.buffers.clear();
-        self.cached_buffer_ptrs.clear();
-        self.exec_graph.clear();
+        // self.buffers.clear();
+        // self.cached_buffer_ptrs.clear();
+
         let mut exec_graph = StableGraph::default();
         let mut node_to_exec = FxHashMap::default();
 
@@ -756,123 +760,118 @@ impl Runtime for CudaRuntime {
         }
 
         // Add kernels
-        {
-            let _span = span!(Level::TRACE, "compile_kernels").entered();
-            let kernel_ops_in_graph = llir_graph
-                .node_indices()
-                .filter(|n| llir_graph[*n].to_dialect::<dyn KernelOp>().is_some())
-                .collect::<FxHashSet<_>>();
-            let kernel_subgraphs =
-                partition_marked_convex(llir_graph, &kernel_ops_in_graph).unwrap();
-            let mut compile_cache = FxHashMap::default();
-            for subgraph in kernel_subgraphs {
-                // Create a CUDA graph for this subgraph (even single kernels)
-                // The actual graph is built lazily on first execute (needs buffer pointers)
-                let mut kernel_info = Vec::with_capacity(subgraph.len());
-                let mut all_dyn_dims = FxHashSet::default();
-                let mut total_bytes_loaded = Expression::from(0);
-                let mut total_bytes_stored = Expression::from(0);
-                let mut total_flops = Expression::from(0);
+        let _span = span!(Level::TRACE, "compile_kernels").entered();
+        let kernel_ops_in_graph = llir_graph
+            .node_indices()
+            .filter(|n| llir_graph[*n].to_dialect::<dyn KernelOp>().is_some())
+            .collect::<FxHashSet<_>>();
+        let kernel_subgraphs = partition_marked_convex(llir_graph, &kernel_ops_in_graph).unwrap();
+        let mut compile_cache = FxHashMap::default();
+        for subgraph in kernel_subgraphs {
+            // Create a CUDA graph for this subgraph (even single kernels)
+            // The actual graph is built lazily on first execute (needs buffer pointers)
+            let mut kernel_info = Vec::with_capacity(subgraph.len());
+            let mut all_dyn_dims = FxHashSet::default();
+            let mut total_bytes_loaded = Expression::from(0);
+            let mut total_bytes_stored = Expression::from(0);
+            let mut total_flops = Expression::from(0);
 
-                // Get topological order for kernels in this subgraph
-                let topo_order: Vec<_> = toposort(llir_graph, None)
-                    .unwrap()
-                    .into_iter()
-                    .filter(|n| subgraph.contains(n))
-                    .collect();
+            // Get topological order for kernels in this subgraph
+            let topo_order: Vec<_> = toposort(llir_graph, None)
+                .unwrap()
+                .into_iter()
+                .filter(|n| subgraph.contains(n))
+                .collect();
 
-                for kernel in &topo_order {
-                    let kernel_op = llir_graph[*kernel].to_dialect::<dyn KernelOp>().unwrap();
-                    let span = span!(Level::TRACE, "kernel_compile").entered();
-                    let (kernel_function, _, kernel_str, grid, tb, shared_mem, _constants) =
-                        kernel_op.compile(&self.cuda_stream, &mut compile_cache);
-                    drop(span);
-                    let inputs = llir_graph
-                        .edges_directed(*kernel, Direction::Incoming)
-                        .sorted_by_key(|e| e.id())
-                        .map(|e| e.source())
-                        .collect_vec();
+            for kernel in &topo_order {
+                let kernel_op = llir_graph[*kernel].to_dialect::<dyn KernelOp>().unwrap();
+                let span = span!(Level::TRACE, "kernel_compile").entered();
+                let (kernel_function, _, kernel_str, grid, tb, shared_mem, _constants) =
+                    kernel_op.compile(&self.cuda_stream, &mut compile_cache);
+                drop(span);
+                let inputs = llir_graph
+                    .edges_directed(*kernel, Direction::Incoming)
+                    .sorted_by_key(|e| e.id())
+                    .map(|e| e.source())
+                    .collect_vec();
 
-                    total_bytes_loaded += kernel_op.bytes_loaded();
-                    total_bytes_stored += kernel_op.bytes_stored();
-                    total_flops += kernel_op.flops();
+                total_bytes_loaded += kernel_op.bytes_loaded();
+                total_bytes_stored += kernel_op.bytes_stored();
+                total_flops += kernel_op.flops();
 
-                    // Collect all dyn dims used by this kernel's expressions
-                    all_dyn_dims.extend(grid.0.dyn_vars());
-                    all_dyn_dims.extend(grid.1.dyn_vars());
-                    all_dyn_dims.extend(grid.2.dyn_vars());
-                    all_dyn_dims.extend(tb.0.dyn_vars());
-                    all_dyn_dims.extend(tb.1.dyn_vars());
-                    all_dyn_dims.extend(tb.2.dyn_vars());
-                    all_dyn_dims.extend(shared_mem.dyn_vars());
-                    all_dyn_dims.extend(kernel_op.output_size().dyn_vars());
-                    all_dyn_dims.extend(kernel_op.bytes_loaded().dyn_vars());
-                    all_dyn_dims.extend(kernel_op.bytes_stored().dyn_vars());
+                // Collect all dyn dims used by this kernel's expressions
+                all_dyn_dims.extend(grid.0.dyn_vars());
+                all_dyn_dims.extend(grid.1.dyn_vars());
+                all_dyn_dims.extend(grid.2.dyn_vars());
+                all_dyn_dims.extend(tb.0.dyn_vars());
+                all_dyn_dims.extend(tb.1.dyn_vars());
+                all_dyn_dims.extend(tb.2.dyn_vars());
+                all_dyn_dims.extend(shared_mem.dyn_vars());
+                all_dyn_dims.extend(kernel_op.output_size().dyn_vars());
+                all_dyn_dims.extend(kernel_op.bytes_loaded().dyn_vars());
+                all_dyn_dims.extend(kernel_op.bytes_stored().dyn_vars());
 
-                    kernel_info.push(CudaGraphKernelNode {
-                        llir_node: *kernel,
-                        kernel: kernel_function,
-                        launch_grid: grid,
-                        launch_threadblock: tb,
-                        shared_mem,
-                        inputs,
-                        kernel_str,
-                        output: *kernel,
-                        kernel_name: kernel_op.kernel_name(),
-                        bytes_loaded: kernel_op.bytes_loaded(),
-                        bytes_stored: kernel_op.bytes_stored(),
-                        flops: kernel_op.flops(),
-                    });
-                }
+                kernel_info.push(CudaGraphKernelNode {
+                    llir_node: *kernel,
+                    kernel: kernel_function,
+                    launch_grid: grid,
+                    launch_threadblock: tb,
+                    shared_mem,
+                    inputs,
+                    kernel_str,
+                    output: *kernel,
+                    kernel_name: kernel_op.kernel_name(),
+                    bytes_loaded: kernel_op.bytes_loaded(),
+                    bytes_stored: kernel_op.bytes_stored(),
+                    flops: kernel_op.flops(),
+                });
+            }
 
-                // Sort dyn dims alphabetically for consistent buffer layout
-                let mut dyn_dims_order: Vec<char> = all_dyn_dims.into_iter().collect();
-                dyn_dims_order.sort();
+            // Sort dyn dims alphabetically for consistent buffer layout
+            let mut dyn_dims_order: Vec<char> = all_dyn_dims.into_iter().collect();
+            dyn_dims_order.sort();
 
-                let exec_node = exec_graph.add_node(ExecutableKernel::CudaGraphExec(Box::new(
-                    CudaGraphExecData {
-                        cuda_graph: None,
-                        cuda_graph_exec: None,
-                        node_to_graph_node: FxHashMap::default(),
-                        kernel_params: Vec::new(),
-                        kernel_info,
-                        dyn_dims_buffer: None,
-                        dyn_dims_order,
-                        last_dyn_values: FxHashMap::default(),
-                        last_buffer_ptrs: FxHashMap::default(),
-                        timing_events: Vec::new(),
-                        total_bytes_loaded,
-                        total_bytes_stored,
-                        total_flops,
-                    },
-                )));
+            let exec_node = exec_graph.add_node(ExecutableKernel::CudaGraphExec(Box::new(
+                CudaGraphExecData {
+                    cuda_graph: None,
+                    cuda_graph_exec: None,
+                    node_to_graph_node: FxHashMap::default(),
+                    kernel_params: Vec::new(),
+                    kernel_info,
+                    dyn_dims_buffer: None,
+                    dyn_dims_order,
+                    last_dyn_values: FxHashMap::default(),
+                    last_buffer_ptrs: FxHashMap::default(),
+                    timing_events: Vec::new(),
+                    total_bytes_loaded,
+                    total_bytes_stored,
+                    total_flops,
+                },
+            )));
 
-                for node in subgraph {
-                    node_to_exec.insert(node, exec_node);
-                }
+            for node in subgraph {
+                node_to_exec.insert(node, exec_node);
             }
         }
 
         // Add host ops
-        {
-            let _span = span!(Level::TRACE, "compile_host_ops").entered();
-            for host_op_node_index in llir_graph.node_indices() {
-                if let Some(host_op) = llir_graph[host_op_node_index].to_dialect::<dyn HostOp>() {
-                    let inputs = llir_graph
-                        .edges_directed(host_op_node_index, Direction::Incoming)
-                        .sorted_by_key(|e| e.id())
-                        .map(|e| e.source())
-                        .collect_vec();
-                    node_to_exec.insert(
-                        host_op_node_index,
-                        exec_graph.add_node(ExecutableKernel::HostOp {
-                            stream: Arc::clone(&self.cuda_stream),
-                            inputs,
-                            output: host_op_node_index,
-                            internal: Arc::clone(host_op),
-                        }),
-                    );
-                }
+        let _span = span!(Level::TRACE, "compile_host_ops").entered();
+        for host_op_node_index in llir_graph.node_indices() {
+            if let Some(host_op) = llir_graph[host_op_node_index].to_dialect::<dyn HostOp>() {
+                let inputs = llir_graph
+                    .edges_directed(host_op_node_index, Direction::Incoming)
+                    .sorted_by_key(|e| e.id())
+                    .map(|e| e.source())
+                    .collect_vec();
+                node_to_exec.insert(
+                    host_op_node_index,
+                    exec_graph.add_node(ExecutableKernel::HostOp {
+                        stream: Arc::clone(&self.cuda_stream),
+                        inputs,
+                        output: host_op_node_index,
+                        internal: Arc::clone(host_op),
+                    }),
+                );
             }
         }
 
@@ -892,6 +891,7 @@ impl Runtime for CudaRuntime {
                 exec_graph.add_edge(exec_start, exec_end, ());
             }
         }
+
         self.exec_graph = exec_graph;
         self.llir_graph = llir_graph.clone();
         self.node_to_exec = node_to_exec;
@@ -924,15 +924,29 @@ impl Runtime for CudaRuntime {
         &mut self,
         llir_graph: &LLIRGraph,
         dyn_map: &FxHashMap<char, usize>,
+        trials: usize,
     ) -> (Self::ProfileMetric, String) {
-        self.buffers.clear();
-        self.load_llir(llir_graph);
-        let start = std::time::Instant::now();
-        self.execute(dyn_map);
-        let duration = start.elapsed();
+        // Synchronize to ensure all pending operations complete before clearing
+        self.cuda_stream.synchronize().unwrap();
 
-        // Flush pending timing data so it's available for stats
-        self.flush_pending_timings();
+        // Clear timing data from previous profiles to prevent memory accumulation
+        self.timings.clear();
+        self.cuda_graph_timings.clear();
+        self.last_kernel_stats.clear();
+        self.pending_timing_data.clear();
+
+        self.load_llir(llir_graph);
+        self.last_dyn_map = dyn_map.clone();
+        self.allocate_intermediate_buffers(dyn_map);
+
+        let mut duration = Duration::default();
+        for _ in 0..trials {
+            let start = std::time::Instant::now();
+            self.execute(dyn_map);
+            self.cuda_stream.synchronize().unwrap();
+            duration += start.elapsed();
+        }
+        duration /= trials as u32;
 
         // Compute aggregates for profile display
         let block_op_stats = Self::compute_block_op_stats(
@@ -976,7 +990,13 @@ impl Runtime for CudaRuntime {
         let duration_str = pretty_duration::pretty_duration(&duration, None);
         let mbu_str = mbu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
         let mfu_str = mfu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
-        let display = format!("{duration_str} | MBU: {mbu_str} | MFU: {mfu_str}");
+        let display = format!(
+            "{duration_str} | MBU: {mbu_str} | MFU: {mfu_str} | MK: {}",
+            self.exec_graph
+                .node_weights()
+                .filter(|n| matches!(n, ExecutableKernel::Megakernel { .. }))
+                .count()
+        );
 
         (duration, display)
     }
@@ -1792,7 +1812,6 @@ impl CudaRuntime {
                 count: wait_count,
             });
         }
-
         stats
     }
 

@@ -19,6 +19,7 @@ pub trait Runtime {
         &mut self,
         llir_graph: &LLIRGraph,
         dyn_map: &FxHashMap<char, usize>,
+        trials: usize,
     ) -> (Self::ProfileMetric, String);
 }
 
