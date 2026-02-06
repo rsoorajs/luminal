@@ -766,7 +766,7 @@ fn compile_to_cubin(kernel: &str, arch: &str) -> Result<Vec<u8>, String> {
         // Get compilation log for error message
         let mut log_size = 0usize;
         unsafe { nvrtc_sys::nvrtcGetProgramLogSize(prog, &mut log_size) };
-        let mut log: Vec<i8> = vec![0; log_size];
+        let mut log: Vec<std::ffi::c_char> = vec![0; log_size];
         unsafe { nvrtc_sys::nvrtcGetProgramLog(prog, log.as_mut_ptr()) };
         unsafe { nvrtc_sys::nvrtcDestroyProgram(&mut prog) };
 
@@ -789,7 +789,7 @@ fn compile_to_cubin(kernel: &str, arch: &str) -> Result<Vec<u8>, String> {
 
     // Get cubin data
     let mut cubin: Vec<u8> = vec![0; cubin_size];
-    let result = unsafe { nvrtc_sys::nvrtcGetCUBIN(prog, cubin.as_mut_ptr() as *mut i8) };
+    let result = unsafe { nvrtc_sys::nvrtcGetCUBIN(prog, cubin.as_mut_ptr() as *mut std::ffi::c_char) };
     if result != nvrtc_sys::nvrtcResult::NVRTC_SUCCESS {
         unsafe { nvrtc_sys::nvrtcDestroyProgram(&mut prog) };
         return Err(format!("nvrtcGetCUBIN failed: {:?}", result));

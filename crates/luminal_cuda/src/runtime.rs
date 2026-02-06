@@ -10,6 +10,7 @@ use crate::{
         event_elapsed_ms, record_cuda_graph_timings,
     },
 };
+use colorize::AnsiColor;
 use cudarc::driver::{
     CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PinnedHostSlice,
     PushKernelArg, sys::CUgraphNode,
@@ -650,7 +651,7 @@ impl ToCudaInput for Vec<f32> {
 impl Runtime for CudaRuntime {
     type Ops = (
         crate::logical::Ops,
-        // crate::kernel::Ops,
+        crate::kernel::Ops,
         crate::block::Ops,
         crate::host::Ops,
     );
@@ -723,9 +724,9 @@ impl Runtime for CudaRuntime {
         // Synchronize to ensure all CUDA operations are complete before clearing
         self.cuda_stream.synchronize().unwrap();
         // Clear intermediate buffers when loading new graph - they need to be
-        // reallocated and re-registered with the new work_queue
-        // self.buffers.clear();
-        // self.cached_buffer_ptrs.clear();
+        // reallocated and re-registered with the new exec_graph
+        self.buffers.clear();
+        self.cached_buffer_ptrs.clear();
 
         let mut exec_graph = StableGraph::default();
         let mut node_to_exec = FxHashMap::default();
@@ -991,14 +992,46 @@ impl Runtime for CudaRuntime {
         let mbu_str = mbu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
         let mfu_str = mfu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
         let display = format!(
-            "{duration_str} | MBU: {mbu_str} | MFU: {mfu_str} | MK: {}",
-            self.exec_graph
+            "{duration_str:<12} MBU: {} MFU: {} [BLK: {} KRN: {} HOST: {}]",
+            mbu_str.bold(),
+            mfu_str.bold(),
+            self.llir_graph
                 .node_weights()
-                .filter(|n| matches!(n, ExecutableKernel::Megakernel { .. }))
+                .filter(|n| n.to_dialect::<dyn BlockOp>().is_some())
                 .count()
+                .to_string()
+                .bold(),
+            self.llir_graph
+                .node_weights()
+                .filter(|n| n.to_dialect::<dyn KernelOp>().is_some())
+                .count()
+                .to_string()
+                .bold(),
+            self.llir_graph
+                .node_weights()
+                .filter(|n| n.to_dialect::<dyn HostOp>().is_some())
+                .count()
+                .to_string()
+                .bold(),
         );
 
         (duration, display)
+    }
+
+    fn allocate_dummy_input(&mut self, node_index: usize, num_elements: usize) {
+        let buf = self
+            .cuda_stream
+            .alloc_zeros(num_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let id = NodeIndex::new(node_index);
+        self.hlir_buffers.insert(id, CudaInput::Buffer(buf));
+        self.changed_hlir.insert(id);
+    }
+
+    fn clear_intermediate_buffers(&mut self) {
+        self.cuda_stream.synchronize().unwrap();
+        self.buffers.clear();
+        self.cached_buffer_ptrs.clear();
     }
 
     #[tracing::instrument(skip_all)]

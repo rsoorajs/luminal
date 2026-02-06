@@ -23,7 +23,7 @@ const REPO_ID: &str = "NousResearch/Meta-Llama-3-8B-Instruct";
 fn main() {
     let max_seq_len = 4096;
     let gen_tokens = 10;
-    let search_graphs = 30; // the number of graphs we want to search during compilation
+    let search_graphs = 500; // the number of graphs we want to search during compilation
     let prompt = "Hello, how are you";
 
     // Tracing
@@ -31,9 +31,8 @@ fn main() {
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(
-            luminal_filter()
-                //.with_target("luminal", LevelFilter::TRACE)
-                //.with_target("llama", Level::TRACE),
+            luminal_filter(), //.with_target("luminal", LevelFilter::TRACE)
+                              //.with_target("llama", Level::TRACE),
         )
         //.with(perfetto_layer)
         .init();
@@ -137,7 +136,6 @@ fn main() {
 
     println!("Dumping device execution trace to perfetto...");
     //runtime.record_cuda_perfetto_trace(perfetto_guard);
-
 }
 
 #[tracing::instrument(skip_all)]

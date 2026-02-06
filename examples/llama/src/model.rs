@@ -106,6 +106,7 @@ impl Llama {
                 k_cache.device_ptr(v_cache.stream()).0,
                 v_cache.device_ptr(k_cache.stream()).0,
             );
+            x = x.graph_break();
         }
         self.lm_norm.forward(x).matmul(self.lm_head.t())
     }
