@@ -14,9 +14,6 @@ tokenizers = "0.15.2"
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Use jemalloc for better memory management
-tikv-jemallocator = "0.6"
-
 # HuggingFace model download
 hf-hub = {version = "0.4", default-features = false, features = ["rustls-tls", "ureq"]}
 safetensors = "0.7.0"

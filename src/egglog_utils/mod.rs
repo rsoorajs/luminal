@@ -270,27 +270,21 @@ pub fn hash_egglog_normalized(text: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     for line in text.lines() {
         if line.contains("(Input ") {
-            // Hash only the dtype portion: (F32), (F16), etc.
-            let mut found = false;
-            for dtype in ["(F32)", "(F16)", "(Bf16)", "(Int)", "(Bool)"] {
-                if line.contains(dtype) {
-                    ("INPUT", dtype).hash(&mut hasher);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                // Fallback: hash the whole line if dtype not recognized
+            // Format: (let tN (Input NODE "LABEL" (DTYPE)))
+            // Strip the node index and label, keep only the dtype.
+            // The dtype is the last parenthesized token, e.g. "(F32)".
+            if let Some(dtype_start) = line.rfind(" (") {
+                let dtype = &line[dtype_start + 1..];
+                ("INPUT", dtype).hash(&mut hasher);
+            } else {
                 line.hash(&mut hasher);
             }
         } else if line.contains("(Output ") && !line.contains("(OutputJoin ") {
             "OUTPUT".hash(&mut hasher);
         } else if line.contains("(CustomOpHLIR ") {
-            // CustomOpHLIR format: (let tN (CustomOpHLIR <IList> <Int> (<DType>)))
-            // The integer ID varies per layer. Replace it with a constant marker.
-            // Find the pattern: ")) <digits> (" and replace the digits.
-            let normalized = normalize_custom_op_id(line);
-            normalized.hash(&mut hasher);
+            // Format: (let tN (CustomOpHLIR (ICons ... (INil)) ID (DTYPE)))
+            // The integer ID varies per layer. Replace it with a constant.
+            normalize_custom_op_id(line).hash(&mut hasher);
         } else {
             line.hash(&mut hasher);
         }
@@ -302,23 +296,15 @@ pub fn hash_egglog_normalized(text: &str) -> u64 {
 /// Input format: `(let tN (CustomOpHLIR (ICons ... (INil))) ID (DTYPE)))`
 /// The ID is the integer between the closing of IList and the opening of DType.
 fn normalize_custom_op_id(line: &str) -> String {
-    // Find "(CustomOpHLIR " and then the integer after the IList closes
-    // The IList ends with "(INil)" followed by some closing parens, then " ID ("
-    // Strategy: find the last occurrence of ")) " followed by digits followed by " ("
-    // which is where the ID sits between IList and DType.
     if let Some(custom_start) = line.find("(CustomOpHLIR ") {
-        // Find the portion after CustomOpHLIR
         let after = &line[custom_start + "(CustomOpHLIR ".len()..];
-        // The IList part ends with (INil) and closing parens.
-        // Find the pattern: ") <digits> (" — the ID is between the last ')' of IList and '(' of DType
-        // We scan backwards from the end to find the dtype opening paren
+        // Find the dtype opening paren (last " (" in the line)
         if let Some(last_open) = after.rfind(" (") {
-            // Now find the space before the integer
             let before_dtype = &after[..last_open];
+            // Find the space before the integer ID
             if let Some(space_before_id) = before_dtype.rfind(' ') {
                 let id_str = &before_dtype[space_before_id + 1..];
                 if id_str.chars().all(|c| c.is_ascii_digit()) {
-                    // Reconstruct with "0" replacing the ID
                     return format!(
                         "{}0{}",
                         &line[..custom_start + "(CustomOpHLIR ".len() + space_before_id + 1],

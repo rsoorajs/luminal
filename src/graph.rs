@@ -18,7 +18,7 @@ use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-use tracing::{self, trace};
+use tracing;
 
 pub type LLIRGraph = StableGraph<LLIROp, ()>;
 pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ShapeTracker>;
@@ -175,10 +175,12 @@ impl Graph {
         let subgraphs = split_at_graph_breaks(self);
 
         if subgraphs.len() <= 1 {
-            // No graph breaks — original single-egraph path
             let (program, root) = hlir_to_egglog(self);
             self.egraphs = vec![run_egglog(&program, &root, &ops, cleanup_hlir).unwrap()];
-            self.chunk_groups = vec![];
+            self.chunk_groups = vec![ChunkGroup {
+                representative: 0,
+                members: vec![0],
+            }];
         } else {
             println!(
                 "   {:>6}  {} chunks from graph breaks",
@@ -206,7 +208,10 @@ impl Graph {
         if subgraphs.len() <= 1 {
             let (program, root) = hlir_to_egglog(self);
             self.egraphs = vec![run_egglog(&program, &root, &ops, cleanup_hlir).unwrap()];
-            self.chunk_groups = vec![];
+            self.chunk_groups = vec![ChunkGroup {
+                representative: 0,
+                members: vec![0],
+            }];
         } else {
             self.build_grouped_egraphs(&subgraphs, &ops, cleanup_hlir);
         }
@@ -278,16 +283,13 @@ impl Graph {
 
     #[tracing::instrument(skip_all)]
     pub fn search<R: Runtime>(&mut self, mut runtime: R, limit: usize) -> R {
-        if self.subgraph_descriptors.len() <= 1 {
-            return self.search_single(runtime, limit);
-        }
-
         let n_chunks = self.subgraph_descriptors.len();
         let n_groups = self.chunk_groups.len();
+        let multi_chunk = n_chunks > 1;
         let ops = self.ops.as_ref().unwrap();
         let start = std::time::Instant::now();
 
-        // Allocate dummy buffers for all boundary inputs so any group can be profiled
+        // Allocate dummy buffers for boundary inputs so groups can be profiled
         for desc in &self.subgraph_descriptors {
             for bi in &desc.boundary_inputs {
                 let n_elements = bi
@@ -351,25 +353,37 @@ impl Graph {
 
             let mut n_graphs = 1;
 
-            // Print initial result above progress bars
+            // Print initial result and progress
             {
+                let multiplier = if group.members.len() > 1 {
+                    format!(" ({}x)", group.members.len())
+                } else {
+                    String::new()
+                };
                 let msg = format!(
-                    "   {:>8} {} ({}x)",
+                    "   {:>8} {}{multiplier}",
                     format!("Group {group_idx}").cyan().bold(),
                     display,
-                    group.members.len(),
                 );
                 if bars_drawn {
                     print!("\x1b[1A\r\x1b[2K");
                 }
                 println!("{msg}");
-                print!(
-                    "\x1b[2K  {:>6}  {} {n_graphs}/{limit}\n\x1b[2K  {:>6}  {} {group_idx}/{n_groups}",
-                    "Group".cyan().bold(),
-                    make_bar(n_graphs, limit),
-                    "Total".cyan().bold(),
-                    make_bar(group_idx, n_groups)
-                );
+                if multi_chunk {
+                    print!(
+                        "\x1b[2K  {:>6}  {} {n_graphs}/{limit}\n\x1b[2K  {:>6}  {} {group_idx}/{n_groups}",
+                        "Group".cyan().bold(),
+                        make_bar(n_graphs, limit),
+                        "Total".cyan().bold(),
+                        make_bar(group_idx, n_groups)
+                    );
+                } else {
+                    print!(
+                        "\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
+                        "Search".cyan().bold(),
+                        make_bar(n_graphs, limit),
+                    );
+                }
                 std::io::stdout().flush().unwrap();
                 bars_drawn = true;
             }
@@ -412,42 +426,55 @@ impl Graph {
                     let (new_metric, display_metric) = match profile_result {
                         Ok(result) => result,
                         Err(_) => {
-                            // Just update progress bars on skip
-                            print!(
-                                "\x1b[1A\r\x1b[2K  {:>6}  {} {n_graphs}/{limit}\n\x1b[2K  {:>6}  {} {group_idx}/{n_groups}",
-                                "Group".cyan().bold(),
-                                make_bar(n_graphs, limit),
-                                "Total".cyan().bold(),
-                                make_bar(group_idx, n_groups)
-                            );
+                            if multi_chunk {
+                                print!(
+                                    "\x1b[1A\r\x1b[2K  {:>6}  {} {n_graphs}/{limit}\n\x1b[2K  {:>6}  {} {group_idx}/{n_groups}",
+                                    "Group".cyan().bold(),
+                                    make_bar(n_graphs, limit),
+                                    "Total".cyan().bold(),
+                                    make_bar(group_idx, n_groups)
+                                );
+                            } else {
+                                print!(
+                                    "\r\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
+                                    "Search".cyan().bold(),
+                                    make_bar(n_graphs, limit),
+                                );
+                            }
                             std::io::stdout().flush().unwrap();
                             continue;
                         }
                     };
 
-                    let mut new_best = false;
-                    if best_metric.gt(&new_metric) {
+                    let new_best = best_metric.gt(&new_metric);
+                    if new_best {
                         best_metric = new_metric;
                         best_graph = llir_graph;
                         best_genome = genome;
-                        new_best = true;
                     }
 
                     if new_best {
-                        // Print result above progress bars
                         let msg = format!("   {:>6} {display_metric}", "Searched".green().bold());
-                        print!("\x1b[1A\r\x1b[2K");
-                        println!("{msg}");
-                        print!(
-                            "\x1b[2K  {:>6}  {} {n_graphs}/{limit}\n\x1b[2K  {:>6}  {} {group_idx}/{n_groups}",
-                            "Group".cyan().bold(),
-                            make_bar(n_graphs, limit),
-                            "Total".cyan().bold(),
-                            make_bar(group_idx, n_groups)
-                        );
-                        std::io::stdout().flush().unwrap();
-                    } else {
-                        // Just update progress bars
+                        if multi_chunk {
+                            print!("\x1b[1A\r\x1b[2K");
+                            println!("{msg}");
+                            print!(
+                                "\x1b[2K  {:>6}  {} {n_graphs}/{limit}\n\x1b[2K  {:>6}  {} {group_idx}/{n_groups}",
+                                "Group".cyan().bold(),
+                                make_bar(n_graphs, limit),
+                                "Total".cyan().bold(),
+                                make_bar(group_idx, n_groups)
+                            );
+                        } else {
+                            print!("\r\x1b[2K");
+                            println!("{msg}");
+                            print!(
+                                "\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
+                                "Search".cyan().bold(),
+                                make_bar(n_graphs, limit),
+                            );
+                        }
+                    } else if multi_chunk {
                         print!(
                             "\x1b[1A\r\x1b[2K  {:>6}  {} {n_graphs}/{limit}\n\x1b[2K  {:>6}  {} {group_idx}/{n_groups}",
                             "Group".cyan().bold(),
@@ -455,8 +482,14 @@ impl Graph {
                             "Total".cyan().bold(),
                             make_bar(group_idx, n_groups)
                         );
-                        std::io::stdout().flush().unwrap();
+                    } else {
+                        print!(
+                            "\r\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
+                            "Search".cyan().bold(),
+                            make_bar(n_graphs, limit),
+                        );
                     }
+                    std::io::stdout().flush().unwrap();
                 }
             }
 
@@ -466,7 +499,11 @@ impl Graph {
 
         // Clear progress bars
         if bars_drawn {
-            print!("\x1b[1A\r\x1b[2K\n\x1b[2K\x1b[1A\r");
+            if multi_chunk {
+                print!("\x1b[1A\r\x1b[2K\n\x1b[2K\x1b[1A\r");
+            } else {
+                print!("\r\x1b[2K");
+            }
             std::io::stdout().flush().unwrap();
         }
 
@@ -517,7 +554,7 @@ impl Graph {
             .map(|(i, opt)| opt.unwrap_or_else(|| panic!("Missing LLIR for chunk {i}")))
             .collect();
 
-        // Stitch all chunk LLIRs into a single graph
+        // Stitch chunk LLIRs into a single graph (no-op for single chunk)
         let stitched = stitch_llir_graphs(&chunk_best_llirs, &self.subgraph_descriptors);
 
         println!(
@@ -531,153 +568,6 @@ impl Graph {
         // Clear stale buffers from chunk profiling before loading the final graph
         runtime.clear_intermediate_buffers();
         runtime.load_llir(&stitched);
-        runtime
-    }
-
-    /// Search a single e-graph (original behavior, no graph breaks).
-    fn search_single<R: Runtime>(&mut self, mut runtime: R, limit: usize) -> R {
-        let mut rng = rand::rng();
-        let egraph = &self.egraphs[0];
-        let ops = self.ops.as_ref().unwrap();
-
-        let mut prev_selected: FxHashSet<u64> = FxHashSet::default();
-        let mut list_cache = FxHashMap::default();
-        let mut expr_cache = FxHashMap::default();
-
-        let mut best_genome = random_initial_choice(egraph, &mut rng);
-        prev_selected.insert(hash_choice_set(&best_genome));
-
-        let start = std::time::Instant::now();
-        let mut best_graph;
-        let mut best_metric;
-        let bar_width = 24;
-        let mut n_graphs;
-
-        let progress_bar = |searched: usize, limit: usize| {
-            let total = limit;
-            let head = ((searched as f32 / total as f32) * bar_width as f32)
-                .clamp(0.0, bar_width as f32)
-                .floor() as usize;
-            let bar = if head == 0 {
-                format!("[>{}]", " ".repeat(bar_width - 1))
-            } else if head >= bar_width {
-                format!("[{}>]", "=".repeat(bar_width))
-            } else {
-                format!(
-                    "[{}>{}]",
-                    "=".repeat(head),
-                    " ".repeat(bar_width - head - 1)
-                )
-            };
-            print!(
-                "\r\x1b[2K  {:>6}  {bar} {searched}/{total}",
-                "Searching".cyan().bold(),
-            );
-            std::io::stdout().flush().unwrap();
-        };
-
-        {
-            let llir_graph = egglog_to_llir(
-                egraph,
-                best_genome.clone(),
-                ops,
-                &self.custom_ops,
-                &mut list_cache,
-                &mut expr_cache,
-                None,
-            );
-            let (new_metric, display_metric) =
-                runtime.profile(&llir_graph, &self.dyn_map, Self::TRIALS_PER_PROFILE);
-            best_metric = Some(new_metric);
-            best_graph = llir_graph;
-            n_graphs = 1;
-            progress_bar(n_graphs, limit);
-            print!("\r\x1b[2K");
-            std::io::stdout().flush().unwrap();
-            println!(
-                "   {:>6}  Graph {n_graphs}[0]: {}",
-                "Searched".green().bold(),
-                display_metric.bold().green()
-            );
-        }
-
-        let mut generation = 0;
-        while n_graphs < limit {
-            generation += 1;
-            let offspring = extract_generation(
-                egraph,
-                &best_genome,
-                (limit - n_graphs).min(Self::DEFAULT_GENERATION_SIZE),
-                Self::MUTATIONS_PER_OFFSPRING,
-                &mut prev_selected,
-                &mut rng,
-            );
-
-            if offspring.is_empty() {
-                break;
-            }
-
-            for genome in offspring {
-                n_graphs += 1;
-                progress_bar(n_graphs, limit);
-                list_cache.clear();
-                expr_cache.clear();
-
-                let llir_graph = egglog_to_llir(
-                    egraph,
-                    genome.clone(),
-                    ops,
-                    &self.custom_ops,
-                    &mut list_cache,
-                    &mut expr_cache,
-                    None,
-                );
-                let (new_metric, display_metric) =
-                    runtime.profile(&llir_graph, &self.dyn_map, Self::TRIALS_PER_PROFILE);
-
-                let mut new_best = false;
-                if let Some(old_metric) = &best_metric {
-                    if old_metric.gt(&new_metric) {
-                        best_metric = Some(new_metric);
-                        best_graph = llir_graph;
-                        best_genome = genome;
-                        new_best = true;
-                    }
-                } else {
-                    best_metric = Some(new_metric);
-                    best_graph = llir_graph;
-                    best_genome = genome;
-                    new_best = true;
-                }
-
-                print!("\r\x1b[2K");
-                std::io::stdout().flush().unwrap();
-                println!(
-                    "   {:>6}  Graph {n_graphs}[{generation}]: {}",
-                    "Searched".green().bold(),
-                    if new_best {
-                        display_metric.bold().green().to_string()
-                    } else {
-                        display_metric
-                    }
-                );
-            }
-        }
-
-        trace!(
-            target: "luminal::search",
-            n_graphs,
-            limit,
-            limit_reached = n_graphs >= limit,
-            duration_ms = start.elapsed().as_millis() as u64,
-            "search completed"
-        );
-        println!(
-            "   {:>6}  {n_graphs} graphs in {}",
-            "Searched".green().bold(),
-            pretty_duration::pretty_duration(&start.elapsed(), None)
-        );
-        runtime.load_llir(&best_graph);
         runtime
     }
 }

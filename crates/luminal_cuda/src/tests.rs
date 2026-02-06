@@ -558,6 +558,7 @@ fn fuzz_test_cuda_genomes() {
         &cx.custom_ops,
         &mut list_cache,
         &mut expr_cache,
+        None,
     );
 
     let mut rt = CudaRuntime::initialize(stream.clone());
@@ -582,14 +583,7 @@ fn fuzz_test_cuda_genomes() {
     let target = 50;
 
     for _generation in 0..100 {
-        let offspring = extract_generation(
-            egraph,
-            &base,
-            10,
-            2,
-            &mut prev_selected,
-            &mut rng,
-        );
+        let offspring = extract_generation(egraph, &base, 10, 2, &mut prev_selected, &mut rng);
 
         if offspring.is_empty() {
             println!("Search space exhausted");
@@ -612,6 +606,7 @@ fn fuzz_test_cuda_genomes() {
                 &cx.custom_ops,
                 &mut list_cache,
                 &mut expr_cache,
+                None,
             );
 
             // Create fresh runtime for this genome
@@ -639,6 +634,9 @@ fn fuzz_test_cuda_genomes() {
         }
     }
 
-    println!("Fuzz test: verified {} genomes produce correct results", tested);
+    println!(
+        "Fuzz test: verified {} genomes produce correct results",
+        tested
+    );
     assert!(tested > 0, "No genomes were tested");
 }

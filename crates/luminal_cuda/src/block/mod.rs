@@ -7,7 +7,7 @@ pub use ops::*;
 
 use cudarc::{
     driver::{CudaFunction, CudaModule, CudaSlice, CudaStream, DeviceRepr, ValidAsZeroBits},
-    nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts},
+    nvrtc::{CompileOptions, compile_ptx_with_opts},
 };
 use luminal::{
     graph::LLIRGraph,
@@ -18,14 +18,11 @@ use luminal::{
     },
     shape::{Expression, flatten_z_strides},
 };
-use std::ffi::CString;
 use std::{
     collections::HashMap,
     fmt::Debug,
     hash::{DefaultHasher, Hash, Hasher},
-    io::Write as IoWrite,
     iter::once,
-    path::PathBuf,
     ptr::{null, null_mut},
     sync::Arc,
 };
@@ -702,115 +699,6 @@ pub fn record_block_op_timings(
     packets
 }
 
-/// Get the disk cache directory for cubin files
-fn cubin_cache_dir() -> PathBuf {
-    let cache_dir = dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("luminal")
-        .join("cubin");
-    std::fs::create_dir_all(&cache_dir).ok();
-    cache_dir
-}
-
-/// Compute a hash of the kernel source for caching
-fn kernel_hash(kernel: &str, arch: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    kernel.hash(&mut hasher);
-    arch.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
-/// Try to load cubin from disk cache
-fn load_cached_cubin(kernel: &str, arch: &str) -> Option<Ptx> {
-    let hash = kernel_hash(kernel, arch);
-    let cache_path = cubin_cache_dir().join(format!("{}.cubin", hash));
-
-    if cache_path.exists() {
-        let cubin_data = std::fs::read(&cache_path).ok()?;
-        Some(Ptx::from_binary(cubin_data))
-    } else {
-        None
-    }
-}
-
-/// Compile CUDA source to cubin using NVRTC
-/// Returns cubin binary data
-fn compile_to_cubin(kernel: &str, arch: &str) -> Result<Vec<u8>, String> {
-    use cudarc::nvrtc::sys as nvrtc_sys;
-
-    let src = CString::new(kernel).map_err(|e| e.to_string())?;
-
-    // Create program
-    let mut prog = std::ptr::null_mut();
-    let result = unsafe {
-        nvrtc_sys::nvrtcCreateProgram(
-            &mut prog,
-            src.as_ptr(),
-            std::ptr::null(), // name
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-        )
-    };
-    if result != nvrtc_sys::nvrtcResult::NVRTC_SUCCESS {
-        return Err(format!("nvrtcCreateProgram failed: {:?}", result));
-    }
-
-    // Compile with --gpu-architecture to produce cubin
-    // Note: NVRTC produces cubin automatically when compiling for a real GPU architecture (sm_XX)
-    let arch_opt = CString::new(format!("--gpu-architecture={}", arch)).unwrap();
-    let opts = [arch_opt.as_ptr()];
-
-    let result = unsafe { nvrtc_sys::nvrtcCompileProgram(prog, 1, opts.as_ptr()) };
-    if result != nvrtc_sys::nvrtcResult::NVRTC_SUCCESS {
-        // Get compilation log for error message
-        let mut log_size = 0usize;
-        unsafe { nvrtc_sys::nvrtcGetProgramLogSize(prog, &mut log_size) };
-        let mut log: Vec<std::ffi::c_char> = vec![0; log_size];
-        unsafe { nvrtc_sys::nvrtcGetProgramLog(prog, log.as_mut_ptr()) };
-        unsafe { nvrtc_sys::nvrtcDestroyProgram(&mut prog) };
-
-        let log_str = unsafe { CString::from_raw(log.as_mut_ptr()) };
-        std::mem::forget(log); // Don't double-free
-        return Err(format!(
-            "nvrtcCompileProgram failed: {:?}\nLog: {:?}",
-            result,
-            log_str.to_string_lossy()
-        ));
-    }
-
-    // Get cubin size
-    let mut cubin_size = 0usize;
-    let result = unsafe { nvrtc_sys::nvrtcGetCUBINSize(prog, &mut cubin_size) };
-    if result != nvrtc_sys::nvrtcResult::NVRTC_SUCCESS {
-        unsafe { nvrtc_sys::nvrtcDestroyProgram(&mut prog) };
-        return Err(format!("nvrtcGetCUBINSize failed: {:?}", result));
-    }
-
-    // Get cubin data
-    let mut cubin: Vec<u8> = vec![0; cubin_size];
-    let result = unsafe { nvrtc_sys::nvrtcGetCUBIN(prog, cubin.as_mut_ptr() as *mut std::ffi::c_char) };
-    if result != nvrtc_sys::nvrtcResult::NVRTC_SUCCESS {
-        unsafe { nvrtc_sys::nvrtcDestroyProgram(&mut prog) };
-        return Err(format!("nvrtcGetCUBIN failed: {:?}", result));
-    }
-
-    // Destroy program
-    unsafe { nvrtc_sys::nvrtcDestroyProgram(&mut prog) };
-
-    Ok(cubin)
-}
-
-/// Save compiled cubin to disk cache
-fn save_cached_cubin(kernel: &str, arch: &str, cubin: &[u8]) {
-    let hash = kernel_hash(kernel, arch);
-    let cache_path = cubin_cache_dir().join(format!("{}.cubin", hash));
-
-    if let Ok(mut file) = std::fs::File::create(&cache_path) {
-        file.write_all(cubin).ok();
-    }
-}
-
 #[tracing::instrument(skip_all)]
 fn compile_interpreter(
     cuda_stream: &Arc<CudaStream>,
@@ -1006,40 +894,18 @@ fn compile_interpreter(
     );
     drop(span);
 
-    // Detect GPU compute capability and format as sm_XX
-    let (major, minor) = cuda_stream.context().compute_capability().unwrap_or((7, 5)); // Fallback to sm_75
-    let arch = format!("sm_{}{}", major, minor);
-
     let (module, func) = if let Some((module, kernel)) = kernel_cache.get(&kernel) {
         (module.clone(), kernel.clone())
     } else {
         let _span = span!(Level::TRACE, "nvrtc").entered();
-
-        // Try to load cubin from disk cache first (avoids NVRTC and driver JIT memory leaks)
-        let ptx = if let Some(cached_cubin) = load_cached_cubin(&kernel, &arch) {
-            cached_cubin
-        } else {
-            // Compile to cubin using NVRTC
-            match compile_to_cubin(&kernel, &arch) {
-                Ok(cubin) => {
-                    // Save to disk cache for future runs
-                    save_cached_cubin(&kernel, &arch, &cubin);
-                    Ptx::from_binary(cubin)
-                }
-                Err(_e) => {
-                    // Fallback to PTX compilation if cubin fails
-                    compile_ptx_with_opts(
-                        &kernel,
-                        CompileOptions {
-                            arch: Some("sm_75"), // Fallback to PTX with generic arch
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap()
-                }
-            }
-        };
-
+        let ptx = compile_ptx_with_opts(
+            &kernel,
+            CompileOptions {
+                arch: Some("sm_75"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let module = cuda_stream.context().load_module(ptx).unwrap();
         let func = module.load_function("worker_kernel").unwrap();
         kernel_cache.push(kernel.clone(), (module.clone(), func.clone()));

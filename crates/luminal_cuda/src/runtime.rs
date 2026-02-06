@@ -277,10 +277,12 @@ impl CudaRuntime {
     }
 
     pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
-        self.get_output_data(id)
-            .chunks_exact(4)
-            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-            .collect_vec()
+        let bytes = self.get_output_data(id);
+        let bytes = bytes.leak();
+        let n_bytes = bytes.len();
+        let bytes_ptr = bytes.as_mut_ptr();
+        let float_ptr = bytes_ptr as *mut f32;
+        unsafe { Vec::from_raw_parts(float_ptr, n_bytes / 4, n_bytes / 4) }
     }
 
     pub fn get_i32(&self, id: impl ToId) -> Vec<i32> {
