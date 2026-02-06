@@ -1232,7 +1232,12 @@ pub fn stitch_llir_graphs(
                     if let Some(&producer_new) = this_map.get(&pred) {
                         boundary_producers.insert(output_op.node, producer_new);
                     } else {
-                        eprintln!("[stitch] WARNING: chunk {}: boundary Output node={} predecessor {:?} not in this_map!", _chunk_idx, output_op.node, pred.index());
+                        eprintln!(
+                            "[stitch] WARNING: chunk {}: boundary Output node={} predecessor {:?} not in this_map!",
+                            _chunk_idx,
+                            output_op.node,
+                            pred.index()
+                        );
                     }
                 }
             }
@@ -1246,8 +1251,14 @@ pub fn stitch_llir_graphs(
                     if let Some(&producer) = boundary_producers.get(&input_op.node) {
                         this_map.insert(old_node, producer);
                     } else {
-                        eprintln!("[stitch] WARNING: chunk {}: boundary Input node={} has no producer in boundary_producers!", _chunk_idx, input_op.node);
-                        eprintln!("[stitch]   available producers: {:?}", boundary_producers.keys().collect::<Vec<_>>());
+                        eprintln!(
+                            "[stitch] WARNING: chunk {}: boundary Input node={} has no producer in boundary_producers!",
+                            _chunk_idx, input_op.node
+                        );
+                        eprintln!(
+                            "[stitch]   available producers: {:?}",
+                            boundary_producers.keys().collect::<Vec<_>>()
+                        );
                     }
                 }
             }

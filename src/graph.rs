@@ -732,14 +732,14 @@ pub fn split_at_graph_breaks(graph: &Graph) -> Vec<SubgraphDescriptor> {
     // are included (except GraphBreak boundary nodes). This handles shared
     // computation nodes (e.g. RoPE frequencies, sqrt(d_k)) that are assigned to
     // an earlier chunk but used by later chunks.
-    for chunk_idx in 0..n_chunks {
-        let mut to_visit: Vec<NodeIndex> = chunk_nodes[chunk_idx].iter().copied().collect();
+    for chunk_node in chunk_nodes.iter_mut().take(n_chunks) {
+        let mut to_visit: Vec<NodeIndex> = chunk_node.iter().copied().collect();
         while let Some(node) = to_visit.pop() {
             for pred in graph.graph.neighbors_directed(node, Direction::Incoming) {
                 if break_nodes.contains(&pred) {
                     continue; // Boundary handled separately
                 }
-                if chunk_nodes[chunk_idx].insert(pred) {
+                if chunk_node.insert(pred) {
                     // Newly added — also visit its predecessors
                     to_visit.push(pred);
                 }
@@ -749,8 +749,8 @@ pub fn split_at_graph_breaks(graph: &Graph) -> Vec<SubgraphDescriptor> {
 
     // Build SubgraphDescriptors
     let mut descriptors: Vec<SubgraphDescriptor> = Vec::with_capacity(n_chunks);
-    for chunk_idx in 0..n_chunks {
-        let nodes = chunk_nodes[chunk_idx].clone();
+    for (chunk_idx, chunk_node) in chunk_nodes.iter().enumerate().take(n_chunks) {
+        let nodes = chunk_node.clone();
 
         // Boundary inputs: GraphBreak nodes whose successors are in this chunk
         let mut boundary_inputs = vec![];
@@ -813,8 +813,8 @@ pub fn split_at_graph_breaks(graph: &Graph) -> Vec<SubgraphDescriptor> {
 /// The remapping handles three categories of nodes:
 /// 1. **Boundary inputs**: Matched positionally via SubgraphDescriptor.boundary_inputs
 /// 2. **Boundary outputs**: Matched positionally via SubgraphDescriptor.boundary_outputs
-/// 3. **Weight/data inputs**: Chunk-specific Input nodes (in one subgraph but not the other)
-///    are sorted by index and matched positionally.
+/// 3. **Weight/data inputs**: Chunk-specific Input nodes (in one subgraph but not the other) are sorted by index and matched positionally.
+///
 /// Shared Input nodes (same NodeIndex in both subgraphs) need no remapping.
 /// Build remapping tables for cloning a representative chunk's LLIR to a target chunk.
 ///

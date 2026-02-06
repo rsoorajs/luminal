@@ -180,8 +180,7 @@ impl HostOp for CuBlasSgemmV2 {
         .entered();
 
         // Use shared cuBLAS handle to avoid per-operation workspace allocation
-        let cublas = SHARED_CUBLAS
-            .get_or_init(|| Arc::new(CudaBlas::new(stream.clone()).unwrap()));
+        let cublas = SHARED_CUBLAS.get_or_init(|| Arc::new(CudaBlas::new(stream.clone()).unwrap()));
 
         // Set the stream for this operation (cuBLAS handle can work with any stream)
         // The CUstream types from cublas::sys and driver::sys are compatible, just cast

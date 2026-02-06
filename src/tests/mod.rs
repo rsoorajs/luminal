@@ -234,7 +234,10 @@ fn fuzz_test_genome_validity() {
         &mut expr_cache,
         None,
     );
-    println!("Initial extraction successful, graph has {} nodes", _graph.node_count());
+    println!(
+        "Initial extraction successful, graph has {} nodes",
+        _graph.node_count()
+    );
 
     // Generate many mutations and validate each
     let mut base = initial;
@@ -269,10 +272,7 @@ fn fuzz_test_genome_validity() {
 
             // Validate the choice set
             if let Err(e) = validate_choice_set(egraph, &genome, ops) {
-                panic!(
-                    "Generation {} produced invalid genome: {}",
-                    generation, e
-                );
+                panic!("Generation {} produced invalid genome: {}", generation, e);
             }
 
             // Test extraction doesn't panic
@@ -287,10 +287,7 @@ fn fuzz_test_genome_validity() {
             );
 
             // Basic sanity check on extracted graph
-            assert!(
-                graph.node_count() > 0,
-                "Extracted graph has no nodes"
-            );
+            assert!(graph.node_count() > 0, "Extracted graph has no nodes");
 
             valid_count += 1;
 
@@ -359,14 +356,7 @@ fn fuzz_test_genome_execution() {
     let mut tested = 0;
 
     for _generation in 0..10 {
-        let offspring = extract_generation(
-            egraph,
-            &base,
-            5,
-            2,
-            &mut prev_selected,
-            &mut rng,
-        );
+        let offspring = extract_generation(egraph, &base, 5, 2, &mut prev_selected, &mut rng);
 
         if offspring.is_empty() {
             break;
@@ -422,10 +412,17 @@ fn fuzz_test_genome_execution() {
         })
         .count();
 
-    println!("Execution test: verified {} genomes produce correct results", tested);
+    println!(
+        "Execution test: verified {} genomes produce correct results",
+        tested
+    );
     if mutable_eclasses == 0 {
         println!("Search space has only one valid graph (no mutable eclasses)");
     } else {
-        assert!(tested > 0, "No genomes were tested for execution despite having {} mutable eclasses", mutable_eclasses);
+        assert!(
+            tested > 0,
+            "No genomes were tested for execution despite having {} mutable eclasses",
+            mutable_eclasses
+        );
     }
 }
