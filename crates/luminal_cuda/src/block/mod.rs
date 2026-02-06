@@ -2,6 +2,7 @@
 pub mod cstruct;
 mod ops;
 use itertools::Itertools;
+use lru::LruCache;
 pub use ops::*;
 
 use cudarc::{
@@ -704,7 +705,7 @@ fn compile_interpreter(
     ops: &Vec<Arc<Box<dyn BlockOp>>>,
     expressions: &FxHashSet<Expression>,
     payload_size: usize,
-    kernel_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
+    kernel_cache: &mut LruCache<String, (Arc<CudaModule>, CudaFunction)>,
 ) -> (
     CudaFunction,
     FxHashMap<Expression, i32>,
@@ -907,7 +908,7 @@ fn compile_interpreter(
         .unwrap();
         let module = cuda_stream.context().load_module(ptx).unwrap();
         let func = module.load_function("worker_kernel").unwrap();
-        kernel_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+        kernel_cache.push(kernel.clone(), (module.clone(), func.clone()));
         (module, func)
     };
     let constants = constants
@@ -929,7 +930,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
     llir_graph: &LLIRGraph,
     subgraph: &FxHashSet<NodeIndex>,
     cuda_stream: &Arc<CudaStream>,
-    kernel_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
+    kernel_cache: &mut LruCache<String, (Arc<CudaModule>, CudaFunction)>,
 ) -> (
     CudaFunction,
     FxHashMap<char, CudaSlice<u8>>,

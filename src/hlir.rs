@@ -1,5 +1,10 @@
 use std::{fmt::Debug, sync::Arc};
 
+use crate::egglog_utils::elist_to_egglog;
+use crate::egglog_utils::extract_dtype;
+use crate::egglog_utils::extract_expr;
+use crate::egglog_utils::extract_expr_list;
+use crate::egglog_utils::list_to_egglog;
 use crate::op::OpParam::*;
 use crate::op::*;
 use crate::prelude::*;
@@ -371,14 +376,20 @@ impl NativeOp for Cast {
                 NativeData::F16(f) => f.clone(),
                 NativeData::Bf16(f) => f.iter().map(|f| f16::from_f32(f.to_f32())).collect(),
                 NativeData::Int(i) => i.iter().map(|i| f16::from_f32(*i as f32)).collect(),
-                NativeData::Bool(b) => b.iter().map(|b| f16::from_f32(if *b { 1.0 } else { 0.0 })).collect(),
+                NativeData::Bool(b) => b
+                    .iter()
+                    .map(|b| f16::from_f32(if *b { 1.0 } else { 0.0 }))
+                    .collect(),
             }),
             DType::Bf16 => NativeData::Bf16(match &input[0] {
                 NativeData::F32(f) => f.iter().copied().map(bf16::from_f32).collect(),
                 NativeData::F16(f) => f.iter().map(|f| bf16::from_f32(f.to_f32())).collect(),
                 NativeData::Bf16(f) => f.clone(),
                 NativeData::Int(i) => i.iter().map(|i| bf16::from_f32(*i as f32)).collect(),
-                NativeData::Bool(b) => b.iter().map(|b| bf16::from_f32(if *b { 1.0 } else { 0.0 })).collect(),
+                NativeData::Bool(b) => b
+                    .iter()
+                    .map(|b| bf16::from_f32(if *b { 1.0 } else { 0.0 }))
+                    .collect(),
             }),
             DType::Bool => NativeData::Bool(match &input[0] {
                 NativeData::F32(f) => f.iter().map(|f| *f != 0.0).collect(),
@@ -1408,7 +1419,13 @@ impl NativeData {
             NativeData::F16(v) => v[i].to_f32(),
             NativeData::Bf16(v) => v[i].to_f32(),
             NativeData::Int(v) => v[i] as f32,
-            NativeData::Bool(v) => if v[i] { 1.0 } else { 0.0 },
+            NativeData::Bool(v) => {
+                if v[i] {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
         }
     }
 
@@ -1441,7 +1458,13 @@ impl NativeData {
             NativeData::F32(v) => v[i] as i32,
             NativeData::F16(v) => v[i].to_f32() as i32,
             NativeData::Bf16(v) => v[i].to_f32() as i32,
-            NativeData::Bool(v) => if v[i] { 1 } else { 0 },
+            NativeData::Bool(v) => {
+                if v[i] {
+                    1
+                } else {
+                    0
+                }
+            }
         }
     }
 
@@ -1524,6 +1547,7 @@ impl Runtime for NativeRuntime {
         &mut self,
         _: &LLIRGraph,
         _: &FxHashMap<char, usize>,
+        _: usize,
     ) -> (Self::ProfileMetric, String) {
         (0, "0 ms".to_string())
     }

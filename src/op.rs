@@ -19,7 +19,14 @@ pub trait Runtime {
         &mut self,
         llir_graph: &LLIRGraph,
         dyn_map: &FxHashMap<char, usize>,
+        trials: usize,
     ) -> (Self::ProfileMetric, String);
+    /// Allocate a dummy input buffer for a boundary node during per-chunk profiling.
+    /// `node_index` is the HLIR node index used in the Input op's `node` field.
+    /// `num_elements` is the number of f32 elements to allocate.
+    fn allocate_dummy_input(&mut self, _node_index: usize, _num_elements: usize) {}
+    /// Clear intermediate buffers to prepare for loading a different chunk's LLIR.
+    fn clear_intermediate_buffers(&mut self) {}
 }
 
 /// Optional runtime instrumentation for collecting execution statistics.

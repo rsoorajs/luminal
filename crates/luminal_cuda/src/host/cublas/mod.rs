@@ -1,10 +1,10 @@
 use cudarc::cublas::{
     CudaBlas,
-    sys::{cublasOperation_t, cublasSgemm_v2, cublasStatus_t},
+    sys::{cublasOperation_t, cublasSetStream_v2, cublasSgemm_v2, cublasStatus_t},
 };
 use cudarc::driver::{CudaStream, DevicePtr};
 use luminal::{
-    graph::extract_expr,
+    egglog_utils::extract_expr,
     op::{
         EgglogOp, LLIROp,
         OpParam::{self, *},
@@ -15,6 +15,9 @@ use std::sync::{Arc, OnceLock};
 use tracing::{Level, span, trace};
 
 use crate::{cudarc::driver::CudaSlice, host::HostOp};
+
+/// Global shared cuBLAS handle to avoid per-operation workspace allocation
+static SHARED_CUBLAS: OnceLock<Arc<CudaBlas>> = OnceLock::new();
 
 /// Parse cuBLAS operation from egglog string (e.g., "\"T\"" -> CUBLAS_OP_T)
 fn parse_cublas_op(s: &str) -> cublasOperation_t {
@@ -176,9 +179,14 @@ impl HostOp for CuBlasSgemmV2 {
         )
         .entered();
 
-        let cublas = self
-            .cublas
-            .get_or_init(|| Arc::new(CudaBlas::new(stream.clone()).unwrap()));
+        // Use shared cuBLAS handle to avoid per-operation workspace allocation
+        let cublas = SHARED_CUBLAS.get_or_init(|| Arc::new(CudaBlas::new(stream.clone()).unwrap()));
+
+        // Set the stream for this operation (cuBLAS handle can work with any stream)
+        // The CUstream types from cublas::sys and driver::sys are compatible, just cast
+        unsafe {
+            cublasSetStream_v2(*cublas.handle(), stream.cu_stream() as _);
+        }
 
         let status = unsafe {
             cublasSgemm_v2(
