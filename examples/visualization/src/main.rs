@@ -55,6 +55,7 @@ fn main() {
         &[],
         &mut FxHashMap::default(),
         &mut FxHashMap::default(),
+        None,
     );
 
     println!("Visualizing LLIR Graph");

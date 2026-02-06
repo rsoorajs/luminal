@@ -232,6 +232,7 @@ fn fuzz_test_genome_validity() {
         &cx.custom_ops,
         &mut list_cache,
         &mut expr_cache,
+        None,
     );
     println!("Initial extraction successful, graph has {} nodes", _graph.node_count());
 
@@ -282,6 +283,7 @@ fn fuzz_test_genome_validity() {
                 &cx.custom_ops,
                 &mut list_cache,
                 &mut expr_cache,
+                None,
             );
 
             // Basic sanity check on extracted graph
@@ -386,6 +388,7 @@ fn fuzz_test_genome_execution() {
                 &cx.custom_ops,
                 &mut list_cache,
                 &mut expr_cache,
+                None,
             );
 
             let mut rt = NativeRuntime::default();

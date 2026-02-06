@@ -394,6 +394,8 @@ impl CudaRuntime {
         if self.buffers.is_empty() {
             self.last_dyn_map = dyn_map.clone();
             self.allocate_intermediate_buffers(dyn_map);
+            // Synchronize to ensure all async allocations complete before building CUDA graphs
+            self.cuda_stream.synchronize().unwrap();
         }
 
         // 2. Process changed HLIR inputs to get their buffer pointers
@@ -425,7 +427,8 @@ impl CudaRuntime {
 
         // 3. Build all CUDA graphs
         let tracing_enabled = enabled!(Level::TRACE);
-        for exec_node in toposort(&self.exec_graph, None).unwrap() {
+        let exec_nodes: Vec<_> = toposort(&self.exec_graph, None).unwrap();
+        for exec_node in exec_nodes {
             if let ExecutableKernel::CudaGraphExec(data) = &mut self.exec_graph[exec_node] {
                 let CudaGraphExecData {
                     cuda_graph,
@@ -913,7 +916,6 @@ impl Runtime for CudaRuntime {
         }
 
         // Prebuild CUDA graphs if we have a previous dyn_map (e.g., from search/profile)
-        // This avoids rebuild overhead on first execute after load_llir
         if !self.last_dyn_map.is_empty() {
             let dyn_map = self.last_dyn_map.clone();
             self.prebuild_graphs(&dyn_map);

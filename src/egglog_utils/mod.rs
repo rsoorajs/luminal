@@ -252,6 +252,85 @@ pub fn hash_serialized_egraph(egraph: &SerializedEGraph) -> u64 {
     hasher.finish()
 }
 
+/// Hash egglog text with normalization for structural dedup.
+///
+/// Structurally identical chunks (e.g. transformer layers) produce identical
+/// egglog text except for:
+/// - Input node indices and labels (differ per layer)
+/// - Output node indices (differ per layer)
+/// - CustomOpHLIR integer IDs (global custom_ops index, differs per layer)
+///
+/// This function hashes the text while normalizing those chunk-specific values:
+/// - Input lines: only the dtype is hashed (not node index or label)
+/// - Output lines: only the "OUTPUT" marker is hashed (not the node index)
+/// - CustomOpHLIR lines: the integer ID is replaced with a constant
+/// - All other lines (ops, shapes, strides): hashed verbatim
+pub fn hash_egglog_normalized(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    for line in text.lines() {
+        if line.contains("(Input ") {
+            // Hash only the dtype portion: (F32), (F16), etc.
+            let mut found = false;
+            for dtype in ["(F32)", "(F16)", "(Bf16)", "(Int)", "(Bool)"] {
+                if line.contains(dtype) {
+                    ("INPUT", dtype).hash(&mut hasher);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                // Fallback: hash the whole line if dtype not recognized
+                line.hash(&mut hasher);
+            }
+        } else if line.contains("(Output ") && !line.contains("(OutputJoin ") {
+            "OUTPUT".hash(&mut hasher);
+        } else if line.contains("(CustomOpHLIR ") {
+            // CustomOpHLIR format: (let tN (CustomOpHLIR <IList> <Int> (<DType>)))
+            // The integer ID varies per layer. Replace it with a constant marker.
+            // Find the pattern: ")) <digits> (" and replace the digits.
+            let normalized = normalize_custom_op_id(line);
+            normalized.hash(&mut hasher);
+        } else {
+            line.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Replace the integer ID in a CustomOpHLIR egglog line with a constant "0".
+/// Input format: `(let tN (CustomOpHLIR (ICons ... (INil))) ID (DTYPE)))`
+/// The ID is the integer between the closing of IList and the opening of DType.
+fn normalize_custom_op_id(line: &str) -> String {
+    // Find "(CustomOpHLIR " and then the integer after the IList closes
+    // The IList ends with "(INil)" followed by some closing parens, then " ID ("
+    // Strategy: find the last occurrence of ")) " followed by digits followed by " ("
+    // which is where the ID sits between IList and DType.
+    if let Some(custom_start) = line.find("(CustomOpHLIR ") {
+        // Find the portion after CustomOpHLIR
+        let after = &line[custom_start + "(CustomOpHLIR ".len()..];
+        // The IList part ends with (INil) and closing parens.
+        // Find the pattern: ") <digits> (" — the ID is between the last ')' of IList and '(' of DType
+        // We scan backwards from the end to find the dtype opening paren
+        if let Some(last_open) = after.rfind(" (") {
+            // Now find the space before the integer
+            let before_dtype = &after[..last_open];
+            if let Some(space_before_id) = before_dtype.rfind(' ') {
+                let id_str = &before_dtype[space_before_id + 1..];
+                if id_str.chars().all(|c| c.is_ascii_digit()) {
+                    // Reconstruct with "0" replacing the ID
+                    return format!(
+                        "{}0{}",
+                        &line[..custom_start + "(CustomOpHLIR ".len() + space_before_id + 1],
+                        &line[custom_start + "(CustomOpHLIR ".len() + last_open..]
+                    );
+                }
+            }
+        }
+    }
+    line.to_string()
+}
+
 pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
     use std::cmp::Reverse;
     use std::collections::{BinaryHeap, HashMap};
@@ -969,6 +1048,7 @@ pub fn egglog_to_llir<'a>(
     custom_ops: &[Box<dyn CustomOp>],
     list_cache: &mut FxHashMap<&'a NodeId, Vec<Expression>>,
     expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
+    custom_op_id_remap: Option<&FxHashMap<usize, usize>>,
 ) -> LLIRGraph {
     // Get maps for all e-classes to e-node options
     // if enabled!(Level::DEBUG) {
@@ -1038,7 +1118,10 @@ pub fn egglog_to_llir<'a>(
                 .0
                 .parse()
                 .unwrap();
-            let r = graph.add_node(custom_ops[id].to_llir_op());
+            let remapped_id = custom_op_id_remap
+                .and_then(|m| m.get(&id).copied())
+                .unwrap_or(id);
+            let r = graph.add_node(custom_ops[remapped_id].to_llir_op());
             enode_to_node.insert(node, r);
             for source in inputs {
                 edges_to_place.push((source, node));
@@ -1162,6 +1245,8 @@ pub fn stitch_llir_graphs(
                         .expect("Boundary Output must have exactly one input");
                     if let Some(&producer_new) = this_map.get(&pred) {
                         boundary_producers.insert(output_op.node, producer_new);
+                    } else {
+                        eprintln!("[stitch] WARNING: chunk {}: boundary Output node={} predecessor {:?} not in this_map!", _chunk_idx, output_op.node, pred.index());
                     }
                 }
             }
@@ -1174,17 +1259,19 @@ pub fn stitch_llir_graphs(
                 if boundary_input_set.contains(&input_op.node) {
                     if let Some(&producer) = boundary_producers.get(&input_op.node) {
                         this_map.insert(old_node, producer);
+                    } else {
+                        eprintln!("[stitch] WARNING: chunk {}: boundary Input node={} has no producer in boundary_producers!", _chunk_idx, input_op.node);
+                        eprintln!("[stitch]   available producers: {:?}", boundary_producers.keys().collect::<Vec<_>>());
                     }
                 }
             }
         }
 
-        // Pass 3: Add edges
+        // Pass 3: Add edges (preserving duplicate edges for ops like x*x)
         for edge in chunk_graph.edge_indices() {
             let (src, dst) = chunk_graph.edge_endpoints(edge).unwrap();
             if let (Some(&new_src), Some(&new_dst)) = (this_map.get(&src), this_map.get(&dst)) {
-                if new_src != new_dst && merged.edges_connecting(new_src, new_dst).next().is_none()
-                {
+                if new_src != new_dst {
                     merged.add_edge(new_src, new_dst, ());
                 }
             }
