@@ -45,6 +45,10 @@ pub trait BlockOp: Debug + as_any::AsAny {
     fn output_size(&self) -> Expression {
         unimplemented!()
     }
+    /// Returns the output buffer size in bytes (BlockOps are F32 only).
+    fn output_bytes(&self) -> Expression {
+        self.output_size() * 4
+    }
     fn producer_barriers_seperate(&self) -> Vec<bool>;
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>>;
     /// C function body

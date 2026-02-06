@@ -20,4 +20,7 @@ pub trait HostOp: Debug + as_any::AsAny + EgglogOp {
     ) -> anyhow::Result<()>;
 
     fn output_size(&self) -> Expression;
+
+    /// Returns the output buffer size in bytes (accounts for dtype).
+    fn output_bytes(&self) -> Expression;
 }

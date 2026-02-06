@@ -46,8 +46,8 @@
         (= ?b_n_stride ?k)
         (= ?b_k_stride (MNum 1))
 
-        (= (F32) (dtype ?a))
-        (= (F32) (dtype ?b))
+        (= ?dt (dtype ?a))
+        (= ?dt (dtype ?b))
     )
     (
         ; For row-major A × column-major B with cuBLAS:
@@ -62,9 +62,10 @@
             "N"            ; transb = No transpose
             ?k             ; lda = k (column-major B[k,n])
             ?k             ; ldb = k (row-major A[m,k] viewed as col-major [k,m])
-            ?n))           ; ldc = n (row-major C[m,n] viewed as col-major [n,m])
+            ?n             ; ldc = n (row-major C[m,n] viewed as col-major [n,m])
+            ?dt))          ; dtype
         (union ?sum ?sgemm)
-        (set (dtype ?sgemm) (F32))
+        (set (dtype ?sgemm) ?dt)
     )
-    :name "cublas sgemm row-major × column-major"
+    :name "cublaslt row-major × column-major"
 )

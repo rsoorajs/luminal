@@ -220,4 +220,9 @@ impl HostOp for CuBlasSgemmV2 {
     fn output_size(&self) -> Expression {
         self.m * self.n
     }
+
+    fn output_bytes(&self) -> Expression {
+        // CuBlasSgemmV2 is F32 only (Sgemm = Single precision)
+        self.output_size() * 4
+    }
 }

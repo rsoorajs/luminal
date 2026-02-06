@@ -1,9 +1,9 @@
 use std::sync::{Arc, OnceLock};
 
 use luminal::{
-    graph::extract_expr,
+    graph::{extract_dtype, extract_expr},
     op::{
-        EgglogOp, LLIROp,
+        DType, EgglogOp, LLIROp,
         OpParam::{self, *},
     },
     prelude::{
@@ -20,6 +20,7 @@ use crate::{
         cublaslt::{
             CudaBlasLT, MatmulShared,
             sys::{
+                cublasComputeType_t,
                 cublasLtMatmulDesc_t,
                 cublasLtMatrixLayout_t,
                 cublasLtMatmulPreference_t,
@@ -35,6 +36,7 @@ use crate::{
                 cublasLtMatmulPreferenceDestroy,
                 cublasLtMatrixLayoutDestroy,
                 cublasLtMatmulDescDestroy,
+                cudaDataType,
             }
         }
     }
@@ -52,8 +54,8 @@ pub struct CuBlasLt {
     lda: Expression,
     ldb: Expression,
     ldc: Expression,
+    dtype: DType,
     cublaslt: OnceLock<Arc<CudaBlasLT>>,
-    
 }
 
 // Useless default for IntoEgglogOp
@@ -68,6 +70,7 @@ impl Default for CuBlasLt {
             lda: Expression::default(),
             ldb: Expression::default(),
             ldc: Expression::default(),
+            dtype: DType::F32,
             cublaslt: OnceLock::new(),
         }
     }
@@ -77,8 +80,8 @@ impl EgglogOp for CuBlasLt {
     fn term(&self) -> (String, Vec<OpParam>) {
         (
             "cublaslt".to_string(),
-            //    A      B      m     n      k  , A input Layout, B input Layout,
-            vec![Input, Input, Expr, Expr, Expr, Str, Str, Expr, Expr, Expr],
+            //    A      B      m     n      k  , A input Layout, B input Layout, lda, ldb, ldc, dtype
+            vec![Input, Input, Expr, Expr, Expr, Str, Str, Expr, Expr, Expr, Dty],
         )
     }
 
@@ -115,6 +118,9 @@ impl EgglogOp for CuBlasLt {
         let ldb = extract_expr(egraph, children[8], expr_cache).unwrap();
         let ldc = extract_expr(egraph, children[9], expr_cache).unwrap();
 
+        // Extract dtype from egglog
+        let dtype = extract_dtype(egraph, children[10]);
+
         let extracted_state = Self {
             m,
             n,
@@ -124,6 +130,7 @@ impl EgglogOp for CuBlasLt {
             lda,
             ldb,
             ldc,
+            dtype,
             cublaslt: OnceLock::new(),
         };
         trace!(?extracted_state);
@@ -135,6 +142,20 @@ impl EgglogOp for CuBlasLt {
 
     fn cleanup(&self) -> bool {
         false
+    }
+}
+
+/// Convert DType to CUDA types for cuBLAS LT
+/// Returns (matrix_dtype, compute_type, scale_dtype)
+fn dtype_to_cuda_types(dtype: DType) -> (cudaDataType, cublasComputeType_t, cudaDataType) {
+    match dtype {
+        // F32: matrix=f32, compute=f32, scale=f32
+        DType::F32 => (cudaDataType::CUDA_R_32F, cublasComputeType_t::CUBLAS_COMPUTE_32F, cudaDataType::CUDA_R_32F),
+        // F16: matrix=f16, compute=f32 (FP32 accumulation for accuracy), scale=f32
+        DType::F16 => (cudaDataType::CUDA_R_16F, cublasComputeType_t::CUBLAS_COMPUTE_32F, cudaDataType::CUDA_R_32F),
+        // BF16: matrix=bf16, compute=f32 with tensor cores, scale=f32
+        DType::Bf16 => (cudaDataType::CUDA_R_16BF, cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_16BF, cudaDataType::CUDA_R_32F),
+        DType::Int => panic!("cuBLAS LT does not support integer matmul"),
     }
 }
 
@@ -155,8 +176,17 @@ impl HostOp for CuBlasLt {
         let ldb = self.ldb.exec(dyn_map).unwrap() as i64;
         let ldc = self.ldc.exec(dyn_map).unwrap() as i64;
 
-        let alpha = 1.0f32;
-        let beta = 0.0f32;
+        // Get CUDA types based on dtype
+        let (cuda_dtype, compute_type, scale_dtype) = dtype_to_cuda_types(self.dtype);
+        let element_size = match self.dtype {
+            DType::F32 => 4u64,
+            DType::F16 | DType::Bf16 => 2u64,
+            DType::Int => panic!("cuBLAS LT does not support integer matmul"),
+        };
+
+        // Alpha/beta scale values (all dtypes use F32 scale type)
+        let alpha_f32: f32 = 1.0;
+        let beta_f32: f32 = 0.0;
 
         // Get device pointers
         let (a_ptr, _a_guard) = inputs[1].device_ptr(stream);
@@ -167,16 +197,16 @@ impl HostOp for CuBlasLt {
         trace!(
             "buffer_validation {}=={},{}=={},{}=={}",
             inputs[1].len(),
-            m * k * 4,
+            m * k * element_size,
             inputs[2].len(),
-            k * n * 4,
+            k * n * element_size,
             inputs[0].len(),
-            m * n * 4
+            m * n * element_size
         );
         let _span = span!(
             Level::TRACE,
             "cuBLASLT",
-            m, n, k, alpha, beta, lda, ldb, ldc, ?a_layout, ?b_layout,
+            m, n, k, lda, ldb, ldc, ?a_layout, ?b_layout, ?self.dtype,
         )
         .entered();
 
@@ -198,11 +228,11 @@ impl HostOp for CuBlasLt {
         let (workspace_ptr, _workspace_guard) = workspace.device_ptr(stream);
 
         unsafe {
-            // Create matmul descriptor
+            // Create matmul descriptor (compute_type, scale_type for alpha/beta)
             cublasLtMatmulDescCreate(
                 &mut matmul_desc,
-                cudarc::cublaslt::sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-                cudarc::cublaslt::sys::cudaDataType::CUDA_R_32F,
+                compute_type,
+                scale_dtype,
             ).result()?;
 
             // Set transpose attributes
@@ -233,17 +263,17 @@ impl HostOp for CuBlasLt {
 
             cublasLtMatrixLayoutCreate(
                 &mut a_desc,
-                cudarc::cublaslt::sys::cudaDataType::CUDA_R_32F,
+                cuda_dtype,
                 a_rows, a_cols, lda,
             ).result()?;
             cublasLtMatrixLayoutCreate(
                 &mut b_desc,
-                cudarc::cublaslt::sys::cudaDataType::CUDA_R_32F,
+                cuda_dtype,
                 b_rows, b_cols, ldb,
             ).result()?;
             cublasLtMatrixLayoutCreate(
                 &mut c_desc,
-                cudarc::cublaslt::sys::cudaDataType::CUDA_R_32F,
+                cuda_dtype,
                 m, n, ldc,
             ).result()?;
 
@@ -280,16 +310,18 @@ impl HostOp for CuBlasLt {
                 return Err(anyhow::anyhow!("No suitable cuBLASLT algorithm found"));
             }
 
-            // Execute matmul
+            // All dtypes use F32 scale type for alpha/beta
+            let alpha_ptr = &alpha_f32 as *const _ as *const std::ffi::c_void;
+            let beta_ptr = &beta_f32 as *const _ as *const std::ffi::c_void;
             cublasLtMatmul(
                 *cublaslt.handle(),
                 matmul_desc,
-                &alpha as *const _ as *const std::ffi::c_void,
+                alpha_ptr,
                 a_ptr as *const std::ffi::c_void,
                 a_desc,
                 b_ptr as *const std::ffi::c_void,
                 b_desc,
-                &beta as *const _ as *const std::ffi::c_void,
+                beta_ptr,
                 c_ptr as *const std::ffi::c_void,
                 c_desc,
                 c_ptr as *mut std::ffi::c_void,
@@ -314,5 +346,14 @@ impl HostOp for CuBlasLt {
 
     fn output_size(&self) -> Expression {
         self.m * self.n
+    }
+
+    fn output_bytes(&self) -> Expression {
+        let elem_size: Expression = match self.dtype {
+            DType::F32 | DType::Int => 4,
+            DType::F16 | DType::Bf16 => 2,
+        }
+        .into();
+        self.output_size() * elem_size
     }
 }

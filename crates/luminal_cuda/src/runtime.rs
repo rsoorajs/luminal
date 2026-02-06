@@ -16,6 +16,7 @@ use cudarc::driver::{
 };
 
 use fixedbitset::FixedBitSet;
+use half::{bf16, f16};
 use itertools::Itertools;
 use luminal::hlir::*;
 use luminal::prelude::{
@@ -32,7 +33,7 @@ use luminal_tracing::PerfettoGuard;
 use memmap2::MmapOptions;
 use prost::Message;
 use safetensors::SafeTensors;
-use std::{collections::VecDeque, fmt::Debug, fs::File, mem::size_of, sync::Arc, time::Duration};
+use std::{collections::VecDeque, fmt::Debug, fs::File, sync::Arc, time::Duration};
 use tracing::{Level, enabled, field, span, trace};
 use uuid::Uuid;
 
@@ -287,6 +288,24 @@ impl CudaRuntime {
             .collect_vec()
     }
 
+    pub fn get_f16(&self, id: impl ToId) -> Vec<f16> {
+        let bytes = self.get_output_data(id);
+        let bytes = bytes.leak();
+        let n_bytes = bytes.len();
+        let bytes_ptr = bytes.as_mut_ptr();
+        let f16_ptr = bytes_ptr as *mut f16;
+        unsafe { Vec::from_raw_parts(f16_ptr, n_bytes / 2, n_bytes / 2) }
+    }
+
+    pub fn get_bf16(&self, id: impl ToId) -> Vec<bf16> {
+        let bytes = self.get_output_data(id);
+        let bytes = bytes.leak();
+        let n_bytes = bytes.len();
+        let bytes_ptr = bytes.as_mut_ptr();
+        let bf16_ptr = bytes_ptr as *mut bf16;
+        unsafe { Vec::from_raw_parts(bf16_ptr, n_bytes / 2, n_bytes / 2) }
+    }
+
     fn register_buffer(&mut self, llir_node: NodeIndex, ptr: u64) {
         // Remap pointers in work queue
         if let Some(ExecutableKernel::Megakernel {
@@ -336,24 +355,24 @@ impl CudaRuntime {
             }
             if let Some(op) = self.llir_graph[node].to_dialect::<dyn BlockOp>() {
                 self.intermediate_buffer_dims
-                    .extend(op.output_size().dyn_vars());
+                    .extend(op.output_bytes().dyn_vars());
                 self.buffers.insert(
                     node,
                     self.cuda_stream
-                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
+                        .alloc_zeros(op.output_bytes().exec(dyn_dims).unwrap())
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.cached_buffer_ptrs.insert(node, ptr);
                 self.register_buffer(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
-                let out_size = op.output_size();
-                let exec_size = out_size.exec(dyn_dims).unwrap();
-                self.intermediate_buffer_dims.extend(out_size.dyn_vars());
+                let out_bytes = op.output_bytes();
+                let exec_bytes = out_bytes.exec(dyn_dims).unwrap();
+                self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
                 self.buffers.insert(
                     node,
                     self.cuda_stream
-                        .alloc_zeros(exec_size * size_of::<f32>())
+                        .alloc_zeros(exec_bytes)
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
@@ -363,7 +382,7 @@ impl CudaRuntime {
                 self.buffers.insert(
                     node,
                     self.cuda_stream
-                        .alloc_zeros(op.output_size().exec(dyn_dims).unwrap() * size_of::<f32>())
+                        .alloc_zeros(op.output_bytes().exec(dyn_dims).unwrap())
                         .unwrap(),
                 );
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
@@ -639,6 +658,30 @@ impl ToCudaInput for Vec<f32> {
             stream
                 .clone_htod(unsafe {
                     std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 4)
+                })
+                .unwrap(),
+        )
+    }
+}
+
+impl ToCudaInput for Vec<f16> {
+    fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        CudaInput::Buffer(
+            stream
+                .clone_htod(unsafe {
+                    std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 2)
+                })
+                .unwrap(),
+        )
+    }
+}
+
+impl ToCudaInput for Vec<bf16> {
+    fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        CudaInput::Buffer(
+            stream
+                .clone_htod(unsafe {
+                    std::slice::from_raw_parts(self.as_ptr() as *const u8, self.len() * 2)
                 })
                 .unwrap(),
         )

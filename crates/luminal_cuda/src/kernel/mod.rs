@@ -173,6 +173,9 @@ pub trait KernelOp: luminal::op::EgglogOp {
     /// Returns the output buffer size in elements.
     fn output_size(&self) -> Expression;
 
+    /// Returns the output buffer size in bytes (accounts for dtype).
+    fn output_bytes(&self) -> Expression;
+
     /// Returns the number of bytes this kernel will load from global memory.
     fn bytes_loaded(&self) -> Expression {
         0.into()
