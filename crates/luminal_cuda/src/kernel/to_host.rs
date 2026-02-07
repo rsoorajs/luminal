@@ -252,6 +252,10 @@ impl HostOp for CudaGraphOp {
     fn extra_buffer_sizes(&self) -> FxHashMap<NodeIndex, Expression> {
         self.buffer_sizes.clone()
     }
+
+    fn stats_name(&self) -> Option<&'static str> {
+        Some("CudaGraph")
+    }
 }
 
 impl CudaGraphOp {
@@ -801,9 +805,20 @@ pub fn kernel_to_host(
         }
     }
 
-    // Add collected edges (deduplicate)
+    // Add collected edges (deduplicate), skipping back-edges to preserve DAG property
     let edges_to_add: FxHashSet<(NodeIndex, NodeIndex)> = edges_to_add.into_iter().collect();
+    let topo = toposort(&*llir_graph, None).unwrap();
+    let mut topo_pos: FxHashMap<NodeIndex, usize> = FxHashMap::default();
+    for (i, n) in topo.iter().enumerate() {
+        topo_pos.insert(*n, i);
+    }
     for (src, dst) in edges_to_add {
+        // Only add forward edges (src before dst in topo order) to avoid creating cycles
+        let src_pos = topo_pos.get(&src).copied().unwrap_or(usize::MAX);
+        let dst_pos = topo_pos.get(&dst).copied().unwrap_or(usize::MAX);
+        if src_pos >= dst_pos {
+            continue; // Skip back-edges
+        }
         if !llir_graph.edges_connecting(src, dst).any(|_| true) {
             llir_graph.add_edge(src, dst, ());
         }

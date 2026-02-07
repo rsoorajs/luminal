@@ -25,7 +25,7 @@ struct Task {
   int in_dep_c_base;
   int out_dep_stride;
   int out_dep_base;
-  int source_indices[3];
+  int source_indices[6];
   int out_index;
   Payload payload;
 };
@@ -159,7 +159,7 @@ __global__ void worker_kernel(
   __shared__ bool run_c_prologue;
   __shared__ bool stop_wait_loop;
   __shared__ float scratchpad[8192]; // 32 KB scratchpad
-  __shared__ const float* source_ptrs[3];
+  __shared__ const float* source_ptrs[6];
   __shared__ float* out_ptr;
   int recorded_event = 0;
   timings += blockIdx.x * N_TIMING_SLOTS;
@@ -182,6 +182,9 @@ __global__ void worker_kernel(
       source_ptrs[0] = buffers[t->source_indices[0]];
       source_ptrs[1] = buffers[t->source_indices[1]];
       source_ptrs[2] = buffers[t->source_indices[2]];
+      source_ptrs[3] = buffers[t->source_indices[3]];
+      source_ptrs[4] = buffers[t->source_indices[4]];
+      source_ptrs[5] = buffers[t->source_indices[5]];
       out_ptr = buffers[t->out_index];
     }
     __syncthreads();

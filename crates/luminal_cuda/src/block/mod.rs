@@ -340,12 +340,12 @@ impl TaskQueue {
     pub fn new(payload_size: usize, payload_align: usize) -> Self {
         // Task layout (must match C struct with alignment):
         // - 11 ints (44 bytes at offset 0)
-        // - 3 source indices (12 bytes at offset 44)
-        // - 1 out index (4 bytes at offset 56)
-        // = 60 bytes base, then padding for payload alignment, then payload
+        // - 6 source indices (24 bytes at offset 44)
+        // - 1 out index (4 bytes at offset 68)
+        // = 72 bytes base, then padding for payload alignment, then payload
         let int_section = size_of::<i32>() * 11; // 44 bytes
-        let index_section = size_of::<i32>() * 4; // 16 bytes (3 source + 1 out)
-        let base_size = int_section + index_section; // 60 bytes
+        let index_section = size_of::<i32>() * 7; // 28 bytes (6 source + 1 out)
+        let base_size = int_section + index_section; // 72 bytes
 
         // Add padding before payload if needed for alignment
         let payload_offset = if payload_align > 1 {
@@ -380,7 +380,7 @@ impl TaskQueue {
         in_dep_c_base: i32,
         out_dep_stride: i32,
         out_dep_base: i32,
-        source_indices: [i32; 3],
+        source_indices: [i32; 6],
         out_index: i32,
         payload: &[u8],
         expressions: &FxHashMap<Expression, i32>,
@@ -760,7 +760,7 @@ fn compile_interpreter(
                 let op_name = op.op_name();
                 let op_body = op.cuda_function();
                 format!(
-                    "__device__ __forceinline__ void {op_name}_function({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t, float* scratchpad) {{
+                    "__device__ __forceinline__ void {op_name}_function({op_name}Payload payload, const float* const source_ptrs[6], float* out_ptr, const int current, int t, float* scratchpad) {{
 {op_body}
 }}"
                 )
@@ -800,21 +800,21 @@ fn compile_interpreter(
                 let mut funcs = Vec::new();
                 if !prologue_a.is_empty() {
                     funcs.push(format!(
-                        "__device__ __forceinline__ void {op_name}_prologue_a({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t, float* scratchpad) {{
+                        "__device__ __forceinline__ void {op_name}_prologue_a({op_name}Payload payload, const float* const source_ptrs[6], float* out_ptr, const int current, int t, float* scratchpad) {{
 {prologue_a}
 }}"
                     ));
                 }
                 if !prologue_b.is_empty() {
                     funcs.push(format!(
-                        "__device__ __forceinline__ void {op_name}_prologue_b({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t, float* scratchpad) {{
+                        "__device__ __forceinline__ void {op_name}_prologue_b({op_name}Payload payload, const float* const source_ptrs[6], float* out_ptr, const int current, int t, float* scratchpad) {{
 {prologue_b}
 }}"
                     ));
                 }
                 if !prologue_c.is_empty() {
                     funcs.push(format!(
-                        "__device__ __forceinline__ void {op_name}_prologue_c({op_name}Payload payload, const float* const source_ptrs[3], float* out_ptr, const int current, int t, float* scratchpad) {{
+                        "__device__ __forceinline__ void {op_name}_prologue_c({op_name}Payload payload, const float* const source_ptrs[6], float* out_ptr, const int current, int t, float* scratchpad) {{
 {prologue_c}
 }}"
                     ));
@@ -1298,10 +1298,13 @@ pub(crate) fn make_megakernel_from_llir_graph(
             .collect_vec();
 
         // Assign buffer indices for source nodes and output node
-        let source_indices: [i32; 3] = [
+        let source_indices: [i32; 6] = [
             get_buffer_index(sources[0]),
             sources.get(1).map(|&n| get_buffer_index(n)).unwrap_or(0),
             sources.get(2).map(|&n| get_buffer_index(n)).unwrap_or(0),
+            sources.get(3).map(|&n| get_buffer_index(n)).unwrap_or(0),
+            sources.get(4).map(|&n| get_buffer_index(n)).unwrap_or(0),
+            sources.get(5).map(|&n| get_buffer_index(n)).unwrap_or(0),
         ];
         let out_index = get_buffer_index(node);
 

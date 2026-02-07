@@ -46,4 +46,9 @@ pub trait HostOp: Debug + as_any::AsAny + EgglogOp {
     fn extra_buffer_sizes(&self) -> FxHashMap<NodeIndex, Expression> {
         FxHashMap::default()
     }
+
+    /// Returns the name of this host op for stats reporting, or None if not reportable.
+    fn stats_name(&self) -> Option<&'static str> {
+        None
+    }
 }

@@ -528,6 +528,22 @@ impl Runtime for CudaRuntime {
         }
     }
 
+    fn allocate_dummy_input(&mut self, node_index: usize, num_elements: usize) {
+        let buf = self
+            .cuda_stream
+            .alloc_zeros(num_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let id = NodeIndex::new(node_index);
+        self.hlir_buffers.insert(id, CudaInput::Buffer(buf));
+        self.changed_hlir.insert(id);
+    }
+
+    fn clear_intermediate_buffers(&mut self) {
+        self.cuda_stream.synchronize().unwrap();
+        self.buffers.clear();
+        self.cached_buffer_ptrs.clear();
+    }
+
     #[tracing::instrument(skip_all)]
     fn profile(
         &mut self,
@@ -586,7 +602,21 @@ impl Runtime for CudaRuntime {
         let duration_str = pretty_duration::pretty_duration(&duration, None);
         let mbu_str = mbu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
         let mfu_str = mfu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
-        let display = format!("{duration_str} | MBU: {mbu_str} | MFU: {mfu_str}");
+        let display = format!(
+            "{duration_str} | MBU: {mbu_str} | MFU: {mfu_str} [BLK: {} KRN: {} HOST: {}]",
+            llir_graph
+                .node_weights()
+                .filter(|n| n.to_dialect::<dyn BlockOp>().is_some())
+                .count(),
+            llir_graph
+                .node_weights()
+                .filter(|n| n.to_dialect::<dyn KernelOp>().is_some())
+                .count(),
+            llir_graph
+                .node_weights()
+                .filter(|n| n.to_dialect::<dyn HostOp>().is_some())
+                .count()
+        );
 
         (duration, display)
     }
@@ -615,7 +645,10 @@ impl Runtime for CudaRuntime {
         // Cache HLIR input pointers
         if !self.changed_hlir.is_empty() {
             for hlir_node in self.changed_hlir.clone() {
-                let llir_node = self.hlir_to_llir[&hlir_node];
+                // Skip HLIR nodes not present in the current LLIR graph (e.g., from other chunks)
+                let Some(&llir_node) = self.hlir_to_llir.get(&hlir_node) else {
+                    continue;
+                };
                 let ptr = match &self.hlir_buffers[&hlir_node] {
                     CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
                     CudaInput::Ptr(p) => *p,
@@ -663,12 +696,43 @@ impl Runtime for CudaRuntime {
                     }
                 }
             }
-            let _span =
-                span!(Level::TRACE, "host_op_execute", n_inputs = exec_op.inputs.len()).entered();
-            exec_op.internal.execute(&exec_op.stream, exec_op.output, &exec_op.inputs, &buffer_map, dyn_map).unwrap();
+            let _span = span!(
+                Level::TRACE,
+                "host_op_execute",
+                n_inputs = exec_op.inputs.len()
+            )
+            .entered();
+            exec_op
+                .internal
+                .execute(
+                    &exec_op.stream,
+                    exec_op.output,
+                    &exec_op.inputs,
+                    &buffer_map,
+                    dyn_map,
+                )
+                .unwrap();
             self.cuda_stream.synchronize().unwrap();
         }
         self.last_total_time_us = total_start.elapsed().as_secs_f64() * 1_000_000.0;
+
+        // Populate last_kernel_stats from HostOps that report stats
+        self.last_kernel_stats.clear();
+        for exec_node in self.exec_graph.node_indices() {
+            let exec_op = &self.exec_graph[exec_node];
+            if let Some(name) = exec_op.internal.stats_name() {
+                self.last_kernel_stats.push(KernelStats {
+                    name,
+                    execution_time_us: 0.0,
+                    bytes_loaded: 0,
+                    bytes_stored: 0,
+                    flops: 0,
+                    bandwidth_gbps: 0.0,
+                    tflops: 0.0,
+                });
+            }
+        }
+
         // Final sync to ensure all operations completed successfully
         self.cuda_stream
             .synchronize()

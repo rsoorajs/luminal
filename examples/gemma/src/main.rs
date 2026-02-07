@@ -30,15 +30,14 @@ fn main() {
     let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
     let mut sentence = tokenizer.encode(prompt, true).unwrap().get_ids().to_vec();
 
-    // Allocate kv cache and norm weight buffers
+    // Allocate kv cache
     let mut kv_cache = KVCache::new(&stream, max_seq_len);
-    let mut norm_bufs = NormWeightBuffers::new(&stream);
 
     // Create compute graph
     let mut cx = Graph::default();
     let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
     let model = model::Gemma::init(&mut cx);
-    let logits = model.forward(input, &kv_cache, &norm_bufs).output();
+    let logits = model.forward(input, &kv_cache).output();
 
     // Build search space
     println!("Building E-Graph...");
@@ -49,10 +48,6 @@ fn main() {
     let mut runtime = CudaRuntime::initialize(stream);
     let weights_path = model_dir.join("model_combined.safetensors");
     runtime.load_safetensors(&cx, weights_path.to_str().unwrap());
-
-    // Load QK-norm weights directly from safetensors into GPU buffers
-    println!("Loading norm weights...");
-    norm_bufs.load_from_safetensors(&weights_path);
 
     // Run search process
     println!("Compiling...");
