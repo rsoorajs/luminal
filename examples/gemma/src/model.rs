@@ -274,12 +274,8 @@ impl NormWeightBuffers {
             layers: (0..LAYERS)
                 .map(|_| {
                     (
-                        stream
-                            .alloc_zeros(HEAD_DIM * size_of::<f32>())
-                            .unwrap(),
-                        stream
-                            .alloc_zeros(HEAD_DIM * size_of::<f32>())
-                            .unwrap(),
+                        stream.alloc_zeros(HEAD_DIM * size_of::<f32>()).unwrap(),
+                        stream.alloc_zeros(HEAD_DIM * size_of::<f32>()).unwrap(),
                     )
                 })
                 .collect(),
@@ -327,6 +323,7 @@ pub struct GemmaAttention {
 }
 
 impl GemmaAttention {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         k_cache: u64,
         v_cache: u64,

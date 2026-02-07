@@ -156,7 +156,14 @@ impl QwenLayer {
 
         // 3 graph inputs (Q, K, V) + norm weights via payload pointers
         let attn_out = x.graph().custom_op(
-            QwenAttention::new(k_cache, v_cache, q_norm_ptr, k_norm_ptr, q.dims()[0], 'p'.into()),
+            QwenAttention::new(
+                k_cache,
+                v_cache,
+                q_norm_ptr,
+                k_norm_ptr,
+                q.dims()[0],
+                'p'.into(),
+            ),
             (q, k, v),
             q.shape,
             q.dtype,
@@ -218,12 +225,8 @@ impl NormWeightBuffers {
             layers: (0..LAYERS)
                 .map(|_| {
                     (
-                        stream
-                            .alloc_zeros(HEAD_DIM * size_of::<f32>())
-                            .unwrap(),
-                        stream
-                            .alloc_zeros(HEAD_DIM * size_of::<f32>())
-                            .unwrap(),
+                        stream.alloc_zeros(HEAD_DIM * size_of::<f32>()).unwrap(),
+                        stream.alloc_zeros(HEAD_DIM * size_of::<f32>()).unwrap(),
                     )
                 })
                 .collect(),
