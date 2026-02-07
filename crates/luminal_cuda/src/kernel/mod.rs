@@ -249,3 +249,7 @@ pub trait KernelOp: std::fmt::Debug + as_any::AsAny {
 }
 
 luminal::impl_into_ops!(KernelOp);
+
+// Kernel to host op compilation
+mod to_host;
+pub use to_host::{CudaGraphOp, kernel_to_host};
