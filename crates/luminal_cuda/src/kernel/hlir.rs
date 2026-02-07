@@ -7,7 +7,7 @@ use cudarc::{
 };
 use itertools::Itertools;
 use luminal::{
-    graph::{extract_dtype, extract_expr, extract_expr_list},
+    egglog_utils::{extract_dtype, extract_expr, extract_expr_list},
     op::OpParam::*,
     op::*,
     prelude::*,
@@ -259,7 +259,8 @@ impl EgglogOp for KernelSumReduce {
     }
 
     fn cleanup(&self) -> bool {
-        false
+        true // TODO: this is very bad! its here so we dont have the Mul -> SumReduce pattern which can exceed memory but we should analytically eliminate that from search sapce!
+        // a slightly better way than this will be to subsume in the cublas match rule
     }
 
     fn extract<'a>(

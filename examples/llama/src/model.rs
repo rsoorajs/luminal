@@ -100,12 +100,14 @@ impl Llama {
                 + token_ids.graph().arange(HIDDEN).expand_dim(0, seq),
         );
         for (layer, (k_cache, v_cache)) in self.layers.iter().zip(&kv_cache.layers) {
-            x = layer.forward(
-                x,
-                pos_ids,
-                k_cache.device_ptr(v_cache.stream()).0,
-                v_cache.device_ptr(k_cache.stream()).0,
-            );
+            x = layer
+                .forward(
+                    x,
+                    pos_ids,
+                    k_cache.device_ptr(v_cache.stream()).0,
+                    v_cache.device_ptr(k_cache.stream()).0,
+                )
+                .graph_break();
         }
         self.lm_norm.forward(x).matmul(self.lm_head.t())
     }

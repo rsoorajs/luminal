@@ -533,6 +533,7 @@ impl Runtime for CudaRuntime {
         &mut self,
         llir_graph: &LLIRGraph,
         dyn_map: &FxHashMap<char, usize>,
+        _trials: usize,
     ) -> (Self::ProfileMetric, String) {
         self.buffers.clear();
         self.load_llir(llir_graph);

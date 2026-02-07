@@ -19,10 +19,13 @@ tracing = "0.1.43"
 tracing-perfetto-sdk-schema = "0.13.0"
 prost = "0.14.1"
 half = "2.7.1"
-pretty-duration = "0.1.1"
+pretty-duration = {git="https://github.com/jafioti/pretty-duration"}
 bytemuck = "1.24.0"
 memmap2 = "0.9.9"
 uuid = {version="1.19.0", features=["v4"]}
+lru = "0.16.2"
+libc = "0.2"
+colorize = "*"
 
 [dev-dependencies]
 candle-core = "0.9.1"
