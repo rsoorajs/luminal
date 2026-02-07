@@ -6,7 +6,10 @@ use cudarc::driver::{CudaFunction, CudaModule, CudaStream};
 use luminal::{
     graph::LLIRGraph,
     op::LLIROp,
-    prelude::{FxHashMap, FxHashSet, NodeIndex, petgraph::{Direction, visit::EdgeRef}},
+    prelude::{
+        FxHashMap, FxHashSet, NodeIndex,
+        petgraph::{Direction, visit::EdgeRef},
+    },
 };
 use tracing::{Level, span};
 

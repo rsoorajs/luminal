@@ -564,10 +564,8 @@ impl CudaGraphOp {
             prev_graph_node = Some(graph_node);
         }
 
-        if tracing_enabled {
-            if let Some(prev) = prev_graph_node {
-                graph.add_event_record_node(&[prev], state.timing_events[num_kernels])?;
-            }
+        if tracing_enabled && let Some(prev) = prev_graph_node {
+            graph.add_event_record_node(&[prev], state.timing_events[num_kernels])?;
         }
 
         let exec = graph.instantiate()?;
@@ -724,7 +722,13 @@ pub fn kernel_to_host(
         // Create CudaGraphOp with RefCell for interior mutability
         let state = CudaGraphOpState::new(kernels);
 
-        let cuda_graph_op = CudaGraphOp::new(buffer_nodes, all_buffer_sizes, dyn_dims_order, cuda_stream.clone(), state);
+        let cuda_graph_op = CudaGraphOp::new(
+            buffer_nodes,
+            all_buffer_sizes,
+            dyn_dims_order,
+            cuda_stream.clone(),
+            state,
+        );
 
         // Add CudaGraphOp to llir_graph as a HostOp
         let cuda_graph_node =
@@ -789,10 +793,10 @@ pub fn kernel_to_host(
                     continue; // Same subgraph
                 }
                 // Check if consumer is a kernel in another CudaGraphOp
-                if let Some(&consumer_cuda_graph) = kernel_to_cuda_graph.get(&consumer) {
-                    if consumer_cuda_graph != *cuda_graph_node {
-                        edges_to_add.push((*cuda_graph_node, consumer_cuda_graph));
-                    }
+                if let Some(&consumer_cuda_graph) = kernel_to_cuda_graph.get(&consumer)
+                    && consumer_cuda_graph != *cuda_graph_node
+                {
+                    edges_to_add.push((*cuda_graph_node, consumer_cuda_graph));
                 }
                 // Also add edges to HostOps (like cuBLAS ops) that consume our outputs
                 if llir_graph[consumer]

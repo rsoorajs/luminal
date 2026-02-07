@@ -142,11 +142,7 @@ impl Gemma {
         }
     }
 
-    pub fn forward(
-        &self,
-        token_ids: GraphTensor,
-        kv_cache: &KVCache,
-    ) -> GraphTensor {
+    pub fn forward(&self, token_ids: GraphTensor, kv_cache: &KVCache) -> GraphTensor {
         let batch = token_ids.dims1();
         let mut x = self.embedding.gather(
             (token_ids * HIDDEN).expand_dim(1, HIDDEN)
@@ -184,12 +180,7 @@ struct GemmaLayer {
 }
 
 impl GemmaLayer {
-    pub fn forward(
-        &self,
-        x: GraphTensor,
-        k_cache: u64,
-        v_cache: u64,
-    ) -> GraphTensor {
+    pub fn forward(&self, x: GraphTensor, k_cache: u64, v_cache: u64) -> GraphTensor {
         let x_attn = self.input_layernorm.forward(x);
         let q = x_attn.matmul(self.q_proj.t());
         let k = x_attn.matmul(self.k_proj.t());

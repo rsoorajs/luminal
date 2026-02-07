@@ -22,7 +22,14 @@ use luminal_tracing::PerfettoGuard;
 use memmap2::MmapOptions;
 use prost::Message;
 use safetensors::SafeTensors;
-use std::{collections::VecDeque, fmt::Debug, fs::File, mem::size_of, sync::Arc, time::Duration};
+use std::{
+    collections::{VecDeque, hash_map::Entry},
+    fmt::Debug,
+    fs::File,
+    mem::size_of,
+    sync::Arc,
+    time::Duration,
+};
 use tracing::{Level, enabled, span, trace};
 use uuid::Uuid;
 
@@ -677,22 +684,22 @@ impl Runtime for CudaRuntime {
             for inp in exec_op.inputs.iter() {
                 if let Some(buf) = self.buffers.get(inp) {
                     buffer_map.insert(*inp, buf);
-                } else if let Some(hlir_node) = self.llir_to_hlir.get(inp) {
-                    if let Some(CudaInput::Buffer(buf)) = self.hlir_buffers.get(hlir_node) {
-                        buffer_map.insert(*inp, buf);
-                    }
+                } else if let Some(hlir_node) = self.llir_to_hlir.get(inp)
+                    && let Some(CudaInput::Buffer(buf)) = self.hlir_buffers.get(hlir_node)
+                {
+                    buffer_map.insert(*inp, buf);
                 }
             }
             // Add extra buffer nodes (for CudaGraphOp)
             let extra_nodes = exec_op.internal.extra_buffer_nodes();
             for extra_node in extra_nodes {
-                if !buffer_map.contains_key(&extra_node) {
+                if let Entry::Vacant(e) = buffer_map.entry(extra_node) {
                     if let Some(buf) = self.buffers.get(&extra_node) {
-                        buffer_map.insert(extra_node, buf);
-                    } else if let Some(hlir_node) = self.llir_to_hlir.get(&extra_node) {
-                        if let Some(CudaInput::Buffer(buf)) = self.hlir_buffers.get(hlir_node) {
-                            buffer_map.insert(extra_node, buf);
-                        }
+                        e.insert(buf);
+                    } else if let Some(hlir_node) = self.llir_to_hlir.get(&extra_node)
+                        && let Some(CudaInput::Buffer(buf)) = self.hlir_buffers.get(hlir_node)
+                    {
+                        e.insert(buf);
                     }
                 }
             }

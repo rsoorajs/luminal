@@ -265,6 +265,7 @@ pub struct MegakernelParams {
 impl MegakernelParams {
     /// Create megakernel params with all internal buffer pointers and dyn_dims.
     /// Order: tasks, head, ready, queue_lock, timings, start_times, buffers, dyn_dims
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tasks_ptr: u64,
         head_ptr: u64,
@@ -284,7 +285,8 @@ impl MegakernelParams {
             start_times_ptr,
             buffers_ptr,
             dyn_dims_ptr,
-        ].into_boxed_slice();
+        ]
+        .into_boxed_slice();
         let ptrs: Box<[*mut c_void]> = values
             .iter()
             .map(|v| v as *const u64 as *mut c_void)
