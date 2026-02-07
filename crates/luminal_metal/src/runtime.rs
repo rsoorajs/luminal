@@ -116,15 +116,21 @@ impl Runtime for MetalRuntime {
         &mut self,
         llir_graph: &LLIRGraph,
         dyn_map: &FxHashMap<char, usize>,
+        trials: usize,
     ) -> (Self::ProfileMetric, String) {
         self.load_llir(llir_graph);
         self.allocate_intermediate_buffers(dyn_map);
 
-        let start = std::time::Instant::now();
-        self.execute(dyn_map);
-        let elapsed = start.elapsed();
+        let trials = trials.max(1);
+        let mut duration = Duration::default();
+        for _ in 0..trials {
+            let start = std::time::Instant::now();
+            self.execute(dyn_map);
+            duration += start.elapsed();
+        }
+        duration /= trials as u32;
 
-        (elapsed, format!("{:.2?}", elapsed))
+        (duration, format!("{:.2?}", duration))
     }
 
     #[tracing::instrument(skip_all)]

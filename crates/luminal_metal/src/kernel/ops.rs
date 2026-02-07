@@ -144,7 +144,7 @@ macro_rules! metal_unary_op {
                 list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
                 expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
             ) -> (LLIROp, Vec<&'a ENodeId>) {
-                use luminal::graph::extract_expr_list;
+                use luminal::egglog_utils::extract_expr_list;
                 (
                     LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                         shape: extract_expr_list(egraph, children[0], list_cache, expr_cache)
@@ -295,7 +295,7 @@ impl EgglogOp for MetalAdd {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -418,7 +418,7 @@ impl EgglogOp for MetalMul {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -540,7 +540,7 @@ impl EgglogOp for MetalMod {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -662,7 +662,7 @@ impl EgglogOp for MetalLessThan {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -788,8 +788,8 @@ impl EgglogOp for MetalSumReduce {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr;
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -945,8 +945,8 @@ impl EgglogOp for MetalMaxReduce {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr;
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -1195,7 +1195,7 @@ impl EgglogOp for MetalIota {
         _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr;
+        use luminal::egglog_utils::extract_expr;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 expr: extract_expr(egraph, children[0], expr_cache).unwrap(),
@@ -1300,7 +1300,7 @@ impl EgglogOp for MetalGather {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -1440,7 +1440,7 @@ impl EgglogOp for MetalCast {
         _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         _expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::{extract_dtype, extract_expr};
+        use luminal::egglog_utils::{extract_dtype, extract_expr};
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 size: extract_expr(egraph, children[1], _expr_cache).unwrap(),
@@ -1453,35 +1453,26 @@ impl EgglogOp for MetalCast {
 
 impl MetalKernelOp for MetalCast {
     fn compile(&self, device: &Device) -> ComputePipelineState {
-        // Cast is a pure element-wise operation: out[i] = (target_type)inp[i]
-        // No stride calculations needed - input and output are both contiguous
-
-        // Determine input and output types based on target dtype
-        let (in_type, out_type) = match self.target_dtype {
-            DType::F32 => ("int", "float"),
-            DType::Int => ("float", "int"),
-            DType::F16 => ("float", "half"),
-            DType::Bf16 => ("float", "bfloat"),
-        };
-
+        let _ = self.target_dtype;
+        // MetalRuntime currently allocates all buffers as fp32, so Cast is a no-op copy at runtime.
+        // The dtype lives in egglog for correctness / lowering checks, but is not yet reflected in
+        // Metal buffer allocation or kernel signatures.
         let source = format!(
             r#"
             #include <metal_stdlib>
             using namespace metal;
 
             kernel void mkernel(
-                device {in_type} *inp [[buffer(0)]],
-                device {out_type} *out [[buffer(1)]],
+                device float *inp [[buffer(0)]],
+                device float *out [[buffer(1)]],
                 device uint &n_elements [[buffer(2)]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
-                    out[idx] = ({out_type})inp[idx];
+                    out[idx] = inp[idx];
                 }}
             }}
-            "#,
-            in_type = in_type,
-            out_type = out_type,
+            "#
         );
         compile_shader(device, &source, "mkernel")
     }
