@@ -1,4 +1,4 @@
-use crate::runtime::MetalRuntime;
+use crate::{kernel::lower_expression_for_metal, runtime::MetalRuntime};
 use luminal::prelude::*;
 use proptest::prelude::*;
 
@@ -28,7 +28,7 @@ fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
 #[test]
 fn dynamic_const_codegen_uses_dyn_buffer() {
     let expr = (Expression::from('a') * 2 + Expression::from('z')).simplify();
-    let code = expr.to_kernel().replace("const_z", "idx");
+    let code = lower_expression_for_metal(&expr, "idx");
 
     assert!(
         !code.contains("*const_"),
