@@ -8,9 +8,7 @@ use luminal_cuda::{
     block::{cstruct::CStruct, BlockOp},
     cudarc::driver::{CudaSlice, CudaStream, DevicePtr},
 };
-use memmap2::MmapOptions;
-use safetensors::SafeTensors;
-use std::{fmt::Debug, path::Path, sync::Arc};
+use std::{fmt::Debug, sync::Arc};
 
 // Gemma 3 4B hyperparams
 pub const LAYERS: usize = 34;
@@ -95,6 +93,14 @@ impl Gemma {
                     format!("model.layers.{l}.self_attn.o_proj.weight"),
                     (HIDDEN, Q_DIM),
                 ),
+                q_norm: cx.named_tensor(
+                    format!("model.layers.{l}.self_attn.q_norm.weight"),
+                    HEAD_DIM,
+                ),
+                k_norm: cx.named_tensor(
+                    format!("model.layers.{l}.self_attn.k_norm.weight"),
+                    HEAD_DIM,
+                ),
                 input_layernorm: GemmaRMSNorm::new(
                     HIDDEN,
                     &format!("model.layers.{l}.input_layernorm.weight"),
@@ -136,29 +142,18 @@ impl Gemma {
         }
     }
 
-    pub fn forward(
-        &self,
-        token_ids: GraphTensor,
-        kv_cache: &KVCache,
-        norm_bufs: &NormWeightBuffers,
-    ) -> GraphTensor {
+    pub fn forward(&self, token_ids: GraphTensor, kv_cache: &KVCache) -> GraphTensor {
         let batch = token_ids.dims1();
         let mut x = self.embedding.gather(
             (token_ids * HIDDEN).expand_dim(1, HIDDEN)
                 + token_ids.graph().arange(HIDDEN).expand_dim(0, batch),
         );
-        for (layer, ((k_cache, v_cache), (q_norm_buf, k_norm_buf))) in self
-            .layers
-            .iter()
-            .zip(kv_cache.layers.iter().zip(norm_bufs.layers.iter()))
-        {
+        for (layer, (k_cache, v_cache)) in self.layers.iter().zip(kv_cache.layers.iter()) {
             x = layer
                 .forward(
                     x,
                     k_cache.device_ptr(v_cache.stream()).0,
                     v_cache.device_ptr(k_cache.stream()).0,
-                    q_norm_buf.device_ptr(k_cache.stream()).0,
-                    k_norm_buf.device_ptr(k_cache.stream()).0,
                 )
                 .graph_break();
         }
@@ -174,6 +169,8 @@ struct GemmaLayer {
     k_proj: GraphTensor,
     v_proj: GraphTensor,
     o_proj: GraphTensor,
+    q_norm: GraphTensor,
+    k_norm: GraphTensor,
     input_layernorm: GemmaRMSNorm,
     post_attention_layernorm: GemmaRMSNorm,
     pre_feedforward_layernorm: GemmaRMSNorm,
@@ -183,32 +180,23 @@ struct GemmaLayer {
 }
 
 impl GemmaLayer {
-    pub fn forward(
-        &self,
-        x: GraphTensor,
-        k_cache: u64,
-        v_cache: u64,
-        q_norm_ptr: u64,
-        k_norm_ptr: u64,
-    ) -> GraphTensor {
+    pub fn forward(&self, x: GraphTensor, k_cache: u64, v_cache: u64) -> GraphTensor {
         let x_attn = self.input_layernorm.forward(x);
         let q = x_attn.matmul(self.q_proj.t());
         let k = x_attn.matmul(self.k_proj.t());
         let v = x_attn.matmul(self.v_proj.t());
 
-        // 3 graph inputs (Q, K, V) + norm weights via payload pointers
+        // 5 graph inputs: Q, K, V, q_norm_weights, k_norm_weights
         let attn_out = x.graph().custom_op(
             GemmaAttention::new(
                 k_cache,
                 v_cache,
-                q_norm_ptr,
-                k_norm_ptr,
                 q.dims()[0],
                 'p'.into(),
                 self.is_local,
                 self.rope_theta,
             ),
-            (q, k, v),
+            (q, k, v, self.q_norm, self.k_norm),
             q.shape,
             q.dtype,
         );
@@ -228,7 +216,7 @@ impl GemmaLayer {
 }
 
 // ---------------------------------------------------------------------------
-// KV Cache + Norm Weight Buffers
+// KV Cache
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -262,43 +250,6 @@ impl KVCache {
     }
 }
 
-/// Pre-allocated GPU buffers for QK-norm weights per layer.
-#[derive(Debug, Clone)]
-pub struct NormWeightBuffers {
-    pub layers: Vec<(CudaSlice<u8>, CudaSlice<u8>)>, // (q_norm, k_norm) per layer
-}
-
-impl NormWeightBuffers {
-    pub fn new(stream: &Arc<CudaStream>) -> Self {
-        Self {
-            layers: (0..LAYERS)
-                .map(|_| {
-                    (
-                        stream.alloc_zeros(HEAD_DIM * size_of::<f32>()).unwrap(),
-                        stream.alloc_zeros(HEAD_DIM * size_of::<f32>()).unwrap(),
-                    )
-                })
-                .collect(),
-        }
-    }
-
-    /// Load QK-norm weights directly from a safetensors file into GPU buffers.
-    pub fn load_from_safetensors(&mut self, weights_path: &Path) {
-        let f = std::fs::File::open(weights_path).unwrap();
-        let mmap = unsafe { MmapOptions::new().map(&f).unwrap() };
-        let st = SafeTensors::deserialize(&mmap).unwrap();
-        for i in 0..LAYERS {
-            let q_name = format!("model.layers.{i}.self_attn.q_norm.weight");
-            let k_name = format!("model.layers.{i}.self_attn.k_norm.weight");
-            let q_data = st.tensor(&q_name).unwrap().data();
-            let k_data = st.tensor(&k_name).unwrap().data();
-            let stream = self.layers[i].0.stream().clone();
-            stream.memcpy_htod(q_data, &mut self.layers[i].0).unwrap();
-            stream.memcpy_htod(k_data, &mut self.layers[i].1).unwrap();
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // GemmaAttention: Fused QK-Norm + RoPE + Causal Attention with KV Cache
 // ---------------------------------------------------------------------------
@@ -316,19 +267,14 @@ pub struct GemmaAttention {
     prev_seq: Expression,
     k_cache: u64,
     v_cache: u64,
-    q_norm_ptr: u64,
-    k_norm_ptr: u64,
     sliding_window: usize,
     rope_theta: f32,
 }
 
 impl GemmaAttention {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         k_cache: u64,
         v_cache: u64,
-        q_norm_ptr: u64,
-        k_norm_ptr: u64,
         seq: Expression,
         prev_seq: Expression,
         is_local: bool,
@@ -347,8 +293,6 @@ impl GemmaAttention {
             prev_seq,
             k_cache,
             v_cache,
-            q_norm_ptr,
-            k_norm_ptr,
             sliding_window,
             rope_theta,
         }
@@ -385,7 +329,9 @@ impl BlockOp for GemmaAttention {
         k[self.range.len() - 1] = false;
         let mut v = vec![true; self.range.len()];
         v[self.range.len() - 1] = false;
-        vec![q, k, v]
+        // q_norm and k_norm are constant weights, no barriers needed
+        let no_barrier = vec![false; self.range.len()];
+        vec![q, k, v, no_barrier.clone(), no_barrier]
     }
 
     fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
@@ -405,8 +351,6 @@ impl BlockOp for GemmaAttention {
             .expr("out", flatten_mul_strides(&self.range, &self.o_stride))
             .ptr_mut_f32("key_cache", self.k_cache as *mut f32)
             .ptr_mut_f32("val_cache", self.v_cache as *mut f32)
-            .ptr_const_f32("q_norm_weights", self.q_norm_ptr as *const f32)
-            .ptr_const_f32("k_norm_weights", self.k_norm_ptr as *const f32)
             .expr("prev_seq", self.prev_seq)
             .expr(
                 "q_pos_stride",
@@ -449,13 +393,12 @@ impl BlockOp for GemmaAttention {
                 return val;
             };
 
-            // 3 graph inputs
+            // 5 graph inputs: Q, K, V, q_norm_weights, k_norm_weights
             const float* q_raw = source_ptrs[0] + eval_expression(payload.q, current);
             const float* k_base = source_ptrs[1] + eval_expression(payload.k, current);
             const float* v_base = source_ptrs[2] + eval_expression(payload.v, current);
-            // Norm weights from payload
-            const float* q_weights = payload.q_norm_weights;
-            const float* k_weights = payload.k_norm_weights;
+            const float* q_weights = source_ptrs[3];
+            const float* k_weights = source_ptrs[4];
 
             float* out = out_ptr + eval_expression(payload.out, current);
             int q_pos_local = eval_expression(payload.q_pos_stride, current);
