@@ -138,13 +138,18 @@ impl CudaRuntime {
             if let Some(Input { label, .. }) = (*cx.graph[node]).as_any().downcast_ref::<Input>()
                 && let Ok(tensor) = st.tensor(label)
             {
+                self.changed_hlir.insert(node);
                 match tensor.dtype() {
                     safetensors::Dtype::F32 => {
                         let bytes = tensor.data();
                         let f32s: &[f32] = bytemuck::cast_slice(bytes);
                         let dev = f32s.to_cuda_input(&self.cuda_stream);
                         self.hlir_buffers.insert(node, dev);
-                        self.changed_hlir.insert(node);
+                    }
+                    safetensors::Dtype::U8 => {
+                        let bytes = tensor.data();
+                        let dev = bytes.to_cuda_input(&self.cuda_stream);
+                        self.hlir_buffers.insert(node, dev);
                     }
                     dtype => unimplemented!("{dtype} loading not supported yet"),
                 }
