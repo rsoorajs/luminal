@@ -2153,14 +2153,33 @@ impl BlockOp for TileMatmulNvFp4 {
         //   [packed_data: K/2 bytes][block_scales: K/16 bytes]
         // Columns are laid out contiguously: column n starts at offset n * (K/2 + K/16)
 
-        // FP4 E2M1 lookup table: maps 4-bit code to float value
+        // FP4 E2M1 lookup table (16 entries) + FP8 E4M3 lookup table (256 entries)
         __shared__ float fp4_lut[16];
+        __shared__ float fp8_lut[256];
+
+        // Initialize FP4 LUT
         if (t < 16) {{
             const float table[16] = {{
                 0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
                 -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
             }};
             fp4_lut[t] = table[t];
+        }}
+
+        // Initialize FP8 E4M3 LUT: precompute all 256 decoded values
+        for (int i = t; i < 256; i += blockDim.x) {{
+            unsigned int sign = (i >> 7) & 1;
+            unsigned int exp  = (i >> 3) & 0xF;
+            unsigned int mant = i & 0x7;
+            float result;
+            if (exp == 0) {{
+                result = ldexpf((float)mant / 8.0f, -6);
+            }} else if (exp == 15 && mant == 7) {{
+                result = 0.0f; // NaN -> treat as 0 for safety
+            }} else {{
+                result = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
+            }}
+            fp8_lut[i] = sign ? -result : result;
         }}
         __syncthreads();
 
@@ -2191,34 +2210,6 @@ impl BlockOp for TileMatmulNvFp4 {
         const int warp_id = t >> 5;
         const int num_warps = threads >> 5;
 
-        // FP8 E4M3 to float conversion
-        auto fp8_e4m3_to_float = [](unsigned char bits) -> float {{
-            unsigned int sign = (bits >> 7) & 1;
-            unsigned int exp  = (bits >> 3) & 0xF;
-            unsigned int mant = bits & 0x7;
-
-            float result;
-            if (exp == 0) {{
-                result = ldexpf((float)mant / 8.0f, -6);
-            }} else if (exp == 15 && mant == 7) {{
-                result = __int_as_float(0x7FC00000);
-            }} else {{
-                result = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
-            }}
-            return sign ? -result : result;
-        }};
-
-        // Helper: dequantize element k from column col
-        auto dequant = [&](int col, int k) -> float {{
-            const unsigned char* col_data = b_base + col * col_stride;
-            const unsigned char* packed = col_data;
-            const unsigned char* scales = col_data + packed_per_col;
-            unsigned char packed_byte = packed[k / 2];
-            unsigned char nibble = (k & 1) ? (packed_byte >> 4) : (packed_byte & 0xF);
-            float block_scale = fp8_e4m3_to_float(scales[k / 16]) * tensor_scale;
-            return fp4_lut[nibble] * block_scale;
-        }};
-
         // ============== M=1 DECODE PATH ==============
         if (M == 1) {{
             const int cols_per_sm = (N + sm_count - 1) / sm_count;
@@ -2229,33 +2220,74 @@ impl BlockOp for TileMatmulNvFp4 {
 
             const float* a = a_base;
             const int K = total_k;
+            const int half_K = K / 2;
 
-            for (int col = col_start + warp_id; col < col_end; col += num_warps) {{
-                const unsigned char* col_data = b_base + col * col_stride;
-                const unsigned char* packed = col_data;
-                const unsigned char* scales = col_data + packed_per_col;
-                float partial = 0.0f;
+            // Each warp handles 4 columns simultaneously, reusing activation values
+            constexpr int COLS_PER_WARP = 4;
 
-                // Each lane processes blocks of 16, strided by warp width
+            for (int col_base = col_start + warp_id * COLS_PER_WARP; col_base < col_end; col_base += num_warps * COLS_PER_WARP) {{
+                float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
+                const int valid_cols = min(COLS_PER_WARP, col_end - col_base);
+
+                // Pre-compute column data pointers
+                const unsigned char* packed[COLS_PER_WARP];
+                const unsigned char* scales[COLS_PER_WARP];
+                #pragma unroll
+                for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                    const unsigned char* col_data = b_base + (col_base + ci) * col_stride;
+                    packed[ci] = col_data;
+                    scales[ci] = col_data + packed_per_col;
+                }}
+
+                // Each lane processes 8 elements (one packed byte = 2 FP4 values, repeated 4x per block)
+                // Lane processes K elements in blocks of 16, strided by warp width
                 for (int block_start = lane * 16; block_start < K; block_start += 32 * 16) {{
-                    float block_scale = fp8_e4m3_to_float(scales[block_start / 16]) * tensor_scale;
-                    int block_end = min(block_start + 16, K);
+                    // Load block scales for all columns from LUT (no branches)
+                    const int scale_idx = block_start / 16;
+                    float block_scale[COLS_PER_WARP];
+                    #pragma unroll
+                    for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                        block_scale[ci] = fp8_lut[scales[ci][scale_idx]] * tensor_scale;
+                    }}
 
-                    for (int k = block_start; k < block_end; k++) {{
-                        unsigned char packed_byte = packed[k / 2];
-                        unsigned char nibble = (k & 1) ? (packed_byte >> 4) : (packed_byte & 0xF);
-                        float w = fp4_lut[nibble] * block_scale;
-                        partial += a[k] * w;
+                    // Process 16 elements (8 bytes) in this block
+                    const int byte_start = block_start / 2;
+                    #pragma unroll
+                    for (int bi = 0; bi < 8; bi++) {{
+                        const int k0 = block_start + bi * 2;
+                        const int k1 = k0 + 1;
+                        if (k1 >= K) break;
+
+                        // Load activation values (reused across all columns)
+                        float a0 = a[k0];
+                        float a1 = a[k1];
+
+                        // Process all columns for this byte
+                        #pragma unroll
+                        for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                            if (ci < valid_cols) {{
+                                unsigned char pb = packed[ci][byte_start + bi];
+                                float w0 = fp4_lut[pb & 0xF] * block_scale[ci];
+                                float w1 = fp4_lut[pb >> 4] * block_scale[ci];
+                                partial[ci] += a0 * w0 + a1 * w1;
+                            }}
+                        }}
                     }}
                 }}
 
                 // Warp reduction
-                for (int offset = 16; offset > 0; offset >>= 1) {{
-                    partial += __shfl_down_sync(0xffffffff, partial, offset);
+                #pragma unroll
+                for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                    for (int offset = 16; offset > 0; offset >>= 1) {{
+                        partial[ci] += __shfl_down_sync(0xffffffff, partial[ci], offset);
+                    }}
                 }}
 
                 if (lane == 0) {{
-                    c_base[col] = partial;
+                    if (valid_cols > 0) c_base[col_base] = partial[0];
+                    if (valid_cols > 1) c_base[col_base + 1] = partial[1];
+                    if (valid_cols > 2) c_base[col_base + 2] = partial[2];
+                    if (valid_cols > 3) c_base[col_base + 3] = partial[3];
                 }}
             }}
             return;
@@ -2292,13 +2324,16 @@ impl BlockOp for TileMatmulNvFp4 {
 
                 float acc = 0.0f;
                 for (int block_start = 0; block_start < total_k; block_start += 16) {{
-                    float block_scale = fp8_e4m3_to_float(scales[block_start / 16]) * tensor_scale;
-                    int block_end = min(block_start + 16, total_k);
-                    for (int k = block_start; k < block_end; k++) {{
-                        unsigned char packed_byte = packed[k / 2];
-                        unsigned char nibble = (k & 1) ? (packed_byte >> 4) : (packed_byte & 0xF);
-                        float w = fp4_lut[nibble] * block_scale;
-                        acc += a_row[k] * w;
+                    float block_scale = fp8_lut[scales[block_start / 16]] * tensor_scale;
+                    const int byte_start = block_start / 2;
+                    #pragma unroll
+                    for (int bi = 0; bi < 8; bi++) {{
+                        const int k0 = block_start + bi * 2;
+                        if (k0 + 1 >= total_k) break;
+                        unsigned char pb = packed[byte_start + bi];
+                        float w0 = fp4_lut[pb & 0xF] * block_scale;
+                        float w1 = fp4_lut[pb >> 4] * block_scale;
+                        acc += a_row[k0] * w0 + a_row[k0 + 1] * w1;
                     }}
                 }}
                 *c_out = acc;
