@@ -7,7 +7,7 @@ use cudarc::{
 };
 use itertools::Itertools;
 use luminal::{
-    graph::{extract_dtype, extract_expr, extract_expr_list},
+    egglog_utils::{extract_dtype, extract_expr, extract_expr_list},
     op::OpParam::*,
     op::*,
     prelude::*,

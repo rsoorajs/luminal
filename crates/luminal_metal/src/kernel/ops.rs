@@ -1,4 +1,4 @@
-use super::MetalKernelOp;
+use super::{MetalKernelOp, DYN_BUFFER_INDEX};
 use luminal::{
     egglog_utils::SerializedEGraph, op::OpParam::*, op::*, prelude::*, shape::flatten_mul_strides,
 };
@@ -23,6 +23,8 @@ pub type MetalOps = (
     MetalConstant,
     MetalIota,
     MetalGather,
+    // Type conversion
+    MetalCast,
 );
 
 fn compile_shader(device: &Device, source: &str, function_name: &str) -> ComputePipelineState {
@@ -35,6 +37,85 @@ fn compile_shader(device: &Device, source: &str, function_name: &str) -> Compute
     device
         .new_compute_pipeline_state_with_function(&function)
         .expect("Failed to create compute pipeline state")
+}
+
+fn lower_dynamic_consts(mut code: String) -> String {
+    for c in b'a'..=b'y' {
+        let symbol = c as char;
+        code = code.replace(
+            &format!("*const_{symbol}"),
+            &format!("dyn[{}]", (c - b'a') as usize),
+        );
+    }
+    code
+}
+
+pub(crate) fn lower_expression_for_metal(expr: &Expression, index_var: &str) -> String {
+    lower_dynamic_consts(expr.to_kernel().replace("const_z", index_var))
+}
+
+// ============================================================================
+// Performance Metrics Macros
+// ============================================================================
+
+/// Generate metrics methods for unary ops: 1 input read, 1 output write, 1 flop per element
+macro_rules! impl_unary_metrics {
+    ($self:ident, $dyn_map:ident) => {
+        fn bytes_loaded(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n = $self.output_size().exec($dyn_map).unwrap_or(0);
+            n * std::mem::size_of::<f32>()
+        }
+
+        fn bytes_stored(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n = $self.output_size().exec($dyn_map).unwrap_or(0);
+            n * std::mem::size_of::<f32>()
+        }
+
+        fn flops(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            $self.output_size().exec($dyn_map).unwrap_or(0)
+        }
+    };
+}
+
+/// Generate metrics methods for binary ops: 2 inputs read, 1 output write, flops_per_elem per element
+macro_rules! impl_binary_metrics {
+    ($self:ident, $dyn_map:ident, $flops_per_elem:expr) => {
+        fn bytes_loaded(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n = $self.output_size().exec($dyn_map).unwrap_or(0);
+            n * 2 * std::mem::size_of::<f32>()
+        }
+
+        fn bytes_stored(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n = $self.output_size().exec($dyn_map).unwrap_or(0);
+            n * std::mem::size_of::<f32>()
+        }
+
+        fn flops(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            $self.output_size().exec($dyn_map).unwrap_or(0) * $flops_per_elem
+        }
+    };
+}
+
+/// Generate metrics methods for reduce ops
+macro_rules! impl_reduce_metrics {
+    ($self:ident, $dyn_map:ident) => {
+        fn bytes_loaded(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n_outputs = $self.output_size().exec($dyn_map).unwrap_or(0);
+            let iters = $self.iters.exec($dyn_map).unwrap_or(0);
+            n_outputs * iters * std::mem::size_of::<f32>()
+        }
+
+        fn bytes_stored(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n = $self.output_size().exec($dyn_map).unwrap_or(0);
+            n * std::mem::size_of::<f32>()
+        }
+
+        fn flops(&$self, $dyn_map: &FxHashMap<char, usize>) -> usize {
+            let n_outputs = $self.output_size().exec($dyn_map).unwrap_or(0);
+            let iters = $self.iters.exec($dyn_map).unwrap_or(0);
+            n_outputs * iters
+        }
+    };
 }
 
 macro_rules! metal_unary_op {
@@ -54,13 +135,15 @@ macro_rules! metal_unary_op {
             fn rewrites(&self) -> Vec<String> {
                 vec![format!(
                     r#"(rule
-                        ((= ?e ({} ?shape ?x ?x_stride ?out_stride))
-                         (= ?dt (dtype ?x)))
-                        ((let ?me ({} ?shape ?x ?x_stride ?out_stride))
-                         (union ?e ?me)
-                         (set (dtype ?me) ?dt))
-                    )"#,
+	                        ((= ?e ({} ?shape ?x ?x_stride ?out_stride))
+	                         (= ?dt (dtype ?x)))
+	                        ((let ?me ({} ?shape ?x ?x_stride ?out_stride))
+	                         (union ?e ?me)
+	                         (set (dtype ?me) ?dt))
+	                        :name "metal {}"
+	                    )"#,
                     $op_name.replace("Metal", ""),
+                    $op_name,
                     $op_name
                 )]
             }
@@ -76,7 +159,7 @@ macro_rules! metal_unary_op {
                 list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
                 expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
             ) -> (LLIROp, Vec<&'a ENodeId>) {
-                use luminal::graph::extract_expr_list;
+                use luminal::egglog_utils::extract_expr_list;
                 (
                     LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                         shape: extract_expr_list(egraph, children[0], list_cache, expr_cache)
@@ -108,8 +191,8 @@ macro_rules! metal_unary_op {
                 let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
 
                 // Convert expressions to Metal code
-                let inp_idx = inp_index.to_kernel().replace("const_z", "idx");
-                let out_idx = out_index.to_kernel().replace("const_z", "idx");
+                let inp_idx = lower_expression_for_metal(&inp_index, "idx");
+                let out_idx = lower_expression_for_metal(&out_index, "idx");
 
                 let source = format!(
                     r#"
@@ -120,6 +203,7 @@ macro_rules! metal_unary_op {
                         device float *inp [[buffer(0)]],
                         device float *out [[buffer(1)]],
                         device uint &n_elements [[buffer(2)]],
+                        constant int *dyn [[buffer({dyn_buffer_index})]],
                         uint idx [[thread_position_in_grid]]
                     ) {{
                         if (idx < n_elements) {{
@@ -129,7 +213,8 @@ macro_rules! metal_unary_op {
                     "#,
                     metal_op = $metal_op,
                     inp_idx = inp_idx,
-                    out_idx = out_idx
+                    out_idx = out_idx,
+                    dyn_buffer_index = DYN_BUFFER_INDEX
                 );
                 compile_shader(device, &source, "mkernel")
             }
@@ -165,6 +250,9 @@ macro_rules! metal_unary_op {
                 let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
                 encoder.dispatch_thread_groups(thread_groups, thread_group_size);
             }
+
+            // Performance metrics for MBU/MFU (unary: 1 read, 1 write, 1 flop per element)
+            impl_unary_metrics!(self, dyn_map);
         }
     };
 }
@@ -192,14 +280,25 @@ impl EgglogOp for MetalAdd {
     }
 
     fn rewrites(&self) -> Vec<String> {
-        vec![r#"(rule
+        vec![
+            r#"(rule
             ((= ?e (Add ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
              (= ?dt (dtype ?a)))
             ((let ?me (MetalAdd ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
              (union ?e ?me)
              (set (dtype ?me) ?dt))
+            :name "metal MetalAdd"
         )"#
-        .to_string()]
+            .to_string(),
+            r#"(rule
+                ((= ?e (Add ?shape ?a ?a_stride ?b ?b_stride ?out_stride)))
+                ((let ?me (MetalAdd ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
+                 (union ?e ?me)
+                 (set (dtype ?me) (F32)))
+                :name "metal MetalAdd (no dtype)"
+            )"#
+            .to_string(),
+        ]
     }
 
     fn cleanup(&self) -> bool {
@@ -213,7 +312,7 @@ impl EgglogOp for MetalAdd {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -235,9 +334,9 @@ impl MetalKernelOp for MetalAdd {
         let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
 
         // Convert expressions to Metal code, replacing 'const_z' with 'idx'
-        let a_idx = a_index.to_kernel().replace("const_z", "idx");
-        let b_idx = b_index.to_kernel().replace("const_z", "idx");
-        let out_idx = out_index.to_kernel().replace("const_z", "idx");
+        let a_idx = lower_expression_for_metal(&a_index, "idx");
+        let b_idx = lower_expression_for_metal(&b_index, "idx");
+        let out_idx = lower_expression_for_metal(&out_index, "idx");
 
         let source = format!(
             r#"
@@ -249,13 +348,15 @@ impl MetalKernelOp for MetalAdd {
                 device float *b [[buffer(1)]],
                 device float *out [[buffer(2)]],
                 device uint &n_elements [[buffer(3)]],
+                constant int *dyn [[buffer({dyn_buffer_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
                     out[{out_idx}] = a[{a_idx}] + b[{b_idx}];
                 }}
             }}
-            "#
+            "#,
+            dyn_buffer_index = DYN_BUFFER_INDEX
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -292,6 +393,9 @@ impl MetalKernelOp for MetalAdd {
         let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
+
+    // Performance metrics for MBU/MFU (binary: 2 reads, 1 write, 1 flop per element)
+    impl_binary_metrics!(self, dyn_map, 1);
 }
 
 #[derive(Debug, Default, Clone)]
@@ -317,6 +421,7 @@ impl EgglogOp for MetalMul {
             ((let ?me (MetalMul ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
              (union ?e ?me)
              (set (dtype ?me) ?dt))
+            :name "metal MetalMul"
         )"#
         .to_string()]
     }
@@ -332,7 +437,7 @@ impl EgglogOp for MetalMul {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -352,9 +457,9 @@ impl MetalKernelOp for MetalMul {
         let b_index = flatten_mul_strides(&self.shape, &self.b_strides);
         let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
 
-        let a_idx = a_index.to_kernel().replace("const_z", "idx");
-        let b_idx = b_index.to_kernel().replace("const_z", "idx");
-        let out_idx = out_index.to_kernel().replace("const_z", "idx");
+        let a_idx = lower_expression_for_metal(&a_index, "idx");
+        let b_idx = lower_expression_for_metal(&b_index, "idx");
+        let out_idx = lower_expression_for_metal(&out_index, "idx");
 
         let source = format!(
             r#"
@@ -366,13 +471,15 @@ impl MetalKernelOp for MetalMul {
                 device float *b [[buffer(1)]],
                 device float *out [[buffer(2)]],
                 device uint &n_elements [[buffer(3)]],
+                constant int *dyn [[buffer({dyn_buffer_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
                     out[{out_idx}] = a[{a_idx}] * b[{b_idx}];
                 }}
             }}
-            "#
+            "#,
+            dyn_buffer_index = DYN_BUFFER_INDEX
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -409,6 +516,9 @@ impl MetalKernelOp for MetalMul {
         let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
+
+    // Performance metrics (binary: 2 reads, 1 write, 1 flop per element)
+    impl_binary_metrics!(self, dyn_map, 1);
 }
 
 // MetalMod: a % b using fmod
@@ -435,6 +545,7 @@ impl EgglogOp for MetalMod {
             ((let ?me (MetalMod ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
              (union ?e ?me)
              (set (dtype ?me) ?dt))
+            :name "metal MetalMod"
         )"#
         .to_string()]
     }
@@ -450,7 +561,7 @@ impl EgglogOp for MetalMod {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -470,9 +581,9 @@ impl MetalKernelOp for MetalMod {
         let b_index = flatten_mul_strides(&self.shape, &self.b_strides);
         let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
 
-        let a_idx = a_index.to_kernel().replace("const_z", "idx");
-        let b_idx = b_index.to_kernel().replace("const_z", "idx");
-        let out_idx = out_index.to_kernel().replace("const_z", "idx");
+        let a_idx = lower_expression_for_metal(&a_index, "idx");
+        let b_idx = lower_expression_for_metal(&b_index, "idx");
+        let out_idx = lower_expression_for_metal(&out_index, "idx");
 
         let source = format!(
             r#"
@@ -484,13 +595,15 @@ impl MetalKernelOp for MetalMod {
                 device float *b [[buffer(1)]],
                 device float *out [[buffer(2)]],
                 device uint &n_elements [[buffer(3)]],
+                constant int *dyn [[buffer({dyn_buffer_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
                     out[{out_idx}] = fmod(a[{a_idx}], b[{b_idx}]);
                 }}
             }}
-            "#
+            "#,
+            dyn_buffer_index = DYN_BUFFER_INDEX
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -527,6 +640,9 @@ impl MetalKernelOp for MetalMod {
         let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
+
+    // Performance metrics (binary: 2 reads, 1 write, ~10 flops for fmod)
+    impl_binary_metrics!(self, dyn_map, 10);
 }
 
 // MetalLessThan: a < b ? 1.0 : 0.0
@@ -553,6 +669,7 @@ impl EgglogOp for MetalLessThan {
             ((let ?me (MetalLessThan ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
              (union ?e ?me)
              (set (dtype ?me) ?dt))
+            :name "metal MetalLessThan"
         )"#
         .to_string()]
     }
@@ -568,7 +685,7 @@ impl EgglogOp for MetalLessThan {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -588,9 +705,9 @@ impl MetalKernelOp for MetalLessThan {
         let b_index = flatten_mul_strides(&self.shape, &self.b_strides);
         let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
 
-        let a_idx = a_index.to_kernel().replace("const_z", "idx");
-        let b_idx = b_index.to_kernel().replace("const_z", "idx");
-        let out_idx = out_index.to_kernel().replace("const_z", "idx");
+        let a_idx = lower_expression_for_metal(&a_index, "idx");
+        let b_idx = lower_expression_for_metal(&b_index, "idx");
+        let out_idx = lower_expression_for_metal(&out_index, "idx");
 
         let source = format!(
             r#"
@@ -602,13 +719,15 @@ impl MetalKernelOp for MetalLessThan {
                 device float *b [[buffer(1)]],
                 device float *out [[buffer(2)]],
                 device uint &n_elements [[buffer(3)]],
+                constant int *dyn [[buffer({dyn_buffer_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
                     out[{out_idx}] = (a[{a_idx}] < b[{b_idx}]) ? 1.0f : 0.0f;
                 }}
             }}
-            "#
+            "#,
+            dyn_buffer_index = DYN_BUFFER_INDEX
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -645,6 +764,9 @@ impl MetalKernelOp for MetalLessThan {
         let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
+
+    // Performance metrics (binary: 2 reads, 1 write, 1 comparison per element)
+    impl_binary_metrics!(self, dyn_map, 1);
 }
 
 // ============================================================================
@@ -675,6 +797,7 @@ impl EgglogOp for MetalSumReduce {
             ((let ?me (MetalSum ?out_shape ?iters ?inp ?in_stride ?iter_stride ?out_stride))
              (union ?e ?me)
              (set (dtype ?me) ?dt))
+            :name "metal MetalSum"
         )"#
         .to_string()]
     }
@@ -690,8 +813,8 @@ impl EgglogOp for MetalSumReduce {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr;
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -710,10 +833,10 @@ impl MetalKernelOp for MetalSumReduce {
         let in_index = flatten_mul_strides(&self.out_shape, &self.in_stride);
         let out_index = flatten_mul_strides(&self.out_shape, &self.out_stride);
 
-        let in_idx = in_index.to_kernel().replace("const_z", "gid");
-        let out_idx = out_index.to_kernel().replace("const_z", "gid");
-        let iters = self.iters.to_kernel();
-        let iter_stride = self.iter_stride.to_kernel();
+        let in_idx = lower_expression_for_metal(&in_index, "gid");
+        let out_idx = lower_expression_for_metal(&out_index, "gid");
+        let iters = lower_dynamic_consts(self.iters.to_kernel());
+        let iter_stride = lower_dynamic_consts(self.iter_stride.to_kernel());
 
         let source = format!(
             r#"
@@ -726,6 +849,7 @@ impl MetalKernelOp for MetalSumReduce {
                 device float *out [[buffer(0)]],
                 const device float *in [[buffer(1)]],
                 device uint &n_outputs [[buffer(2)]],
+                constant int *dyn [[buffer({dyn_buffer_index})]],
                 uint gid [[threadgroup_position_in_grid]],
                 uint tid [[thread_index_in_threadgroup]],
                 uint simd_lane [[thread_index_in_simdgroup]],
@@ -765,7 +889,8 @@ impl MetalKernelOp for MetalSumReduce {
                     }}
                 }}
             }}
-            "#
+            "#,
+            dyn_buffer_index = DYN_BUFFER_INDEX
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -802,6 +927,9 @@ impl MetalKernelOp for MetalSumReduce {
         let thread_groups = MTLSize::new(n_outputs as u64, 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
+
+    // Performance metrics for reduce ops
+    impl_reduce_metrics!(self, dyn_map);
 }
 
 #[derive(Debug, Default, Clone)]
@@ -828,6 +956,7 @@ impl EgglogOp for MetalMaxReduce {
             ((let ?me (MetalMax ?out_shape ?iters ?inp ?in_stride ?iter_stride ?out_stride))
              (union ?e ?me)
              (set (dtype ?me) ?dt))
+            :name "metal MetalMax"
         )"#
         .to_string()]
     }
@@ -843,8 +972,8 @@ impl EgglogOp for MetalMaxReduce {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr;
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -863,10 +992,10 @@ impl MetalKernelOp for MetalMaxReduce {
         let in_index = flatten_mul_strides(&self.out_shape, &self.in_stride);
         let out_index = flatten_mul_strides(&self.out_shape, &self.out_stride);
 
-        let in_idx = in_index.to_kernel().replace("const_z", "gid");
-        let out_idx = out_index.to_kernel().replace("const_z", "gid");
-        let iters = self.iters.to_kernel();
-        let iter_stride = self.iter_stride.to_kernel();
+        let in_idx = lower_expression_for_metal(&in_index, "gid");
+        let out_idx = lower_expression_for_metal(&out_index, "gid");
+        let iters = lower_dynamic_consts(self.iters.to_kernel());
+        let iter_stride = lower_dynamic_consts(self.iter_stride.to_kernel());
 
         let source = format!(
             r#"
@@ -880,6 +1009,7 @@ impl MetalKernelOp for MetalMaxReduce {
                 device float *out [[buffer(0)]],
                 const device float *in [[buffer(1)]],
                 device uint &n_outputs [[buffer(2)]],
+                constant int *dyn [[buffer({dyn_buffer_index})]],
                 uint gid [[threadgroup_position_in_grid]],
                 uint tid [[thread_index_in_threadgroup]],
                 uint simd_lane [[thread_index_in_simdgroup]],
@@ -919,7 +1049,8 @@ impl MetalKernelOp for MetalMaxReduce {
                     }}
                 }}
             }}
-            "#
+            "#,
+            dyn_buffer_index = DYN_BUFFER_INDEX
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -955,6 +1086,9 @@ impl MetalKernelOp for MetalMaxReduce {
         let thread_groups = MTLSize::new(n_outputs as u64, 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
     }
+
+    // Performance metrics for reduce ops
+    impl_reduce_metrics!(self, dyn_map);
 }
 
 // ============================================================================
@@ -978,6 +1112,7 @@ impl EgglogOp for MetalConstant {
             ((let ?me (MetalConstant ?f))
              (union ?e ?me)
              (set (dtype ?me) (F32)))
+            :name "metal MetalConstant"
         )"#
         .to_string()]
     }
@@ -1008,6 +1143,13 @@ impl EgglogOp for MetalConstant {
 
 impl MetalKernelOp for MetalConstant {
     fn compile(&self, device: &Device) -> ComputePipelineState {
+        // Ensure value is formatted with decimal point for Metal (e.g., -1.0f not -1f)
+        let value_str = if self.value.fract() == 0.0 {
+            format!("{:.1}", self.value)
+        } else {
+            format!("{}", self.value)
+        };
+
         let source = format!(
             r#"
             #include <metal_stdlib>
@@ -1015,6 +1157,7 @@ impl MetalKernelOp for MetalConstant {
 
             kernel void mkernel(
                 device float *out [[buffer(0)]],
+                constant int *dyn [[buffer({dyn_buffer_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx == 0) {{
@@ -1022,7 +1165,8 @@ impl MetalKernelOp for MetalConstant {
                 }}
             }}
             "#,
-            value = self.value
+            value = value_str,
+            dyn_buffer_index = DYN_BUFFER_INDEX
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -1066,6 +1210,7 @@ impl EgglogOp for MetalIota {
             ((let ?me (MetalIota ?expr ?range))
              (union ?e ?me)
              (set (dtype ?me) (Int)))
+            :name "metal MetalIota"
         )"#
         .to_string()]
     }
@@ -1081,7 +1226,7 @@ impl EgglogOp for MetalIota {
         _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr;
+        use luminal::egglog_utils::extract_expr;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 expr: extract_expr(egraph, children[0], expr_cache).unwrap(),
@@ -1095,7 +1240,7 @@ impl EgglogOp for MetalIota {
 impl MetalKernelOp for MetalIota {
     fn compile(&self, device: &Device) -> ComputePipelineState {
         // Generate the expression as Metal code
-        let expr_code = self.expr.to_kernel().replace("const_z", "idx");
+        let expr_code = lower_expression_for_metal(&self.expr, "idx");
 
         let source = format!(
             r#"
@@ -1105,6 +1250,7 @@ impl MetalKernelOp for MetalIota {
             kernel void mkernel(
                 device int *out [[buffer(0)]],
                 device uint &n_elements [[buffer(1)]],
+                constant int *dyn [[buffer({dyn_buffer_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
@@ -1112,7 +1258,8 @@ impl MetalKernelOp for MetalIota {
                 }}
             }}
             "#,
-            expr = expr_code
+            expr = expr_code,
+            dyn_buffer_index = DYN_BUFFER_INDEX
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -1170,6 +1317,7 @@ impl EgglogOp for MetalGather {
              (let ?me (MetalGather ?out_shape ?indexes ?index_strides ?data ?data_strides ?out_strides))
              (union ?a ?me)
              (set (dtype ?me) ?dty))
+            :name "metal MetalGather"
         )"#
         .to_string()]
     }
@@ -1185,7 +1333,7 @@ impl EgglogOp for MetalGather {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        use luminal::graph::extract_expr_list;
+        use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
                 out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
@@ -1202,15 +1350,18 @@ impl EgglogOp for MetalGather {
 
 impl MetalKernelOp for MetalGather {
     fn compile(&self, device: &Device) -> ComputePipelineState {
-        let out_idx = flatten_mul_strides(&self.out_shape, &self.out_stride)
-            .to_kernel()
-            .replace("const_z", "idx");
-        let index_idx = flatten_mul_strides(&self.out_shape, &self.index_stride)
-            .to_kernel()
-            .replace("const_z", "idx");
-        let data_idx = flatten_mul_strides(&self.out_shape, &self.data_stride)
-            .to_kernel()
-            .replace("const_z", "gathered_index");
+        let out_idx = lower_expression_for_metal(
+            &flatten_mul_strides(&self.out_shape, &self.out_stride),
+            "idx",
+        );
+        let index_idx = lower_expression_for_metal(
+            &flatten_mul_strides(&self.out_shape, &self.index_stride),
+            "idx",
+        );
+        let data_idx = lower_expression_for_metal(
+            &flatten_mul_strides(&self.out_shape, &self.data_stride),
+            "gathered_index",
+        );
 
         let source = format!(
             r#"
@@ -1222,6 +1373,7 @@ impl MetalKernelOp for MetalGather {
                 const device int *indexes [[buffer(1)]],
                 const device float *data [[buffer(2)]],
                 device uint &n_elements [[buffer(3)]],
+                constant int *dyn [[buffer({dyn_buffer_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
@@ -1229,7 +1381,8 @@ impl MetalKernelOp for MetalGather {
                     out[{out_idx}] = data[{data_idx}];
                 }}
             }}
-            "#
+            "#,
+            dyn_buffer_index = DYN_BUFFER_INDEX
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -1265,5 +1418,147 @@ impl MetalKernelOp for MetalGather {
         let thread_group_size = MTLSize::new(256, 1, 1);
         let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
+    }
+
+    // Gather metrics: read indices + read gathered data + write output
+    fn bytes_loaded(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let n = self.output_size().exec(dyn_map).unwrap_or(0);
+        // Read n indices (i32 = 4 bytes) + n data elements (f32 = 4 bytes)
+        n * std::mem::size_of::<i32>() + n * std::mem::size_of::<f32>()
+    }
+
+    fn bytes_stored(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let n = self.output_size().exec(dyn_map).unwrap_or(0);
+        // Write n output elements (f32)
+        n * std::mem::size_of::<f32>()
+    }
+
+    fn flops(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {
+        // Gather is memory-bound, no significant FLOPs
+        0
+    }
+}
+
+// ============================================================================
+// Type Conversion Operations
+// ============================================================================
+
+// MetalCast: convert between data types (Int <-> F32, F16, etc.)
+// This is a pure element-wise operation with no data movement or reshaping.
+#[derive(Debug, Default, Clone)]
+pub struct MetalCast {
+    size: Expression,
+    target_dtype: DType,
+}
+
+impl EgglogOp for MetalCast {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        ("MetalCast".to_string(), vec![Input, Expr, Dty])
+    }
+
+    fn rewrites(&self) -> Vec<String> {
+        vec![r#"(rule
+            ((= ?e (Cast ?inp ?size ?dty)))
+            ((let ?me (MetalCast ?inp ?size ?dty))
+             (union ?e ?me)
+             (set (dtype ?me) ?dty))
+            :name "metal MetalCast"
+        )"#
+        .to_string()]
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        _expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        use luminal::egglog_utils::{extract_dtype, extract_expr};
+        (
+            LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
+                size: extract_expr(egraph, children[1], _expr_cache).unwrap(),
+                target_dtype: extract_dtype(egraph, children[2]),
+            })),
+            vec![children[0]],
+        )
+    }
+}
+
+impl MetalKernelOp for MetalCast {
+    fn compile(&self, device: &Device) -> ComputePipelineState {
+        let _ = self.target_dtype;
+        // MetalRuntime currently allocates all buffers as fp32, so Cast is a no-op copy at runtime.
+        // The dtype lives in egglog for correctness / lowering checks, but is not yet reflected in
+        // Metal buffer allocation or kernel signatures.
+        let source = format!(
+            r#"
+            #include <metal_stdlib>
+            using namespace metal;
+
+            kernel void mkernel(
+                device float *inp [[buffer(0)]],
+                device float *out [[buffer(1)]],
+                device uint &n_elements [[buffer(2)]],
+                constant int *dyn [[buffer({dyn_buffer_index})]],
+                uint idx [[thread_position_in_grid]]
+            ) {{
+                if (idx < n_elements) {{
+                    out[idx] = inp[idx];
+                }}
+            }}
+            "#,
+            dyn_buffer_index = DYN_BUFFER_INDEX
+        );
+        compile_shader(device, &source, "mkernel")
+    }
+
+    fn output_size(&self) -> Expression {
+        self.size
+    }
+
+    fn encode(
+        &self,
+        encoder: &ComputeCommandEncoderRef,
+        pipeline: &ComputePipelineState,
+        inputs: &[&Buffer],
+        output: &Buffer,
+        dyn_map: &FxHashMap<char, usize>,
+    ) {
+        let n_elements = self.size.exec(dyn_map).unwrap_or(0) as u32;
+
+        encoder.set_compute_pipeline_state(pipeline);
+        encoder.set_buffer(0, Some(inputs[0]), 0);
+        encoder.set_buffer(1, Some(output), 0);
+        encoder.set_bytes(
+            2,
+            std::mem::size_of::<u32>() as u64,
+            &n_elements as *const u32 as *const _,
+        );
+
+        let thread_group_size = MTLSize::new(256, 1, 1);
+        let thread_groups = MTLSize::new((n_elements as u64).div_ceil(256), 1, 1);
+        encoder.dispatch_thread_groups(thread_groups, thread_group_size);
+    }
+
+    // Cast is memory-bound: 1 read, 1 write, minimal compute
+    fn bytes_loaded(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let n = self.size.exec(dyn_map).unwrap_or(0);
+        // TODO: input dtype is not encoded; treat as 4B for now (matches current MetalRuntime IO path).
+        n * std::mem::size_of::<f32>()
+    }
+
+    fn bytes_stored(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let n = self.size.exec(dyn_map).unwrap_or(0);
+        // TODO: output dtype sizing should be wired through MetalRuntime allocation.
+        n * std::mem::size_of::<f32>()
+    }
+
+    fn flops(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {
+        0 // Type conversion has negligible compute cost
     }
 }

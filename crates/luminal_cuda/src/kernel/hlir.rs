@@ -7,7 +7,7 @@ use cudarc::{
 };
 use itertools::Itertools;
 use luminal::{
-    graph::{extract_dtype, extract_expr, extract_expr_list},
+    egglog_utils::{extract_dtype, extract_expr, extract_expr_list},
     op::OpParam::*,
     op::*,
     prelude::*,
@@ -2064,9 +2064,9 @@ impl KernelOp for KernelLessThan {
             "{includes}
 {dyn_defines}
 extern \"C\" {{
-    __global__ void less_than_k({dtype} *C, const {dtype} *A, const {b_dtype} *B{dyn_dims_param}) {{
+    __global__ void less_than_k(unsigned char *C, const {dtype} *A, const {b_dtype} *B{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-        C[{}] = A[{}] < ({dtype})B[{}] ? 1.0f : 0.0f;
+        C[{}] = A[{}] < ({dtype})B[{}] ? 1 : 0;
     }}
 }}",
             flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),

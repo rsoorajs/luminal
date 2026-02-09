@@ -2,7 +2,7 @@ use std::{fmt::Debug, sync::Arc};
 
 use cudarc::driver::CudaStream;
 use luminal::{
-    graph::{extract_expr, extract_expr_list},
+    egglog_utils::{extract_expr, extract_expr_list},
     op::OpParam::*,
     op::*,
     prelude::*,
