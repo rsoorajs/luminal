@@ -346,6 +346,18 @@ impl ToCudaInput for Vec<f32> {
     }
 }
 
+impl ToCudaInput for &[u8] {
+    fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        CudaInput::Buffer(stream.clone_htod(self).unwrap())
+    }
+}
+
+impl ToCudaInput for Vec<u8> {
+    fn to_cuda_input(self, stream: &Arc<CudaStream>) -> CudaInput {
+        CudaInput::Buffer(stream.clone_htod(&self).unwrap())
+    }
+}
+
 impl Runtime for CudaRuntime {
     type Ops = (
         crate::logical::Ops,
