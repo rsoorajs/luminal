@@ -740,6 +740,7 @@ pub fn extract_dtype<'a>(egraph: &'a SerializedEGraph, node: &'a NodeId) -> DTyp
         "Int" => DType::Int,
         "Bool" => DType::Bool,
         "NvFp4" => DType::NvFp4,
+        "Mxfp4" => DType::Mxfp4,
         other => panic!("unknown dtype {other}"),
     }
 }

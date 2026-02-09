@@ -42,6 +42,7 @@
         (Int)
         (Bool)
         (NvFp4)
+        (Mxfp4)
     )
 )
 

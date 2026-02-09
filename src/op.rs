@@ -175,6 +175,10 @@ pub enum DType {
     /// Each element is 4 bits. Every 16 elements share an FP8 (E4M3) scale factor.
     /// Storage: n/2 bytes (packed FP4) + n/16 bytes (block scales) = 9n/16 bytes per n elements.
     NvFp4,
+    /// OCP MXFP4 (E2M1) with E8M0 block-scaled quantization.
+    /// Each element is 4 bits. Every 32 elements share an E8M0 (8-bit exponent) scale factor.
+    /// Storage: n/2 bytes (packed FP4) + n/32 bytes (block scales) = 17n/32 bytes per n elements.
+    Mxfp4,
 }
 
 impl Display for DType {
@@ -192,6 +196,7 @@ impl DType {
             DType::Bf16 | DType::F16 => 2,
             DType::Bool => 1,
             DType::NvFp4 => panic!("NvFp4 has no fixed per-element size; use size_of_n(n) instead"),
+            DType::Mxfp4 => panic!("Mxfp4 has no fixed per-element size; use size_of_n(n) instead"),
         }
     }
 
@@ -210,6 +215,15 @@ impl DType {
                 // n/2 bytes packed FP4 data (2 elements per byte)
                 // + n/16 bytes FP8 block scales (1 scale per 16 elements)
                 n / 2 + n / 16
+            }
+            DType::Mxfp4 => {
+                assert!(
+                    n % 32 == 0,
+                    "Mxfp4 requires element count divisible by 32 (block size), got {n}"
+                );
+                // n/2 bytes packed FP4 data (2 elements per byte)
+                // + n/32 bytes E8M0 block scales (1 scale per 32 elements)
+                n / 2 + n / 32
             }
         }
     }

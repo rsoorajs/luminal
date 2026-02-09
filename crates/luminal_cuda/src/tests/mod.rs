@@ -1,4 +1,5 @@
 mod misc;
+mod mxfp4;
 mod nvfp4;
 mod ops;
 
