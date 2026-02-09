@@ -1,15 +1,19 @@
 use luminal::{
     graph::Graph,
-    op::{CustomOp, LLIROp},
-    prelude::GraphTensor,
+    op::{CustomOp, EgglogOp, LLIROp, OpParam},
+    prelude::{FxHashMap, GraphTensor, NodeIndex},
     shape::{flatten_mul_strides, Expression, ToShape},
 };
 use luminal_cuda::{
     block::{cstruct::CStruct, BlockOp},
-    cudarc::driver::{CudaSlice, CudaStream, DevicePtr},
+    cudarc::{
+        driver::{CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg},
+        nvrtc::compile_ptx,
+    },
+    host::HostOp,
 };
 use luminal_nn::LayerNorm;
-use std::{f64::consts::PI, fmt::Debug, mem::size_of, sync::Arc};
+use std::{f64::consts::PI, fmt::Debug, mem::size_of, sync::Arc, sync::OnceLock};
 
 // GPT-OSS 120B hyperparams
 pub const LAYERS: usize = 36;
@@ -173,6 +177,7 @@ impl GptOss {
         expert_weights: &ExpertWeightBuffers,
         scratchpad: &MoeScratchpad,
         sink_buffers: &SinkBuffers,
+        sm_count: u32,
     ) -> GraphTensor {
         let seq = token_ids.dims1();
         let mut x = self.embedding.gather(
@@ -191,6 +196,7 @@ impl GptOss {
                     scratchpad,
                     &sink_buffers.layers[l],
                     l,
+                    sm_count,
                 )
                 .graph_break();
         }
@@ -224,6 +230,7 @@ impl GptOssLayer {
         scratchpad: &MoeScratchpad,
         sinks: &CudaSlice<u8>,
         layer_idx: usize,
+        sm_count: u32,
     ) -> GraphTensor {
         let x_attn = self.input_layernorm.forward(x);
         let q = x_attn.matmul(self.q_proj_w.t()) + self.q_proj_b.expand_lhs(&x_attn.dims()[..x_attn.dims().len() - 1]);
@@ -251,7 +258,7 @@ impl GptOssLayer {
         let router_logits = x_ff.matmul(self.router_w.t()) + self.router_b.expand_lhs(&x_ff.dims()[..x_ff.dims().len() - 1]);
 
         let moe_out = x.graph().custom_op(
-            MoeExperts::new(expert_weights, scratchpad, layer_idx),
+            MoeExperts::new(expert_weights, scratchpad, layer_idx, sm_count),
             (x_ff, router_logits),
             x_ff.shape,
             x_ff.dtype,
@@ -749,27 +756,231 @@ impl BlockOp for GptOssAttention {
 }
 
 // ---------------------------------------------------------------------------
-// MoeExperts: Top-k routing + MXFP4 expert computation
+// MoeExperts: Top-k routing + MXFP4 expert computation (HostOp — multi-SM)
 // ---------------------------------------------------------------------------
+
+/// Cached compiled MoE kernels (compiled once, reused across layers and tokens)
+static MOE_KERNELS: OnceLock<(Arc<CudaModule>, CudaFunction, CudaFunction)> = OnceLock::new();
+
+fn moe_kernel_source() -> String {
+    format!(
+        r#"
+#define HIDDEN {hidden}
+#define INTERMEDIATE {intermediate}
+#define FUSED_INTERMEDIATE {fused_intermediate}
+#define NUM_EXPERTS {num_experts}
+#define TOP_K {top_k}
+#define COL_STRIDE_GU {col_stride_gu}
+#define COL_STRIDE_D {col_stride_d}
+#define SWIGLU_LIMIT {swiglu_limit:.1}f
+
+__device__ __forceinline__ float e8m0_decode(unsigned char s) {{
+    if (s == 0xFF) return 0.0f;
+    return ldexpf(1.0f, (int)s - 127);
+}}
+
+__device__ void topk_select(const float* router, int* top_indices, float* top_weights, float* shared_buf) {{
+    int tid = threadIdx.x;
+    for (int i = tid; i < NUM_EXPERTS; i += blockDim.x)
+        shared_buf[i] = router[i];
+    __syncthreads();
+    if (tid == 0) {{
+        for (int ki = 0; ki < TOP_K; ki++) {{
+            float best_val = -1e30f;
+            int best_idx = 0;
+            for (int e = 0; e < NUM_EXPERTS; e++) {{
+                if (shared_buf[e] > best_val) {{ best_val = shared_buf[e]; best_idx = e; }}
+            }}
+            top_indices[ki] = best_idx;
+            top_weights[ki] = best_val;
+            shared_buf[best_idx] = -1e30f;
+        }}
+        float max_val = top_weights[0];
+        for (int ki = 1; ki < TOP_K; ki++) max_val = fmaxf(max_val, top_weights[ki]);
+        float sum_exp = 0.0f;
+        for (int ki = 0; ki < TOP_K; ki++) {{
+            top_weights[ki] = __expf(top_weights[ki] - max_val);
+            sum_exp += top_weights[ki];
+        }}
+        float inv = 1.0f / sum_exp;
+        for (int ki = 0; ki < TOP_K; ki++) top_weights[ki] *= inv;
+    }}
+    __syncthreads();
+}}
+
+// Kernel 1: Gate+Up matmul fused with SwiGLU, distributed across all blocks
+extern "C" __global__ void moe_gate_up_swiglu(
+    float* __restrict__ swiglu_out,
+    const float* __restrict__ x,
+    const float* __restrict__ router,
+    const unsigned char* __restrict__ gate_up_weights,
+    const float* __restrict__ gate_up_bias
+) {{
+    __shared__ float fp4_lut[16];
+    __shared__ float shared_buf[NUM_EXPERTS];
+    __shared__ int top_indices[TOP_K];
+    __shared__ float top_weights[TOP_K];
+
+    int tid = threadIdx.x;
+    if (tid < 16) {{
+        const float table[16] = {{0.0f,0.5f,1.0f,1.5f,2.0f,3.0f,4.0f,6.0f,-0.0f,-0.5f,-1.0f,-1.5f,-2.0f,-3.0f,-4.0f,-6.0f}};
+        fp4_lut[tid] = table[tid];
+    }}
+    __syncthreads();
+    topk_select(router, top_indices, top_weights, shared_buf);
+
+    int lane = tid & 31;
+    int warp_id = tid >> 5;
+    int num_warps = blockDim.x >> 5;
+    int num_blocks = gridDim.x;
+    int bid = blockIdx.x;
+
+    // Each block processes its portion of TOP_K * INTERMEDIATE output positions
+    // For each position: compute gate + up dot products, apply SwiGLU
+    int total = TOP_K * INTERMEDIATE;
+    int my_start = (bid * total) / num_blocks;
+    int my_end = ((bid + 1) * total) / num_blocks;
+
+    for (int pos = my_start + warp_id; pos < my_end; pos += num_warps) {{
+        int expert_local = pos / INTERMEDIATE;
+        int pos_in_expert = pos % INTERMEDIATE;
+        int expert_idx = top_indices[expert_local];
+
+        // Gate column (even)
+        int gate_col = 2 * pos_in_expert;
+        const unsigned char* gd = gate_up_weights
+            + (size_t)expert_idx * FUSED_INTERMEDIATE * COL_STRIDE_GU
+            + (size_t)gate_col * COL_STRIDE_GU;
+        float gate_acc = 0.0f;
+        for (int bs = lane * 32; bs < HIDDEN; bs += 32 * 32) {{
+            float sc = e8m0_decode(gd[HIDDEN/2 + bs/32]);
+            int by = bs / 2;
+            for (int bi = 0; bi < 16; bi++) {{
+                int k0 = bs + bi * 2;
+                if (k0 + 1 >= HIDDEN) break;
+                unsigned char pb = gd[by + bi];
+                gate_acc += x[k0] * (fp4_lut[pb & 0xF] * sc) + x[k0+1] * (fp4_lut[pb >> 4] * sc);
+            }}
+        }}
+        for (int o = 16; o > 0; o >>= 1) gate_acc += __shfl_down_sync(0xffffffff, gate_acc, o);
+
+        // Up column (odd)
+        const unsigned char* ud = gd + COL_STRIDE_GU;
+        float up_acc = 0.0f;
+        for (int bs = lane * 32; bs < HIDDEN; bs += 32 * 32) {{
+            float sc = e8m0_decode(ud[HIDDEN/2 + bs/32]);
+            int by = bs / 2;
+            for (int bi = 0; bi < 16; bi++) {{
+                int k0 = bs + bi * 2;
+                if (k0 + 1 >= HIDDEN) break;
+                unsigned char pb = ud[by + bi];
+                up_acc += x[k0] * (fp4_lut[pb & 0xF] * sc) + x[k0+1] * (fp4_lut[pb >> 4] * sc);
+            }}
+        }}
+        for (int o = 16; o > 0; o >>= 1) up_acc += __shfl_down_sync(0xffffffff, up_acc, o);
+
+        if (lane == 0) {{
+            gate_acc += gate_up_bias[expert_idx * FUSED_INTERMEDIATE + gate_col];
+            up_acc += gate_up_bias[expert_idx * FUSED_INTERMEDIATE + gate_col + 1];
+            gate_acc = fminf(gate_acc, SWIGLU_LIMIT);
+            up_acc = fmaxf(fminf(up_acc, SWIGLU_LIMIT), -SWIGLU_LIMIT);
+            float glu = gate_acc * (1.0f / (1.0f + __expf(-gate_acc * 1.702f)));
+            swiglu_out[pos] = (up_acc + 1.0f) * glu;
+        }}
+    }}
+}}
+
+// Kernel 2: Down matmul + weighted sum, distributed across all blocks
+extern "C" __global__ void moe_down_weighted_sum(
+    float* __restrict__ output,
+    const float* __restrict__ swiglu_in,
+    const float* __restrict__ router,
+    const unsigned char* __restrict__ down_weights,
+    const float* __restrict__ down_bias
+) {{
+    __shared__ float fp4_lut[16];
+    __shared__ float shared_buf[NUM_EXPERTS];
+    __shared__ int top_indices[TOP_K];
+    __shared__ float top_weights[TOP_K];
+
+    int tid = threadIdx.x;
+    if (tid < 16) {{
+        const float table[16] = {{0.0f,0.5f,1.0f,1.5f,2.0f,3.0f,4.0f,6.0f,-0.0f,-0.5f,-1.0f,-1.5f,-2.0f,-3.0f,-4.0f,-6.0f}};
+        fp4_lut[tid] = table[tid];
+    }}
+    __syncthreads();
+    topk_select(router, top_indices, top_weights, shared_buf);
+
+    int lane = tid & 31;
+    int warp_id = tid >> 5;
+    int num_warps = blockDim.x >> 5;
+    int num_blocks = gridDim.x;
+    int bid = blockIdx.x;
+
+    // Each block processes its portion of HIDDEN output columns
+    int my_start = (bid * HIDDEN) / num_blocks;
+    int my_end = ((bid + 1) * HIDDEN) / num_blocks;
+
+    for (int col = my_start + warp_id; col < my_end; col += num_warps) {{
+        float out_val = 0.0f;
+        for (int el = 0; el < TOP_K; el++) {{
+            int expert_idx = top_indices[el];
+            const unsigned char* cd = down_weights
+                + (size_t)expert_idx * HIDDEN * COL_STRIDE_D
+                + (size_t)col * COL_STRIDE_D;
+            const float* ei = swiglu_in + el * INTERMEDIATE;
+
+            float acc = 0.0f;
+            for (int bs = lane * 32; bs < INTERMEDIATE; bs += 32 * 32) {{
+                float sc = e8m0_decode(cd[INTERMEDIATE/2 + bs/32]);
+                int by = bs / 2;
+                for (int bi = 0; bi < 16; bi++) {{
+                    int k0 = bs + bi * 2;
+                    if (k0 + 1 >= INTERMEDIATE) break;
+                    unsigned char pb = cd[by + bi];
+                    acc += ei[k0] * (fp4_lut[pb & 0xF] * sc) + ei[k0+1] * (fp4_lut[pb >> 4] * sc);
+                }}
+            }}
+            for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffff, acc, o);
+
+            if (lane == 0) {{
+                acc += down_bias[expert_idx * HIDDEN + col];
+                out_val += top_weights[el] * acc;
+            }}
+        }}
+        if (lane == 0) output[col] = out_val;
+    }}
+}}
+"#,
+        hidden = HIDDEN,
+        intermediate = INTERMEDIATE,
+        fused_intermediate = FUSED_INTERMEDIATE,
+        num_experts = NUM_EXPERTS,
+        top_k = EXPERTS_PER_TOKEN,
+        col_stride_gu = MXFP4_COL_STRIDE_GATE_UP,
+        col_stride_d = MXFP4_COL_STRIDE_DOWN,
+        swiglu_limit = SWIGLU_LIMIT,
+    )
+}
 
 #[derive(Debug, Clone)]
 pub struct MoeExperts {
-    range: Vec<Expression>,
     gate_up_ptr: u64,
     down_ptr: u64,
     gate_up_bias_ptr: u64,
     down_bias_ptr: u64,
     intermediate_ptr: u64,
+    sm_count: u32,
 }
 
 impl MoeExperts {
     fn new(
         expert_weights: &ExpertWeightBuffers,
-        _scratchpad: &MoeScratchpad,
+        scratchpad: &MoeScratchpad,
         layer_idx: usize,
+        sm_count: u32,
     ) -> Self {
         Self {
-            range: vec![1.into()], // Single block — no inter-SM sync needed
             gate_up_ptr: expert_weights.gate_up[layer_idx]
                 .device_ptr(expert_weights.gate_up[layer_idx].stream())
                 .0,
@@ -782,237 +993,93 @@ impl MoeExperts {
             down_bias_ptr: expert_weights.down_bias[layer_idx]
                 .device_ptr(expert_weights.down_bias[layer_idx].stream())
                 .0,
-            intermediate_ptr: _scratchpad
+            intermediate_ptr: scratchpad
                 .intermediate
-                .device_ptr(_scratchpad.intermediate.stream())
+                .device_ptr(scratchpad.intermediate.stream())
                 .0,
+            sm_count,
         }
     }
+
+    fn ensure_kernels(stream: &Arc<CudaStream>) -> &'static (Arc<CudaModule>, CudaFunction, CudaFunction) {
+        MOE_KERNELS.get_or_init(|| {
+            let src = moe_kernel_source();
+            let ptx = compile_ptx(src).expect("Failed to compile MoE kernels");
+            let module = stream.context().load_module(ptx).expect("Failed to load MoE module");
+            let gate_up_fn = module.load_function("moe_gate_up_swiglu").unwrap();
+            let down_fn = module.load_function("moe_down_weighted_sum").unwrap();
+            (module, gate_up_fn, down_fn)
+        })
+    }
+}
+
+impl Default for MoeExperts {
+    fn default() -> Self {
+        Self { gate_up_ptr: 0, down_ptr: 0, gate_up_bias_ptr: 0, down_bias_ptr: 0, intermediate_ptr: 0, sm_count: 1 }
+    }
+}
+
+impl EgglogOp for MoeExperts {
+    fn term(&self) -> (String, Vec<OpParam>) {
+        ("MoeExperts".to_string(), vec![OpParam::Input, OpParam::Input])
+    }
+    fn rewrites(&self) -> Vec<String> { vec![] }
+    fn cleanup(&self) -> bool { false }
 }
 
 impl CustomOp for MoeExperts {
     fn to_llir_op(&self) -> LLIROp {
-        LLIROp::new::<dyn BlockOp>(Box::new(self.clone()))
+        LLIROp::new::<dyn HostOp>(Box::new(self.clone()) as Box<dyn HostOp>)
     }
 }
 
-impl BlockOp for MoeExperts {
-    fn op_name(&self) -> &'static str {
-        "MoeExperts"
-    }
+impl HostOp for MoeExperts {
+    fn execute(
+        &self,
+        stream: &Arc<CudaStream>,
+        self_node: NodeIndex,
+        inputs: &[NodeIndex],
+        buffers: &FxHashMap<NodeIndex, &CudaSlice<u8>>,
+        _dyn_map: &FxHashMap<char, usize>,
+    ) -> anyhow::Result<()> {
+        let (_, gate_up_fn, down_fn) = Self::ensure_kernels(stream);
 
-    fn launch_range(&self) -> Vec<Expression> {
-        self.range.clone()
+        let output_buf = buffers[&self_node];
+        let x_buf = buffers[&inputs[0]];
+        let router_buf = buffers[&inputs[1]];
+
+        let (out_ptr, _g0) = output_buf.device_ptr(stream);
+        let (x_ptr, _g1) = x_buf.device_ptr(stream);
+        let (router_ptr, _g2) = router_buf.device_ptr(stream);
+
+        let cfg = LaunchConfig {
+            grid_dim: (self.sm_count, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Kernel 1: Gate+Up + SwiGLU → writes to intermediate buffer
+        let mut launch1 = stream.launch_builder(gate_up_fn);
+        launch1.arg(&self.intermediate_ptr);
+        launch1.arg(&x_ptr);
+        launch1.arg(&router_ptr);
+        launch1.arg(&self.gate_up_ptr);
+        launch1.arg(&self.gate_up_bias_ptr);
+        unsafe { launch1.launch(cfg) }?;
+
+        // Kernel 2: Down matmul + weighted sum → writes to output
+        let mut launch2 = stream.launch_builder(down_fn);
+        launch2.arg(&out_ptr);
+        launch2.arg(&self.intermediate_ptr);
+        launch2.arg(&router_ptr);
+        launch2.arg(&self.down_ptr);
+        launch2.arg(&self.down_bias_ptr);
+        unsafe { launch2.launch(cfg) }?;
+
+        Ok(())
     }
 
     fn output_size(&self) -> Expression {
         HIDDEN.into()
-    }
-
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
-        vec![false]
-    }
-
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
-        // 2 inputs: x, router_logits
-        vec![vec![false], vec![false]]
-    }
-
-    fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
-        payload
-            .ptr_const_f32("gate_up_weights", self.gate_up_ptr as *const f32)
-            .ptr_const_f32("down_weights", self.down_ptr as *const f32)
-            .ptr_const_f32("gate_up_bias", self.gate_up_bias_ptr as *const f32)
-            .ptr_const_f32("down_bias", self.down_bias_ptr as *const f32)
-            .ptr_mut_f32("intermediate", self.intermediate_ptr as *mut f32)
-    }
-
-    fn cuda_function(&self) -> String {
-        format!(
-            r#"
-        // MoeExperts: Single-block implementation
-        // Top-k routing + MXFP4 expert gate_up → SwiGLU → down
-        // Inputs: source_ptrs[0] = x [1, HIDDEN], source_ptrs[1] = router_logits [1, NUM_EXPERTS]
-
-        __shared__ float fp4_lut[16];
-        __shared__ float shared_buf[{hidden_or_experts}]; // max(HIDDEN, NUM_EXPERTS)
-        __shared__ int top_indices[{top_k}];
-        __shared__ float top_weights[{top_k}];
-
-        if (t < 16) {{
-            const float table[16] = {{
-                0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
-                -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
-            }};
-            fp4_lut[t] = table[t];
-        }}
-        __syncthreads();
-
-        const float* x = source_ptrs[0];
-        const float* router_logits = source_ptrs[1];
-        float* output = out_ptr;
-
-        const unsigned char* gate_up_weights = (const unsigned char*)payload.gate_up_weights;
-        const unsigned char* down_weights = (const unsigned char*)payload.down_weights;
-        const float* gate_up_bias = (const float*)payload.gate_up_bias;
-        const float* down_bias = (const float*)payload.down_bias;
-        float* intermediate = payload.intermediate;
-
-        constexpr int HIDDEN = {hidden};
-        constexpr int INTERMEDIATE = {intermediate};
-        constexpr int FUSED_INTERMEDIATE = {fused_intermediate};
-        constexpr int NUM_EXPERTS = {num_experts};
-        constexpr int TOP_K = {top_k};
-        constexpr int MXFP4_COL_STRIDE_GU = {col_stride_gu};
-        constexpr int MXFP4_COL_STRIDE_D = {col_stride_d};
-
-        const int threads = blockDim.x;
-        const int lane = t & 31;
-        const int warp_id = t >> 5;
-        const int num_warps = threads >> 5;
-
-        auto e8m0_decode = [](unsigned char s) -> float {{
-            if (s == 0xFF) return 0.0f;
-            return ldexpf(1.0f, (int)s - 127);
-        }};
-
-        // ======== PHASE 0: Top-K Selection ========
-        for (int i = t; i < NUM_EXPERTS; i += threads) {{
-            shared_buf[i] = router_logits[i];
-        }}
-        __syncthreads();
-
-        if (t == 0) {{
-            for (int ki = 0; ki < TOP_K; ki++) {{
-                float best_val = -1e30f;
-                int best_idx = 0;
-                for (int e = 0; e < NUM_EXPERTS; e++) {{
-                    if (shared_buf[e] > best_val) {{
-                        best_val = shared_buf[e];
-                        best_idx = e;
-                    }}
-                }}
-                top_indices[ki] = best_idx;
-                top_weights[ki] = best_val;
-                shared_buf[best_idx] = -1e30f;
-            }}
-            // Softmax over top-K
-            float max_val = top_weights[0];
-            for (int ki = 1; ki < TOP_K; ki++) max_val = fmaxf(max_val, top_weights[ki]);
-            float sum_exp = 0.0f;
-            for (int ki = 0; ki < TOP_K; ki++) {{
-                top_weights[ki] = __expf(top_weights[ki] - max_val);
-                sum_exp += top_weights[ki];
-            }}
-            float inv_sum = 1.0f / sum_exp;
-            for (int ki = 0; ki < TOP_K; ki++) top_weights[ki] *= inv_sum;
-        }}
-        __syncthreads();
-
-        // ======== PHASE 1: Gate+Up matmul for each expert ========
-        for (int global_col = warp_id; global_col < TOP_K * FUSED_INTERMEDIATE; global_col += num_warps) {{
-            const int expert_local = global_col / FUSED_INTERMEDIATE;
-            const int col_in_expert = global_col % FUSED_INTERMEDIATE;
-            const int expert_idx = top_indices[expert_local];
-
-            const unsigned char* col_data = gate_up_weights
-                + (size_t)expert_idx * FUSED_INTERMEDIATE * MXFP4_COL_STRIDE_GU
-                + col_in_expert * MXFP4_COL_STRIDE_GU;
-            const unsigned char* packed = col_data;
-            const unsigned char* scales = col_data + HIDDEN / 2;
-
-            float acc = 0.0f;
-            for (int block_start = lane * 32; block_start < HIDDEN; block_start += 32 * 32) {{
-                float block_scale = e8m0_decode(scales[block_start / 32]);
-                const int byte_start = block_start / 2;
-                for (int bi = 0; bi < 16; bi++) {{
-                    const int k0 = block_start + bi * 2;
-                    if (k0 + 1 >= HIDDEN) break;
-                    unsigned char pb = packed[byte_start + bi];
-                    float w0 = fp4_lut[pb & 0xF] * block_scale;
-                    float w1 = fp4_lut[pb >> 4] * block_scale;
-                    acc += x[k0] * w0 + x[k0 + 1] * w1;
-                }}
-            }}
-            for (int offset = 16; offset > 0; offset >>= 1)
-                acc += __shfl_down_sync(0xffffffff, acc, offset);
-
-            if (lane == 0) {{
-                acc += gate_up_bias[expert_idx * FUSED_INTERMEDIATE + col_in_expert];
-                intermediate[expert_local * FUSED_INTERMEDIATE + col_in_expert] = acc;
-            }}
-        }}
-        __syncthreads();
-
-        // ======== PHASE 2: Gated activation ========
-        // Gate and up are INTERLEAVED in the gate_up output: gate=even indices, up=odd indices.
-        // Activation: glu = clamp(gate, max=7) * sigmoid(clamp(gate, max=7) * 1.702)
-        // Output: (clamp(up, -7, 7) + 1) * glu
-        // Write to separate region to avoid races: swiglu_out starts at TOP_K * FUSED_INTERMEDIATE
-        constexpr int SWIGLU_OFFSET = TOP_K * FUSED_INTERMEDIATE;
-        for (int e = 0; e < TOP_K; e++) {{
-            for (int i = t; i < INTERMEDIATE; i += threads) {{
-                float gate_val = intermediate[e * FUSED_INTERMEDIATE + 2 * i];
-                float up_val = intermediate[e * FUSED_INTERMEDIATE + 2 * i + 1];
-                gate_val = fminf(gate_val, {swiglu_limit:.1}f);
-                up_val = fmaxf(fminf(up_val, {swiglu_limit:.1}f), -{swiglu_limit:.1}f);
-                float glu = gate_val * (1.0f / (1.0f + __expf(-gate_val * 1.702f)));
-                intermediate[SWIGLU_OFFSET + e * INTERMEDIATE + i] = (up_val + 1.0f) * glu;
-            }}
-            __syncthreads();
-        }}
-
-        // ======== PHASE 3: Zero output ========
-        for (int i = t; i < HIDDEN; i += threads) output[i] = 0.0f;
-        __syncthreads();
-
-        // ======== PHASE 4: Down matmul + weighted accumulation ========
-        for (int global_col = warp_id; global_col < TOP_K * HIDDEN; global_col += num_warps) {{
-            const int expert_local = global_col / HIDDEN;
-            const int col_in_expert = global_col % HIDDEN;
-            const int expert_idx = top_indices[expert_local];
-
-            const unsigned char* col_data = down_weights
-                + (size_t)expert_idx * HIDDEN * MXFP4_COL_STRIDE_D
-                + col_in_expert * MXFP4_COL_STRIDE_D;
-            const unsigned char* packed = col_data;
-            const unsigned char* scales = col_data + INTERMEDIATE / 2;
-
-            const float* expert_input = intermediate + SWIGLU_OFFSET + expert_local * INTERMEDIATE;
-
-            float acc = 0.0f;
-            for (int block_start = lane * 32; block_start < INTERMEDIATE; block_start += 32 * 32) {{
-                float block_scale = e8m0_decode(scales[block_start / 32]);
-                const int byte_start = block_start / 2;
-                for (int bi = 0; bi < 16; bi++) {{
-                    const int k0 = block_start + bi * 2;
-                    if (k0 + 1 >= INTERMEDIATE) break;
-                    unsigned char pb = packed[byte_start + bi];
-                    float w0 = fp4_lut[pb & 0xF] * block_scale;
-                    float w1 = fp4_lut[pb >> 4] * block_scale;
-                    acc += expert_input[k0] * w0 + expert_input[k0 + 1] * w1;
-                }}
-            }}
-            for (int offset = 16; offset > 0; offset >>= 1)
-                acc += __shfl_down_sync(0xffffffff, acc, offset);
-
-            if (lane == 0) {{
-                acc += down_bias[expert_idx * HIDDEN + col_in_expert];
-                acc *= top_weights[expert_local];
-                // Single block, so no atomicAdd needed - direct accumulation
-                output[col_in_expert] += acc;
-            }}
-        }}
-        "#,
-            hidden = HIDDEN,
-            intermediate = INTERMEDIATE,
-            fused_intermediate = FUSED_INTERMEDIATE,
-            num_experts = NUM_EXPERTS,
-            top_k = EXPERTS_PER_TOKEN,
-            col_stride_gu = MXFP4_COL_STRIDE_GATE_UP,
-            col_stride_d = MXFP4_COL_STRIDE_DOWN,
-            swiglu_limit = SWIGLU_LIMIT,
-            hidden_or_experts = std::cmp::max(HIDDEN, NUM_EXPERTS),
-        )
     }
 }

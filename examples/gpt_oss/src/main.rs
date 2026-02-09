@@ -3,7 +3,7 @@ mod model;
 
 use hf::{load_expert_weights, load_sinks, prepare_hf_model};
 use luminal::prelude::*;
-use luminal_cuda::{cudarc::driver::CudaContext, runtime::CudaRuntime};
+use luminal_cuda::{cudarc::driver::{CudaContext, sys::CUdevice_attribute}, runtime::CudaRuntime};
 use luminal_tracing::*;
 use model::*;
 use std::{io::Write, time::Duration};
@@ -56,6 +56,12 @@ fn main() {
     load_expert_weights(&model_dir, &mut expert_weights, &stream)
         .expect("Failed to load expert weights");
 
+    // Get SM count for MoE kernel parallelism
+    let sm_count = ctx
+        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+        .expect("Failed to get SM count") as u32;
+    println!("GPU SMs: {sm_count}");
+
     // Create compute graph
     let mut cx = Graph::default();
     let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
@@ -67,6 +73,7 @@ fn main() {
             &expert_weights,
             &scratchpad,
             &sink_buffers,
+            sm_count,
         )
         .output();
 
