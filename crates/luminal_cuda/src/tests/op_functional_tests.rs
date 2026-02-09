@@ -3,6 +3,10 @@ use cudarc::driver::CudaContext;
 use luminal::prelude::*;
 use proptest::prelude::*;
 
+use luminal::egglog_utils::{
+    egglog_to_llir, extract_generation, hash_choice_set, random_initial_choice, validate_choice_set,
+};
+
 use crate::runtime::CudaRuntime;
 
 use super::utilities::{
@@ -344,4 +348,161 @@ proptest! {
             seed,
         );
     }
+}
+
+
+/// Fuzz test that generates many random genomes and verifies they all produce correct results.
+/// This tests the genetic algorithm search by validating each genome individually.
+#[test]
+fn fuzz_test_cuda_genomes() {
+    let Some(stream) = get_cuda_stream() else {
+        println!("CUDA not available, skipping test");
+        return;
+    };
+
+    // Build a graph with operations that have rewrite alternatives
+    let mut cx = Graph::default();
+    let a = cx.tensor((4, 8));
+    let b = cx.tensor((8, 4));
+    let c = cx.tensor((4, 4));
+
+    // Matmul + add + relu creates opportunities for rewrites
+    let d = a.matmul(b);
+    let e = (d + c).relu();
+    let out = e.output();
+
+    cx.build_search_space::<CudaRuntime>();
+    let egraph = cx.egraph().unwrap();
+    let ops = cx.egglog_ops().unwrap();
+
+    // Count mutable eclasses
+    let mutable_eclasses: usize = egraph
+        .eclasses
+        .iter()
+        .filter(|(_, (label, enodes))| {
+            (label.contains("IR") || label.contains("IList")) && enodes.len() > 1
+        })
+        .count();
+    println!(
+        "CUDA search space: {} total eclasses, {} mutable",
+        egraph.eclasses.len(),
+        mutable_eclasses
+    );
+
+    // Generate test data
+    let a_data = random_vec(32);
+    let b_data = random_vec(32);
+    let c_data = random_vec(16);
+
+    // Compute reference result using candle
+    let device = Device::Cpu;
+    let ref_a = Tensor::from_vec(a_data.clone(), (4, 8), &device).unwrap();
+    let ref_b = Tensor::from_vec(b_data.clone(), (8, 4), &device).unwrap();
+    let ref_c = Tensor::from_vec(c_data.clone(), (4, 4), &device).unwrap();
+    let ref_d = ref_a.matmul(&ref_b).unwrap();
+    let ref_e = (&ref_d + &ref_c).unwrap().relu().unwrap();
+    let expected: Vec<f32> = ref_e.flatten_all().unwrap().to_vec1().unwrap();
+
+    let mut rng = rand::rng();
+    let mut prev_selected: FxHashSet<u64> = FxHashSet::default();
+
+    // Test initial genome
+    let initial = random_initial_choice(egraph, &mut rng);
+    prev_selected.insert(hash_choice_set(&initial));
+
+    if let Err(e) = validate_choice_set(egraph, &initial, ops) {
+        panic!("Initial genome invalid: {}", e);
+    }
+
+    // Extract and execute initial genome
+    let mut list_cache = FxHashMap::default();
+    let mut expr_cache = FxHashMap::default();
+    let llir_graph = egglog_to_llir(
+        egraph,
+        initial.clone(),
+        ops,
+        &cx.custom_ops,
+        &mut list_cache,
+        &mut expr_cache,
+        None,
+    );
+
+    let mut rt = CudaRuntime::initialize(stream.clone());
+    rt.load_llir(&llir_graph);
+    rt.set_data(a, a_data.clone());
+    rt.set_data(b, b_data.clone());
+    rt.set_data(c, c_data.clone());
+    rt.execute(&cx.dyn_map);
+    let result = rt.get_f32(out);
+    assert_close(&result, &expected);
+    println!("Initial genome: correct");
+
+    // If no mutable eclasses, only one valid graph exists
+    if mutable_eclasses == 0 {
+        println!("No mutable eclasses, only one valid graph - test passed");
+        return;
+    }
+
+    // Generate and test many genomes
+    let mut base = initial;
+    let mut tested = 0;
+    let target = 50;
+
+    for _generation in 0..100 {
+        let offspring = extract_generation(egraph, &base, 10, 2, &mut prev_selected, &mut rng);
+
+        if offspring.is_empty() {
+            println!("Search space exhausted");
+            break;
+        }
+
+        for genome in offspring {
+            // Validate
+            if let Err(e) = validate_choice_set(egraph, &genome, ops) {
+                panic!("Invalid genome: {}", e);
+            }
+
+            // Extract and execute
+            let mut list_cache = FxHashMap::default();
+            let mut expr_cache = FxHashMap::default();
+            let llir_graph = egglog_to_llir(
+                egraph,
+                genome.clone(),
+                ops,
+                &cx.custom_ops,
+                &mut list_cache,
+                &mut expr_cache,
+                None,
+            );
+
+            // Create fresh runtime for this genome
+            let mut rt = CudaRuntime::initialize(stream.clone());
+            rt.load_llir(&llir_graph);
+            rt.set_data(a, a_data.clone());
+            rt.set_data(b, b_data.clone());
+            rt.set_data(c, c_data.clone());
+            rt.execute(&cx.dyn_map);
+            let result = rt.get_f32(out);
+
+            // Verify correctness
+            assert_close(&result, &expected);
+
+            tested += 1;
+            base = genome;
+
+            if tested >= target {
+                break;
+            }
+        }
+
+        if tested >= target {
+            break;
+        }
+    }
+
+    println!(
+        "Fuzz test: verified {} genomes produce correct results",
+        tested
+    );
+    assert!(tested > 0, "No genomes were tested");
 }
