@@ -1110,4 +1110,9 @@ impl HostOp for MoeExperts {
     fn output_size(&self) -> Expression {
         HIDDEN.into()
     }
+
+    fn output_bytes(&self) -> Expression {
+        // MoeExperts outputs F32
+        self.output_size() * 4
+    }
 }
