@@ -85,6 +85,7 @@ proptest! {
             luminal::op::DType::Bf16 => candle_core::DType::BF16,
             luminal::op::DType::Int => candle_core::DType::I32,
             luminal::op::DType::Bool => candle_core::DType::U8,
+            luminal::op::DType::NvFp4 | luminal::op::DType::Mxfp4 => todo!(),
         };
 
         let luminal_op = move |a: GraphTensor, b: GraphTensor| {

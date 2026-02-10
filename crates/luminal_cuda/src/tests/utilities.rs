@@ -93,6 +93,7 @@ pub fn dtype_epsilon(dtype: luminal::op::DType) -> f32 {
         luminal::op::DType::Bf16 => 7.81e-3, // 2^-7
         luminal::op::DType::Int => 0.0,
         luminal::op::DType::Bool => 0.0,
+        luminal::op::DType::NvFp4 | luminal::op::DType::Mxfp4 => todo!(),
     }
 }
 
