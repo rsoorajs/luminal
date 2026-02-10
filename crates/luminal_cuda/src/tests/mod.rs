@@ -1,13 +1,13 @@
 pub mod utilities;
 
-#[cfg(test)]
-mod op_functional_tests;
-#[cfg(test)]
-mod performance_tests;
 mod misc;
 mod mxfp4;
 mod nvfp4;
+#[cfg(test)]
+mod op_functional_tests;
 mod ops;
+#[cfg(test)]
+mod performance_tests;
 
 use cudarc::driver::CudaContext;
 use luminal::prelude::*;
