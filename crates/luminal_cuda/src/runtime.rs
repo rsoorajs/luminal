@@ -27,7 +27,6 @@ use std::{
     collections::{VecDeque, hash_map::Entry},
     fmt::Debug,
     fs::File,
-    mem::size_of,
     sync::Arc,
     time::Duration,
 };
@@ -224,46 +223,6 @@ impl CudaRuntime {
         unsafe { Vec::from_raw_parts(bf16_ptr, n_bytes / 2, n_bytes / 2) }
     }
 
-    fn register_buffer(&mut self, llir_node: NodeIndex, ptr: u64) {
-        // Remap pointers in work queue
-        if let Some(ExecutableKernel::Megakernel {
-            work_queue,
-            node_to_task_index,
-            ..
-        }) = self
-            .node_to_exec
-            .get(&llir_node)
-            .and_then(|n| self.exec_graph.node_weight_mut(*n))
-            && self.llir_graph[llir_node].to_op::<Input>().is_none()
-        {
-            work_queue.set_out_ptr(node_to_task_index[&llir_node], ptr as *mut f32);
-        }
-        let outgoing_edges: Vec<_> = self
-            .llir_graph
-            .edges_directed(llir_node, Direction::Outgoing)
-            .collect();
-        for edge in outgoing_edges {
-            let dest = edge.target();
-            let n_input = self
-                .llir_graph
-                .edges_directed(dest, Direction::Incoming)
-                .sorted_by_key(|e| e.id())
-                .position(|e| e.id() == edge.id())
-                .unwrap();
-            if let Some(ExecutableKernel::Megakernel {
-                work_queue,
-                node_to_task_index,
-                ..
-            }) = self
-                .node_to_exec
-                .get(&dest)
-                .and_then(|n| self.exec_graph.node_weight_mut(*n))
-            {
-                work_queue.set_source_ptr(node_to_task_index[&dest], n_input, ptr as *const f32);
-            }
-        }
-    }
-
     #[tracing::instrument(skip_all)]
     fn allocate_intermediate_buffers(&mut self, dyn_dims: &FxHashMap<char, usize>) {
         self.intermediate_buffer_dims.clear();
@@ -272,7 +231,8 @@ impl CudaRuntime {
                 continue;
             }
             if let Some(op) = self.llir_graph[node].to_dialect::<dyn BlockOp>() {
-                let exec_size = out_size.exec(dyn_dims).unwrap();
+                let out_bytes = op.output_bytes();
+                let exec_size = out_bytes.exec(dyn_dims).unwrap();
                 // Skip allocation for ops with zero output size
                 if exec_size == 0 {
                     continue;
@@ -303,17 +263,17 @@ impl CudaRuntime {
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.cached_buffer_ptrs.insert(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
-                if op.output_bytes() > 0 {
-                self.buffers.insert(
-                    node,
-                    self.cuda_stream
-                        .alloc_zeros(op.output_bytes().exec(dyn_dims).unwrap())
-                        .unwrap(),
-                );
-            }
-                let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
-                self.cached_buffer_ptrs.insert(node, ptr);
-                self.register_buffer(node, ptr);
+                let out_bytes = op.output_bytes().exec(dyn_dims).unwrap();
+                if out_bytes > 0 {
+                    self.buffers.insert(
+                        node,
+                        self.cuda_stream
+                            .alloc_zeros(out_bytes)
+                            .unwrap(),
+                    );
+                    let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+                    self.cached_buffer_ptrs.insert(node, ptr);
+                }
             }
         }
     }

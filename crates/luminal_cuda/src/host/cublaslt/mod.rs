@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
 use luminal::{
-    graph::{extract_dtype, extract_expr},
+    egglog_utils::{extract_dtype, extract_expr},
     op::{
         DType, EgglogOp, LLIROp,
         OpParam::{self, *},
@@ -156,6 +156,7 @@ fn dtype_to_cuda_types(dtype: DType) -> (cudaDataType, cublasComputeType_t, cuda
         // BF16: matrix=bf16, compute=f32 with tensor cores, scale=f32
         DType::Bf16 => (cudaDataType::CUDA_R_16BF, cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_16BF, cudaDataType::CUDA_R_32F),
         DType::Int => panic!("cuBLAS LT does not support integer matmul"),
+        DType::Bool => panic!("cuBLAS LT does not support bool matmul"),
     }
 }
 
@@ -163,7 +164,9 @@ impl HostOp for CuBlasLt {
     fn execute(
         &self,
         stream: &Arc<CudaStream>,
-        inputs: &[&CudaSlice<u8>],
+        self_node: NodeIndex,
+        inputs: &[NodeIndex],
+        buffers: &FxHashMap<NodeIndex, &CudaSlice<u8>>,
         dyn_map: &FxHashMap<char, usize>,
     ) -> anyhow::Result<()> {
         // GEMM parameters
@@ -181,26 +184,31 @@ impl HostOp for CuBlasLt {
         let element_size = match self.dtype {
             DType::F32 => 4u64,
             DType::F16 | DType::Bf16 => 2u64,
-            DType::Int => panic!("cuBLAS LT does not support integer matmul"),
+            DType::Int | DType::Bool => panic!("cuBLAS LT does not support integer/bool matmul"),
         };
 
         // Alpha/beta scale values (all dtypes use F32 scale type)
         let alpha_f32: f32 = 1.0;
         let beta_f32: f32 = 0.0;
 
+        // Get buffers: output is self_node, inputs are from graph edges
+        let c_buf = buffers[&self_node];
+        let a_buf = buffers[&inputs[0]];
+        let b_buf = buffers[&inputs[1]];
+
         // Get device pointers
-        let (a_ptr, _a_guard) = inputs[1].device_ptr(stream);
-        let (b_ptr, _b_guard) = inputs[2].device_ptr(stream);
-        let (c_ptr, _c_guard) = inputs[0].device_ptr(stream);
+        let (a_ptr, _a_guard) = a_buf.device_ptr(stream);
+        let (b_ptr, _b_guard) = b_buf.device_ptr(stream);
+        let (c_ptr, _c_guard) = c_buf.device_ptr(stream);
 
         // Debug tracing
         trace!(
             "buffer_validation {}=={},{}=={},{}=={}",
-            inputs[1].len(),
+            a_buf.len(),
             m * k * element_size,
-            inputs[2].len(),
+            b_buf.len(),
             k * n * element_size,
-            inputs[0].len(),
+            c_buf.len(),
             m * n * element_size
         );
         let _span = span!(
@@ -352,6 +360,7 @@ impl HostOp for CuBlasLt {
         let elem_size: Expression = match self.dtype {
             DType::F32 | DType::Int => 4,
             DType::F16 | DType::Bf16 => 2,
+            DType::Bool => 1,
         }
         .into();
         self.output_size() * elem_size

@@ -1,4 +1,4 @@
-use candle_core::Tensor;
+use candle_core::{Device, Tensor};
 use cudarc::driver::CudaContext;
 use luminal::prelude::*;
 use proptest::prelude::*;
@@ -10,8 +10,8 @@ use luminal::egglog_utils::{
 use crate::runtime::CudaRuntime;
 
 use super::utilities::{
-    dtype_epsilon, gen_slice_range, random_f32_vec, test_binary_cuda, test_mod, test_unary_cuda,
-    TOLERANCE_SAFETY_FACTOR,
+    assert_close, dtype_epsilon, gen_slice_range, get_cuda_stream, random_f32_vec,
+    test_binary_cuda, test_mod, test_unary_cuda, TOLERANCE_SAFETY_FACTOR,
 };
 
 proptest! {
@@ -84,6 +84,7 @@ proptest! {
             luminal::op::DType::F16 => candle_core::DType::F16,
             luminal::op::DType::Bf16 => candle_core::DType::BF16,
             luminal::op::DType::Int => candle_core::DType::I32,
+            luminal::op::DType::Bool => candle_core::DType::U8,
         };
 
         let luminal_op = move |a: GraphTensor, b: GraphTensor| {
@@ -171,8 +172,9 @@ proptest! {
         let gen_lambda = |n, s| random_f32_vec(n, s, -0.5, 0.5);
         let eps = dtype_epsilon(luminal::op::DType::F32);
         let (rtol, atol) = (eps * TOLERANCE_SAFETY_FACTOR, eps * TOLERANCE_SAFETY_FACTOR);
-        test_binary_cuda(x, x, |a, b| a.lt(b), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap(), &gen_lambda, &gen_lambda, seed, rtol, atol);
-        test_binary_cuda((y, x), (y, x), |a, b| a.lt(b), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap(), &gen_lambda, &gen_lambda, seed, rtol, atol);
+        // less_than outputs Bool, so cast to F32 for comparison (matching candle's to_dtype)
+        test_binary_cuda(x, x, |a, b| a.lt(b).cast(luminal::op::DType::F32), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap(), &gen_lambda, &gen_lambda, seed, rtol, atol);
+        test_binary_cuda((y, x), (y, x), |a, b| a.lt(b).cast(luminal::op::DType::F32), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap(), &gen_lambda, &gen_lambda, seed, rtol, atol);
     }
 }
 
@@ -353,12 +355,18 @@ proptest! {
 
 /// Fuzz test that generates many random genomes and verifies they all produce correct results.
 /// This tests the genetic algorithm search by validating each genome individually.
-#[test]
-fn fuzz_test_cuda_genomes() {
+/// Uses proptest seed for reproducibility - if this test fails, proptest will print the seed
+/// which can be used to reproduce the failure.
+fn fuzz_test_cuda_genomes_impl(seed: u64) {
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
     let Some(stream) = get_cuda_stream() else {
         println!("CUDA not available, skipping test");
         return;
     };
+
+    println!("Running fuzz_test_cuda_genomes with seed: {}", seed);
 
     // Build a graph with operations that have rewrite alternatives
     let mut cx = Graph::default();
@@ -389,10 +397,13 @@ fn fuzz_test_cuda_genomes() {
         mutable_eclasses
     );
 
-    // Generate test data
-    let a_data = random_vec(32);
-    let b_data = random_vec(32);
-    let c_data = random_vec(16);
+    // Use seeded RNG for full reproducibility
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    // Generate test data with seeded RNG (reproducible)
+    let a_data: Vec<f32> = (0..32).map(|_| rng.random::<f32>()).collect();
+    let b_data: Vec<f32> = (0..32).map(|_| rng.random::<f32>()).collect();
+    let c_data: Vec<f32> = (0..16).map(|_| rng.random::<f32>()).collect();
 
     // Compute reference result using candle
     let device = Device::Cpu;
@@ -403,7 +414,6 @@ fn fuzz_test_cuda_genomes() {
     let ref_e = (&ref_d + &ref_c).unwrap().relu().unwrap();
     let expected: Vec<f32> = ref_e.flatten_all().unwrap().to_vec1().unwrap();
 
-    let mut rng = rand::rng();
     let mut prev_selected: FxHashSet<u64> = FxHashSet::default();
 
     // Test initial genome
@@ -427,14 +437,16 @@ fn fuzz_test_cuda_genomes() {
         None,
     );
 
-    let mut rt = CudaRuntime::initialize(stream.clone());
+    let mut rt: CudaRuntime = CudaRuntime::initialize(stream.clone());
     rt.load_llir(&llir_graph);
     rt.set_data(a, a_data.clone());
     rt.set_data(b, b_data.clone());
     rt.set_data(c, c_data.clone());
     rt.execute(&cx.dyn_map);
     let result = rt.get_f32(out);
-    assert_close(&result, &expected);
+    let eps = dtype_epsilon(luminal::op::DType::F32);
+    let tol = eps * TOLERANCE_SAFETY_FACTOR;
+    assert_close(&result, &expected, tol, tol);
     println!("Initial genome: correct");
 
     // If no mutable eclasses, only one valid graph exists
@@ -476,7 +488,7 @@ fn fuzz_test_cuda_genomes() {
             );
 
             // Create fresh runtime for this genome
-            let mut rt = CudaRuntime::initialize(stream.clone());
+            let mut rt: CudaRuntime = CudaRuntime::initialize(stream.clone());
             rt.load_llir(&llir_graph);
             rt.set_data(a, a_data.clone());
             rt.set_data(b, b_data.clone());
@@ -485,7 +497,7 @@ fn fuzz_test_cuda_genomes() {
             let result = rt.get_f32(out);
 
             // Verify correctness
-            assert_close(&result, &expected);
+            assert_close(&result, &expected, tol, tol);
 
             tested += 1;
             base = genome;
@@ -505,4 +517,13 @@ fn fuzz_test_cuda_genomes() {
         tested
     );
     assert!(tested > 0, "No genomes were tested");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(3))]
+
+    #[test]
+    fn fuzz_test_cuda_genomes(seed in any::<u64>()) {
+        fuzz_test_cuda_genomes_impl(seed);
+    }
 }

@@ -64,7 +64,6 @@ pub fn random_f32_vec(n: usize, seed: u64, low: f32, high: f32) -> Vec<f32> {
     (0..n).map(|_| rng.random_range(low..high)).collect()
 }
 
-
 /// Assert two vectors are close following NumPy/PyTorch conventions.
 /// Formula: |a - b| <= atol + rtol * |b|
 /// Generic version that works with any Float type (f32, f16, bf16).
@@ -95,6 +94,7 @@ pub fn dtype_epsilon(dtype: luminal::op::DType) -> f32 {
         luminal::op::DType::F16 => 9.77e-4,  // 2^-10
         luminal::op::DType::Bf16 => 7.81e-3, // 2^-7
         luminal::op::DType::Int => 0.0,
+        luminal::op::DType::Bool => 0.0,
     }
 }
 

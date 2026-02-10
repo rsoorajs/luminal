@@ -993,6 +993,11 @@ impl crate::kernel::KernelOp for MegakernelOp {
         0.into()
     }
 
+    fn output_bytes(&self) -> Expression {
+        // Megakernels don't have a single output - buffer allocation is per-BlockOp.
+        0.into()
+    }
+
     fn kernel_name(&self) -> &'static str {
         "Megakernel"
     }

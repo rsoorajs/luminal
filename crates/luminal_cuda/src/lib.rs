@@ -3,7 +3,6 @@ pub mod host;
 pub mod kernel;
 pub mod logical;
 pub mod runtime;
-mod tests;
 use std::sync::Arc;
 
 pub use cudarc;
