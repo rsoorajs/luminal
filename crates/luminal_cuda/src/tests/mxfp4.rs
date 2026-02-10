@@ -92,13 +92,7 @@ fn pack_mxfp4(weights: &[f32], n: usize, k: usize) -> Vec<u8> {
 }
 
 /// Reference dequantized matmul: A [M,K] x dequant(B_packed) [K,N] -> C [M,N]
-fn reference_mxfp4_matmul(
-    a: &[f32],
-    m: usize,
-    k: usize,
-    packed_b: &[u8],
-    n: usize,
-) -> Vec<f32> {
+fn reference_mxfp4_matmul(a: &[f32], m: usize, k: usize, packed_b: &[u8], n: usize) -> Vec<f32> {
     let packed_per_col = k / 2;
     let scales_per_col = k / 32;
     let col_stride = packed_per_col + scales_per_col;

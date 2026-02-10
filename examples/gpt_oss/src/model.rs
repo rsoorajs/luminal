@@ -7,7 +7,9 @@ use luminal::{
 use luminal_cuda::{
     block::{cstruct::CStruct, BlockOp},
     cudarc::{
-        driver::{CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg},
+        driver::{
+            CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
+        },
         nvrtc::compile_ptx,
     },
     host::HostOp,
@@ -55,7 +57,7 @@ fn compute_yarn_inv_freq() -> ([f32; 32], f32) {
     let high = find_correction_dim(YARN_BETA_SLOW);
 
     let mut inv_freq = [0.0f32; 32];
-    for i in 0..half {
+    for (i, pos) in inv_freq.iter_mut().enumerate().take(half) {
         let pos_freq = base.powf(2.0 * i as f64 / dim);
         let inv_extrap = 1.0 / pos_freq;
         let inv_interp = 1.0 / (YARN_FACTOR * pos_freq);
@@ -69,8 +71,7 @@ fn compute_yarn_inv_freq() -> ([f32; 32], f32) {
         let ramp = t.clamp(0.0, 1.0);
         let extrap_factor = 1.0 - ramp;
 
-        inv_freq[i] =
-            (inv_interp * (1.0 - extrap_factor) + inv_extrap * extrap_factor) as f32;
+        *pos = (inv_interp * (1.0 - extrap_factor) + inv_extrap * extrap_factor) as f32;
     }
 
     // attention_factor = 0.1 * ln(factor) + 1.0 (get_mscale with default mscale=1)
@@ -81,11 +82,9 @@ fn compute_yarn_inv_freq() -> ([f32; 32], f32) {
 
 // Layer types: alternating sliding_attention / full_attention
 pub const LAYER_IS_SLIDING: [bool; LAYERS] = [
+    true, false, true, false, true, false, true, false, true, false, true, false, true, false,
+    true, false, true, false, true, false, true, false, true, false, true, false, true, false,
     true, false, true, false, true, false, true, false,
-    true, false, true, false, true, false, true, false,
-    true, false, true, false, true, false, true, false,
-    true, false, true, false, true, false, true, false,
-    true, false, true, false,
 ];
 
 pub struct GptOss {
@@ -98,40 +97,31 @@ pub struct GptOss {
 impl GptOss {
     pub fn init(cx: &mut Graph) -> Self {
         let mut layers = vec![];
-        for l in 0..LAYERS {
+        for (l, &is_sliding) in LAYER_IS_SLIDING.iter().enumerate() {
             layers.push(GptOssLayer {
                 q_proj_w: cx.named_tensor(
                     format!("model.layers.{l}.self_attn.q_proj.weight"),
                     (Q_DIM, HIDDEN),
                 ),
-                q_proj_b: cx.named_tensor(
-                    format!("model.layers.{l}.self_attn.q_proj.bias"),
-                    Q_DIM,
-                ),
+                q_proj_b: cx.named_tensor(format!("model.layers.{l}.self_attn.q_proj.bias"), Q_DIM),
                 k_proj_w: cx.named_tensor(
                     format!("model.layers.{l}.self_attn.k_proj.weight"),
                     (KV_DIM, HIDDEN),
                 ),
-                k_proj_b: cx.named_tensor(
-                    format!("model.layers.{l}.self_attn.k_proj.bias"),
-                    KV_DIM,
-                ),
+                k_proj_b: cx
+                    .named_tensor(format!("model.layers.{l}.self_attn.k_proj.bias"), KV_DIM),
                 v_proj_w: cx.named_tensor(
                     format!("model.layers.{l}.self_attn.v_proj.weight"),
                     (KV_DIM, HIDDEN),
                 ),
-                v_proj_b: cx.named_tensor(
-                    format!("model.layers.{l}.self_attn.v_proj.bias"),
-                    KV_DIM,
-                ),
+                v_proj_b: cx
+                    .named_tensor(format!("model.layers.{l}.self_attn.v_proj.bias"), KV_DIM),
                 o_proj_w: cx.named_tensor(
                     format!("model.layers.{l}.self_attn.o_proj.weight"),
                     (HIDDEN, Q_DIM),
                 ),
-                o_proj_b: cx.named_tensor(
-                    format!("model.layers.{l}.self_attn.o_proj.bias"),
-                    HIDDEN,
-                ),
+                o_proj_b: cx
+                    .named_tensor(format!("model.layers.{l}.self_attn.o_proj.bias"), HIDDEN),
                 input_layernorm: LayerNorm::new(
                     HIDDEN,
                     Some(&format!("model.layers.{l}.input_layernorm.weight")),
@@ -152,14 +142,18 @@ impl GptOss {
                     format!("model.layers.{l}.mlp.router.weight"),
                     (NUM_EXPERTS, HIDDEN),
                 ),
-                router_b: cx.named_tensor(
-                    format!("model.layers.{l}.mlp.router.bias"),
-                    NUM_EXPERTS,
-                ),
-                is_sliding: LAYER_IS_SLIDING[l],
+                router_b: cx.named_tensor(format!("model.layers.{l}.mlp.router.bias"), NUM_EXPERTS),
+                is_sliding,
             });
         }
-        let lm_norm = LayerNorm::new(HIDDEN, Some("model.norm.weight"), None, false, RMS_NORM_EPS, cx);
+        let lm_norm = LayerNorm::new(
+            HIDDEN,
+            Some("model.norm.weight"),
+            None,
+            false,
+            RMS_NORM_EPS,
+            cx,
+        );
         let lm_head = cx.named_tensor("lm_head.weight", (VOCAB_SIZE, HIDDEN));
         Self {
             embedding: cx.named_tensor("model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN)),
@@ -184,15 +178,14 @@ impl GptOss {
             (token_ids * HIDDEN).expand_dim(1, HIDDEN)
                 + token_ids.graph().arange(HIDDEN).expand_dim(0, seq),
         );
-        for (l, (layer, (k_cache, v_cache))) in
-            self.layers.iter().zip(&kv_cache.layers).enumerate()
+        for (l, (layer, (k_cache, v_cache))) in self.layers.iter().zip(&kv_cache.layers).enumerate()
         {
             x = layer
                 .forward(
                     x,
                     k_cache,
                     v_cache,
-                    &expert_weights,
+                    expert_weights,
                     scratchpad,
                     &sink_buffers.layers[l],
                     l,
@@ -221,6 +214,7 @@ pub struct GptOssLayer {
 }
 
 impl GptOssLayer {
+    #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
         x: GraphTensor,
@@ -233,9 +227,18 @@ impl GptOssLayer {
         sm_count: u32,
     ) -> GraphTensor {
         let x_attn = self.input_layernorm.forward(x);
-        let q = x_attn.matmul(self.q_proj_w.t()) + self.q_proj_b.expand_lhs(&x_attn.dims()[..x_attn.dims().len() - 1]);
-        let k = x_attn.matmul(self.k_proj_w.t()) + self.k_proj_b.expand_lhs(&x_attn.dims()[..x_attn.dims().len() - 1]);
-        let v = x_attn.matmul(self.v_proj_w.t()) + self.v_proj_b.expand_lhs(&x_attn.dims()[..x_attn.dims().len() - 1]);
+        let q = x_attn.matmul(self.q_proj_w.t())
+            + self
+                .q_proj_b
+                .expand_lhs(&x_attn.dims()[..x_attn.dims().len() - 1]);
+        let k = x_attn.matmul(self.k_proj_w.t())
+            + self
+                .k_proj_b
+                .expand_lhs(&x_attn.dims()[..x_attn.dims().len() - 1]);
+        let v = x_attn.matmul(self.v_proj_w.t())
+            + self
+                .v_proj_b
+                .expand_lhs(&x_attn.dims()[..x_attn.dims().len() - 1]);
 
         let attn_out = x.graph().custom_op(
             GptOssAttention::new(
@@ -251,11 +254,17 @@ impl GptOssLayer {
             q.dtype,
         );
 
-        let h = attn_out.matmul(self.o_proj_w.t()) + self.o_proj_b.expand_lhs(&x_attn.dims()[..x_attn.dims().len() - 1]);
+        let h = attn_out.matmul(self.o_proj_w.t())
+            + self
+                .o_proj_b
+                .expand_lhs(&x_attn.dims()[..x_attn.dims().len() - 1]);
         let x = (x + h).graph_break(); // Split attention chunk from MoE chunk
 
         let x_ff = self.post_attention_layernorm.forward(x) * 1.0; // Materialize RMSNorm output
-        let router_logits = x_ff.matmul(self.router_w.t()) + self.router_b.expand_lhs(&x_ff.dims()[..x_ff.dims().len() - 1]);
+        let router_logits = x_ff.matmul(self.router_w.t())
+            + self
+                .router_b
+                .expand_lhs(&x_ff.dims()[..x_ff.dims().len() - 1]);
 
         let moe_out = x.graph().custom_op(
             MoeExperts::new(expert_weights, scratchpad, layer_idx, sm_count),
@@ -1001,11 +1010,16 @@ impl MoeExperts {
         }
     }
 
-    fn ensure_kernels(stream: &Arc<CudaStream>) -> &'static (Arc<CudaModule>, CudaFunction, CudaFunction) {
+    fn ensure_kernels(
+        stream: &Arc<CudaStream>,
+    ) -> &'static (Arc<CudaModule>, CudaFunction, CudaFunction) {
         MOE_KERNELS.get_or_init(|| {
             let src = moe_kernel_source();
             let ptx = compile_ptx(src).expect("Failed to compile MoE kernels");
-            let module = stream.context().load_module(ptx).expect("Failed to load MoE module");
+            let module = stream
+                .context()
+                .load_module(ptx)
+                .expect("Failed to load MoE module");
             let gate_up_fn = module.load_function("moe_gate_up_swiglu").unwrap();
             let down_fn = module.load_function("moe_down_weighted_sum").unwrap();
             (module, gate_up_fn, down_fn)
@@ -1015,16 +1029,30 @@ impl MoeExperts {
 
 impl Default for MoeExperts {
     fn default() -> Self {
-        Self { gate_up_ptr: 0, down_ptr: 0, gate_up_bias_ptr: 0, down_bias_ptr: 0, intermediate_ptr: 0, sm_count: 1 }
+        Self {
+            gate_up_ptr: 0,
+            down_ptr: 0,
+            gate_up_bias_ptr: 0,
+            down_bias_ptr: 0,
+            intermediate_ptr: 0,
+            sm_count: 1,
+        }
     }
 }
 
 impl EgglogOp for MoeExperts {
     fn term(&self) -> (String, Vec<OpParam>) {
-        ("MoeExperts".to_string(), vec![OpParam::Input, OpParam::Input])
+        (
+            "MoeExperts".to_string(),
+            vec![OpParam::Input, OpParam::Input],
+        )
     }
-    fn rewrites(&self) -> Vec<String> { vec![] }
-    fn cleanup(&self) -> bool { false }
+    fn rewrites(&self) -> Vec<String> {
+        vec![]
+    }
+    fn cleanup(&self) -> bool {
+        false
+    }
 }
 
 impl CustomOp for MoeExperts {

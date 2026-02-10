@@ -3,7 +3,10 @@ mod model;
 
 use hf::{load_expert_weights, load_sinks, prepare_hf_model};
 use luminal::prelude::*;
-use luminal_cuda::{cudarc::driver::{CudaContext, sys::CUdevice_attribute}, runtime::CudaRuntime};
+use luminal_cuda::{
+    cudarc::driver::{sys::CUdevice_attribute, CudaContext},
+    runtime::CudaRuntime,
+};
 use luminal_tracing::*;
 use model::*;
 use std::{io::Write, time::Duration};
@@ -99,13 +102,12 @@ fn main() {
     runtime = cx.search(runtime, search_graphs);
     kv_cache.reset();
 
-    print!("> {prompt}\n");
+    println!("> {prompt}");
     std::io::stdout().flush().unwrap();
 
     // Feed prompt tokens one at a time (MoeExperts only supports single-token)
     let prompt_tokens = sentence.clone();
     let total_tokens = prompt_tokens.len() + gen_tokens;
-    let mut prev_seq = 0;
     let mut fwd_durations = vec![];
 
     // Harmony template state: track whether we're in the "final" channel
@@ -134,7 +136,7 @@ fn main() {
         };
 
         cx.set_dim('s', 1);
-        cx.set_dim('p', prev_seq);
+        cx.set_dim('p', i);
 
         runtime.set_data(input, vec![token as i32]);
 
@@ -145,7 +147,6 @@ fn main() {
         // Sample next token (greedy)
         let _sample_span = span!(Level::INFO, "sample_full").entered();
         sentence = vec![*sample(&logits_data, VOCAB_SIZE).last().unwrap()];
-        prev_seq += 1;
 
         // Only process generated tokens (not prompt tokens)
         if i >= prompt_tokens.len() {

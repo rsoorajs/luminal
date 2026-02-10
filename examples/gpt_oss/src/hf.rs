@@ -14,8 +14,8 @@ use luminal_cuda::cudarc::driver::CudaStream;
 use std::sync::Arc;
 
 use crate::model::{
-    ExpertWeightBuffers, SinkBuffers, FUSED_INTERMEDIATE, HIDDEN, INTERMEDIATE, LAYERS, NUM_EXPERTS,
-    N_HEADS,
+    ExpertWeightBuffers, SinkBuffers, FUSED_INTERMEDIATE, HIDDEN, INTERMEDIATE, LAYERS,
+    NUM_EXPERTS, N_HEADS,
 };
 
 /// Index file structure for sharded safetensors models
@@ -63,9 +63,7 @@ fn is_expert_tensor(name: &str) -> bool {
 
 /// Combine non-quantized tensors into a single model_combined.safetensors file.
 /// Expert weights are loaded separately via load_expert_weights().
-pub fn combine_safetensors(
-    model_dir: &Path,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
+pub fn combine_safetensors(model_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let output_path = model_dir.join("model_combined.safetensors");
 
     if output_path.exists() {
@@ -130,7 +128,10 @@ pub fn combine_safetensors(
         }
     }
 
-    println!("Prepared {} non-quantized tensors for output", all_tensors.len());
+    println!(
+        "Prepared {} non-quantized tensors for output",
+        all_tensors.len()
+    );
     println!("Saving combined model to {}...", output_path.display());
 
     let tensor_views: HashMap<String, TensorView<'_>> = all_tensors
@@ -249,11 +250,19 @@ pub fn load_expert_weights(
             let st = SafeTensors::deserialize(&mmap)?;
 
             for name in &names {
-                if tensor_to_shard.get(*name).map(|s| s == shard).unwrap_or(false) {
+                if tensor_to_shard
+                    .get(*name)
+                    .map(|s| s == shard)
+                    .unwrap_or(false)
+                {
                     if let Ok(tensor) = st.tensor(name) {
                         raw_data.insert(
                             name.to_string(),
-                            (tensor.data().to_vec(), tensor.dtype(), tensor.shape().to_vec()),
+                            (
+                                tensor.data().to_vec(),
+                                tensor.dtype(),
+                                tensor.shape().to_vec(),
+                            ),
                         );
                     }
                 }
@@ -275,8 +284,13 @@ pub fn load_expert_weights(
             assert_eq!(scales_shape[1], FUSED_INTERMEDIATE);
 
             let total_cols = NUM_EXPERTS * FUSED_INTERMEDIATE;
-            let interleaved =
-                interleave_mxfp4(blocks_data, scales_data, total_cols, PACKED_PER_COL_GU, SCALES_PER_COL_GU);
+            let interleaved = interleave_mxfp4(
+                blocks_data,
+                scales_data,
+                total_cols,
+                PACKED_PER_COL_GU,
+                SCALES_PER_COL_GU,
+            );
 
             stream
                 .memcpy_htod(&interleaved, &mut expert_weights.gate_up[layer])
@@ -298,8 +312,13 @@ pub fn load_expert_weights(
             assert_eq!(scales_shape[1], HIDDEN);
 
             let total_cols = NUM_EXPERTS * HIDDEN;
-            let interleaved =
-                interleave_mxfp4(blocks_data, scales_data, total_cols, PACKED_PER_COL_D, SCALES_PER_COL_D);
+            let interleaved = interleave_mxfp4(
+                blocks_data,
+                scales_data,
+                total_cols,
+                PACKED_PER_COL_D,
+                SCALES_PER_COL_D,
+            );
 
             stream
                 .memcpy_htod(&interleaved, &mut expert_weights.down[layer])
