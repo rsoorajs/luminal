@@ -47,7 +47,7 @@ fn float_to_fp4_e2m1(val: f32) -> u8 {
 /// Buffer layout: N columns, each column = [packed_data: K/2 bytes][block_scales: K/32 bytes]
 fn pack_mxfp4(weights: &[f32], n: usize, k: usize) -> Vec<u8> {
     assert_eq!(weights.len(), n * k);
-    assert!(k % 32 == 0, "K must be divisible by 32");
+    assert!(k.is_multiple_of(32), "K must be divisible by 32");
 
     let packed_per_col = k / 2;
     let scales_per_col = k / 32;

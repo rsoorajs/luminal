@@ -67,7 +67,7 @@ fn float_to_fp4_e2m1(val: f32) -> u8 {
 /// Returns (packed_buffer, tensor_scale).
 fn pack_nvfp4(weights: &[f32], n: usize, k: usize) -> (Vec<u8>, f32) {
     assert_eq!(weights.len(), n * k);
-    assert!(k % 16 == 0, "K must be divisible by 16");
+    assert!(k.is_multiple_of(16), "K must be divisible by 16");
 
     let tensor_scale = 1.0f32;
     let packed_per_col = k / 2;
