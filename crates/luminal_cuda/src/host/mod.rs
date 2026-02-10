@@ -3,7 +3,7 @@ use std::{fmt::Debug, sync::Arc};
 use crate::cudarc::driver::{CudaSlice, CudaStream};
 use luminal::{op::EgglogOp, prelude::*};
 mod cublas;
-mod cublaslt; 
+mod cublaslt;
 
 pub type Ops = (
     // cublas::CuBlasSgemmV2,

@@ -16,7 +16,7 @@ use crate::{
     cudarc::{
         cublas::{
             CudaBlas,
-            sys::{cublasOperation_t, cublasSgemm_v2, cublasSetStream_v2, cublasStatus_t},
+            sys::{cublasOperation_t, cublasSetStream_v2, cublasSgemm_v2, cublasStatus_t},
         },
         driver::{CudaSlice, CudaStream, DevicePtr},
     },

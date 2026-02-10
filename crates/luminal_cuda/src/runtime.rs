@@ -254,23 +254,15 @@ impl CudaRuntime {
                     continue;
                 }
                 self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
-                self.buffers.insert(
-                    node,
-                    self.cuda_stream
-                        .alloc_zeros(exec_bytes)
-                        .unwrap(),
-                );
+                self.buffers
+                    .insert(node, self.cuda_stream.alloc_zeros(exec_bytes).unwrap());
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.cached_buffer_ptrs.insert(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
                 let out_bytes = op.output_bytes().exec(dyn_dims).unwrap();
                 if out_bytes > 0 {
-                    self.buffers.insert(
-                        node,
-                        self.cuda_stream
-                            .alloc_zeros(out_bytes)
-                            .unwrap(),
-                    );
+                    self.buffers
+                        .insert(node, self.cuda_stream.alloc_zeros(out_bytes).unwrap());
                     let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                     self.cached_buffer_ptrs.insert(node, ptr);
                 }

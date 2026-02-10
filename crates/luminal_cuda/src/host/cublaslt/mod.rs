@@ -13,35 +13,24 @@ use luminal::{
 };
 
 use crate::{
-    host::{HostOp, cublas::parse_cublas_op},
     cudarc::{
-        driver::{CudaSlice, CudaStream, DevicePtr},
         cublas::sys::cublasOperation_t,
         cublaslt::{
             CudaBlasLT, MatmulShared,
             sys::{
-                cublasComputeType_t,
-                cublasLtMatmulDesc_t,
-                cublasLtMatrixLayout_t,
-                cublasLtMatmulPreference_t,
-                cublasLtMatmulHeuristicResult_t,
-                cublasLtMatmulDescCreate,
-                cublasLtMatmulDescSetAttribute,
-                cublasLtMatrixLayoutCreate,
-                cublasLtMatmulPreferenceCreate,
-                cublasLtMatmulPreferenceSetAttribute,
-                cublasLtMatmulPreferenceAttributes_t,
-                cublasLtMatmulAlgoGetHeuristic,
-                cublasLtMatmul,
-                cublasLtMatmulPreferenceDestroy,
-                cublasLtMatrixLayoutDestroy,
-                cublasLtMatmulDescDestroy,
-                cudaDataType,
-            }
-        }
-    }
+                cublasComputeType_t, cublasLtMatmul, cublasLtMatmulAlgoGetHeuristic,
+                cublasLtMatmulDesc_t, cublasLtMatmulDescCreate, cublasLtMatmulDescDestroy,
+                cublasLtMatmulDescSetAttribute, cublasLtMatmulHeuristicResult_t,
+                cublasLtMatmulPreference_t, cublasLtMatmulPreferenceAttributes_t,
+                cublasLtMatmulPreferenceCreate, cublasLtMatmulPreferenceDestroy,
+                cublasLtMatmulPreferenceSetAttribute, cublasLtMatrixLayout_t,
+                cublasLtMatrixLayoutCreate, cublasLtMatrixLayoutDestroy, cudaDataType,
+            },
+        },
+        driver::{CudaSlice, CudaStream, DevicePtr},
+    },
+    host::{HostOp, cublas::parse_cublas_op},
 };
-
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -81,7 +70,9 @@ impl EgglogOp for CuBlasLt {
         (
             "cublaslt".to_string(),
             //    A      B      m     n      k  , A input Layout, B input Layout, lda, ldb, ldc, dtype
-            vec![Input, Input, Expr, Expr, Expr, Str, Str, Expr, Expr, Expr, Dty],
+            vec![
+                Input, Input, Expr, Expr, Expr, Str, Str, Expr, Expr, Expr, Dty,
+            ],
         )
     }
 
@@ -150,11 +141,23 @@ impl EgglogOp for CuBlasLt {
 fn dtype_to_cuda_types(dtype: DType) -> (cudaDataType, cublasComputeType_t, cudaDataType) {
     match dtype {
         // F32: matrix=f32, compute=f32, scale=f32
-        DType::F32 => (cudaDataType::CUDA_R_32F, cublasComputeType_t::CUBLAS_COMPUTE_32F, cudaDataType::CUDA_R_32F),
+        DType::F32 => (
+            cudaDataType::CUDA_R_32F,
+            cublasComputeType_t::CUBLAS_COMPUTE_32F,
+            cudaDataType::CUDA_R_32F,
+        ),
         // F16: matrix=f16, compute=f32 (FP32 accumulation for accuracy), scale=f32
-        DType::F16 => (cudaDataType::CUDA_R_16F, cublasComputeType_t::CUBLAS_COMPUTE_32F, cudaDataType::CUDA_R_32F),
+        DType::F16 => (
+            cudaDataType::CUDA_R_16F,
+            cublasComputeType_t::CUBLAS_COMPUTE_32F,
+            cudaDataType::CUDA_R_32F,
+        ),
         // BF16: matrix=bf16, compute=f32 with tensor cores, scale=f32
-        DType::Bf16 => (cudaDataType::CUDA_R_16BF, cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_16BF, cudaDataType::CUDA_R_32F),
+        DType::Bf16 => (
+            cudaDataType::CUDA_R_16BF,
+            cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_16BF,
+            cudaDataType::CUDA_R_32F,
+        ),
         DType::Int => panic!("cuBLAS LT does not support integer matmul"),
         DType::Bool => panic!("cuBLAS LT does not support bool matmul"),
     }
@@ -237,11 +240,7 @@ impl HostOp for CuBlasLt {
 
         unsafe {
             // Create matmul descriptor (compute_type, scale_type for alpha/beta)
-            cublasLtMatmulDescCreate(
-                &mut matmul_desc,
-                compute_type,
-                scale_dtype,
-            ).result()?;
+            cublasLtMatmulDescCreate(&mut matmul_desc, compute_type, scale_dtype).result()?;
 
             // Set transpose attributes
             cublasLtMatmulDescSetAttribute(
@@ -249,13 +248,15 @@ impl HostOp for CuBlasLt {
                 cudarc::cublaslt::sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSA,
                 &a_layout as *const _ as *const std::ffi::c_void,
                 std::mem::size_of::<cublasOperation_t>(),
-            ).result()?;
+            )
+            .result()?;
             cublasLtMatmulDescSetAttribute(
                 matmul_desc,
                 cudarc::cublaslt::sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSB,
                 &b_layout as *const _ as *const std::ffi::c_void,
                 std::mem::size_of::<cublasOperation_t>(),
-            ).result()?;
+            )
+            .result()?;
 
             // Create matrix layout descriptors
             let (a_rows, a_cols) = if a_layout == cublasOperation_t::CUBLAS_OP_N {
@@ -269,21 +270,9 @@ impl HostOp for CuBlasLt {
                 (n, k)
             };
 
-            cublasLtMatrixLayoutCreate(
-                &mut a_desc,
-                cuda_dtype,
-                a_rows, a_cols, lda,
-            ).result()?;
-            cublasLtMatrixLayoutCreate(
-                &mut b_desc,
-                cuda_dtype,
-                b_rows, b_cols, ldb,
-            ).result()?;
-            cublasLtMatrixLayoutCreate(
-                &mut c_desc,
-                cuda_dtype,
-                m, n, ldc,
-            ).result()?;
+            cublasLtMatrixLayoutCreate(&mut a_desc, cuda_dtype, a_rows, a_cols, lda).result()?;
+            cublasLtMatrixLayoutCreate(&mut b_desc, cuda_dtype, b_rows, b_cols, ldb).result()?;
+            cublasLtMatrixLayoutCreate(&mut c_desc, cuda_dtype, m, n, ldc).result()?;
 
             // Create preference and set workspace size
             cublasLtMatmulPreferenceCreate(&mut preference).result()?;
@@ -292,7 +281,8 @@ impl HostOp for CuBlasLt {
                 cublasLtMatmulPreferenceAttributes_t::CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
                 &WORKSPACE_SIZE as *const _ as *const std::ffi::c_void,
                 std::mem::size_of::<usize>(),
-            ).result()?;
+            )
+            .result()?;
 
             // Get heuristic (best algorithm)
             cublasLtMatmulAlgoGetHeuristic(
@@ -306,7 +296,8 @@ impl HostOp for CuBlasLt {
                 1, // Request 1 result
                 &mut heuristic,
                 &mut algo_count,
-            ).result()?;
+            )
+            .result()?;
 
             if algo_count == 0 {
                 // Cleanup before returning error
@@ -338,7 +329,8 @@ impl HostOp for CuBlasLt {
                 workspace_ptr as *mut std::ffi::c_void,
                 WORKSPACE_SIZE,
                 stream.cu_stream() as *mut _,
-            ).result()?;
+            )
+            .result()?;
 
             // Cleanup
             cublasLtMatmulPreferenceDestroy(preference);

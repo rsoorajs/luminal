@@ -19,16 +19,22 @@ pub fn dtype_includes(dtypes: &[DType]) -> String {
     let needs_bf16 = dtypes.iter().any(|d| matches!(d, DType::Bf16));
     format!(
         "{}{}",
-        if needs_fp16 { "#include <cuda_fp16.h>\n" } else { "" },
-        if needs_bf16 { "#include <cuda_bf16.h>\n" } else { "" },
+        if needs_fp16 {
+            "#include <cuda_fp16.h>\n"
+        } else {
+            ""
+        },
+        if needs_bf16 {
+            "#include <cuda_bf16.h>\n"
+        } else {
+            ""
+        },
     )
 }
 
 /// Compiles a CUDA kernel with proper include paths for f16/bf16 types
 pub fn compile_kernel(kernel: &str, dtypes: &[DType]) -> cudarc::nvrtc::Ptx {
-    let needs_special_types = dtypes
-        .iter()
-        .any(|d| matches!(d, DType::F16 | DType::Bf16));
+    let needs_special_types = dtypes.iter().any(|d| matches!(d, DType::F16 | DType::Bf16));
 
     if needs_special_types {
         compile_ptx_with_opts(

@@ -74,9 +74,7 @@ pub fn assert_close<T: Float + std::fmt::Display>(a_vec: &[T], b_vec: &[T], rtol
         let tolerance = atol + rtol * b.abs();
 
         if diff > tolerance {
-            panic!(
-                "{a} is not close to {b}, index {i}, diff: {diff}, tolerance: {tolerance}"
-            );
+            panic!("{a} is not close to {b}, index {i}, diff: {diff}, tolerance: {tolerance}");
         }
     }
 }
@@ -106,8 +104,7 @@ pub fn test_unary_cuda<T: TestDType>(
     ref_func: impl Fn(Tensor) -> Tensor,
     generator: impl Fn(usize, u64) -> Vec<T>,
     seed: u64,
-)
-where
+) where
     Vec<T>: ToCudaInput,
 {
     let Some(stream) = get_cuda_stream() else {
@@ -161,8 +158,7 @@ pub fn test_binary_cuda<T: TestDType>(
     seed: u64,
     rtol: f32,
     atol: f32,
-)
-where
+) where
     Vec<T>: ToCudaInput,
 {
     let Some(stream) = get_cuda_stream() else {
@@ -269,7 +265,12 @@ pub fn test_mod(
 /// Generate a slice range for an axis of given size.
 /// If do_start is true, randomly choose a start offset (leaving at least 1 element).
 /// If do_end is true, randomly choose an end before the axis end.
-pub fn gen_slice_range(size: usize, do_start: bool, do_end: bool, rng: &mut impl Rng) -> (usize, usize) {
+pub fn gen_slice_range(
+    size: usize,
+    do_start: bool,
+    do_end: bool,
+    rng: &mut impl Rng,
+) -> (usize, usize) {
     let start = if do_start && size > 1 {
         rng.random_range(0..size)
     } else {

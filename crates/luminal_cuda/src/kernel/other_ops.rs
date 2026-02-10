@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
-use crate::{cuda_dtype, kernel::KernelOp, kernel::hlir::{generate_dyn_dims_defines, dtype_includes, compile_kernel}};
+use crate::{
+    cuda_dtype,
+    kernel::KernelOp,
+    kernel::hlir::{compile_kernel, dtype_includes, generate_dyn_dims_defines},
+};
 use cudarc::{
     driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream},
     nvrtc::CompileOptions,

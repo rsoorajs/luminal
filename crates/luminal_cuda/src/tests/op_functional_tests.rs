@@ -10,8 +10,8 @@ use luminal::egglog_utils::{
 use crate::runtime::CudaRuntime;
 
 use super::utilities::{
-    assert_close, dtype_epsilon, gen_slice_range, get_cuda_stream, random_f32_vec,
-    test_binary_cuda, test_mod, test_unary_cuda, TOLERANCE_SAFETY_FACTOR,
+    TOLERANCE_SAFETY_FACTOR, assert_close, dtype_epsilon, gen_slice_range, get_cuda_stream,
+    random_f32_vec, test_binary_cuda, test_mod, test_unary_cuda,
 };
 
 proptest! {
@@ -238,21 +238,31 @@ fn run_argsort_test(rows: usize, cols: usize, seed: u64) {
     // Debug: check for out-of-range values (indices should be 0..rows for dim0, 0..cols for dim1)
     let max_valid_dim0 = rows as i32 - 1;
     let max_valid_dim1 = cols as i32 - 1;
-    let bad_dim0: Vec<_> = out_dim0.iter().enumerate()
+    let bad_dim0: Vec<_> = out_dim0
+        .iter()
+        .enumerate()
         .filter(|&(_, &v)| v < 0 || v > max_valid_dim0)
         .take(10)
         .collect();
-    let bad_dim1: Vec<_> = out_dim1.iter().enumerate()
+    let bad_dim1: Vec<_> = out_dim1
+        .iter()
+        .enumerate()
         .filter(|&(_, &v)| v < 0 || v > max_valid_dim1)
         .take(10)
         .collect();
 
     if !bad_dim0.is_empty() {
-        panic!("dim0 has out-of-range values (valid: 0-{max_valid_dim0}): {:?}\nFirst 20 values: {:?}",
-               bad_dim0, &out_dim0[..20.min(out_dim0.len())]);
+        panic!(
+            "dim0 has out-of-range values (valid: 0-{max_valid_dim0}): {:?}\nFirst 20 values: {:?}",
+            bad_dim0,
+            &out_dim0[..20.min(out_dim0.len())]
+        );
     }
     if !bad_dim1.is_empty() {
-        panic!("dim1 has out-of-range values (valid: 0-{max_valid_dim1}): {:?}", bad_dim1);
+        panic!(
+            "dim1 has out-of-range values (valid: 0-{max_valid_dim1}): {:?}",
+            bad_dim1
+        );
     }
 
     for i in 0..out_dim0.len() {
@@ -292,20 +302,20 @@ pub fn test_cast_f16_edge_cases() {
         1.0,
         -1.0,
         0.5,
-        0.333333333,      // Will truncate: F16 can't represent 1/3 exactly
-        0.1,              // Will truncate: 0.1 isn't exact in binary
-        1.0009765625,     // Exactly representable in F16 (1 + 1/1024)
-        1.00048828125,    // Rounds to 1.0 in F16 (1 + 1/2048, below F16 precision)
-        1.0007324219,     // Between two F16 values, will round
-        -3.140625,        // Exactly representable
-        3.14159265,       // Pi - will truncate
-        65504.0,          // Max normal F16
-        -65504.0,         // Min normal F16
-        0.000060976,      // Near F16 min positive normal
-        1e-7,             // Subnormal in F16
+        0.333333333,   // Will truncate: F16 can't represent 1/3 exactly
+        0.1,           // Will truncate: 0.1 isn't exact in binary
+        1.0009765625,  // Exactly representable in F16 (1 + 1/1024)
+        1.00048828125, // Rounds to 1.0 in F16 (1 + 1/2048, below F16 precision)
+        1.0007324219,  // Between two F16 values, will round
+        -3.140625,     // Exactly representable
+        3.14159265,    // Pi - will truncate
+        65504.0,       // Max normal F16
+        -65504.0,      // Min normal F16
+        0.000060976,   // Near F16 min positive normal
+        1e-7,          // Subnormal in F16
         100.0,
         -100.0,
-        12.345678,        // Arbitrary value requiring truncation
+        12.345678, // Arbitrary value requiring truncation
     ];
 
     // Generator that ignores seed and returns edge cases
@@ -351,7 +361,6 @@ proptest! {
         );
     }
 }
-
 
 /// Fuzz test that generates many random genomes and verifies they all produce correct results.
 /// This tests the genetic algorithm search by validating each genome individually.
