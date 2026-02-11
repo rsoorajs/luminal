@@ -11,7 +11,7 @@ use crate::runtime::CudaRuntime;
 
 use super::utilities::{
     TOLERANCE_SAFETY_FACTOR, assert_close, dtype_epsilon, gen_slice_range, get_cuda_stream,
-    random_f32_vec, test_binary_cuda, test_mod, test_unary_cuda,
+    random_f32_vec, random_i32_vec, test_binary_cuda, test_mod, test_unary_cuda,
 };
 
 proptest! {
@@ -170,12 +170,9 @@ proptest! {
 
     #[test]
     fn test_less_than(x in 1usize..100, y in 1usize..5, seed in any::<u64>()) {
-        let gen_lambda = |n, s| random_f32_vec(n, s, -0.5, 0.5);
-        let eps = dtype_epsilon(luminal::op::DType::F32);
-        let (rtol, atol) = (eps * TOLERANCE_SAFETY_FACTOR, eps * TOLERANCE_SAFETY_FACTOR);
-        // less_than outputs Bool, so cast to F32 for comparison (matching candle's to_dtype)
-        test_binary_cuda(x, x, |a, b| a.lt(b).cast(luminal::op::DType::F32), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap(), &gen_lambda, &gen_lambda, seed, rtol, atol);
-        test_binary_cuda((y, x), (y, x), |a, b| a.lt(b).cast(luminal::op::DType::F32), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap(), &gen_lambda, &gen_lambda, seed, rtol, atol);
+        let gen_lambda = |n, s| random_f32_vec(n, s, -99.0, 100.0).into_iter().map(|v| v.floor()).collect();
+        test_binary_cuda(x, x, |a, b| a.lt(b).cast(luminal::op::DType::F32), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap(), &gen_lambda, &gen_lambda, seed, 0.0, 0.0);
+        test_binary_cuda((y, x), (y, x), |a, b| a.lt(b).cast(luminal::op::DType::F32), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap(), &gen_lambda, &gen_lambda, seed, 0.0, 0.0);
     }
 }
 

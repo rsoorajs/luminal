@@ -2,7 +2,7 @@ use candle_core::{Device, Tensor, WithDType};
 use cudarc::driver::CudaContext;
 use half::{bf16, f16};
 use luminal::prelude::*;
-use num_traits::Float;
+use num_traits::{Num, Signed};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ pub const TOLERANCE_SAFETY_FACTOR: f32 = 2.0;
 
 /// Trait for test-compatible data types that can be used in generic test functions.
 /// Bridges luminal's runtime types with candle's tensor types.
-pub trait TestDType: Clone + Sized + WithDType + Float + std::fmt::Display + 'static
+pub trait TestDType: Clone + Sized + WithDType + PartialEq + Copy + std::fmt::Debug + 'static
 where
     Vec<Self>: ToCudaInput,
 {
@@ -24,6 +24,8 @@ where
     fn get_from_runtime(rt: &CudaRuntime, id: NodeIndex) -> Vec<Self>;
     /// Extract a Vec from a candle Tensor
     fn candle_to_vec(tensor: &Tensor) -> Vec<Self>;
+    /// Compare two result vectors. Float types use tolerance; exact types use equality.
+    fn assert_match(a: &[Self], b: &[Self], rtol: f32, atol: f32);
 }
 
 impl TestDType for f32 {
@@ -34,6 +36,9 @@ impl TestDType for f32 {
     }
     fn candle_to_vec(tensor: &Tensor) -> Vec<Self> {
         tensor.to_vec1::<f32>().unwrap()
+    }
+    fn assert_match(a: &[Self], b: &[Self], rtol: f32, atol: f32) {
+        assert_close(a, b, rtol, atol);
     }
 }
 
@@ -46,6 +51,9 @@ impl TestDType for f16 {
     fn candle_to_vec(tensor: &Tensor) -> Vec<Self> {
         tensor.to_vec1::<f16>().unwrap()
     }
+    fn assert_match(a: &[Self], b: &[Self], rtol: f32, atol: f32) {
+        assert_close(a, b, f16::from_f32(rtol), f16::from_f32(atol));
+    }
 }
 
 impl TestDType for bf16 {
@@ -57,6 +65,28 @@ impl TestDType for bf16 {
     fn candle_to_vec(tensor: &Tensor) -> Vec<Self> {
         tensor.to_vec1::<bf16>().unwrap()
     }
+    fn assert_match(a: &[Self], b: &[Self], rtol: f32, atol: f32) {
+        assert_close(a, b, bf16::from_f32(rtol), bf16::from_f32(atol));
+    }
+}
+
+impl TestDType for i32 {
+    const DTYPE: luminal::op::DType = luminal::op::DType::Int;
+
+    fn get_from_runtime(rt: &CudaRuntime, id: NodeIndex) -> Vec<Self> {
+        rt.get_i32(id)
+    }
+    fn candle_to_vec(tensor: &Tensor) -> Vec<Self> {
+        tensor.to_vec1::<i32>().unwrap()
+    }
+    fn assert_match(a: &[Self], b: &[Self], _rtol: f32, _atol: f32) {
+        assert_eq!(a, b);
+    }
+}
+
+pub fn random_i32_vec(n: usize, seed: u64, low: i32, high: i32) -> Vec<i32> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    (0..n).map(|_| rng.random_range(low..=high)).collect()
 }
 
 pub fn random_f32_vec(n: usize, seed: u64, low: f32, high: f32) -> Vec<f32> {
@@ -67,7 +97,7 @@ pub fn random_f32_vec(n: usize, seed: u64, low: f32, high: f32) -> Vec<f32> {
 /// Assert two vectors are close following NumPy/PyTorch conventions.
 /// Formula: |a - b| <= atol + rtol * |b|
 /// Generic version that works with any Float type (f32, f16, bf16).
-pub fn assert_close<T: Float + std::fmt::Display>(a_vec: &[T], b_vec: &[T], rtol: T, atol: T) {
+pub fn assert_close<T: Num + Signed + PartialOrd + Copy + std::fmt::Display>(a_vec: &[T], b_vec: &[T], rtol: T, atol: T) {
     assert_eq!(a_vec.len(), b_vec.len(), "Number of elements doesn't match");
     for (i, (a, b)) in a_vec.iter().zip(b_vec.iter()).enumerate() {
         let diff = (*a - *b).abs();
@@ -139,11 +169,9 @@ pub fn test_unary_cuda<T: TestDType>(
     let ref_b = ref_func(ref_a).flatten_all().unwrap();
     let ref_vec = T::candle_to_vec(&ref_b);
 
-    // Tolerances derived from dtype epsilon
     let eps = dtype_epsilon(<T as TestDType>::DTYPE);
-    let rtol = T::from(eps * TOLERANCE_SAFETY_FACTOR).unwrap();
-    let atol = T::from(eps * TOLERANCE_SAFETY_FACTOR).unwrap();
-    assert_close(&result, &ref_vec, rtol, atol);
+    let tol = eps * TOLERANCE_SAFETY_FACTOR;
+    T::assert_match(&result, &ref_vec, tol, tol);
 }
 
 /// Base binary test function with input generators
@@ -203,9 +231,7 @@ pub fn test_binary_cuda<T: TestDType>(
     let ref_c = ref_func(ref_a, ref_b).flatten_all().unwrap();
     let ref_vec = T::candle_to_vec(&ref_c);
 
-    let rtol = T::from(rtol).unwrap();
-    let atol = T::from(atol).unwrap();
-    assert_close(&result, &ref_vec, rtol, atol);
+    T::assert_match(&result, &ref_vec, rtol, atol);
 }
 
 /// Test mod operation with element-wise reference using Rust's % operator

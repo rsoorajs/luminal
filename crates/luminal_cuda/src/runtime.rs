@@ -203,6 +203,13 @@ impl CudaRuntime {
         unsafe { Vec::from_raw_parts(float_ptr, n_bytes / 4, n_bytes / 4) }
     }
 
+    pub fn get_bool(&self, id: impl ToId) -> Vec<bool> {
+        self.get_output_data(id)
+            .into_iter()
+            .map(|b| b != 0)
+            .collect()
+    }
+
     pub fn get_i32(&self, id: impl ToId) -> Vec<i32> {
         self.get_output_data(id)
             .chunks_exact(4)
