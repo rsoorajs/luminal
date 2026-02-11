@@ -13,7 +13,8 @@ pub const TOLERANCE_SAFETY_FACTOR: f32 = 2.0;
 
 /// Trait for test-compatible data types that can be used in generic test functions.
 /// Bridges luminal's runtime types with candle's tensor types.
-pub trait TestDType: Clone + Sized + WithDType + PartialEq + Copy + std::fmt::Debug + 'static
+pub trait TestDType:
+    Clone + Sized + WithDType + PartialEq + Copy + std::fmt::Debug + 'static
 where
     Vec<Self>: ToCudaInput,
 {
@@ -97,7 +98,12 @@ pub fn random_f32_vec(n: usize, seed: u64, low: f32, high: f32) -> Vec<f32> {
 /// Assert two vectors are close following NumPy/PyTorch conventions.
 /// Formula: |a - b| <= atol + rtol * |b|
 /// Generic version that works with any Float type (f32, f16, bf16).
-pub fn assert_close<T: Num + Signed + PartialOrd + Copy + std::fmt::Display>(a_vec: &[T], b_vec: &[T], rtol: T, atol: T) {
+pub fn assert_close<T: Num + Signed + PartialOrd + Copy + std::fmt::Display>(
+    a_vec: &[T],
+    b_vec: &[T],
+    rtol: T,
+    atol: T,
+) {
     assert_eq!(a_vec.len(), b_vec.len(), "Number of elements doesn't match");
     for (i, (a, b)) in a_vec.iter().zip(b_vec.iter()).enumerate() {
         let diff = (*a - *b).abs();
@@ -123,6 +129,18 @@ pub fn dtype_epsilon(dtype: luminal::op::DType) -> f32 {
         luminal::op::DType::Bf16 => 7.81e-3, // 2^-7
         luminal::op::DType::Int => 0.0,
         luminal::op::DType::Bool => 0.0,
+        luminal::op::DType::NvFp4 | luminal::op::DType::Mxfp4 => todo!(),
+    }
+}
+
+/// Map a luminal DType to the corresponding candle DType.
+pub fn to_candle_dtype(dtype: luminal::op::DType) -> candle_core::DType {
+    match dtype {
+        luminal::op::DType::F32 => candle_core::DType::F32,
+        luminal::op::DType::F16 => candle_core::DType::F16,
+        luminal::op::DType::Bf16 => candle_core::DType::BF16,
+        luminal::op::DType::Int => candle_core::DType::I32,
+        luminal::op::DType::Bool => candle_core::DType::U8,
         luminal::op::DType::NvFp4 | luminal::op::DType::Mxfp4 => todo!(),
     }
 }

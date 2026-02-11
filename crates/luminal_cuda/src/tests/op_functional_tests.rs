@@ -9,9 +9,10 @@ use luminal::egglog_utils::{
 
 use crate::runtime::CudaRuntime;
 
+#[allow(unused_imports)]
 use super::utilities::{
     TOLERANCE_SAFETY_FACTOR, assert_close, dtype_epsilon, gen_slice_range, get_cuda_stream,
-    random_f32_vec, random_i32_vec, test_binary_cuda, test_mod, test_unary_cuda,
+    random_f32_vec, random_i32_vec, test_binary_cuda, test_mod, test_unary_cuda, to_candle_dtype,
 };
 
 proptest! {
@@ -78,15 +79,7 @@ proptest! {
             (true, true)   => ((k, m), (n, k)),  // Cm x Cm
         };
 
-        // Map luminal dtype to candle dtype
-        let candle_dtype = match dtype {
-            luminal::op::DType::F32 => candle_core::DType::F32,
-            luminal::op::DType::F16 => candle_core::DType::F16,
-            luminal::op::DType::Bf16 => candle_core::DType::BF16,
-            luminal::op::DType::Int => candle_core::DType::I32,
-            luminal::op::DType::Bool => candle_core::DType::U8,
-            luminal::op::DType::NvFp4 | luminal::op::DType::Mxfp4 => todo!(),
-        };
+        let candle_dtype = to_candle_dtype(dtype);
 
         let luminal_op = move |a: GraphTensor, b: GraphTensor| {
             let a = a.cast(dtype);

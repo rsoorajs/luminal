@@ -1,7 +1,7 @@
 use luminal::prelude::*;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
-use super::{assert_close_precision, get_cuda_stream, random_vec};
+use super::utilities::{assert_close, get_cuda_stream, random_f32_vec};
 use crate::runtime::CudaRuntime;
 
 /// FP4 E2M1 lookup table (matches CUDA kernel)
@@ -150,7 +150,7 @@ fn test_matmul_mxfp4_minimal() {
     rt.execute(&cx.dyn_map);
 
     let result = rt.get_f32(c);
-    assert_close_precision(&result, &expected, 0.5);
+    assert_close(&result, &expected, 0.0, 0.5);
 }
 
 /// Test MXFP4 matmul with exact FP4 values (zero quantization error).
@@ -164,7 +164,7 @@ fn test_matmul_mxfp4_exact() {
     let k = 64;
     let n = 8;
 
-    let a_data = random_vec(m * k);
+    let a_data = random_f32_vec(m * k, 0, -0.5, 0.5);
 
     // Weights using exact FP4 values
     let mut rng = StdRng::seed_from_u64(42);
@@ -188,7 +188,7 @@ fn test_matmul_mxfp4_exact() {
 
     rt.execute(&cx.dyn_map);
     let result = rt.get_f32(c);
-    assert_close_precision(&result, &expected, 0.1);
+    assert_close(&result, &expected, 0.0, 0.1);
 }
 
 /// Test MXFP4 matmul with random weights (includes quantization error).
@@ -202,7 +202,7 @@ fn test_matmul_mxfp4_random() {
     let k = 128;
     let n = 16;
 
-    let a_data = random_vec(m * k);
+    let a_data = random_f32_vec(m * k, 0, -0.5, 0.5);
 
     let mut rng = StdRng::seed_from_u64(99);
     let b_fp32: Vec<f32> = (0..n * k).map(|_| rng.random_range(-3.0..3.0f32)).collect();
@@ -223,7 +223,7 @@ fn test_matmul_mxfp4_random() {
     rt.execute(&cx.dyn_map);
 
     let result = rt.get_f32(c);
-    assert_close_precision(&result, &expected, 0.5);
+    assert_close(&result, &expected, 0.0, 0.5);
 }
 
 /// Test MXFP4 matmul with M=1 (decode path in kernel).
@@ -237,7 +237,7 @@ fn test_matmul_mxfp4_m1() {
     let k = 128;
     let n = 64;
 
-    let a_data = random_vec(m * k);
+    let a_data = random_f32_vec(m * k, 0, -0.5, 0.5);
 
     let mut rng = StdRng::seed_from_u64(7);
     let b_fp32: Vec<f32> = (0..n * k)
@@ -260,5 +260,5 @@ fn test_matmul_mxfp4_m1() {
     rt.execute(&cx.dyn_map);
 
     let result = rt.get_f32(c);
-    assert_close_precision(&result, &expected, 0.1);
+    assert_close(&result, &expected, 0.0, 0.1);
 }
