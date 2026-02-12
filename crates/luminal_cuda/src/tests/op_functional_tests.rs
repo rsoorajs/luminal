@@ -12,7 +12,8 @@ use crate::runtime::CudaRuntime;
 #[allow(unused_imports)]
 use super::utilities::{
     TOLERANCE_SAFETY_FACTOR, assert_close, dtype_epsilon, gen_slice_range, get_cuda_stream,
-    random_f32_vec, random_i32_vec, test_binary_cuda, test_mod, test_unary_cuda, to_candle_dtype,
+    gpu_supports_dtype, random_f32_vec, random_i32_vec, test_binary_cuda, test_mod,
+    test_unary_cuda, to_candle_dtype,
 };
 
 proptest! {
@@ -63,6 +64,7 @@ proptest! {
             }),
         seed in any::<u64>()
     ) {
+        prop_assume!(gpu_supports_dtype(dtype), "GPU does not support {:?}", dtype);
 
         let (m_start, m_end) = m_slice;
         let (k_start, k_end) = k_slice;

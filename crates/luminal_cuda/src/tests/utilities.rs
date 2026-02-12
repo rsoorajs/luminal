@@ -121,6 +121,24 @@ pub fn get_cuda_stream() -> Option<Arc<cudarc::driver::CudaStream>> {
     Some(ctx.default_stream())
 }
 
+/// Get the GPU compute capability as (major, minor).
+pub fn gpu_compute_cap() -> Option<(i32, i32)> {
+    let ctx = CudaContext::new(0).ok()?;
+    ctx.compute_capability().ok()
+}
+
+/// Check if the current GPU supports the given dtype for tensor core / WMMA operations.
+pub fn gpu_supports_dtype(dtype: luminal::op::DType) -> bool {
+    let Some((major, _)) = gpu_compute_cap() else {
+        return false;
+    };
+    match dtype {
+        luminal::op::DType::Bf16 => major >= 8,                          // Ampere (sm_80+)
+        luminal::op::DType::NvFp4 | luminal::op::DType::Mxfp4 => major >= 10, // Blackwell (sm_100+)
+        _ => true,
+    }
+}
+
 /// Machine epsilon for each dtype (approximate)
 pub fn dtype_epsilon(dtype: luminal::op::DType) -> f32 {
     match dtype {
