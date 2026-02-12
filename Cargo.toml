@@ -50,3 +50,6 @@ members = [
     "crates/luminal_tracing",
     "crates/luminal_bench",
 ]
+
+[patch.crates-io]
+candle-kernels = { git = "https://github.com/asglover/candle.git", branch = "fix/disable-bf16-wmma-pre-ampere" }
