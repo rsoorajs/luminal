@@ -134,7 +134,7 @@ pub fn gpu_supports_dtype(dtype: luminal::op::DType) -> bool {
         return false;
     };
     match dtype {
-        luminal::op::DType::Bf16 => major >= 8,                          // Ampere (sm_80+)
+        luminal::op::DType::Bf16 => major >= 8, // Ampere (sm_80+)
         luminal::op::DType::NvFp4 | luminal::op::DType::Mxfp4 => major >= 10, // Blackwell (sm_100+)
         _ => true,
     }
