@@ -21,3 +21,4 @@ Cargo.lock
 tokenizer.json
 **/.cache
 **/proptest-regressions
+opencode.json

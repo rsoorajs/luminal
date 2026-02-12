@@ -1,7 +1,7 @@
 use luminal::prelude::*;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
-use super::{assert_close_precision, get_cuda_stream, random_vec};
+use super::utilities::{assert_close, get_cuda_stream, random_f32_vec};
 use crate::runtime::CudaRuntime;
 
 /// FP4 E2M1 lookup table (matches CUDA kernel)
@@ -188,7 +188,7 @@ fn test_matmul_nvfp4_minimal() {
     rt.execute(&cx.dyn_map);
 
     let result = rt.get_f32(c);
-    assert_close_precision(&result, &expected, 0.5);
+    assert_close(&result, &expected, 0.0, 0.5);
 }
 
 /// Test NvFp4 matmul with exact FP4 values (zero quantization error).
@@ -204,7 +204,7 @@ fn test_matmul_nvfp4_exact() {
     let n = 8;
 
     // Random activations
-    let a_data = random_vec(m * k);
+    let a_data = random_f32_vec(m * k, 0, -0.5, 0.5);
 
     // Weights using exact FP4 values (block_scale=1.0 means no quantization error)
     let mut rng = StdRng::seed_from_u64(42);
@@ -233,7 +233,7 @@ fn test_matmul_nvfp4_exact() {
 
     rt.execute(&cx.dyn_map);
     let result = rt.get_f32(c);
-    assert_close_precision(&result, &expected, 0.1);
+    assert_close(&result, &expected, 0.0, 0.1);
 }
 
 /// Test NvFp4 matmul with random weights (includes quantization error).
@@ -247,7 +247,7 @@ fn test_matmul_nvfp4_random() {
     let k = 64;
     let n = 16;
 
-    let a_data = random_vec(m * k);
+    let a_data = random_f32_vec(m * k, 0, -0.5, 0.5);
 
     // Random weights in a small range (will be quantized to FP4)
     let mut rng = StdRng::seed_from_u64(99);
@@ -270,7 +270,7 @@ fn test_matmul_nvfp4_random() {
 
     let result = rt.get_f32(c);
     // Wider tolerance since quantization introduces error
-    assert_close_precision(&result, &expected, 0.5);
+    assert_close(&result, &expected, 0.0, 0.5);
 }
 
 /// Test NvFp4 matmul with M=1 (decode path in kernel).
@@ -284,7 +284,7 @@ fn test_matmul_nvfp4_m1() {
     let k = 48;
     let n = 32;
 
-    let a_data = random_vec(m * k);
+    let a_data = random_f32_vec(m * k, 0, -0.5, 0.5);
 
     let mut rng = StdRng::seed_from_u64(7);
     let b_fp32: Vec<f32> = (0..n * k)
@@ -307,5 +307,5 @@ fn test_matmul_nvfp4_m1() {
     rt.execute(&cx.dyn_map);
 
     let result = rt.get_f32(c);
-    assert_close_precision(&result, &expected, 0.1);
+    assert_close(&result, &expected, 0.0, 0.1);
 }

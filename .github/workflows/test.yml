@@ -28,7 +28,7 @@ jobs:
         steps:
             - uses: actions/checkout@v6
             - name: Run clippy
-              run: sudo apt-get install protobuf-compiler; rustup update; cargo clippy --workspace --exclude luminal_metal --exclude luminal_bench --all-targets -- -D warnings
+              run: sudo apt-get install protobuf-compiler; rustup update; cargo clippy --workspace --exclude luminal_cuda --exclude luminal_metal --exclude luminal_bench --all-targets -- -D warnings
 
     fmt:
         name: Fmt
@@ -49,6 +49,10 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
+            - name: Detect GPU compute capability
+              run: |
+                  CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
+                  echo "CUDA_COMPUTE_CAP=${CAP}" >> "$GITHUB_ENV"
             - name: Run CUDA crate tests
               run: cargo test -p luminal_cuda --verbose
     # cuda_llama: # disabled because t4 doesn't have enough memory for full precision llama. re-enable when we can run on larger machines or use 8-bit precision

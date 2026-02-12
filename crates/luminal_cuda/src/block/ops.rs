@@ -1026,7 +1026,8 @@ impl EgglogOp for TileMatmulSplitK {
 
                 ; Assert B has contiguous k (col-major B / transposed)
                 (= ?b_k_stride (MNum 1))
-
+              
+                ; Only match F32 inputs (BlockOp matmul is F32-only)
                 (= (F32) (dtype ?a))
                 (= (F32) (dtype ?b))
             )
