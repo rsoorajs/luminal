@@ -12,6 +12,7 @@ onnx-protobuf = "0.2"
 protobuf = "~3.4"
 rustc-hash = "2.1.1"
 luminal = {path= "../.."}
+luminal_cuda = {path="../luminal_cuda"}
 
 [dependencies.pyo3]
 version = "0.28.0"
