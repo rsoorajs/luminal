@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use luminal::prelude::*;
-//use luminal_cuda::cudarc::driver::{CudaContext, CudaStream};
-//use luminal_cuda::runtime::CudaRuntime;
+use luminal_cuda::cudarc::driver::{CudaContext, CudaStream};
+use luminal_cuda::runtime::CudaRuntime;
 use rustc_hash::FxHashMap;
 
 /// Enum wrapper for runtime backends allowing runtime selection.
 pub enum RuntimeBackend {
     Native(NativeRuntime),
-    //   Cuda(Box<CudaRuntime>),
+    Cuda(Box<CudaRuntime>),
 }
 
 impl RuntimeBackend {
@@ -16,7 +16,7 @@ impl RuntimeBackend {
     pub fn set_data(&mut self, node: NodeIndex, data: Vec<f32>) {
         match self {
             RuntimeBackend::Native(rt) => rt.set_data(node, data),
-            //   RuntimeBackend::Cuda(rt) => rt.set_data(node, data),
+            RuntimeBackend::Cuda(rt) => rt.set_data(node, data),
         }
     }
 
@@ -24,7 +24,7 @@ impl RuntimeBackend {
     pub fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) {
         match self {
             RuntimeBackend::Native(rt) => rt.execute(dyn_map),
-            //   RuntimeBackend::Cuda(rt) => rt.execute(dyn_map),
+            RuntimeBackend::Cuda(rt) => rt.execute(dyn_map),
         }
     }
 
@@ -32,7 +32,7 @@ impl RuntimeBackend {
     pub fn get_f32(&self, node: NodeIndex) -> Vec<f32> {
         match self {
             RuntimeBackend::Native(rt) => rt.get_f32(node).to_vec(),
-            //   RuntimeBackend::Cuda(rt) => rt.get_f32(node),
+            RuntimeBackend::Cuda(rt) => rt.get_f32(node),
         }
     }
 
@@ -40,7 +40,7 @@ impl RuntimeBackend {
     pub fn name(&self) -> &'static str {
         match self {
             RuntimeBackend::Native(_) => "native",
-            //   RuntimeBackend::Cuda(_) => "cuda",
+            RuntimeBackend::Cuda(_) => "cuda",
         }
     }
 }
@@ -57,7 +57,7 @@ impl RuntimeBackend {
 /// 2. Set data on the runtime using `rt.set_data(node_id, data)`
 /// 3. Call `finalize_cuda` to run profiling with data available
 ///
-/*
+
 pub fn prepare_cuda(context: &mut Graph) -> Result<(CudaRuntime, Arc<CudaStream>), String> {
     let cuda_ctx =
         CudaContext::new(0).map_err(|e| format!("Failed to init CUDA context: {}", e))?;
@@ -72,7 +72,7 @@ pub fn finalize_cuda(context: &mut Graph, rt: CudaRuntime) -> RuntimeBackend {
     let optimized_rt = context.search(rt, 1);
     RuntimeBackend::Cuda(Box::new(optimized_rt))
 }
-*/
+
 /// Initialize a native (CPU) runtime using single-phase approach.
 /// NativeRuntime validates Input nodes, so we must search first, then set data.
 pub fn initialize_native(context: &mut Graph) -> Result<RuntimeBackend, String> {

@@ -204,8 +204,83 @@ impl OnnxGraphResult {
         // Track which tensor names are Input nodes (includes those created during process_onnx_nodes)
         let input_tensor_names: HashSet<String> = tensors.keys().cloned().collect();
         context.build_search_space::<NativeRuntime>();
-        let mut rt = context.search(NativeRuntime::default(), 1);
 
+        let mut rt = OnnxGraphResult::build_cuda_backend(
+            onnx_graph,
+            model_directory,
+            &mut tensors,
+            &mut weight_data,
+        );
+
+        Ok(OnnxGraphResult {
+            context,
+            runtime: rt,
+            tensor_ids,
+            input_names,
+            output_names,
+            output_shapes,
+        })
+    }
+
+    fn build_cuda_backend(
+        onnx_graph: MessageField<GraphProto>,
+        model_directory: &Path,
+        tensors: &mut HashMap<String, GraphTensor>,
+        weight_data: &mut Vec<(String, Vec<f32>)>,
+    ) -> RuntimeBackend {
+        // CUDA: Two-phase - set data BEFORE search for profiling
+        let (mut cuda_rt, _stream) = prepare_cuda(&mut context)?;
+
+        // Set dummy zero data for ALL input tensors
+        for (name, gt) in &tensors {
+            if !input_tensor_names.contains(name) {
+                continue;
+            }
+            let n_elements = compute_n_elements(name);
+            if n_elements > 0 {
+                cuda_rt.set_data(gt.id, vec![0.0f32; n_elements]);
+            }
+        }
+
+        // Overwrite with real initializer data (for accurate profiling)
+        for init in &onnx_graph.initializer {
+            let floats = match load_tensor_floats(init, model_directory) {
+                Some(f) => f,
+                None => continue,
+            };
+            if let Some(gt) = tensors.get(&init.name) {
+                cuda_rt.set_data(gt.id, floats.clone());
+            }
+            let kn_name = format!("{}_kn", &init.name);
+            if let Some(gt_kn) = tensors.get(&kn_name) {
+                let dims: Vec<usize> = init.dims.iter().map(|&d| d as usize).collect();
+                if dims.len() == 2 {
+                    let transposed = transpose_weight_data(&floats, dims[0], dims[1]);
+                    cuda_rt.set_data(gt_kn.id, transposed);
+                }
+            }
+        }
+
+        // Load constant node data
+        for (name, floats) in &weight_data {
+            if let Some(gt) = tensors.get(name) {
+                cuda_rt.set_data(gt.id, floats.clone());
+            }
+        }
+
+        // Now finalize (search with profiling, data is available)
+        finalize_cuda(&mut context, cuda_rt);
+
+        return cuda_rt;
+    }
+
+    fn build_native_backend(
+        onnx_graph: MessageField<GraphProto>,
+        model_directory: &Path,
+        tensors: &mut HashMap<String, GraphTensor>,
+        weight_data: &mut Vec<(String, Vec<f32>)>,
+    ) -> RuntimeBackend {
+        context.search(NativeRuntime::default(), 1);
         /*
         // This is zero init inputs tensors... I don't think we need to do that
         for name in &input_names {
@@ -241,14 +316,7 @@ impl OnnxGraphResult {
                 rt.set_data(gt.id, floats.clone());
             }
         }
-        Ok(OnnxGraphResult {
-            context,
-            runtime: RuntimeBackend::Native(rt),
-            tensor_ids,
-            input_names,
-            output_names,
-            output_shapes,
-        })
+        return RuntimeBackend::Native(rt);
     }
 }
 
