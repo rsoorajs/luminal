@@ -31,6 +31,7 @@ impl OnnxGraphResult {
     pub fn parse_graph(
         model: ModelProto,
         model_directory: &Path,
+        backend: &str,
     ) -> Result<OnnxGraphResult, String> {
         let _span = span!(Level::TRACE, "Onnx Graphing Parsing").entered();
         let onnx_graph = &model.graph;
@@ -205,14 +206,31 @@ impl OnnxGraphResult {
         let input_tensor_names: HashSet<String> = tensors.keys().cloned().collect();
         //        context.build_search_space::<NativeRuntime>();
 
-        let rt = OnnxGraphResult::build_cuda_backend(
-            onnx_graph,
-            model_directory,
-            &mut tensors,
-            &mut weight_data,
-            &mut context,
-            &input_tensor_names
-        );
+        let rt = match backend {
+            "cuda" => {
+                OnnxGraphResult::build_cuda_backend(
+                    onnx_graph,
+                    model_directory,
+                    &mut tensors,
+                    &mut weight_data,
+                    &mut context,
+                    &input_tensor_names
+                )?
+            },
+            "native" => {
+                OnnxGraphResult::build_native_backend(
+                    onnx_graph,
+                    model_directory,
+                    &mut tensors,
+                    &mut weight_data,
+                    &mut context,
+                    &input_tensor_names
+                )?
+            },
+            _ => {
+                return Err(format!("Invalid backend '{}'. Must be 'native' or 'cuda'", backend));
+            }
+        };
 
         Ok(OnnxGraphResult {
             context,
@@ -231,7 +249,7 @@ impl OnnxGraphResult {
         weight_data: &mut Vec<(String, Vec<f32>)>,
         context: &mut Graph,
         input_tensor_names: &HashSet<String>
-    ) -> RuntimeBackend {
+    ) -> Result<RuntimeBackend, String> {
 
         let compute_n_elements = |name: &str| -> usize {
             if let Some(vi) = onnx_graph.input.iter().find(|i| i.name == name) {
@@ -248,7 +266,7 @@ impl OnnxGraphResult {
 
 
         // CUDA: Two-phase - set data BEFORE search for profiling
-        let (mut cuda_rt, _stream) = prepare_cuda(context).unwrap();
+        let (mut cuda_rt, _stream) = prepare_cuda(context)?;
 
         // Set dummy zero data for ALL input tensors
         for (name, gt) in &mut *tensors {
@@ -290,18 +308,19 @@ impl OnnxGraphResult {
         // Now finalize (search with profiling, data is available)
         let cuda_rt = finalize_cuda(context, cuda_rt);
 
-        return cuda_rt;
+        Ok(cuda_rt)
     }
 
     fn build_native_backend(
-        onnx_graph: MessageField<GraphProto>,
+        onnx_graph: &protobuf::MessageField<GraphProto>,
         model_directory: &Path,
         tensors: &mut HashMap<String, GraphTensor>,
         weight_data: &mut Vec<(String, Vec<f32>)>,
-        context: &mut Graph
-    ) -> RuntimeBackend {
+        context: &mut Graph,
+        input_tensor_names: &HashSet<String>
+    ) -> Result<RuntimeBackend, String> {
 
-         let mut rt = initialize_native(context).unwrap();
+         let mut rt = initialize_native(context)?;
         context.search(NativeRuntime::default(), 1);
         /*
         // This is zero init inputs tensors... I don't think we need to do that
@@ -338,7 +357,7 @@ impl OnnxGraphResult {
                 rt.set_data(gt.id, floats.clone());
             }
         }
-        return rt;
+        Ok(rt)
     }
 }
 
