@@ -194,3 +194,38 @@ pub fn parse_div_node(
 
     return Ok(());
 }
+
+/// Handle Sqrt node: output = input[0].sqrt()
+///
+/// Supports numpy-style broadcasting and constant folding when both inputs
+/// have known values at graph-build time.
+pub fn parse_sqrt_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    cx: &mut Graph,
+    weight_data: &mut Vec<(String, Vec<f32>)>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: Sqrt Node");
+    assert!(
+        node.input.len() == 1,
+        "Sqrt nodes need to have one input {} where present",
+        node.input.len()
+    );
+
+    assert!(
+        node.output.len() == 1,
+        "Div nodes only have one input, {} where present",
+        node.input.len(),
+    );
+    let output_name = &node.output[0];
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Sqrt: missing input tensor '{}'", node.input[0]))?;
+
+    let result = a.sqrt();
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Sqrt Node");
+
+    return Ok(());
+}

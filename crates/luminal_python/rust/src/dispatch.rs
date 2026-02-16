@@ -18,6 +18,7 @@ pub fn process_onnx_nodes(
             "Sub" => parse_sub_node(node, tensors, cx, weight_data, known_values)?,
             "Mul" => parse_mul_node(node, tensors, cx, weight_data, known_values)?,
             "Div" => parse_div_node(node, tensors, cx, weight_data, known_values)?,
+            "Sqrt" => parse_sqrt_node(node, tensors, cx, weight_data, known_values)?,
             "MatMul" => parse_matmul_node(node, tensors)?,
             _ => {
                 panic!("Missing Node {}", node.op_type)
