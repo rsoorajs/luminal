@@ -88,3 +88,51 @@ class SubTestModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor):
         return self.weight - x
+
+
+class TransposeTestModel(torch.nn.Module):
+    """Test basic 2D transpose (matrix transpose)."""
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.t()  # 2D transpose
+
+
+class Transpose3DTestModel(torch.nn.Module):
+    """Test 3D transpose with explicit permutation."""
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.permute(2, 0, 1)  # Rotate dimensions
+
+
+class Transpose4DTestModel(torch.nn.Module):
+    """Test 4D transpose (NCHW -> NHWC)."""
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.permute(0, 2, 3, 1)  # Common in CNNs
+
+
+class TransposeReverseTestModel(torch.nn.Module):
+    """Test reverse permutation (default transpose behavior)."""
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dims = list(range(x.ndim))
+        return x.permute(*reversed(dims))
+
+
+class TransposeInExpressionModel(torch.nn.Module):
+    """Test transpose as part of larger expression."""
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight: torch.Tensor = torch.rand((10, 5))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x is (5, 10), transpose to (10, 5), add weight
+        return x.t() + self.weight
