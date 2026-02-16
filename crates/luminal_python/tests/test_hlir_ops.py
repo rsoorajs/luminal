@@ -2,32 +2,13 @@ import os
 import tempfile
 from typing import Callable, List
 
-import luminal
 import onnx
+import pytest
 import torch
 import torch._dynamo
-from compiled_model import CompiledModel
 
-
-def luminal_backend(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]):
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".onnx", delete=False)
-    tmp_path = tmp.name
-    tmp.close()
-    _ = gm.eval()
-    try:
-        _ = torch.onnx.export(
-            gm,
-            tuple(example_inputs),
-            tmp_path,
-            input_names=[f"input_{i}" for i in range(len(example_inputs))],
-        )
-
-        result = luminal.process_onnx(tmp_path)
-    finally:
-        os.unlink(tmp_path)
-    compiled = CompiledModel(result)
-    return compiled
+import luminal
+from luminal import luminal_backend
 
 
 class AddTestModel(torch.nn.Module):
@@ -37,6 +18,24 @@ class AddTestModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor):
         return self.weight + x
+
+
+class MulTestModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight: torch.Tensor = torch.rand((5, 5))
+
+    def forward(self, x: torch.Tensor):
+        return self.weight * x
+
+
+class DivTestModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight: torch.Tensor = torch.rand((5, 5))
+
+    def forward(self, x: torch.Tensor):
+        return self.weight / x
 
 
 class AddAddTestModel(torch.nn.Module):
@@ -57,7 +56,17 @@ class AddConstantTestModel(torch.nn.Module):
         return x + 10
 
 
-def add_test():
+class LinearLayerModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight: torch.Tensor = torch.rand((5, 5))
+        self.bias: torch.Tensor = torch.rand((5, 5))
+
+    def forward(self, x: torch.Tensor):
+        return (self.weight @ x) + self.bias
+
+
+def test_add():
     add_test_model: torch.nn.Module = AddTestModel()
     add_test_mode_compiled: Callable = torch.compile(
         add_test_model, backend=luminal_backend
@@ -68,7 +77,42 @@ def add_test():
     assert torch.allclose(output, original)
 
 
-def add_add_test():
+def test_linear_layer():
+    add_test_model: torch.nn.Module = LinearLayerModel()
+    add_test_mode_compiled: Callable = torch.compile(
+        add_test_model, backend=luminal_backend
+    )
+    x: torch.Tensor = torch.rand((5, 5))
+    original: torch.Tensor = add_test_model(x)
+    output: torch.Tensor = add_test_mode_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_mul():
+    add_test_model: torch.nn.Module = MulTestModel()
+    add_test_mode_compiled: Callable = torch.compile(
+        add_test_model, backend=luminal_backend
+    )
+
+    x: torch.Tensor = torch.rand((5, 5))
+    original: torch.Tensor = add_test_model(x)
+    output: torch.Tensor = add_test_mode_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_div():
+    div_test_model: torch.nn.Module = DivTestModel()
+    div_test_mode_compiled: Callable = torch.compile(
+        div_test_model, backend=luminal_backend
+    )
+
+    x: torch.Tensor = torch.rand((5, 5))
+    original: torch.Tensor = div_test_model(x)
+    output: torch.Tensor = div_test_mode_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_add_add():
     add_test_model: torch.nn.Module = AddAddTestModel()
     add_test_mode_compiled: Callable = torch.compile(
         add_test_model, backend=luminal_backend
@@ -79,7 +123,7 @@ def add_add_test():
     assert torch.allclose(output, original)
 
 
-def add_broadcast_test():
+def test_add_broadcast():
     add_test_model: torch.nn.Module = AddTestModel()
     add_test_mode_compiled: Callable = torch.compile(
         add_test_model, backend=luminal_backend
@@ -90,7 +134,7 @@ def add_broadcast_test():
     assert torch.allclose(output, original)
 
 
-def add_constant_test():
+def test_add_constant():
     add_test_model: torch.nn.Module = AddConstantTestModel()
     add_test_mode_compiled: Callable = torch.compile(
         add_test_model, backend=luminal_backend
@@ -110,7 +154,7 @@ class SubTestModel(torch.nn.Module):
         return self.weight - x
 
 
-def sub_test():
+def test_sub():
     sub_test_model: torch.nn.Module = SubTestModel()
     sub_test_mode_compiled = torch.compile(sub_test_model, backend=luminal_backend)
     x = torch.rand((10, 10))
@@ -119,34 +163,10 @@ def sub_test():
     assert torch.allclose(output, original)
 
 
-def sub_broadcast_test():
+def test_sub_broadcast():
     sub_test_model: torch.nn.Module = SubTestModel()
     sub_test_mode_compiled = torch.compile(sub_test_model, backend=luminal_backend)
     x = torch.rand((10, 10))
     output = sub_test_mode_compiled(x)
     original = sub_test_model(x)
     assert torch.allclose(output, original)
-
-
-def test_cleanup():
-    torch._dynamo.reset()
-
-
-def main():
-
-    tests = [
-        add_add_test,
-        add_constant_test,
-        sub_test,
-        sub_broadcast_test,
-        add_test,
-        add_broadcast_test,
-    ]
-
-    for test in tests:
-        test_cleanup()
-        test()
-
-
-if __name__ == "__main__":
-    main()

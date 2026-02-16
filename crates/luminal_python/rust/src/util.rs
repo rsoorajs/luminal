@@ -203,3 +203,14 @@ pub fn load_initializer_as_f32(init: &onnx_protobuf::TensorProto) -> Option<Vec<
         _ => None,
     }
 }
+
+/// Transpose weight data from [rows, cols] to [cols, rows] row-major layout
+pub fn transpose_weight_data(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    let mut transposed = vec![0.0f32; rows * cols];
+    for r in 0..rows {
+        for c in 0..cols {
+            transposed[c * rows + r] = data[r * cols + c];
+        }
+    }
+    transposed
+}

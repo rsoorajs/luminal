@@ -2,7 +2,9 @@ use luminal::prelude::{
     tracing::{Level, span, trace},
     *,
 };
-use onnx_protobuf::ModelProto;
+use onnx_protobuf::{GraphProto, ModelProto};
+use onnx_protobuf::Message;
+use protobuf::MessageField;
 use pyo3::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
@@ -11,8 +13,8 @@ use std::{
 
 use crate::{
     dispatch::process_onnx_nodes,
-    runtime::RuntimeBackend,
-    util::{get_shape_for_onnx_value, load_initializer_as_f32, load_tensor_floats},
+    runtime::*,
+    util::{get_shape_for_onnx_value, load_initializer_as_f32, load_tensor_floats, transpose_weight_data},
 };
 
 #[pyclass(unsendable)]
@@ -42,7 +44,6 @@ impl OnnxGraphResult {
             .iter()
             .map(|t| t.name.as_str())
             .collect();
-        println!("{:?}", initializer_names);
 
         // Input is an overloaded term in Onnx, it both means the inputs into the model, like the next token
         // and the parameters of the layers, for this we don't want any of the parameters
@@ -54,7 +55,6 @@ impl OnnxGraphResult {
             .filter(|inp| !initializer_names.contains(inp.name.as_str()))
             .map(|inp| inp.name.clone())
             .collect();
-        println!("{:?}", input_names);
 
         // Create "holding" tensors for the input
         // this way they can be considered in the graph computation, and later as we do mutiple runs we can target them and swap out the values
@@ -62,11 +62,11 @@ impl OnnxGraphResult {
         for input in &onnx_graph.input {
             let shape = get_shape_for_onnx_value(input);
             if shape.is_empty() {
-                println!("Input {} skipped because it is empty", input.name.clone());
+                trace!("Input {} skipped because it is empty", input.name.clone());
                 continue;
             }
             let tensor = context.named_tensor(input.name.clone(), shape);
-            println!("Input {} added to tensors", input.name.clone());
+            trace!("Input {} added to tensors", input.name.clone());
             tensors.insert(input.name.clone(), tensor);
         }
 
@@ -97,7 +97,7 @@ impl OnnxGraphResult {
                     // Questions
                     // Should this be fatal
                     // Should this be a print or a log
-                    println!("Unable to initializer values for {:?}", init.name);
+                    panic!("Unable to initializer values for {:?}", init.name);
                 }
             }
         }
@@ -203,13 +203,15 @@ impl OnnxGraphResult {
 
         // Track which tensor names are Input nodes (includes those created during process_onnx_nodes)
         let input_tensor_names: HashSet<String> = tensors.keys().cloned().collect();
-        context.build_search_space::<NativeRuntime>();
+        //        context.build_search_space::<NativeRuntime>();
 
-        let mut rt = OnnxGraphResult::build_cuda_backend(
+        let rt = OnnxGraphResult::build_cuda_backend(
             onnx_graph,
             model_directory,
             &mut tensors,
             &mut weight_data,
+            &mut context,
+            &input_tensor_names
         );
 
         Ok(OnnxGraphResult {
@@ -223,16 +225,33 @@ impl OnnxGraphResult {
     }
 
     fn build_cuda_backend(
-        onnx_graph: MessageField<GraphProto>,
+        onnx_graph: &protobuf::MessageField<GraphProto>,
         model_directory: &Path,
         tensors: &mut HashMap<String, GraphTensor>,
         weight_data: &mut Vec<(String, Vec<f32>)>,
+        context: &mut Graph,
+        input_tensor_names: &HashSet<String>
     ) -> RuntimeBackend {
+
+        let compute_n_elements = |name: &str| -> usize {
+            if let Some(vi) = onnx_graph.input.iter().find(|i| i.name == name) {
+                let shape = get_shape_for_onnx_value(vi);
+                shape.iter().product::<usize>()
+            } else if let Some(init) = onnx_graph.initializer.iter().find(|i| i.name == name) {
+                init.dims.iter().map(|&d| d as usize).product::<usize>()
+            } else if let Some((_, data)) = weight_data.iter().find(|(n, _)| n == name) {
+                data.len()
+            } else {
+                0
+            }
+        };
+
+
         // CUDA: Two-phase - set data BEFORE search for profiling
-        let (mut cuda_rt, _stream) = prepare_cuda(&mut context)?;
+        let (mut cuda_rt, _stream) = prepare_cuda(context).unwrap();
 
         // Set dummy zero data for ALL input tensors
-        for (name, gt) in &tensors {
+        for (name, gt) in &mut *tensors {
             if !input_tensor_names.contains(name) {
                 continue;
             }
@@ -262,14 +281,14 @@ impl OnnxGraphResult {
         }
 
         // Load constant node data
-        for (name, floats) in &weight_data {
+        for (name, floats) in weight_data {
             if let Some(gt) = tensors.get(name) {
                 cuda_rt.set_data(gt.id, floats.clone());
             }
         }
 
         // Now finalize (search with profiling, data is available)
-        finalize_cuda(&mut context, cuda_rt);
+        let cuda_rt = finalize_cuda(context, cuda_rt);
 
         return cuda_rt;
     }
@@ -279,7 +298,10 @@ impl OnnxGraphResult {
         model_directory: &Path,
         tensors: &mut HashMap<String, GraphTensor>,
         weight_data: &mut Vec<(String, Vec<f32>)>,
+        context: &mut Graph
     ) -> RuntimeBackend {
+
+         let mut rt = initialize_native(context).unwrap();
         context.search(NativeRuntime::default(), 1);
         /*
         // This is zero init inputs tensors... I don't think we need to do that
@@ -307,7 +329,7 @@ impl OnnxGraphResult {
         }
 
         // Load constant node data, but skip _kn transposed variants
-        for (name, floats) in &weight_data {
+        for (name, floats) in weight_data {
             // Skip _kn transposed variants - might be optimized away
             if name.ends_with("_kn") {
                 continue;
@@ -316,7 +338,7 @@ impl OnnxGraphResult {
                 rt.set_data(gt.id, floats.clone());
             }
         }
-        return RuntimeBackend::Native(rt);
+        return rt;
     }
 }
 
