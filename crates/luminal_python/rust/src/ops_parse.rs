@@ -230,6 +230,98 @@ pub fn parse_sqrt_node(
     return Ok(());
 }
 
+/// Handle Transpose node: output = permute(input, perm)
+///
+/// The perm attribute specifies the permutation of dimensions.
+/// If perm is not specified, reverses all dimensions (ONNX default).
+pub fn parse_transpose_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    cx: &mut Graph,
+    weight_data: &mut Vec<(String, Vec<f32>)>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: Transpose Node");
+
+    // Validate node structure
+    assert!(
+        node.input.len() == 1,
+        "Transpose nodes must have exactly one input, {} present",
+        node.input.len()
+    );
+    assert!(
+        node.output.len() == 1,
+        "Transpose nodes must have exactly one output, {} present",
+        node.output.len(),
+    );
+
+    // Get input tensor
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Transpose: missing input tensor '{}'", node.input[0]))?;
+
+    let input_rank = input.dims().len();
+
+    // Extract perm attribute or use default (reverse all dims)
+    let perm: Vec<usize> = if let Some(attr) = node.attribute.iter().find(|a| a.name == "perm") {
+        let perm_i64: &Vec<i64> = &attr.ints;
+
+        // Validate perm length
+        if perm_i64.len() != input_rank {
+            return Err(format!(
+                "Transpose: perm length {} does not match input rank {}",
+                perm_i64.len(),
+                input_rank
+            ));
+        }
+
+        // Convert to usize and validate range
+        let mut perm_usize: Vec<usize> = Vec::with_capacity(perm_i64.len());
+        for &axis in perm_i64.iter() {
+            if axis < 0 || axis >= input_rank as i64 {
+                return Err(format!(
+                    "Transpose: perm axis {} out of range [0, {})",
+                    axis, input_rank
+                ));
+            }
+            perm_usize.push(axis as usize);
+        }
+
+        // Validate uniqueness (check it's a valid permutation)
+        let mut sorted = perm_usize.clone();
+        sorted.sort();
+        for (i, &val) in sorted.iter().enumerate() {
+            if val != i {
+                return Err(format!(
+                    "Transpose: perm {:?} is not a valid permutation",
+                    perm_i64
+                ));
+            }
+        }
+
+        perm_usize
+    } else {
+        // Default: reverse all dimensions
+        (0..input_rank).rev().collect()
+    };
+
+    // Apply permute operation
+    let permuted = input.permute(perm);
+
+    // Force materialization by multiplying by 1.0
+    // This is necessary because permute is a view operation that doesn't
+    // rearrange data in memory. The multiplication adds a graph node that
+    // will read according to the permuted shape and write in contiguous order.
+    let result = permuted * 1.0;
+
+    // Store output
+    let output_name = &node.output[0];
+    tensors.insert(output_name.clone(), result);
+
+    trace!("Finished parse: Transpose Node");
+    Ok(())
+}
+
 /// Handle Sin node: output = input[0].sin()
 pub fn parse_sin_node(
     node: &NodeProto,
