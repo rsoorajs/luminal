@@ -14,10 +14,16 @@ use std::path::Path;
 #[pyfunction]
 #[pyo3(signature = (path, backend="native"))]
 fn process_onnx(path: &str, backend: &str) -> PyResult<OnnxGraphResult> {
-    parse_onnx(path).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    if backend != "native" && backend != "cuda" {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            format!("Invalid backend '{}'. Must be 'native' or 'cuda'", backend)
+        ));
+    }
+
+    parse_onnx(path, backend).map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
-fn parse_onnx(path: &str) -> Result<OnnxGraphResult, String> {
+fn parse_onnx(path: &str, backend: &str) -> Result<OnnxGraphResult, String> {
     let data = fs::read(path)
         .map_err(|e| format!("Failed to read file: {}", e))
         .unwrap();
@@ -25,7 +31,7 @@ fn parse_onnx(path: &str) -> Result<OnnxGraphResult, String> {
     let model = ModelProto::parse_from_bytes(&data)
         .map_err(|e| format!("Failed to parse Onnx Model: {}", e))
         .unwrap();
-    let compiled_graph = OnnxGraphResult::parse_graph(model, model_directory);
+    let compiled_graph = OnnxGraphResult::parse_graph(model, model_directory, backend);
     return compiled_graph;
 }
 
