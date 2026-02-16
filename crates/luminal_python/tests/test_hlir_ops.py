@@ -6,72 +6,21 @@ import onnx
 import pytest
 import torch
 import torch._dynamo
+from test_models import (
+    AddAddTestModel,
+    AddConstantTestModel,
+    AddTestModel,
+    CosTestModel,
+    DivTestModel,
+    LinearLayerModel,
+    MulTestModel,
+    SinTestModel,
+    SqrtTestModel,
+    SubTestModel,
+)
 
 import luminal
 from luminal import luminal_backend
-
-
-class AddTestModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.weight: torch.Tensor = torch.rand((5, 5))
-
-    def forward(self, x: torch.Tensor):
-        return self.weight + x
-
-
-class MulTestModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.weight: torch.Tensor = torch.rand((5, 5))
-
-    def forward(self, x: torch.Tensor):
-        return self.weight * x
-
-
-class DivTestModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.weight: torch.Tensor = torch.rand((5, 5))
-
-    def forward(self, x: torch.Tensor):
-        return self.weight / x
-
-
-class AddAddTestModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.weight_1: torch.Tensor = torch.rand((5, 5))
-        self.weight_2: torch.Tensor = torch.rand((5, 5))
-
-    def forward(self, x: torch.Tensor):
-        return self.weight_1 + x + self.weight_2
-
-
-class AddConstantTestModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-
-    def forward(self, x: torch.Tensor):
-        return x + 10
-
-
-class LinearLayerModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.weight: torch.Tensor = torch.rand((5, 5))
-        self.bias: torch.Tensor = torch.rand((5, 5))
-
-    def forward(self, x: torch.Tensor):
-        return (self.weight @ x) + self.bias
-
-
-class SqrtTestModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x.sqrt()
 
 
 def test_add():
@@ -153,15 +102,6 @@ def test_add_constant():
     assert torch.allclose(output, original)
 
 
-class SubTestModel(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.weight: torch.Tensor = torch.rand((10, 10))
-
-    def forward(self, x: torch.Tensor):
-        return self.weight - x
-
-
 def test_sub():
     sub_test_model: torch.nn.Module = SubTestModel()
     sub_test_mode_compiled = torch.compile(sub_test_model, backend=luminal_backend)
@@ -186,4 +126,22 @@ def test_sqrt():
     x = torch.rand(100)
     output = sqrt_test_model_compiled(x)
     original = sqrt_test_model(x)
+    assert torch.allclose(output, original)
+
+
+def test_sin():
+    sin_test_model: torch.nn.Module = SinTestModel()
+    sin_test_model_compiled = torch.compile(sin_test_model, backend=luminal_backend)
+    x = torch.rand(100)
+    output = sin_test_model_compiled(x)
+    original = sin_test_model(x)
+    assert torch.allclose(output, original)
+
+
+def test_cos():
+    cos_test_model: torch.nn.Module = CosTestModel()
+    cos_test_model_compiled = torch.compile(cos_test_model, backend=luminal_backend)
+    x = torch.rand(100)
+    output = cos_test_model_compiled(x)
+    original = cos_test_model(x)
     assert torch.allclose(output, original)

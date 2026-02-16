@@ -229,3 +229,67 @@ pub fn parse_sqrt_node(
 
     return Ok(());
 }
+
+/// Handle Sin node: output = input[0].sin()
+pub fn parse_sin_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    cx: &mut Graph,
+    weight_data: &mut Vec<(String, Vec<f32>)>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: Sin Node");
+    assert!(
+        node.input.len() == 1,
+        "Sin nodes need to have one input {} where present",
+        node.input.len()
+    );
+
+    assert!(
+        node.output.len() == 1,
+        "Sin nodes only have one output, {} where present",
+        node.output.len(),
+    );
+    let output_name = &node.output[0];
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Sin: missing input tensor '{}'", node.input[0]))?;
+
+    let result = a.sin();
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Sin Node");
+
+    return Ok(());
+}
+
+/// Handle Cos node: output = input[0].cos()
+pub fn parse_cos_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    cx: &mut Graph,
+    weight_data: &mut Vec<(String, Vec<f32>)>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: Cos Node");
+    assert!(
+        node.input.len() == 1,
+        "Cos nodes need to have one input {} where present",
+        node.input.len()
+    );
+
+    assert!(
+        node.output.len() == 1,
+        "Cos nodes only have one output, {} where present",
+        node.output.len(),
+    );
+    let output_name = &node.output[0];
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Cos: missing input tensor '{}'", node.input[0]))?;
+
+    let result = a.cos();
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Cos Node");
+
+    return Ok(());
+}
