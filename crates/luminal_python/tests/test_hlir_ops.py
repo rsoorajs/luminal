@@ -66,6 +66,14 @@ class LinearLayerModel(torch.nn.Module):
         return (self.weight @ x) + self.bias
 
 
+class SqrtTestModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sqrt()
+
+
 def test_add():
     add_test_model: torch.nn.Module = AddTestModel()
     add_test_mode_compiled: Callable = torch.compile(
@@ -169,4 +177,13 @@ def test_sub_broadcast():
     x = torch.rand((10, 10))
     output = sub_test_mode_compiled(x)
     original = sub_test_model(x)
+    assert torch.allclose(output, original)
+
+
+def test_sqrt():
+    sqrt_test_model: torch.nn.Module = SqrtTestModel()
+    sqrt_test_model_compiled = torch.compile(sqrt_test_model, backend=luminal_backend)
+    x = torch.rand(100)
+    output = sqrt_test_model_compiled(x)
+    original = sqrt_test_model(x)
     assert torch.allclose(output, original)

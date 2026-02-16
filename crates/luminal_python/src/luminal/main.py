@@ -30,7 +30,3 @@ def luminal_backend(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]
         os.unlink(tmp_path)
     compiled = CompiledModel(result)
     return compiled
-
-
-def test_cleanup():
-    torch._dynamo.reset()
