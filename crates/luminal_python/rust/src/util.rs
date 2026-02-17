@@ -1,6 +1,7 @@
 use std::{fs, path::Path};
 
-use luminal::{prelude::GraphTensor, shape::Expression};
+use luminal::{prelude::{DType, GraphTensor}, shape::Expression};
+use onnx_protobuf::{NodeProto, ValueInfoProto};
 
 // Given a Value from the Onnx proto return its tensor Shape, if it exists
 // Note: some times pytorch will create tensors with a 0 shape
@@ -26,6 +27,32 @@ pub fn get_shape_for_onnx_value(value: &onnx_protobuf::ValueInfoProto) -> Vec<us
     }
 
     vec![]
+}
+
+/// Extract DType from ONNX ValueInfoProto
+pub fn get_dtype_for_onnx_value(value: &ValueInfoProto) -> DType {
+    if let Some(type_proto) = value.type_.as_ref() {
+        if let Some(tensor_type) = type_proto.value.as_ref().and_then(|v| {
+            if let onnx_protobuf::type_proto::Value::TensorType(tt) = v {
+                Some(tt)
+            } else {
+                None
+            }
+        }) {
+            // ONNX data type enum to luminal DType
+            return match tensor_type.elem_type {
+                1 => DType::F32,      // FLOAT
+                10 => DType::F16,     // FLOAT16
+                16 => DType::Bf16,    // BFLOAT16
+                6 => DType::Int,      // INT32
+                7 => DType::Int,      // INT64
+                9 => DType::Bool,     // BOOL
+                11 => DType::F32,     // DOUBLE (downcast to F32, same as Cast does)
+                _ => DType::F32,      // Default fallback
+            };
+        }
+    }
+    DType::F32  // Fallback if no type information
 }
 
 /// Compute the broadcast output shape for two tensors (numpy rules: element-wise max).
@@ -213,4 +240,14 @@ pub fn transpose_weight_data(data: &[f32], rows: usize, cols: usize) -> Vec<f32>
         }
     }
     transposed
+}
+
+/// Get an integer attribute from a node, with a default value
+pub fn get_int_attr(node: &NodeProto, name: &str, default: i64) -> i64 {
+    for attr in &node.attribute {
+        if attr.name == name {
+            return attr.i;
+        }
+    }
+    default
 }

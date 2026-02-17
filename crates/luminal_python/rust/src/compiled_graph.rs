@@ -2,8 +2,8 @@ use luminal::prelude::{
     tracing::{Level, span, trace},
     *,
 };
-use onnx_protobuf::{GraphProto, ModelProto};
 use onnx_protobuf::Message;
+use onnx_protobuf::{GraphProto, ModelProto};
 use protobuf::MessageField;
 use pyo3::prelude::*;
 use std::{
@@ -14,7 +14,10 @@ use std::{
 use crate::{
     dispatch::process_onnx_nodes,
     runtime::*,
-    util::{get_shape_for_onnx_value, load_initializer_as_f32, load_tensor_floats, transpose_weight_data},
+    util::{
+        get_dtype_for_onnx_value, get_shape_for_onnx_value, load_initializer_as_f32,
+        load_tensor_floats, transpose_weight_data,
+    },
 };
 
 #[pyclass(unsendable)]
@@ -66,8 +69,25 @@ impl OnnxGraphResult {
                 trace!("Input {} skipped because it is empty", input.name.clone());
                 continue;
             }
-            let tensor = context.named_tensor(input.name.clone(), shape);
-            trace!("Input {} added to tensors", input.name.clone());
+            let dtype = get_dtype_for_onnx_value(input);
+            let tensor = context.named_tensor(input.name.clone(), shape).as_dtype(dtype);
+            eprintln!(
+                "[DEBUG] Input '{}' created with dtype {:?} (ONNX elem_type: {:?})",
+                input.name.clone(),
+                dtype,
+                input.type_.as_ref().and_then(|t| t.value.as_ref()).and_then(|v| {
+                    if let onnx_protobuf::type_proto::Value::TensorType(tt) = v {
+                        Some(tt.elem_type)
+                    } else {
+                        None
+                    }
+                })
+            );
+            trace!(
+                "Input {} added to tensors with dtype {:?}",
+                input.name.clone(),
+                dtype
+            );
             tensors.insert(input.name.clone(), tensor);
         }
 
@@ -207,28 +227,27 @@ impl OnnxGraphResult {
         //        context.build_search_space::<NativeRuntime>();
 
         let rt = match backend {
-            "cuda" => {
-                OnnxGraphResult::build_cuda_backend(
-                    onnx_graph,
-                    model_directory,
-                    &mut tensors,
-                    &mut weight_data,
-                    &mut context,
-                    &input_tensor_names
-                )?
-            },
-            "native" => {
-                OnnxGraphResult::build_native_backend(
-                    onnx_graph,
-                    model_directory,
-                    &mut tensors,
-                    &mut weight_data,
-                    &mut context,
-                    &input_tensor_names
-                )?
-            },
+            "cuda" => OnnxGraphResult::build_cuda_backend(
+                onnx_graph,
+                model_directory,
+                &mut tensors,
+                &mut weight_data,
+                &mut context,
+                &input_tensor_names,
+            )?,
+            "native" => OnnxGraphResult::build_native_backend(
+                onnx_graph,
+                model_directory,
+                &mut tensors,
+                &mut weight_data,
+                &mut context,
+                &input_tensor_names,
+            )?,
             _ => {
-                return Err(format!("Invalid backend '{}'. Must be 'native' or 'cuda'", backend));
+                return Err(format!(
+                    "Invalid backend '{}'. Must be 'native' or 'cuda'",
+                    backend
+                ));
             }
         };
 
@@ -248,9 +267,8 @@ impl OnnxGraphResult {
         tensors: &mut HashMap<String, GraphTensor>,
         weight_data: &mut Vec<(String, Vec<f32>)>,
         context: &mut Graph,
-        input_tensor_names: &HashSet<String>
+        input_tensor_names: &HashSet<String>,
     ) -> Result<RuntimeBackend, String> {
-
         let compute_n_elements = |name: &str| -> usize {
             if let Some(vi) = onnx_graph.input.iter().find(|i| i.name == name) {
                 let shape = get_shape_for_onnx_value(vi);
@@ -263,7 +281,6 @@ impl OnnxGraphResult {
                 0
             }
         };
-
 
         // CUDA: Two-phase - set data BEFORE search for profiling
         let (mut cuda_rt, _stream) = prepare_cuda(context)?;
@@ -317,22 +334,10 @@ impl OnnxGraphResult {
         tensors: &mut HashMap<String, GraphTensor>,
         weight_data: &mut Vec<(String, Vec<f32>)>,
         context: &mut Graph,
-        input_tensor_names: &HashSet<String>
+        input_tensor_names: &HashSet<String>,
     ) -> Result<RuntimeBackend, String> {
-
-         let mut rt = initialize_native(context)?;
+        let mut rt = initialize_native(context)?;
         context.search(NativeRuntime::default(), 1);
-        /*
-        // This is zero init inputs tensors... I don't think we need to do that
-        for name in &input_names {
-            if let Some(gt) = tensors.get(name) {
-                let n_elements = compute_n_elements(name);
-                if n_elements > 0 {
-                    rt.set_data(gt.id, vec![0.0f32; n_elements]);
-                }
-            }
-        }
-        */
 
         // Set initializer data - these MUST exist after optimization (they're weights)
         // Skip _kn variants - they might be optimized away

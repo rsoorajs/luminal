@@ -23,6 +23,7 @@ pub fn process_onnx_nodes(
             "Sin" => parse_sin_node(node, tensors, cx, weight_data, known_values)?,
             "Cos" => parse_cos_node(node, tensors, cx, weight_data, known_values)?,
             "Constant" => parse_constant_node(node, tensors, cx, weight_data, known_values)?,
+            "Cast" => parse_cast_node(node, tensors, weight_data, known_values)?,
             "MatMul" => parse_matmul_node(node, tensors)?,
             _ => {
                 panic!("Missing Node {}", node.op_type)
