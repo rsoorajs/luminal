@@ -50,6 +50,48 @@ pub fn parse_add_node(
     return Ok(());
 }
 
+/// Handle Mod node: output = input[0] % input[1]
+///
+/// Supports numpy-style broadcasting and constant folding when both inputs
+/// have known values at graph-build time.
+pub fn parse_mod_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    cx: &mut Graph,
+    weight_data: &mut Vec<(String, Vec<f32>)>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: Mod Node");
+    assert!(
+        node.input.len() == 2,
+        "Mod nodes need to have two inputs {} where present",
+        node.input.len()
+    );
+
+    assert!(
+        node.output.len() == 1,
+        "Mod nodes only have one input, {} where present",
+        node.input.len(),
+    );
+    let output_name = &node.output[0];
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Mod: missing input tensor '{}'", node.input[0]))?;
+
+    let b = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("Mod: missing input tensor '{}'", node.input[1]))?;
+
+    let broadcast_shape = compute_broadcast_shape(&a.dims(), &b.dims());
+    let a_bc = broadcast_to(a, &broadcast_shape);
+    let b_bc = broadcast_to(b, &broadcast_shape);
+    let result = a_bc % b_bc;
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Mod Node");
+
+    return Ok(());
+}
+
 /// Handle Sub node: output = input[0] - input[1]
 ///
 /// Supports numpy-style broadcasting and constant folding when both inputs
