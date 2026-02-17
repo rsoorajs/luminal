@@ -15,6 +15,7 @@ pub fn process_onnx_nodes(
     for node in nodes {
         match node.op_type.as_str() {
             "Add" => parse_add_node(node, tensors, cx, weight_data, known_values)?,
+            "Mod" => parse_mod_node(node, tensors, cx, weight_data, known_values)?,
             "Sub" => parse_sub_node(node, tensors, cx, weight_data, known_values)?,
             "Mul" => parse_mul_node(node, tensors, cx, weight_data, known_values)?,
             "Div" => parse_div_node(node, tensors, cx, weight_data, known_values)?,

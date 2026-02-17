@@ -41,6 +41,9 @@ from test_models import (
     CastWith2DTensorModel,
     CastNegativeValuesModel,
     CastScalarValueModel,
+    # Mod models
+    ModTestModel,
+    ModByConstantModel,
 )
 
 from luminal import luminal_backend
@@ -447,6 +450,39 @@ def test_cast_scalar_value():
     model: torch.nn.Module = CastScalarValueModel()
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.tensor([42.123456], dtype=torch.float64)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ONNX Mod Node Tests ==========
+
+
+def test_mod():
+    """Test basic element-wise modulo."""
+    model: torch.nn.Module = ModTestModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5)) * 10.0
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_mod_broadcast():
+    """Test modulo with broadcasting (1D input vs 2D weight)."""
+    model: torch.nn.Module = ModTestModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(5) * 10.0
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_mod_by_constant():
+    """Test modulo by a constant tensor (exercises Mod + Constant nodes)."""
+    model: torch.nn.Module = ModByConstantModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([7.0, 9.0, 11.0])
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)

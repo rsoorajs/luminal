@@ -340,3 +340,26 @@ class CastScalarValueModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.to(torch.float32)
+
+
+# ========== Mod Node Test Models ==========
+
+
+class ModTestModel(torch.nn.Module):
+    """Tests element-wise modulo with a weight tensor."""
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight: torch.Tensor = torch.rand((5, 5)) + 1.0  # ensure non-zero divisor
+
+    def forward(self, x: torch.Tensor):
+        return x % self.weight
+
+
+class ModByConstantModel(torch.nn.Module):
+    """Tests modulo with an inline constant tensor (ONNX Constant node)."""
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        constant = torch.tensor([3.0, 4.0, 5.0])
+        return x % constant
