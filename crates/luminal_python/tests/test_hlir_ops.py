@@ -44,6 +44,18 @@ from test_models import (
     # Mod models
     ModTestModel,
     ModByConstantModel,
+    # Reshape models
+    ReshapeToFlatModel,
+    ReshapeToMatrixModel,
+    ReshapeTo3DModel,
+    ReshapeInferLastDimModel,
+    ReshapeInferFirstDimModel,
+    Reshape3Dto2DModel,
+    ReshapeInExpressionModel,
+    ReshapeRoundtripModel,
+    ReshapeAfterOpsModel,
+    ShapeReshapeBatchFlattenModel,
+    ShapeReshapeKeepBatchModel,
 )
 
 from luminal import luminal_backend
@@ -483,6 +495,120 @@ def test_mod_by_constant():
     model: torch.nn.Module = ModByConstantModel()
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.tensor([7.0, 9.0, 11.0])
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ONNX Reshape Node Tests ==========
+# These tests verify parse_reshape_node and parse_shape_node in ops_parse.rs
+
+
+def test_reshape_2d_to_1d():
+    """Reshape (3, 4) -> (12,) via reshape(-1)."""
+    model: torch.nn.Module = ReshapeToFlatModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4))
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_reshape_1d_to_2d():
+    """Reshape (12,) -> (3, 4) with explicit target shape."""
+    model: torch.nn.Module = ReshapeToMatrixModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(12)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_reshape_1d_to_3d():
+    """Reshape (24,) -> (2, 3, 4) with explicit 3D target shape."""
+    model: torch.nn.Module = ReshapeTo3DModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(24)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_reshape_infer_last_dim():
+    """Reshape (12,) -> (3, 4) with -1 inferring last dimension."""
+    model: torch.nn.Module = ReshapeInferLastDimModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(12)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_reshape_infer_first_dim():
+    """Reshape (12,) -> (3, 4) with -1 inferring first dimension."""
+    model: torch.nn.Module = ReshapeInferFirstDimModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(12)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_reshape_3d_to_2d():
+    """Reshape (2, 3, 4) -> (2, 12) collapsing last two dims."""
+    model: torch.nn.Module = Reshape3Dto2DModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4))
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_reshape_in_expression():
+    """Reshape (12,) -> (2, 6) then add weight tensor."""
+    model: torch.nn.Module = ReshapeInExpressionModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(12)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_reshape_roundtrip():
+    """Reshape (3, 4) -> (12,) -> (3, 4) via two Reshape nodes."""
+    model: torch.nn.Module = ReshapeRoundtripModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4))
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_reshape_after_ops():
+    """Multiply by 2.0 then reshape (2, 3, 4) -> (24,)."""
+    model: torch.nn.Module = ReshapeAfterOpsModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4))
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_shape_reshape_batch_flatten():
+    """Dynamic batch flatten: x.reshape(x.shape[0], -1) on (2, 3, 4) -> (2, 12)."""
+    model: torch.nn.Module = ShapeReshapeBatchFlattenModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4))
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_shape_reshape_view_batch():
+    """Dynamic batch flatten via view: x.view(x.size(0), -1) on (2, 3, 4) -> (2, 12)."""
+    model: torch.nn.Module = ShapeReshapeKeepBatchModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4))
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)

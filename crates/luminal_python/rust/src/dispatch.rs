@@ -26,6 +26,8 @@ pub fn process_onnx_nodes(
             "Constant" => parse_constant_node(node, tensors, cx, weight_data, known_values)?,
             "Cast" => parse_cast_node(node, tensors, weight_data, known_values)?,
             "MatMul" => parse_matmul_node(node, tensors)?,
+            "Reshape" => parse_reshape_node(node, tensors, known_values)?,
+            "Shape" => parse_shape_node(node, tensors, cx, weight_data, known_values)?,
             _ => {
                 panic!("Missing Node {}", node.op_type)
             }
