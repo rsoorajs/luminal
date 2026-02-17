@@ -105,18 +105,68 @@ pub fn broadcast_to(mut tensor: GraphTensor, target_shape: &[usize]) -> GraphTen
 
 /// Load float data from a TensorProto, handling inline (float_data/raw_data) and external storage.
 pub fn load_tensor_floats(init: &onnx_protobuf::TensorProto, model_dir: &Path) -> Option<Vec<f32>> {
-    // Try inline float_data first
-    if !init.float_data.is_empty() {
-        return Some(init.float_data.clone());
-    }
-    // Try inline raw_data
-    if !init.raw_data.is_empty() {
-        let floats: Vec<f32> = init
-            .raw_data
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        return Some(floats);
+    // Try inline data based on data_type
+    match init.data_type {
+        1 => {
+            // FLOAT
+            if !init.float_data.is_empty() {
+                return Some(init.float_data.clone());
+            }
+            if !init.raw_data.is_empty() {
+                return Some(
+                    init.raw_data
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect(),
+                );
+            }
+        }
+        7 => {
+            // INT64 — raw_data stores 8 bytes per element (little-endian int64)
+            if !init.int64_data.is_empty() {
+                return Some(init.int64_data.iter().map(|&v| v as f32).collect());
+            }
+            if !init.raw_data.is_empty() {
+                return Some(
+                    init.raw_data
+                        .chunks_exact(8)
+                        .map(|c| {
+                            i64::from_le_bytes([
+                                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+                            ]) as f32
+                        })
+                        .collect(),
+                );
+            }
+        }
+        6 => {
+            // INT32
+            if !init.int32_data.is_empty() {
+                return Some(init.int32_data.iter().map(|&v| v as f32).collect());
+            }
+            if !init.raw_data.is_empty() {
+                return Some(
+                    init.raw_data
+                        .chunks_exact(4)
+                        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32)
+                        .collect(),
+                );
+            }
+        }
+        _ => {
+            // Fallback: try float_data or interpret raw_data as F32
+            if !init.float_data.is_empty() {
+                return Some(init.float_data.clone());
+            }
+            if !init.raw_data.is_empty() {
+                return Some(
+                    init.raw_data
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect(),
+                );
+            }
+        }
     }
     // Try external data (data_location == EXTERNAL = 1)
     if !init.external_data.is_empty() {

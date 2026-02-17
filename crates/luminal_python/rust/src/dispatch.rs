@@ -30,7 +30,10 @@ pub fn process_onnx_nodes(
             "Reshape" => parse_reshape_node(node, tensors, known_values)?,
             "Shape" => parse_shape_node(node, tensors, cx, weight_data, known_values)?,
             "Gather" => parse_gather_node(node, tensors, cx, weight_data, known_values)?,
+            "GatherND" => parse_gathernd_node(node, tensors, cx, weight_data, known_values)?,
             "Less" => parse_less_node(node, tensors, known_values)?,
+            "Identity" => parse_identity(node, tensors, known_values)?,
+            "Unsqueeze" => parse_unsqueeze_node(node, tensors, known_values)?,
             _ => {
                 panic!("Missing Node {}", node.op_type)
             }
