@@ -56,6 +56,10 @@ from test_models import (
     ReshapeAfterOpsModel,
     ShapeReshapeBatchFlattenModel,
     ShapeReshapeKeepBatchModel,
+    # Less models
+    LessTestModel,
+    LessBroadcastModel,
+    LessWithConstantModel,
 )
 
 from luminal import luminal_backend
@@ -609,6 +613,40 @@ def test_shape_reshape_view_batch():
     model: torch.nn.Module = ShapeReshapeKeepBatchModel()
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.rand((2, 3, 4))
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ONNX Less Node Tests ==========
+# These tests verify parse_less_node in ops_parse.rs
+
+
+def test_less():
+    """Test element-wise less-than comparison against a weight tensor."""
+    model: torch.nn.Module = LessTestModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5))
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_less_broadcast():
+    """Test less-than with broadcasting (1D input broadcasts against 2D weight)."""
+    model: torch.nn.Module = LessBroadcastModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(5)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_less_with_constant():
+    """Test less-than against an inline constant (exercises Less + Constant nodes)."""
+    model: torch.nn.Module = LessWithConstantModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([0.1, 0.5, 0.9])
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)

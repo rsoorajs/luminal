@@ -440,3 +440,34 @@ class ShapeReshapeKeepBatchModel(torch.nn.Module):
     """Use shape of input to reshape, keeping batch dimension dynamic."""
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.view(x.size(0), -1)  # (2, 3, 4) -> (2, 12)
+
+
+# ========== Less Node Test Models ==========
+# These models test ONNX Less node handling in ops_parse.rs
+
+
+class LessTestModel(torch.nn.Module):
+    """Tests element-wise less-than comparison against a stored weight."""
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight: torch.Tensor = torch.rand((5, 5))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x < self.weight).to(torch.float32)
+
+
+class LessBroadcastModel(torch.nn.Module):
+    """Tests less-than with broadcasting (1D input vs 2D weight)."""
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight: torch.Tensor = torch.rand((5, 5))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x < self.weight).to(torch.float32)
+
+
+class LessWithConstantModel(torch.nn.Module):
+    """Tests less-than against an inline constant (ONNX Constant + Less nodes)."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        constant = torch.tensor([0.25, 0.5, 0.75])
+        return (x < constant).to(torch.float32)

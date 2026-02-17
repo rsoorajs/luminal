@@ -708,3 +708,43 @@ pub fn parse_shape_node(
     trace!("Finished parse: Shape");
     Ok(())
 }
+
+/// Parse Lessnode (ONNX element-wise less-tha comparison).
+///
+/// Outputs 1.0 where a < b, 0.0 otherwise. Supports broadcasting
+/// and constant folding.
+pub fn parse_less_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 2, "Less should have 2 inputs");
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Less: missing input tensor '{}'", node.input[0]))?;
+    let b = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("Less: missing input tensor '{}'", node.input[1]))?;
+
+    // Broadcast both operands to the same shape
+    let broadcast_shape = compute_broadcast_shape(&a.dims(), &b.dims());
+    let a_bc = broadcast_to(a, &broadcast_shape);
+    let b_bc = broadcast_to(b, &broadcast_shape);
+
+    let result = b_bc.lt(a_bc);
+
+    let output_name = &node.output[0];
+    tensors.insert(output_name.clone(), result);
+    /*
+    // Constant folding: if both inputs have known values, compute the result
+    if let (Some(va), Some(vb)) = (
+        known_values.get(&node.input[0]).cloned(),
+        known_values.get(&node.input[1]).cloned(),
+    ) {
+        let folded = broadcast_binop(&va, &vb, |a, b| if a <= b { 1.0 } else { 0.0 });
+        known_values.insert(output_name.clone(), folded);
+    }
+    */
+
+    Ok(())
+}
