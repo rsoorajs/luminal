@@ -1,7 +1,9 @@
 """Test configuration."""
+
 # Enable automatic Rust rebuilds during test development
 try:
     import maturin_import_hook
+
     maturin_import_hook.install()
 except ImportError:
     pass  # Hook not available, rebuilds will be manual
@@ -12,6 +14,11 @@ import torch._dynamo
 
 @pytest.fixture(autouse=True, scope="function")
 def reset_torch_dynamo():
+    # We need this for two reasons
+    # 1. Some of our casts tests use the same model, but those graph have some state to them
+    # and the cache will return old models
+    # 2. The cache adds a large preformace hit to the test suite
+    torch._dynamo.config.cache_size_limit = 0
     """Reset PyTorch Dynamo state after each test to prevent state leakage.
 
     This fixture automatically runs after every test function to clear

@@ -6,7 +6,7 @@ use std::{
 use luminal::prelude::{tracing::trace, *};
 use onnx_protobuf::NodeProto;
 
-use crate::util::{broadcast_to, compute_broadcast_shape};
+use crate::util::{broadcast_to, compute_broadcast_shape, get_int_attr};
 
 /// Handle Add node: output = input[0] + input[1]
 ///
@@ -397,6 +397,7 @@ pub fn parse_constant_node(
     weight_data: &mut Vec<(String, Vec<f32>)>,
     known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
+    trace!("Starting parse: Constant Node");
     assert!(
         node.output.len() == 1,
         "Constant should have exactly one output"
@@ -501,5 +502,56 @@ pub fn parse_constant_node(
     known_values.insert(output_name.clone(), floats.clone());
     weight_data.push((output_name.clone(), floats));
 
+    trace!("Finished parse: Constant Node");
+    Ok(())
+}
+
+pub fn parse_cast_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    weight_data: &mut Vec<(String, Vec<f32>)>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: Cast Node");
+    assert!(node.input.len() == 1, "Cast should have exactly 1 input");
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Cast: missing input tensor '{}'", node.input[0]))?;
+
+    // ONNX data type enum → luminal DType
+    let to = get_int_attr(node, "to", 1);
+    let dtype = match to {
+        1 => DType::F32,     // FLOAT
+        10 => DType::F16,    // FLOAT16
+        16 => DType::Bf16,   // BFLOAT16
+        6 | 7 => DType::Int, // INT32, INT64
+        9 => DType::F32,     // BOOL → treat as F32 (0.0/1.0)
+        11 => DType::F32,    // DOUBLE → F32 (downcast)
+        _ => DType::F32,     // fallback
+    };
+
+    let result = input.cast(dtype);
+    let output_name = &node.output[0];
+    tensors.insert(output_name.clone(), result);
+
+    // Propagate known values (cast is a no-op for our f32 storage)
+    if let Some(vals) = known_values.get(&node.input[0]).cloned() {
+        let folded = if to == 9 {
+            // Bool cast: non-zero → 1.0, zero → 0.0
+            vals.iter()
+                .map(|&v| if v != 0.0 { 1.0 } else { 0.0 })
+                .collect()
+        } else if to == 6 || to == 7 {
+            // Int cast: truncate
+            vals.iter().map(|&v| (v as i64) as f32).collect()
+        } else {
+            vals
+        };
+        known_values.insert(output_name.clone(), folded.clone());
+        // Register constant-folded result for CUDA initialization
+        weight_data.push((output_name.clone(), folded));
+    }
+
+    trace!("Finished parse: Cast Node");
     Ok(())
 }
