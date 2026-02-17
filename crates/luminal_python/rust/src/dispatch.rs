@@ -21,6 +21,7 @@ pub fn process_onnx_nodes(
             "Div" => parse_div_node(node, tensors, cx, weight_data, known_values)?,
             "Sqrt" => parse_sqrt_node(node, tensors, cx, weight_data, known_values)?,
             "Transpose" => parse_transpose_node(node, tensors, cx, weight_data, known_values)?,
+            "Floor" => parse_floor_node(node, tensors)?,
             "Sin" => parse_sin_node(node, tensors, cx, weight_data, known_values)?,
             "Cos" => parse_cos_node(node, tensors, cx, weight_data, known_values)?,
             "Constant" => parse_constant_node(node, tensors, cx, weight_data, known_values)?,
@@ -28,6 +29,8 @@ pub fn process_onnx_nodes(
             "MatMul" => parse_matmul_node(node, tensors)?,
             "Reshape" => parse_reshape_node(node, tensors, known_values)?,
             "Shape" => parse_shape_node(node, tensors, cx, weight_data, known_values)?,
+            "Gather" => parse_gather_node(node, tensors, cx, weight_data, known_values)?,
+            "Less" => parse_less_node(node, tensors, known_values)?,
             _ => {
                 panic!("Missing Node {}", node.op_type)
             }

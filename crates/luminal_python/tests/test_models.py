@@ -1,4 +1,5 @@
 """Test models for HLIR ops testing."""
+
 import torch
 
 
@@ -92,6 +93,7 @@ class SubTestModel(torch.nn.Module):
 
 class TransposeTestModel(torch.nn.Module):
     """Test basic 2D transpose (matrix transpose)."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -101,6 +103,7 @@ class TransposeTestModel(torch.nn.Module):
 
 class Transpose3DTestModel(torch.nn.Module):
     """Test 3D transpose with explicit permutation."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -110,6 +113,7 @@ class Transpose3DTestModel(torch.nn.Module):
 
 class Transpose4DTestModel(torch.nn.Module):
     """Test 4D transpose (NCHW -> NHWC)."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -119,6 +123,7 @@ class Transpose4DTestModel(torch.nn.Module):
 
 class TransposeReverseTestModel(torch.nn.Module):
     """Test reverse permutation (default transpose behavior)."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -129,6 +134,7 @@ class TransposeReverseTestModel(torch.nn.Module):
 
 class TransposeInExpressionModel(torch.nn.Module):
     """Test transpose as part of larger expression."""
+
     def __init__(self) -> None:
         super().__init__()
         self.weight: torch.Tensor = torch.rand((10, 5))
@@ -144,6 +150,7 @@ class TransposeInExpressionModel(torch.nn.Module):
 
 class ConstantScalarFloatModel(torch.nn.Module):
     """Test scalar constant (broadcasts to input shape)."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -154,6 +161,7 @@ class ConstantScalarFloatModel(torch.nn.Module):
 
 class Constant1DArrayFloatModel(torch.nn.Module):
     """Test 1D array constant."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -164,6 +172,7 @@ class Constant1DArrayFloatModel(torch.nn.Module):
 
 class Constant2DMatrixFloatModel(torch.nn.Module):
     """Test 2D matrix constant."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -174,6 +183,7 @@ class Constant2DMatrixFloatModel(torch.nn.Module):
 
 class ConstantRawDataFloatModel(torch.nn.Module):
     """Test constant with specific values (tests raw data format)."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -184,6 +194,7 @@ class ConstantRawDataFloatModel(torch.nn.Module):
 
 class ConstantInt32ConversionModel(torch.nn.Module):
     """Test INT32 constant values (PyTorch exports as integers)."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -194,6 +205,7 @@ class ConstantInt32ConversionModel(torch.nn.Module):
 
 class ConstantInt64ConversionModel(torch.nn.Module):
     """Test INT64 constant values."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -204,6 +216,7 @@ class ConstantInt64ConversionModel(torch.nn.Module):
 
 class ConstantFloat64ConversionModel(torch.nn.Module):
     """Test FLOAT64 (double) constant values."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -214,6 +227,7 @@ class ConstantFloat64ConversionModel(torch.nn.Module):
 
 class ConstantBoolConversionModel(torch.nn.Module):
     """Test boolean constant values (converted to 0.0/1.0)."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -224,6 +238,7 @@ class ConstantBoolConversionModel(torch.nn.Module):
 
 class ConstantInt64RawDataModel(torch.nn.Module):
     """Test INT64 constant with large values (tests raw data path)."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -234,6 +249,7 @@ class ConstantInt64RawDataModel(torch.nn.Module):
 
 class ConstantNegativeValuesModel(torch.nn.Module):
     """Test negative constant values."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -244,6 +260,7 @@ class ConstantNegativeValuesModel(torch.nn.Module):
 
 class ConstantZeroValueModel(torch.nn.Module):
     """Test all-zero constant."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -254,6 +271,7 @@ class ConstantZeroValueModel(torch.nn.Module):
 
 class ConstantMultipleInGraphModel(torch.nn.Module):
     """Test multiple constants in one graph."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -269,6 +287,7 @@ class ConstantMultipleInGraphModel(torch.nn.Module):
 
 class CastDoubleToFloatModel(torch.nn.Module):
     """Test downcast: Double (FLOAT64) -> Float."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -279,6 +298,7 @@ class CastDoubleToFloatModel(torch.nn.Module):
 
 class CastInt32ToFloatModel(torch.nn.Module):
     """Test INT32 -> Float conversion."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -288,6 +308,7 @@ class CastInt32ToFloatModel(torch.nn.Module):
 
 class CastInt64ToFloatModel(torch.nn.Module):
     """Test INT64 -> Float conversion."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -297,6 +318,7 @@ class CastInt64ToFloatModel(torch.nn.Module):
 
 class CastBoolToFloatModel(torch.nn.Module):
     """Test BOOL -> Float conversion (non-zero -> 1.0, zero -> 0.0)."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -306,6 +328,7 @@ class CastBoolToFloatModel(torch.nn.Module):
 
 class CastInComputationGraphModel(torch.nn.Module):
     """Test Cast node followed by an operation (Cast + Add)."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -317,6 +340,7 @@ class CastInComputationGraphModel(torch.nn.Module):
 
 class CastWith2DTensorModel(torch.nn.Module):
     """Test Cast with 2D tensor (matrix)."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -326,6 +350,7 @@ class CastWith2DTensorModel(torch.nn.Module):
 
 class CastNegativeValuesModel(torch.nn.Module):
     """Test Cast with negative integer values."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -335,6 +360,7 @@ class CastNegativeValuesModel(torch.nn.Module):
 
 class CastScalarValueModel(torch.nn.Module):
     """Test Cast with scalar (single element)."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -347,6 +373,7 @@ class CastScalarValueModel(torch.nn.Module):
 
 class ModTestModel(torch.nn.Module):
     """Tests element-wise modulo with a weight tensor."""
+
     def __init__(self) -> None:
         super().__init__()
         self.weight: torch.Tensor = torch.rand((5, 5)) + 1.0  # ensure non-zero divisor
@@ -357,6 +384,7 @@ class ModTestModel(torch.nn.Module):
 
 class ModByConstantModel(torch.nn.Module):
     """Tests modulo with an inline constant tensor (ONNX Constant node)."""
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -365,48 +393,79 @@ class ModByConstantModel(torch.nn.Module):
         return x % constant
 
 
+# ========== Floor Node Test Models ==========
+
+
+class FloorTestModel(torch.nn.Module):
+    """Tests element-wise floor operation."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.floor(x)
+
+
+class FloorNegativeModel(torch.nn.Module):
+    """Tests floor with negative values."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.floor(x)
+
+
+class FloorInExpressionModel(torch.nn.Module):
+    """Tests floor as part of a larger expression (floor + mul)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.floor(x) * 2.0
+
+
 # ========== Reshape Node Test Models ==========
 # These models test ONNX Reshape node handling in ops_parse.rs
 
 
 class ReshapeToFlatModel(torch.nn.Module):
     """Reshape 2D tensor to 1D (full flatten)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.reshape(-1)  # (3, 4) -> (12,)
 
 
 class ReshapeToMatrixModel(torch.nn.Module):
     """Reshape 1D tensor to 2D matrix."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.reshape(3, 4)  # (12,) -> (3, 4)
 
 
 class ReshapeTo3DModel(torch.nn.Module):
     """Reshape 1D tensor to 3D tensor."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.reshape(2, 3, 4)  # (24,) -> (2, 3, 4)
 
 
 class ReshapeInferLastDimModel(torch.nn.Module):
     """Reshape with -1 to infer last dimension."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.reshape(3, -1)  # (12,) -> (3, 4)
 
 
 class ReshapeInferFirstDimModel(torch.nn.Module):
     """Reshape with -1 to infer first dimension."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.reshape(-1, 4)  # (12,) -> (3, 4)
 
 
 class Reshape3Dto2DModel(torch.nn.Module):
     """Reshape 3D tensor to 2D (common in networks before linear layer)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.reshape(2, -1)  # (2, 3, 4) -> (2, 12)
 
 
 class ReshapeInExpressionModel(torch.nn.Module):
     """Reshape followed by element-wise addition (Reshape in graph)."""
+
     def __init__(self) -> None:
         super().__init__()
         self.weight: torch.Tensor = torch.rand((2, 6))
@@ -418,13 +477,15 @@ class ReshapeInExpressionModel(torch.nn.Module):
 
 class ReshapeRoundtripModel(torch.nn.Module):
     """Reshape to different shape and back (two Reshape nodes)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        flat = x.reshape(-1)       # (3, 4) -> (12,)
+        flat = x.reshape(-1)  # (3, 4) -> (12,)
         return flat.reshape(3, 4)  # (12,) -> (3, 4)
 
 
 class ReshapeAfterOpsModel(torch.nn.Module):
     """Apply operation then reshape (op -> Reshape)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         doubled = x * 2.0
         return doubled.reshape(-1)  # (2, 3, 4) -> (24,)
@@ -432,12 +493,14 @@ class ReshapeAfterOpsModel(torch.nn.Module):
 
 class ShapeReshapeBatchFlattenModel(torch.nn.Module):
     """Batch flatten using dynamic shape: preserves first dim, flattens rest."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.reshape(x.shape[0], -1)  # (2, 3, 4) -> (2, 12)
 
 
 class ShapeReshapeKeepBatchModel(torch.nn.Module):
     """Use shape of input to reshape, keeping batch dimension dynamic."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.view(x.size(0), -1)  # (2, 3, 4) -> (2, 12)
 
@@ -448,6 +511,7 @@ class ShapeReshapeKeepBatchModel(torch.nn.Module):
 
 class LessTestModel(torch.nn.Module):
     """Tests element-wise less-than comparison against a stored weight."""
+
     def __init__(self) -> None:
         super().__init__()
         self.weight: torch.Tensor = torch.rand((5, 5))
@@ -458,6 +522,7 @@ class LessTestModel(torch.nn.Module):
 
 class LessBroadcastModel(torch.nn.Module):
     """Tests less-than with broadcasting (1D input vs 2D weight)."""
+
     def __init__(self) -> None:
         super().__init__()
         self.weight: torch.Tensor = torch.rand((5, 5))
@@ -468,6 +533,69 @@ class LessBroadcastModel(torch.nn.Module):
 
 class LessWithConstantModel(torch.nn.Module):
     """Tests less-than against an inline constant (ONNX Constant + Less nodes)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([0.25, 0.5, 0.75])
         return (x < constant).to(torch.float32)
+
+
+# ========== Gather Node Test Models ==========
+# These models test ONNX Gather node handling in ops_parse.rs
+
+
+class Gather1DModel(torch.nn.Module):
+    """Tests Gather on 1D float data with constant integer indices (1D path)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        indices = torch.tensor([2, 0, 4, 1])
+        return x[indices]
+
+
+class GatherEmbeddingModel(torch.nn.Module):
+    """Tests Gather via nn.Embedding (axis=0 gather on 2D weight, integer input)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding: torch.nn.Embedding = torch.nn.Embedding(8, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.embedding(x)
+
+
+class Gather2DAxis0Model(torch.nn.Module):
+    """Tests Gather on 2D weight along axis=0 with runtime integer indices."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight: torch.Tensor = torch.rand(6, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.weight[x]
+
+
+class Gather2DAxis1Model(torch.nn.Module):
+    """Tests Gather on 2D float input along axis=1 (exercises permute-gather-permute strategy)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        indices = torch.tensor([1, 3, 0])
+        return x[:, indices]
+
+
+class GatherNegativeIndicesModel(torch.nn.Module):
+    """Tests Gather with negative runtime indices (-1 for last element, etc.)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight: torch.Tensor = torch.rand(6, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.weight[x]
+
+
+class GatherConstantFoldModel(torch.nn.Module):
+    """Tests Gather constant folding: both data and indices are ONNX Constant nodes."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        data = torch.tensor([10.0, 20.0, 30.0, 40.0, 50.0])
+        indices = torch.tensor([4, 1, 3])
+        return x + data[indices]

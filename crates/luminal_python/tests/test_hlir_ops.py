@@ -44,6 +44,10 @@ from test_models import (
     # Mod models
     ModTestModel,
     ModByConstantModel,
+    # Floor models
+    FloorTestModel,
+    FloorNegativeModel,
+    FloorInExpressionModel,
     # Reshape models
     ReshapeToFlatModel,
     ReshapeToMatrixModel,
@@ -60,6 +64,13 @@ from test_models import (
     LessTestModel,
     LessBroadcastModel,
     LessWithConstantModel,
+    # Gather models
+    Gather1DModel,
+    GatherEmbeddingModel,
+    Gather2DAxis0Model,
+    Gather2DAxis1Model,
+    GatherNegativeIndicesModel,
+    GatherConstantFoldModel,
 )
 
 from luminal import luminal_backend
@@ -504,6 +515,39 @@ def test_mod_by_constant():
     assert torch.allclose(output, original)
 
 
+# ========== ONNX Floor Node Tests ==========
+
+
+def test_floor():
+    """Test element-wise floor on positive floats."""
+    model: torch.nn.Module = FloorTestModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([1.2, 2.7, 3.0, 4.9, 5.5])
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_floor_negative():
+    """Test floor with negative values."""
+    model: torch.nn.Module = FloorNegativeModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([-1.2, -2.7, -0.1, 0.9, -3.5])
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_floor_in_expression():
+    """Test floor followed by mul (floor as part of a larger graph)."""
+    model: torch.nn.Module = FloorInExpressionModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([1.5, 2.8, 3.3, 4.1])
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
 # ========== ONNX Reshape Node Tests ==========
 # These tests verify parse_reshape_node and parse_shape_node in ops_parse.rs
 
@@ -647,6 +691,70 @@ def test_less_with_constant():
     model: torch.nn.Module = LessWithConstantModel()
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.tensor([0.1, 0.5, 0.9])
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ONNX Gather Node Tests ==========
+# These tests verify parse_gather_node in ops_parse.rs
+
+
+def test_gather_1d():
+    """Test Gather on 1D data with constant indices (exercises 1D flat gather path)."""
+    model: torch.nn.Module = Gather1DModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(6)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_gather_embedding():
+    """Test Gather via nn.Embedding (axis=0 gather on 2D weight with integer indices)."""
+    model: torch.nn.Module = GatherEmbeddingModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([0, 2, 5, 1])
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_gather_2d_axis0():
+    """Test Gather on 2D weight along axis=0 with runtime integer indices (row selection)."""
+    model: torch.nn.Module = Gather2DAxis0Model()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([2, 0, 4, 1])
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_gather_2d_axis1():
+    """Test Gather on 2D float input along axis=1 (exercises permute-gather-permute strategy)."""
+    model: torch.nn.Module = Gather2DAxis1Model()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(4, 5)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_gather_negative_indices():
+    """Test Gather with negative runtime indices (-1 for last element, etc.)."""
+    model: torch.nn.Module = GatherNegativeIndicesModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([-1, -2, 0, 2])
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_gather_constant_fold():
+    """Test Gather constant folding: both data and indices known at graph-build time."""
+    model: torch.nn.Module = GatherConstantFoldModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0])
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
