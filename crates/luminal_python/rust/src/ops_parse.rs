@@ -385,3 +385,121 @@ pub fn parse_cos_node(
 
     return Ok(());
 }
+
+/// Handle Constant node: creates a tensor from embedded data in the node attributes.
+///
+/// Supports FLOAT, INT64, INT32, and FLOAT64 data types (all converted to f32).
+/// The resulting tensor is registered as a known constant for downstream folding.
+pub fn parse_constant_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    cx: &mut Graph,
+    weight_data: &mut Vec<(String, Vec<f32>)>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    assert!(
+        node.output.len() == 1,
+        "Constant should have exactly one output"
+    );
+
+    // Find the "value" attribute (type TENSOR)
+    let value_attr = node
+        .attribute
+        .iter()
+        .find(|a| a.name == "value")
+        .ok_or_else(|| "Constant node missing 'value' attribute".to_string())?;
+
+    let tensor_proto = value_attr
+        .t
+        .as_ref()
+        .ok_or_else(|| "Constant 'value' attribute has no TensorProto".to_string())?;
+
+    // Determine shape: empty dims = scalar = [1] for luminal
+    let shape: Vec<usize> = if tensor_proto.dims.is_empty() {
+        vec![1]
+    } else {
+        tensor_proto.dims.iter().map(|&d| d as usize).collect()
+    };
+
+    // Extract float data based on data_type
+    let floats: Vec<f32> = match tensor_proto.data_type {
+        1 => {
+            // FLOAT (f32)
+            if !tensor_proto.float_data.is_empty() {
+                tensor_proto.float_data.clone()
+            } else {
+                tensor_proto
+                    .raw_data
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect()
+            }
+        }
+        7 => {
+            // INT64
+            // There is a cast from Int64 -> f32 here because Luminal does not support f32
+            if !tensor_proto.int64_data.is_empty() {
+                tensor_proto.int64_data.iter().map(|&v| v as f32).collect()
+            } else {
+                tensor_proto
+                    .raw_data
+                    .chunks_exact(8)
+                    .map(|c| {
+                        i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
+                    })
+                    .collect()
+            }
+        }
+        6 => {
+            // INT32
+            // There is a cast from Int32 -> f32 here because Luminal does not support f32
+            if !tensor_proto.int32_data.is_empty() {
+                tensor_proto.int32_data.iter().map(|&v| v as f32).collect()
+            } else {
+                tensor_proto
+                    .raw_data
+                    .chunks_exact(4)
+                    .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32)
+                    .collect()
+            }
+        }
+        9 => {
+            // Bool
+            // Bools are stored as bytes in raw_data or as int32 in int32_data
+            if !tensor_proto.int32_data.is_empty() {
+                tensor_proto
+                    .int32_data
+                    .iter()
+                    .map(|&v| if v != 0 { 1.0 } else { 0.0 })
+                    .collect()
+            } else {
+                tensor_proto
+                    .raw_data
+                    .iter()
+                    .map(|&b| if b != 0 { 1.0 } else { 0.0 })
+                    .collect()
+            }
+        }
+        11 => {
+            // FLOAT64 (f64)
+            // There is a cast from f64 -> f32 here because Luminal does not support f32
+            // TODO: add f64 as this will loss information, this is a bad approach
+            tensor_proto
+                .raw_data
+                .chunks_exact(8)
+                .map(|c| {
+                    f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
+                })
+                .collect()
+        }
+        dt => return Err(format!("Constant node: unsupported data_type {}", dt)),
+    };
+
+    let output_name = &node.output[0];
+    let tensor = cx.named_tensor(output_name.clone(), shape);
+    tensors.insert(output_name.clone(), tensor);
+    known_values.insert(output_name.clone(), floats.clone());
+    weight_data.push((output_name.clone(), floats));
+
+    Ok(())
+}
