@@ -597,3 +597,114 @@ pub fn parse_cast_node(
     trace!("Finished parse: Cast Node");
     Ok(())
 }
+
+/// Handle Reshape node: change the tensor's shape without modifying data.
+///
+/// The target shape is read from the second input (must be a known constant).
+/// Supports -1 (infer from total elements) and 0 (copy from input dimension).
+/// Non-contiguous tensors (e.g., from Expand) are materialized before reshaping.
+pub fn parse_reshape_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Started parse: Reshape");
+    assert!(
+        node.input.len() == 2,
+        "Reshape should have exactly 2 inputs"
+    );
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Reshape: missing input tensor '{}'", node.input[0]))?;
+
+    let shape_data = known_values.get(&node.input[1]).ok_or_else(|| {
+        format!(
+            "Reshape: shape input '{}' must be a known constant",
+            node.input[1]
+        )
+    })?;
+
+    // Compute total elements for resolving -1
+    let input_dims = input.dims();
+    let total_elements: usize = input_dims
+        .iter()
+        .map(|d| d.to_usize().expect("Reshape: input dims must be concrete"))
+        .product();
+
+    // Resolve target shape, handling -1 (infer) and 0 (copy from input)
+    let mut target_shape: Vec<i64> = shape_data.iter().map(|&v| v as i64).collect();
+    // First pass: resolve 0 (copy from input at same position)
+    for i in 0..target_shape.len() {
+        if target_shape[i] == 0 {
+            target_shape[i] = input_dims[i].to_usize().unwrap_or(1) as i64;
+        }
+    }
+    // Second pass: resolve -1 (infer from total elements)
+    let known_product: i64 = target_shape.iter().filter(|&&d| d > 0).product();
+    for d in target_shape.iter_mut() {
+        if *d == -1 {
+            *d = total_elements as i64 / known_product;
+        }
+    }
+    let final_shape: Vec<usize> = target_shape.iter().map(|&d| d as usize).collect();
+
+    let mut result = input;
+    // If tensor is not contiguous (e.g., has broadcast strides from Expand),
+    // materialize it before reshaping by multiplying by 1.0.
+    // This forces a contiguous copy through the binary op mechanism.
+    if !result.shape.is_contiguous() {
+        let one = result.graph().constant_float(1.0);
+        let src_dims = result.dims();
+        let broadcast_shape: Vec<usize> = src_dims
+            .iter()
+            .map(|d| d.to_usize().expect("dim must be concrete"))
+            .collect();
+        let one_expanded = broadcast_to(one, &broadcast_shape);
+        result *= one_expanded;
+    }
+    result.shape = ShapeTracker::new(final_shape);
+    let output_name = &node.output[0];
+    tensors.insert(output_name.clone(), result);
+
+    // Propagate known values (reshape doesn't change data, just layout)
+    if let Some(vals) = known_values.get(&node.input[0]).cloned() {
+        known_values.insert(output_name.clone(), vals);
+    }
+    trace!("Finished parse: Reshape");
+    Ok(())
+}
+
+/// Handle Shape node: extract the shape of the input tensor as a 1D constant.
+///
+/// All dimensions must be statically known. The shape values are stored as
+/// known constants for downstream operations (Reshape, Expand, etc.).
+pub fn parse_shape_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    cx: &mut Graph,
+    weight_data: &mut Vec<(String, Vec<f32>)>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Started parse: Shape");
+    assert!(node.input.len() == 1, "Shape should have exactly 1 input");
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Shape: missing input tensor '{}'", node.input[0]))?;
+
+    let dims = input.dims();
+    let shape_values: Vec<f32> = dims
+        .iter()
+        .map(|d| {
+            d.to_usize()
+                .expect("Shape: all dimensions must be concrete") as f32
+        })
+        .collect();
+
+    let output_name = &node.output[0];
+    let tensor = cx.named_tensor(output_name.clone(), vec![shape_values.len()]);
+    tensors.insert(output_name.clone(), tensor);
+    known_values.insert(output_name.clone(), shape_values.clone());
+    weight_data.push((output_name.clone(), shape_values));
+    trace!("Finished parse: Shape");
+    Ok(())
+}

@@ -363,3 +363,80 @@ class ModByConstantModel(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([3.0, 4.0, 5.0])
         return x % constant
+
+
+# ========== Reshape Node Test Models ==========
+# These models test ONNX Reshape node handling in ops_parse.rs
+
+
+class ReshapeToFlatModel(torch.nn.Module):
+    """Reshape 2D tensor to 1D (full flatten)."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.reshape(-1)  # (3, 4) -> (12,)
+
+
+class ReshapeToMatrixModel(torch.nn.Module):
+    """Reshape 1D tensor to 2D matrix."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.reshape(3, 4)  # (12,) -> (3, 4)
+
+
+class ReshapeTo3DModel(torch.nn.Module):
+    """Reshape 1D tensor to 3D tensor."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.reshape(2, 3, 4)  # (24,) -> (2, 3, 4)
+
+
+class ReshapeInferLastDimModel(torch.nn.Module):
+    """Reshape with -1 to infer last dimension."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.reshape(3, -1)  # (12,) -> (3, 4)
+
+
+class ReshapeInferFirstDimModel(torch.nn.Module):
+    """Reshape with -1 to infer first dimension."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.reshape(-1, 4)  # (12,) -> (3, 4)
+
+
+class Reshape3Dto2DModel(torch.nn.Module):
+    """Reshape 3D tensor to 2D (common in networks before linear layer)."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.reshape(2, -1)  # (2, 3, 4) -> (2, 12)
+
+
+class ReshapeInExpressionModel(torch.nn.Module):
+    """Reshape followed by element-wise addition (Reshape in graph)."""
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight: torch.Tensor = torch.rand((2, 6))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        reshaped = x.reshape(2, 6)  # (12,) -> (2, 6)
+        return reshaped + self.weight
+
+
+class ReshapeRoundtripModel(torch.nn.Module):
+    """Reshape to different shape and back (two Reshape nodes)."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        flat = x.reshape(-1)       # (3, 4) -> (12,)
+        return flat.reshape(3, 4)  # (12,) -> (3, 4)
+
+
+class ReshapeAfterOpsModel(torch.nn.Module):
+    """Apply operation then reshape (op -> Reshape)."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        doubled = x * 2.0
+        return doubled.reshape(-1)  # (2, 3, 4) -> (24,)
+
+
+class ShapeReshapeBatchFlattenModel(torch.nn.Module):
+    """Batch flatten using dynamic shape: preserves first dim, flattens rest."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.reshape(x.shape[0], -1)  # (2, 3, 4) -> (2, 12)
+
+
+class ShapeReshapeKeepBatchModel(torch.nn.Module):
+    """Use shape of input to reshape, keeping batch dimension dynamic."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.view(x.size(0), -1)  # (2, 3, 4) -> (2, 12)
