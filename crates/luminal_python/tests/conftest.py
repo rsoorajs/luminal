@@ -18,7 +18,9 @@ def reset_torch_dynamo():
     # 1. Some of our casts tests use the same model, but those graph have some state to them
     # and the cache will return old models
     # 2. The cache adds a large preformace hit to the test suite
-    torch._dynamo.config.cache_size_limit = 0
+    torch._dynamo.config.cache_size_limit = 1
+    # Disable silent fallback to eager mode so backend errors surface as test failures
+    torch._dynamo.config.suppress_errors = False
     """Reset PyTorch Dynamo state after each test to prevent state leakage.
 
     This fixture automatically runs after every test function to clear
