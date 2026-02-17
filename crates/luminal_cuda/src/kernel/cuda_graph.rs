@@ -502,7 +502,7 @@ mod tests {
         rt.execute(&cx.dyn_map);
         let result1 = rt.get_f32(c);
         rt.execute(&cx.dyn_map);
-        let eps = dtype_epsilon(luminal::op::DType::F32);
+        let eps = dtype_epsilon(luminal::dtype::DType::F32);
         let tol = eps * TOLERANCE_SAFETY_FACTOR;
         assert_close(&result1, &rt.get_f32(c), tol, tol);
         let expected: Vec<f32> = data_a
@@ -535,7 +535,7 @@ mod tests {
             rt.execute(&cx.dyn_map);
             results.push(rt.get_f32(c));
         }
-        let eps = dtype_epsilon(luminal::op::DType::F32);
+        let eps = dtype_epsilon(luminal::dtype::DType::F32);
         let tol = eps * TOLERANCE_SAFETY_FACTOR;
         for result in &results {
             assert_close(result, &results[0], tol, tol);
@@ -573,7 +573,7 @@ mod tests {
             .zip(&data_b)
             .map(|(a, b)| (a + b) * a)
             .collect();
-        let eps = dtype_epsilon(luminal::op::DType::F32);
+        let eps = dtype_epsilon(luminal::dtype::DType::F32);
         let tol = eps * TOLERANCE_SAFETY_FACTOR;
         assert_close(&rt.get_f32(d), &expected, tol, tol);
         let size = 1024;
@@ -610,7 +610,7 @@ mod tests {
         rt = cx.search(rt, 5);
         rt.execute(&cx.dyn_map);
         let expected: Vec<f32> = data_a.iter().zip(&data_b).map(|(a, b)| a + b).collect();
-        let eps = dtype_epsilon(luminal::op::DType::F32);
+        let eps = dtype_epsilon(luminal::dtype::DType::F32);
         let tol = eps * TOLERANCE_SAFETY_FACTOR;
         assert_close(&rt.get_f32(c), &expected, tol, tol);
         assert!(rt.last_kernel_stats.iter().any(|s| s.name == "CudaGraph"));

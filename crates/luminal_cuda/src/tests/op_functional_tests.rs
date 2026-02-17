@@ -22,7 +22,7 @@ proptest! {
     #[test]
     fn test_add(x in 1usize..100, y in 1usize..5, seed in any::<u64>()) {
         let gen_lambda = |n, s| random_f32_vec(n, s, -0.5, 0.5);
-        let eps = dtype_epsilon(luminal::op::DType::F32);
+        let eps = dtype_epsilon(luminal::dtype::DType::F32);
         let (rtol, atol) = (eps * TOLERANCE_SAFETY_FACTOR, eps * TOLERANCE_SAFETY_FACTOR);
         test_binary_cuda(x, x, |a, b| a + b, |a, b| (&a + &b).unwrap(), &gen_lambda, &gen_lambda, seed, rtol, atol);
         test_binary_cuda((y, x), (y, x), |a, b| a + b, |a, b| (&a + &b).unwrap(), &gen_lambda, &gen_lambda, seed, rtol, atol);
@@ -31,7 +31,7 @@ proptest! {
     #[test]
     fn test_mul(x in 1usize..100, y in 1usize..5, seed in any::<u64>()) {
         let gen_lambda = |n, s| random_f32_vec(n, s, -0.5, 0.5);
-        let eps = dtype_epsilon(luminal::op::DType::F32);
+        let eps = dtype_epsilon(luminal::dtype::DType::F32);
         let (rtol, atol) = (eps * TOLERANCE_SAFETY_FACTOR, eps * TOLERANCE_SAFETY_FACTOR);
         test_binary_cuda(x, x, |a, b| a * b, |a, b| (&a * &b).unwrap(), &gen_lambda, &gen_lambda, seed, rtol, atol);
         test_binary_cuda((y, x), (y, x), |a, b| a * b, |a, b| (&a * &b).unwrap(), &gen_lambda, &gen_lambda, seed, rtol, atol);
@@ -54,7 +54,7 @@ proptest! {
         (m, n, k, a_col_major, b_col_major, m_slice, k_slice, n_slice, dtype) in
             (1usize..128, 1usize..128, 1usize..128, any::<bool>(), any::<bool>(),
              any::<(bool, bool)>(), any::<(bool, bool)>(), any::<(bool, bool)>(),
-             prop::sample::select(&[luminal::op::DType::F32, luminal::op::DType::F16, luminal::op::DType::Bf16]))
+             prop::sample::select(&[luminal::dtype::DType::F32, luminal::dtype::DType::F16, luminal::dtype::DType::Bf16]))
             .prop_perturb(|(m, n, k, a_cm, b_cm, m_sl, k_sl, n_sl, dt), mut rng| {
                 (m, n, k, a_cm, b_cm,
                  gen_slice_range(m, m_sl.0, m_sl.1, &mut rng),
@@ -91,7 +91,7 @@ proptest! {
             // After transpose: A is (m, k), B is (k, n)
             let a = a.slice((m_start..m_end, k_start..k_end));
             let b = b.slice((k_start..k_end, n_start..n_end));
-            a.matmul(b).cast(luminal::op::DType::F32)
+            a.matmul(b).cast(luminal::dtype::DType::F32)
         };
         let candle_op = move |a: Tensor, b: Tensor| {
             let a = a.to_dtype(candle_dtype).unwrap();
@@ -166,8 +166,8 @@ proptest! {
     #[test]
     fn test_less_than(x in 1usize..100, y in 1usize..5, seed in any::<u64>()) {
         let gen_lambda = |n, s| random_f32_vec(n, s, -99.0, 100.0).into_iter().map(|v| v.floor()).collect();
-        test_binary_cuda(x, x, |a, b| a.lt(b).cast(luminal::op::DType::F32), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap(), &gen_lambda, &gen_lambda, seed, 0.0, 0.0);
-        test_binary_cuda((y, x), (y, x), |a, b| a.lt(b).cast(luminal::op::DType::F32), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap(), &gen_lambda, &gen_lambda, seed, 0.0, 0.0);
+        test_binary_cuda(x, x, |a, b| a.lt(b).cast(luminal::dtype::DType::F32), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap(), &gen_lambda, &gen_lambda, seed, 0.0, 0.0);
+        test_binary_cuda((y, x), (y, x), |a, b| a.lt(b).cast(luminal::dtype::DType::F32), |a, b| a.lt(&b).unwrap().to_dtype(candle_core::DType::F32).unwrap(), &gen_lambda, &gen_lambda, seed, 0.0, 0.0);
     }
 }
 
@@ -287,7 +287,7 @@ proptest! {
 /// Test F32 -> F16 -> F32 cast roundtrip with edge-case values.
 #[test]
 pub fn test_cast_f16_edge_cases() {
-    use luminal::op::DType;
+    use luminal::dtype::DType;
 
     // Fixed edge-case values that exercise F16 behavior
     let edge_cases: Vec<f32> = vec![
@@ -334,7 +334,7 @@ proptest! {
     /// Test F32 -> F16 -> F32 cast roundtrip with random values.
     #[test]
     fn test_cast_f16_random(size in 1usize..200, seed in any::<u64>()) {
-        use luminal::op::DType;
+        use luminal::dtype::DType;
 
         // Use range beyond F16 limits so some values overflow to infinity
         let f16_max = half::f16::MAX.to_f32();
@@ -446,7 +446,7 @@ fn fuzz_test_cuda_genomes_impl(seed: u64) {
     rt.set_data(c, c_data.clone());
     rt.execute(&cx.dyn_map);
     let result = rt.get_f32(out);
-    let eps = dtype_epsilon(luminal::op::DType::F32);
+    let eps = dtype_epsilon(luminal::dtype::DType::F32);
     let tol = eps * TOLERANCE_SAFETY_FACTOR;
     assert_close(&result, &expected, tol, tol);
     println!("Initial genome: correct");

@@ -11,7 +11,7 @@ pub use cudarc;
 mod tests;
 
 use cudarc::driver::CudaContext;
-use luminal::op::DType;
+use luminal::dtype::DType;
 
 fn cuda_dtype(dtype: DType) -> &'static str {
     match dtype {

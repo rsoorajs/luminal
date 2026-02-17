@@ -2,6 +2,7 @@ pub mod egglog_utils;
 pub mod frontend;
 pub mod graph;
 pub mod hlir;
+pub mod dtype;
 pub mod op;
 pub mod shape;
 pub mod visualization;
@@ -15,7 +16,8 @@ pub mod prelude {
     pub use crate::frontend::*;
     pub use crate::graph::*;
     pub use crate::hlir::NativeRuntime;
-    pub use crate::op::{DType, Runtime};
+    pub use crate::dtype::DType;
+    pub use crate::op::Runtime;
     pub use crate::shape::*;
     pub use anyhow;
     pub use egglog;

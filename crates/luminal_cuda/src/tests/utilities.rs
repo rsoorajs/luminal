@@ -19,7 +19,7 @@ where
     Vec<Self>: ToCudaInput,
 {
     /// The corresponding luminal DType
-    const DTYPE: luminal::op::DType;
+    const DTYPE: luminal::dtype::DType;
 
     /// Retrieve data from the runtime in this dtype
     fn get_from_runtime(rt: &CudaRuntime, id: NodeIndex) -> Vec<Self>;
@@ -30,7 +30,7 @@ where
 }
 
 impl TestDType for f32 {
-    const DTYPE: luminal::op::DType = luminal::op::DType::F32;
+    const DTYPE: luminal::dtype::DType = luminal::dtype::DType::F32;
 
     fn get_from_runtime(rt: &CudaRuntime, id: NodeIndex) -> Vec<Self> {
         rt.get_f32(id)
@@ -44,7 +44,7 @@ impl TestDType for f32 {
 }
 
 impl TestDType for f16 {
-    const DTYPE: luminal::op::DType = luminal::op::DType::F16;
+    const DTYPE: luminal::dtype::DType = luminal::dtype::DType::F16;
 
     fn get_from_runtime(rt: &CudaRuntime, id: NodeIndex) -> Vec<Self> {
         rt.get_f16(id)
@@ -58,7 +58,7 @@ impl TestDType for f16 {
 }
 
 impl TestDType for bf16 {
-    const DTYPE: luminal::op::DType = luminal::op::DType::Bf16;
+    const DTYPE: luminal::dtype::DType = luminal::dtype::DType::Bf16;
 
     fn get_from_runtime(rt: &CudaRuntime, id: NodeIndex) -> Vec<Self> {
         rt.get_bf16(id)
@@ -72,7 +72,7 @@ impl TestDType for bf16 {
 }
 
 impl TestDType for i32 {
-    const DTYPE: luminal::op::DType = luminal::op::DType::Int;
+    const DTYPE: luminal::dtype::DType = luminal::dtype::DType::Int;
 
     fn get_from_runtime(rt: &CudaRuntime, id: NodeIndex) -> Vec<Self> {
         rt.get_i32(id)
@@ -129,38 +129,38 @@ pub fn gpu_compute_cap() -> Option<(i32, i32)> {
 }
 
 /// Check if the current GPU supports the given dtype for tensor core / WMMA operations.
-pub fn gpu_supports_dtype(dtype: luminal::op::DType) -> bool {
+pub fn gpu_supports_dtype(dtype: luminal::dtype::DType) -> bool {
     let Some((major, _)) = gpu_compute_cap() else {
         return false;
     };
     match dtype {
-        luminal::op::DType::Bf16 => major >= 8, // Ampere (sm_80+)
-        luminal::op::DType::NvFp4 | luminal::op::DType::Mxfp4 => major >= 10, // Blackwell (sm_100+)
+        luminal::dtype::DType::Bf16 => major >= 8, // Ampere (sm_80+)
+        luminal::dtype::DType::NvFp4 | luminal::dtype::DType::Mxfp4 => major >= 10, // Blackwell (sm_100+)
         _ => true,
     }
 }
 
 /// Machine epsilon for each dtype (approximate)
-pub fn dtype_epsilon(dtype: luminal::op::DType) -> f32 {
+pub fn dtype_epsilon(dtype: luminal::dtype::DType) -> f32 {
     match dtype {
-        luminal::op::DType::F32 => 1.19e-7,  // 2^-23
-        luminal::op::DType::F16 => 9.77e-4,  // 2^-10
-        luminal::op::DType::Bf16 => 7.81e-3, // 2^-7
-        luminal::op::DType::Int => 0.0,
-        luminal::op::DType::Bool => 0.0,
-        luminal::op::DType::NvFp4 | luminal::op::DType::Mxfp4 => todo!(),
+        luminal::dtype::DType::F32 => 1.19e-7,  // 2^-23
+        luminal::dtype::DType::F16 => 9.77e-4,  // 2^-10
+        luminal::dtype::DType::Bf16 => 7.81e-3, // 2^-7
+        luminal::dtype::DType::Int => 0.0,
+        luminal::dtype::DType::Bool => 0.0,
+        luminal::dtype::DType::NvFp4 | luminal::dtype::DType::Mxfp4 => todo!(),
     }
 }
 
 /// Map a luminal DType to the corresponding candle DType.
-pub fn to_candle_dtype(dtype: luminal::op::DType) -> candle_core::DType {
+pub fn to_candle_dtype(dtype: luminal::dtype::DType) -> candle_core::DType {
     match dtype {
-        luminal::op::DType::F32 => candle_core::DType::F32,
-        luminal::op::DType::F16 => candle_core::DType::F16,
-        luminal::op::DType::Bf16 => candle_core::DType::BF16,
-        luminal::op::DType::Int => candle_core::DType::I32,
-        luminal::op::DType::Bool => candle_core::DType::U8,
-        luminal::op::DType::NvFp4 | luminal::op::DType::Mxfp4 => todo!(),
+        luminal::dtype::DType::F32 => candle_core::DType::F32,
+        luminal::dtype::DType::F16 => candle_core::DType::F16,
+        luminal::dtype::DType::Bf16 => candle_core::DType::BF16,
+        luminal::dtype::DType::Int => candle_core::DType::I32,
+        luminal::dtype::DType::Bool => candle_core::DType::U8,
+        luminal::dtype::DType::NvFp4 | luminal::dtype::DType::Mxfp4 => todo!(),
     }
 }
 
@@ -320,7 +320,7 @@ pub fn test_mod(
         .map(|(x, y)| x % y)
         .collect();
 
-    let eps = dtype_epsilon(luminal::op::DType::F32);
+    let eps = dtype_epsilon(luminal::dtype::DType::F32);
     let rtol = eps * TOLERANCE_SAFETY_FACTOR;
     let atol = eps * TOLERANCE_SAFETY_FACTOR;
     assert_close(&result, &expected, rtol, atol);

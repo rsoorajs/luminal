@@ -1,9 +1,10 @@
 use std::sync::{Arc, OnceLock};
 
 use luminal::{
+    dtype::DType,
     egglog_utils::{extract_dtype, extract_expr},
     op::{
-        DType, EgglogOp, LLIROp,
+        EgglogOp, LLIROp,
         OpParam::{self, *},
     },
     prelude::{

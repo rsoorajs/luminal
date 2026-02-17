@@ -1,6 +1,7 @@
 use luminal::{
+    dtype::DType,
     graph::Graph,
-    op::{CustomOp, DType, LLIROp},
+    op::{CustomOp, LLIROp},
     prelude::{F32Pow, GraphTensor},
     shape::{flatten_mul_strides, Expression, ShapeTracker, ToShape},
 };
