@@ -721,7 +721,16 @@ pub fn parse_reshape_node(
         let one_expanded = broadcast_to(one, &broadcast_shape);
         result *= one_expanded;
     }
-    result.shape = ShapeTracker::new(final_shape);
+    result.shape = ShapeTracker::new(final_shape.clone());
+
+    // Force materialization to create a distinct graph node for the CUDA backend.
+    // Without this, the output shares the same NodeIndex as the input tensor,
+    // and CudaRuntime::get_f32 cannot retrieve data for input-aliased outputs.
+    // (Same pattern as parse_transpose_node's `permuted * 1.0`.)
+    let one = result.graph().constant_float(1.0);
+    let one_expanded = broadcast_to(one, &final_shape);
+    result = result * one_expanded;
+
     let output_name = &node.output[0];
     tensors.insert(output_name.clone(), result);
 
@@ -1330,8 +1339,20 @@ pub fn parse_identity(
     );
 
     let output_name = &node.output[0];
-    // Direct alias: the output tensor IS the input tensor
-    tensors.insert(output_name.clone(), a);
+
+    // Force materialization to create a distinct graph node for the CUDA backend.
+    // Without this, the output shares the same NodeIndex as the input tensor,
+    // and CudaRuntime::get_f32 cannot retrieve data for input-aliased outputs.
+    // (Same pattern as parse_reshape_node and parse_transpose_node.)
+    let shape: Vec<usize> = a
+        .dims()
+        .iter()
+        .map(|d| d.to_usize().expect("Identity: dim must be concrete"))
+        .collect();
+    let one = a.graph().constant_float(1.0);
+    let one_expanded = broadcast_to(one, &shape);
+    let result = a * one_expanded;
+    tensors.insert(output_name.clone(), result);
 
     // Propagate known values
     if let Some(vals) = known_values.get(&node.input[0]).cloned() {
