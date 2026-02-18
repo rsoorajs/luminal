@@ -102,197 +102,197 @@ from test_models import (
 from luminal import luminal_backend
 
 
-def test_add():
-    add_test_model: torch.nn.Module = AddTestModel()
+def test_add(device: torch.device):
+    add_test_model: torch.nn.Module = AddTestModel().to(device)
     add_test_mode_compiled: Callable = torch.compile(
         add_test_model, backend=luminal_backend
     )
-    x: torch.Tensor = torch.rand((5, 5))
+    x: torch.Tensor = torch.rand((5, 5), device=device)
     original: torch.Tensor = add_test_model(x)
     output: torch.Tensor = add_test_mode_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_linear_layer():
-    add_test_model: torch.nn.Module = LinearLayerModel()
+def test_linear_layer(device: torch.device):
+    add_test_model: torch.nn.Module = LinearLayerModel().to(device)
     add_test_mode_compiled: Callable = torch.compile(
         add_test_model, backend=luminal_backend
     )
-    x: torch.Tensor = torch.rand((5, 5))
+    x: torch.Tensor = torch.rand((5, 5), device=device)
     original: torch.Tensor = add_test_model(x)
     output: torch.Tensor = add_test_mode_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_mul():
-    add_test_model: torch.nn.Module = MulTestModel()
+def test_mul(device: torch.device):
+    add_test_model: torch.nn.Module = MulTestModel().to(device)
     add_test_mode_compiled: Callable = torch.compile(
         add_test_model, backend=luminal_backend
     )
 
-    x: torch.Tensor = torch.rand((5, 5))
+    x: torch.Tensor = torch.rand((5, 5), device=device)
     original: torch.Tensor = add_test_model(x)
     output: torch.Tensor = add_test_mode_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_div():
-    div_test_model: torch.nn.Module = DivTestModel()
+def test_div(device: torch.device):
+    div_test_model: torch.nn.Module = DivTestModel().to(device)
     div_test_mode_compiled: Callable = torch.compile(
         div_test_model, backend=luminal_backend
     )
 
-    x: torch.Tensor = torch.rand((5, 5))
+    x: torch.Tensor = torch.rand((5, 5), device=device)
     original: torch.Tensor = div_test_model(x)
     output: torch.Tensor = div_test_mode_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_add_add():
-    add_test_model: torch.nn.Module = AddAddTestModel()
+def test_add_add(device: torch.device):
+    add_test_model: torch.nn.Module = AddAddTestModel().to(device)
     add_test_mode_compiled: Callable = torch.compile(
         add_test_model, backend=luminal_backend
     )
-    x: torch.Tensor = torch.rand((5, 5))
+    x: torch.Tensor = torch.rand((5, 5), device=device)
     original: torch.Tensor = add_test_model(x)
     output: torch.Tensor = add_test_mode_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_add_broadcast():
-    add_test_model: torch.nn.Module = AddTestModel()
+def test_add_broadcast(device: torch.device):
+    add_test_model: torch.nn.Module = AddTestModel().to(device)
     add_test_mode_compiled: Callable = torch.compile(
         add_test_model, backend=luminal_backend
     )
-    x: torch.Tensor = torch.rand(5)
+    x: torch.Tensor = torch.rand(5, device=device)
     original: torch.Tensor = add_test_model(x)
     output: torch.Tensor = add_test_mode_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_add_constant():
-    add_test_model: torch.nn.Module = AddConstantTestModel()
+def test_add_constant(device: torch.device):
+    add_test_model: torch.nn.Module = AddConstantTestModel().to(device)
     add_test_mode_compiled: Callable = torch.compile(
         add_test_model, backend=luminal_backend
     )
-    x: torch.Tensor = torch.rand(5)
+    x: torch.Tensor = torch.rand(5, device=device)
     original: torch.Tensor = add_test_model(x)
     output: torch.Tensor = add_test_mode_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_sub():
-    sub_test_model: torch.nn.Module = SubTestModel()
+def test_sub(device: torch.device):
+    sub_test_model: torch.nn.Module = SubTestModel().to(device)
     sub_test_mode_compiled = torch.compile(sub_test_model, backend=luminal_backend)
-    x = torch.rand((10, 10))
+    x = torch.rand((10, 10), device=device)
     output = sub_test_mode_compiled(x)
     original = sub_test_model(x)
     assert torch.allclose(output, original)
 
 
-def test_sub_broadcast():
-    sub_test_model: torch.nn.Module = SubTestModel()
+def test_sub_broadcast(device: torch.device):
+    sub_test_model: torch.nn.Module = SubTestModel().to(device)
     sub_test_mode_compiled = torch.compile(sub_test_model, backend=luminal_backend)
-    x = torch.rand((10, 10))
+    x = torch.rand((10, 10), device=device)
     output = sub_test_mode_compiled(x)
     original = sub_test_model(x)
     assert torch.allclose(output, original)
 
 
-def test_sqrt():
-    sqrt_test_model: torch.nn.Module = SqrtTestModel()
+def test_sqrt(device: torch.device):
+    sqrt_test_model: torch.nn.Module = SqrtTestModel().to(device)
     sqrt_test_model_compiled = torch.compile(sqrt_test_model, backend=luminal_backend)
-    x = torch.rand(100)
+    x = torch.rand(100, device=device)
     output = sqrt_test_model_compiled(x)
     original = sqrt_test_model(x)
     assert torch.allclose(output, original)
 
 
-def test_sin():
-    sin_test_model: torch.nn.Module = SinTestModel()
+def test_sin(device: torch.device):
+    sin_test_model: torch.nn.Module = SinTestModel().to(device)
     sin_test_model_compiled = torch.compile(sin_test_model, backend=luminal_backend)
-    x = torch.rand(100)
+    x = torch.rand(100, device=device)
     output = sin_test_model_compiled(x)
     original = sin_test_model(x)
     assert torch.allclose(output, original)
 
 
-def test_cos():
-    cos_test_model: torch.nn.Module = CosTestModel()
+def test_cos(device: torch.device):
+    cos_test_model: torch.nn.Module = CosTestModel().to(device)
     cos_test_model_compiled = torch.compile(cos_test_model, backend=luminal_backend)
-    x = torch.rand(100)
+    x = torch.rand(100, device=device)
     output = cos_test_model_compiled(x)
     original = cos_test_model(x)
     assert torch.allclose(output, original)
 
 
-def test_transpose_2d():
+def test_transpose_2d(device: torch.device):
     """Test basic 2D matrix transpose."""
-    transpose_test_model: torch.nn.Module = TransposeTestModel()
+    transpose_test_model: torch.nn.Module = TransposeTestModel().to(device)
     transpose_test_model_compiled = torch.compile(
         transpose_test_model, backend=luminal_backend
     )
-    x: torch.Tensor = torch.rand((5, 10))
+    x: torch.Tensor = torch.rand((5, 10), device=device)
     output: torch.Tensor = transpose_test_model_compiled(x)
     original: torch.Tensor = transpose_test_model(x)
     assert torch.allclose(output, original)
 
 
-def test_transpose_3d():
+def test_transpose_3d(device: torch.device):
     """Test 3D transpose with dimension permutation."""
-    transpose_test_model: torch.nn.Module = Transpose3DTestModel()
+    transpose_test_model: torch.nn.Module = Transpose3DTestModel().to(device)
     transpose_test_model_compiled = torch.compile(
         transpose_test_model, backend=luminal_backend
     )
-    x: torch.Tensor = torch.rand((2, 3, 4))
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
     output: torch.Tensor = transpose_test_model_compiled(x)
     original: torch.Tensor = transpose_test_model(x)
     assert torch.allclose(output, original)
 
 
-def test_transpose_4d():
+def test_transpose_4d(device: torch.device):
     """Test 4D transpose (common in conv nets: NCHW -> NHWC)."""
-    transpose_test_model: torch.nn.Module = Transpose4DTestModel()
+    transpose_test_model: torch.nn.Module = Transpose4DTestModel().to(device)
     transpose_test_model_compiled = torch.compile(
         transpose_test_model, backend=luminal_backend
     )
-    x: torch.Tensor = torch.rand((1, 3, 224, 224))
+    x: torch.Tensor = torch.rand((1, 3, 224, 224), device=device)
     output: torch.Tensor = transpose_test_model_compiled(x)
     original: torch.Tensor = transpose_test_model(x)
     assert torch.allclose(output, original)
 
 
-def test_transpose_reverse():
+def test_transpose_reverse(device: torch.device):
     """Test default transpose (reverse all dimensions)."""
-    transpose_test_model: torch.nn.Module = TransposeReverseTestModel()
+    transpose_test_model: torch.nn.Module = TransposeReverseTestModel().to(device)
     transpose_test_model_compiled = torch.compile(
         transpose_test_model, backend=luminal_backend
     )
-    x: torch.Tensor = torch.rand((2, 3, 4, 5))
+    x: torch.Tensor = torch.rand((2, 3, 4, 5), device=device)
     output: torch.Tensor = transpose_test_model_compiled(x)
     original: torch.Tensor = transpose_test_model(x)
     assert torch.allclose(output, original)
 
 
-def test_transpose_in_expression():
+def test_transpose_in_expression(device: torch.device):
     """Test transpose within a larger computational graph."""
-    transpose_test_model: torch.nn.Module = TransposeInExpressionModel()
+    transpose_test_model: torch.nn.Module = TransposeInExpressionModel().to(device)
     transpose_test_model_compiled = torch.compile(
         transpose_test_model, backend=luminal_backend
     )
-    x: torch.Tensor = torch.rand((5, 10))
+    x: torch.Tensor = torch.rand((5, 10), device=device)
     output: torch.Tensor = transpose_test_model_compiled(x)
     original: torch.Tensor = transpose_test_model(x)
     assert torch.allclose(output, original)
 
 
-def test_transpose_square_matrix():
+def test_transpose_square_matrix(device: torch.device):
     """Test transpose of square matrix (edge case)."""
-    transpose_test_model: torch.nn.Module = TransposeTestModel()
+    transpose_test_model: torch.nn.Module = TransposeTestModel().to(device)
     transpose_test_model_compiled = torch.compile(
         transpose_test_model, backend=luminal_backend
     )
-    x: torch.Tensor = torch.rand((5, 5))
+    x: torch.Tensor = torch.rand((5, 5), device=device)
     output: torch.Tensor = transpose_test_model_compiled(x)
     original: torch.Tensor = transpose_test_model(x)
     assert torch.allclose(output, original)
@@ -303,121 +303,121 @@ def test_transpose_square_matrix():
 # which handles ONNX Constant nodes (nodes with embedded data in attributes)
 
 
-def test_constant_scalar_float():
+def test_constant_scalar_float(device: torch.device):
     """Test scalar constant (broadcasts to input shape)."""
-    model: torch.nn.Module = ConstantScalarFloatModel()
+    model: torch.nn.Module = ConstantScalarFloatModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0])
+    x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_constant_1d_array_float():
+def test_constant_1d_array_float(device: torch.device):
     """Test 1D array constant."""
-    model: torch.nn.Module = Constant1DArrayFloatModel()
+    model: torch.nn.Module = Constant1DArrayFloatModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([2.0, 3.0, 4.0, 5.0, 6.0])
+    x: torch.Tensor = torch.tensor([2.0, 3.0, 4.0, 5.0, 6.0]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_constant_2d_matrix_float():
+def test_constant_2d_matrix_float(device: torch.device):
     """Test 2D matrix constant."""
-    model: torch.nn.Module = Constant2DMatrixFloatModel()
+    model: torch.nn.Module = Constant2DMatrixFloatModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    x: torch.Tensor = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_constant_raw_data_float():
+def test_constant_raw_data_float(device: torch.device):
     """Test raw binary data format (chunks_exact(4) code path)."""
-    model: torch.nn.Module = ConstantRawDataFloatModel()
+    model: torch.nn.Module = ConstantRawDataFloatModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0])
+    x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_constant_int32_conversion():
+def test_constant_int32_conversion(device: torch.device):
     """Test INT32 -> f32 conversion."""
-    model: torch.nn.Module = ConstantInt32ConversionModel()
+    model: torch.nn.Module = ConstantInt32ConversionModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([10.0, 20.0, 30.0, 40.0, 50.0])
+    x: torch.Tensor = torch.tensor([10.0, 20.0, 30.0, 40.0, 50.0]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_constant_int64_conversion():
+def test_constant_int64_conversion(device: torch.device):
     """Test INT64 -> f32 conversion."""
-    model: torch.nn.Module = ConstantInt64ConversionModel()
+    model: torch.nn.Module = ConstantInt64ConversionModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([2.0, 3.0, 4.0])
+    x: torch.Tensor = torch.tensor([2.0, 3.0, 4.0]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_constant_float64_conversion():
+def test_constant_float64_conversion(device: torch.device):
     """Test FLOAT64 -> f32 conversion."""
-    model: torch.nn.Module = ConstantFloat64ConversionModel()
+    model: torch.nn.Module = ConstantFloat64ConversionModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([10.0, 20.0, 30.0])
+    x: torch.Tensor = torch.tensor([10.0, 20.0, 30.0]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_constant_bool_conversion():
+def test_constant_bool_conversion(device: torch.device):
     """Test BOOL -> f32 conversion (0.0/1.0)."""
-    model: torch.nn.Module = ConstantBoolConversionModel()
+    model: torch.nn.Module = ConstantBoolConversionModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0])
+    x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_constant_int64_raw_data():
+def test_constant_int64_raw_data(device: torch.device):
     """Test raw binary format for INT64 (chunks_exact(8) code path)."""
-    model: torch.nn.Module = ConstantInt64RawDataModel()
+    model: torch.nn.Module = ConstantInt64RawDataModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([10.0, 20.0, 30.0])
+    x: torch.Tensor = torch.tensor([10.0, 20.0, 30.0]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_constant_negative_values():
+def test_constant_negative_values(device: torch.device):
     """Test negative constants."""
-    model: torch.nn.Module = ConstantNegativeValuesModel()
+    model: torch.nn.Module = ConstantNegativeValuesModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([100.0, 200.0, 300.0])
+    x: torch.Tensor = torch.tensor([100.0, 200.0, 300.0]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_constant_zero_value():
+def test_constant_zero_value(device: torch.device):
     """Test all-zero constant."""
-    model: torch.nn.Module = ConstantZeroValueModel()
+    model: torch.nn.Module = ConstantZeroValueModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0, 4.0]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_constant_multiple_in_graph():
+def test_constant_multiple_in_graph(device: torch.device):
     """Test multiple Constant nodes in one graph."""
-    model: torch.nn.Module = ConstantMultipleInGraphModel()
+    model: torch.nn.Module = ConstantMultipleInGraphModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([5.0, 6.0, 7.0])
+    x: torch.Tensor = torch.tensor([5.0, 6.0, 7.0]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
@@ -428,81 +428,81 @@ def test_constant_multiple_in_graph():
 # which handles ONNX Cast nodes (type conversion operations)
 
 
-def test_cast_double_to_float():
+def test_cast_double_to_float(device: torch.device):
     """Test downcast: Double (FLOAT64) -> Float."""
-    model: torch.nn.Module = CastDoubleToFloatModel()
+    model: torch.nn.Module = CastDoubleToFloatModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([1.123456789, 2.987654321, 3.555555555, 4.111111111], dtype=torch.float64)
+    x: torch.Tensor = torch.tensor([1.123456789, 2.987654321, 3.555555555, 4.111111111], dtype=torch.float64).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_cast_int32_to_float():
+def test_cast_int32_to_float(device: torch.device):
     """Test INT32 -> Float conversion."""
-    model: torch.nn.Module = CastInt32ToFloatModel()
+    model: torch.nn.Module = CastInt32ToFloatModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32)
+    x: torch.Tensor = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_cast_int64_to_float():
+def test_cast_int64_to_float(device: torch.device):
     """Test INT64 -> Float conversion."""
-    model: torch.nn.Module = CastInt64ToFloatModel()
+    model: torch.nn.Module = CastInt64ToFloatModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([100, 200, 300, 400], dtype=torch.int64)
+    x: torch.Tensor = torch.tensor([100, 200, 300, 400], dtype=torch.int64).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_cast_bool_to_float():
+def test_cast_bool_to_float(device: torch.device):
     """Test BOOL -> Float conversion (non-zero -> 1.0, zero -> 0.0)."""
-    model: torch.nn.Module = CastBoolToFloatModel()
+    model: torch.nn.Module = CastBoolToFloatModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([True, False, True, False, True, False], dtype=torch.bool)
+    x: torch.Tensor = torch.tensor([True, False, True, False, True, False], dtype=torch.bool).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_cast_in_computation_graph():
+def test_cast_in_computation_graph(device: torch.device):
     """Test Cast node followed by an operation (Cast + Add)."""
-    model: torch.nn.Module = CastInComputationGraphModel()
+    model: torch.nn.Module = CastInComputationGraphModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([10, 20, 30], dtype=torch.int32)
+    x: torch.Tensor = torch.tensor([10, 20, 30], dtype=torch.int32).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_cast_with_2d_tensor():
+def test_cast_with_2d_tensor(device: torch.device):
     """Test Cast with 2D tensor (matrix)."""
-    model: torch.nn.Module = CastWith2DTensorModel()
+    model: torch.nn.Module = CastWith2DTensorModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int64)
+    x: torch.Tensor = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int64).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_cast_negative_values():
+def test_cast_negative_values(device: torch.device):
     """Test Cast with negative integer values."""
-    model: torch.nn.Module = CastNegativeValuesModel()
+    model: torch.nn.Module = CastNegativeValuesModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([-10, -5, 0, 5, 10], dtype=torch.int32)
+    x: torch.Tensor = torch.tensor([-10, -5, 0, 5, 10], dtype=torch.int32).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_cast_scalar_value():
+def test_cast_scalar_value(device: torch.device):
     """Test Cast with scalar (single element)."""
-    model: torch.nn.Module = CastScalarValueModel()
+    model: torch.nn.Module = CastScalarValueModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([42.123456], dtype=torch.float64)
+    x: torch.Tensor = torch.tensor([42.123456], dtype=torch.float64).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
@@ -511,31 +511,31 @@ def test_cast_scalar_value():
 # ========== ONNX Mod Node Tests ==========
 
 
-def test_mod():
+def test_mod(device: torch.device):
     """Test basic element-wise modulo."""
-    model: torch.nn.Module = ModTestModel()
+    model: torch.nn.Module = ModTestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((5, 5)) * 10.0
+    x: torch.Tensor = torch.rand((5, 5), device=device) * 10.0
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_mod_broadcast():
+def test_mod_broadcast(device: torch.device):
     """Test modulo with broadcasting (1D input vs 2D weight)."""
-    model: torch.nn.Module = ModTestModel()
+    model: torch.nn.Module = ModTestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(5) * 10.0
+    x: torch.Tensor = torch.rand(5, device=device) * 10.0
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_mod_by_constant():
+def test_mod_by_constant(device: torch.device):
     """Test modulo by a constant tensor (exercises Mod + Constant nodes)."""
-    model: torch.nn.Module = ModByConstantModel()
+    model: torch.nn.Module = ModByConstantModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([7.0, 9.0, 11.0])
+    x: torch.Tensor = torch.tensor([7.0, 9.0, 11.0]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
@@ -544,31 +544,31 @@ def test_mod_by_constant():
 # ========== ONNX Floor Node Tests ==========
 
 
-def test_floor():
+def test_floor(device: torch.device):
     """Test element-wise floor on positive floats."""
-    model: torch.nn.Module = FloorTestModel()
+    model: torch.nn.Module = FloorTestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([1.2, 2.7, 3.0, 4.9, 5.5])
+    x: torch.Tensor = torch.tensor([1.2, 2.7, 3.0, 4.9, 5.5]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_floor_negative():
+def test_floor_negative(device: torch.device):
     """Test floor with negative values."""
-    model: torch.nn.Module = FloorNegativeModel()
+    model: torch.nn.Module = FloorNegativeModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([-1.2, -2.7, -0.1, 0.9, -3.5])
+    x: torch.Tensor = torch.tensor([-1.2, -2.7, -0.1, 0.9, -3.5]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_floor_in_expression():
+def test_floor_in_expression(device: torch.device):
     """Test floor followed by mul (floor as part of a larger graph)."""
-    model: torch.nn.Module = FloorInExpressionModel()
+    model: torch.nn.Module = FloorInExpressionModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([1.5, 2.8, 3.3, 4.1])
+    x: torch.Tensor = torch.tensor([1.5, 2.8, 3.3, 4.1]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
@@ -578,111 +578,111 @@ def test_floor_in_expression():
 # These tests verify parse_reshape_node and parse_shape_node in ops_parse.rs
 
 
-def test_reshape_2d_to_1d():
+def test_reshape_2d_to_1d(device: torch.device):
     """Reshape (3, 4) -> (12,) via reshape(-1)."""
-    model: torch.nn.Module = ReshapeToFlatModel()
+    model: torch.nn.Module = ReshapeToFlatModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((3, 4))
+    x: torch.Tensor = torch.rand((3, 4), device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_reshape_1d_to_2d():
+def test_reshape_1d_to_2d(device: torch.device):
     """Reshape (12,) -> (3, 4) with explicit target shape."""
-    model: torch.nn.Module = ReshapeToMatrixModel()
+    model: torch.nn.Module = ReshapeToMatrixModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(12)
+    x: torch.Tensor = torch.rand(12, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_reshape_1d_to_3d():
+def test_reshape_1d_to_3d(device: torch.device):
     """Reshape (24,) -> (2, 3, 4) with explicit 3D target shape."""
-    model: torch.nn.Module = ReshapeTo3DModel()
+    model: torch.nn.Module = ReshapeTo3DModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(24)
+    x: torch.Tensor = torch.rand(24, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_reshape_infer_last_dim():
+def test_reshape_infer_last_dim(device: torch.device):
     """Reshape (12,) -> (3, 4) with -1 inferring last dimension."""
-    model: torch.nn.Module = ReshapeInferLastDimModel()
+    model: torch.nn.Module = ReshapeInferLastDimModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(12)
+    x: torch.Tensor = torch.rand(12, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_reshape_infer_first_dim():
+def test_reshape_infer_first_dim(device: torch.device):
     """Reshape (12,) -> (3, 4) with -1 inferring first dimension."""
-    model: torch.nn.Module = ReshapeInferFirstDimModel()
+    model: torch.nn.Module = ReshapeInferFirstDimModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(12)
+    x: torch.Tensor = torch.rand(12, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_reshape_3d_to_2d():
+def test_reshape_3d_to_2d(device: torch.device):
     """Reshape (2, 3, 4) -> (2, 12) collapsing last two dims."""
-    model: torch.nn.Module = Reshape3Dto2DModel()
+    model: torch.nn.Module = Reshape3Dto2DModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((2, 3, 4))
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_reshape_in_expression():
+def test_reshape_in_expression(device: torch.device):
     """Reshape (12,) -> (2, 6) then add weight tensor."""
-    model: torch.nn.Module = ReshapeInExpressionModel()
+    model: torch.nn.Module = ReshapeInExpressionModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(12)
+    x: torch.Tensor = torch.rand(12, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_reshape_roundtrip():
+def test_reshape_roundtrip(device: torch.device):
     """Reshape (3, 4) -> (12,) -> (3, 4) via two Reshape nodes."""
-    model: torch.nn.Module = ReshapeRoundtripModel()
+    model: torch.nn.Module = ReshapeRoundtripModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((3, 4))
+    x: torch.Tensor = torch.rand((3, 4), device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_reshape_after_ops():
+def test_reshape_after_ops(device: torch.device):
     """Multiply by 2.0 then reshape (2, 3, 4) -> (24,)."""
-    model: torch.nn.Module = ReshapeAfterOpsModel()
+    model: torch.nn.Module = ReshapeAfterOpsModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((2, 3, 4))
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_shape_reshape_batch_flatten():
+def test_shape_reshape_batch_flatten(device: torch.device):
     """Dynamic batch flatten: x.reshape(x.shape[0], -1) on (2, 3, 4) -> (2, 12)."""
-    model: torch.nn.Module = ShapeReshapeBatchFlattenModel()
+    model: torch.nn.Module = ShapeReshapeBatchFlattenModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((2, 3, 4))
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_shape_reshape_view_batch():
+def test_shape_reshape_view_batch(device: torch.device):
     """Dynamic batch flatten via view: x.view(x.size(0), -1) on (2, 3, 4) -> (2, 12)."""
-    model: torch.nn.Module = ShapeReshapeKeepBatchModel()
+    model: torch.nn.Module = ShapeReshapeKeepBatchModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((2, 3, 4))
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
@@ -692,31 +692,31 @@ def test_shape_reshape_view_batch():
 # These tests verify parse_less_node in ops_parse.rs
 
 
-def test_less():
+def test_less(device: torch.device):
     """Test element-wise less-than comparison against a weight tensor."""
-    model: torch.nn.Module = LessTestModel()
+    model: torch.nn.Module = LessTestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((5, 5))
+    x: torch.Tensor = torch.rand((5, 5), device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_less_broadcast():
+def test_less_broadcast(device: torch.device):
     """Test less-than with broadcasting (1D input broadcasts against 2D weight)."""
-    model: torch.nn.Module = LessBroadcastModel()
+    model: torch.nn.Module = LessBroadcastModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(5)
+    x: torch.Tensor = torch.rand(5, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_less_with_constant():
+def test_less_with_constant(device: torch.device):
     """Test less-than against an inline constant (exercises Less + Constant nodes)."""
-    model: torch.nn.Module = LessWithConstantModel()
+    model: torch.nn.Module = LessWithConstantModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([0.1, 0.5, 0.9])
+    x: torch.Tensor = torch.tensor([0.1, 0.5, 0.9]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
@@ -726,61 +726,61 @@ def test_less_with_constant():
 # These tests verify parse_gather_node in ops_parse.rs
 
 
-def test_gather_1d():
+def test_gather_1d(device: torch.device):
     """Test Gather on 1D data with constant indices (exercises 1D flat gather path)."""
-    model: torch.nn.Module = Gather1DModel()
+    model: torch.nn.Module = Gather1DModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(6)
+    x: torch.Tensor = torch.rand(6, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_gather_embedding():
+def test_gather_embedding(device: torch.device):
     """Test Gather via nn.Embedding (axis=0 gather on 2D weight with integer indices)."""
-    model: torch.nn.Module = GatherEmbeddingModel()
+    model: torch.nn.Module = GatherEmbeddingModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([0, 2, 5, 1])
+    x: torch.Tensor = torch.tensor([0, 2, 5, 1]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_gather_2d_axis0():
+def test_gather_2d_axis0(device: torch.device):
     """Test Gather on 2D weight along axis=0 with runtime integer indices (row selection)."""
-    model: torch.nn.Module = Gather2DAxis0Model()
+    model: torch.nn.Module = Gather2DAxis0Model().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([2, 0, 4, 1])
+    x: torch.Tensor = torch.tensor([2, 0, 4, 1]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_gather_2d_axis1():
+def test_gather_2d_axis1(device: torch.device):
     """Test Gather on 2D float input along axis=1 (exercises permute-gather-permute strategy)."""
-    model: torch.nn.Module = Gather2DAxis1Model()
+    model: torch.nn.Module = Gather2DAxis1Model().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(4, 5)
+    x: torch.Tensor = torch.rand(4, 5, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_gather_negative_indices():
+def test_gather_negative_indices(device: torch.device):
     """Test Gather with negative runtime indices (-1 for last element, etc.)."""
-    model: torch.nn.Module = GatherNegativeIndicesModel()
+    model: torch.nn.Module = GatherNegativeIndicesModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([-1, -2, 0, 2])
+    x: torch.Tensor = torch.tensor([-1, -2, 0, 2]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_gather_constant_fold():
+def test_gather_constant_fold(device: torch.device):
     """Test Gather constant folding: both data and indices known at graph-build time."""
-    model: torch.nn.Module = GatherConstantFoldModel()
+    model: torch.nn.Module = GatherConstantFoldModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0])
+    x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0]).to(device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
@@ -790,51 +790,51 @@ def test_gather_constant_fold():
 # These tests verify parse_squeeze_node in ops_parse.rs
 
 
-def test_squeeze_axis():
+def test_squeeze_axis(device: torch.device):
     """Test squeezing a single size-1 leading dimension."""
-    model: torch.nn.Module = SqueezeAxisModel()
+    model: torch.nn.Module = SqueezeAxisModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(1, 3, 4)
+    x: torch.Tensor = torch.rand(1, 3, 4, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_squeeze_all_dims():
+def test_squeeze_all_dims(device: torch.device):
     """Test squeezing all size-1 dimensions with no explicit axes."""
-    model: torch.nn.Module = SqueezeAllDimsModel()
+    model: torch.nn.Module = SqueezeAllDimsModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(1, 3, 1, 4)
+    x: torch.Tensor = torch.rand(1, 3, 1, 4, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_squeeze_multiple_axes():
+def test_squeeze_multiple_axes(device: torch.device):
     """Test squeezing multiple explicit size-1 dimensions."""
-    model: torch.nn.Module = SqueezeMultipleAxesModel()
+    model: torch.nn.Module = SqueezeMultipleAxesModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(1, 3, 1, 4)
+    x: torch.Tensor = torch.rand(1, 3, 1, 4, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_squeeze_negative_axis():
+def test_squeeze_negative_axis(device: torch.device):
     """Test squeezing a trailing size-1 dimension using a negative axis."""
-    model: torch.nn.Module = SqueezeNegativeAxisModel()
+    model: torch.nn.Module = SqueezeNegativeAxisModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(3, 4, 1)
+    x: torch.Tensor = torch.rand(3, 4, 1, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
 
 
-def test_squeeze_in_expression():
+def test_squeeze_in_expression(device: torch.device):
     """Test squeeze followed by an add (squeeze as part of a larger graph)."""
-    model: torch.nn.Module = SqueezeInExpressionModel()
+    model: torch.nn.Module = SqueezeInExpressionModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand(1, 5)
+    x: torch.Tensor = torch.rand(1, 5, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
@@ -843,148 +843,148 @@ def test_squeeze_in_expression():
 # ========== ONNX ReduceSum Node Tests ==========
 
 
-def test_reduce_sum_axis0():
+def test_reduce_sum_axis0(device: torch.device):
     """Test sum reduction along axis 0."""
-    model: torch.nn.Module = ReduceSumAxis0Model()
+    model: torch.nn.Module = ReduceSumAxis0Model().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((4, 5))
+    x: torch.Tensor = torch.rand((4, 5), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_sum_axis1():
+def test_reduce_sum_axis1(device: torch.device):
     """Test sum reduction along axis 1."""
-    model: torch.nn.Module = ReduceSumAxis1Model()
+    model: torch.nn.Module = ReduceSumAxis1Model().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((4, 5))
+    x: torch.Tensor = torch.rand((4, 5), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_sum_keepdims():
+def test_reduce_sum_keepdims(device: torch.device):
     """Test sum reduction along axis 1 with keepdim=True."""
-    model: torch.nn.Module = ReduceSumKeepDimsModel()
+    model: torch.nn.Module = ReduceSumKeepDimsModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((4, 5))
+    x: torch.Tensor = torch.rand((4, 5), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_sum_all_axes():
+def test_reduce_sum_all_axes(device: torch.device):
     """Test sum reduction over all axes (produces a scalar)."""
-    model: torch.nn.Module = ReduceSumAllAxesModel()
+    model: torch.nn.Module = ReduceSumAllAxesModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((3, 4))
+    x: torch.Tensor = torch.rand((3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_sum_3d_axis1():
+def test_reduce_sum_3d_axis1(device: torch.device):
     """Test sum reduction along axis 1 for a 3D tensor."""
-    model: torch.nn.Module = ReduceSum3DAxis1Model()
+    model: torch.nn.Module = ReduceSum3DAxis1Model().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((2, 3, 4))
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_sum_multi_axis():
+def test_reduce_sum_multi_axis(device: torch.device):
     """Test sum reduction along multiple axes (0 and 2)."""
-    model: torch.nn.Module = ReduceSumMultiAxisModel()
+    model: torch.nn.Module = ReduceSumMultiAxisModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((2, 3, 4))
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_sum_multi_axis_keepdims():
+def test_reduce_sum_multi_axis_keepdims(device: torch.device):
     """Test sum reduction along axes (0, 2) with keepdim=True."""
-    model: torch.nn.Module = ReduceSumMultiAxisKeepDimsModel()
+    model: torch.nn.Module = ReduceSumMultiAxisKeepDimsModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((2, 3, 4))
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_sum_negative_axis():
+def test_reduce_sum_negative_axis(device: torch.device):
     """Test sum reduction along axis -1 (last axis)."""
-    model: torch.nn.Module = ReduceSumNegativeAxisModel()
+    model: torch.nn.Module = ReduceSumNegativeAxisModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((3, 4))
+    x: torch.Tensor = torch.rand((3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_sum_in_expression():
+def test_reduce_sum_in_expression(device: torch.device):
     """Test ReduceSum used in a larger expression (mean via sum / n)."""
-    model: torch.nn.Module = ReduceSumInExpressionModel()
+    model: torch.nn.Module = ReduceSumInExpressionModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((3, 4))
+    x: torch.Tensor = torch.rand((3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
 # ========== ONNX ReduceMax Node Tests ==========
 
 
-def test_reduce_max_axis0():
+def test_reduce_max_axis0(device: torch.device):
     """Test max reduction along axis 0."""
-    model: torch.nn.Module = ReduceMaxAxis0Model()
+    model: torch.nn.Module = ReduceMaxAxis0Model().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((4, 5))
+    x: torch.Tensor = torch.rand((4, 5), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_max_axis1():
+def test_reduce_max_axis1(device: torch.device):
     """Test max reduction along axis 1."""
-    model: torch.nn.Module = ReduceMaxAxis1Model()
+    model: torch.nn.Module = ReduceMaxAxis1Model().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((4, 5))
+    x: torch.Tensor = torch.rand((4, 5), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_max_keepdims():
+def test_reduce_max_keepdims(device: torch.device):
     """Test max reduction along axis 1 with keepdim=True."""
-    model: torch.nn.Module = ReduceMaxKeepDimsModel()
+    model: torch.nn.Module = ReduceMaxKeepDimsModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((4, 5))
+    x: torch.Tensor = torch.rand((4, 5), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_max_all_axes():
+def test_reduce_max_all_axes(device: torch.device):
     """Test max reduction over all axes (produces a scalar)."""
-    model: torch.nn.Module = ReduceMaxAllAxesModel()
+    model: torch.nn.Module = ReduceMaxAllAxesModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((3, 4))
+    x: torch.Tensor = torch.rand((3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_max_3d_axis1():
+def test_reduce_max_3d_axis1(device: torch.device):
     """Test max reduction along axis 1 for a 3D tensor."""
-    model: torch.nn.Module = ReduceMax3DAxis1Model()
+    model: torch.nn.Module = ReduceMax3DAxis1Model().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((2, 3, 4))
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_max_multi_axis():
+def test_reduce_max_multi_axis(device: torch.device):
     """Test max reduction along multiple axes (0 and 2)."""
-    model: torch.nn.Module = ReduceMaxMultiAxisModel()
+    model: torch.nn.Module = ReduceMaxMultiAxisModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((2, 3, 4))
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_max_multi_axis_keepdims():
+def test_reduce_max_multi_axis_keepdims(device: torch.device):
     """Test max reduction along axes (0, 2) with keepdim=True."""
-    model: torch.nn.Module = ReduceMaxMultiAxisKeepDimsModel()
+    model: torch.nn.Module = ReduceMaxMultiAxisKeepDimsModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((2, 3, 4))
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_max_negative_axis():
+def test_reduce_max_negative_axis(device: torch.device):
     """Test max reduction along axis -1 (last axis)."""
-    model: torch.nn.Module = ReduceMaxNegativeAxisModel()
+    model: torch.nn.Module = ReduceMaxNegativeAxisModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((3, 4))
+    x: torch.Tensor = torch.rand((3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
 
 
-def test_reduce_max_in_expression():
+def test_reduce_max_in_expression(device: torch.device):
     """Test ReduceMax used in a larger expression (max * 2.0)."""
-    model: torch.nn.Module = ReduceMaxInExpressionModel()
+    model: torch.nn.Module = ReduceMaxInExpressionModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((3, 4))
+    x: torch.Tensor = torch.rand((3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)

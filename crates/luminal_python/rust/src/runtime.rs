@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
 use luminal::prelude::*;
+#[cfg(feature = "cuda")]
 use luminal_cuda::cudarc::driver::{CudaContext, CudaStream};
+#[cfg(feature = "cuda")]
 use luminal_cuda::runtime::CudaRuntime;
 use rustc_hash::FxHashMap;
 
 /// Enum wrapper for runtime backends allowing runtime selection.
 pub enum RuntimeBackend {
     Native(NativeRuntime),
+    #[cfg(feature = "cuda")]
     Cuda(Box<CudaRuntime>),
 }
 
@@ -16,6 +19,7 @@ impl RuntimeBackend {
     pub fn set_data(&mut self, node: NodeIndex, data: Vec<f32>) {
         match self {
             RuntimeBackend::Native(rt) => rt.set_data(node, data),
+            #[cfg(feature = "cuda")]
             RuntimeBackend::Cuda(rt) => rt.set_data(node, data),
         }
     }
@@ -24,6 +28,7 @@ impl RuntimeBackend {
     pub fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) {
         match self {
             RuntimeBackend::Native(rt) => rt.execute(dyn_map),
+            #[cfg(feature = "cuda")]
             RuntimeBackend::Cuda(rt) => rt.execute(dyn_map),
         }
     }
@@ -32,6 +37,7 @@ impl RuntimeBackend {
     pub fn get_f32(&self, node: NodeIndex) -> Vec<f32> {
         match self {
             RuntimeBackend::Native(rt) => rt.get_f32(node).to_vec(),
+            #[cfg(feature = "cuda")]
             RuntimeBackend::Cuda(rt) => rt.get_f32(node),
         }
     }
@@ -40,6 +46,7 @@ impl RuntimeBackend {
     pub fn name(&self) -> &'static str {
         match self {
             RuntimeBackend::Native(_) => "native",
+            #[cfg(feature = "cuda")]
             RuntimeBackend::Cuda(_) => "cuda",
         }
     }
@@ -58,6 +65,7 @@ impl RuntimeBackend {
 /// 3. Call `finalize_cuda` to run profiling with data available
 ///
 
+#[cfg(feature = "cuda")]
 pub fn prepare_cuda(context: &mut Graph) -> Result<(CudaRuntime, Arc<CudaStream>), String> {
     let cuda_ctx =
         CudaContext::new(0).map_err(|e| format!("Failed to init CUDA context: {}", e))?;
@@ -68,6 +76,7 @@ pub fn prepare_cuda(context: &mut Graph) -> Result<(CudaRuntime, Arc<CudaStream>
 }
 
 /// Finalize CUDA runtime: run search with data already set.
+#[cfg(feature = "cuda")]
 pub fn finalize_cuda(context: &mut Graph, rt: CudaRuntime) -> RuntimeBackend {
     let optimized_rt = context.search(rt, 1);
     RuntimeBackend::Cuda(Box::new(optimized_rt))

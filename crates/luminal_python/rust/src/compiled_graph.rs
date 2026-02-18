@@ -212,6 +212,7 @@ impl OnnxGraphResult {
         //        context.build_search_space::<NativeRuntime>();
 
         let rt = match backend {
+            #[cfg(feature = "cuda")]
             "cuda" => OnnxGraphResult::build_cuda_backend(
                 onnx_graph,
                 model_directory,
@@ -246,6 +247,7 @@ impl OnnxGraphResult {
         })
     }
 
+    #[cfg(feature = "cuda")]
     fn build_cuda_backend(
         onnx_graph: &protobuf::MessageField<GraphProto>,
         model_directory: &Path,

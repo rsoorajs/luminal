@@ -8,8 +8,17 @@ try:
 except ImportError:
     pass  # Hook not available, rebuilds will be manual
 
+import os
+
 import pytest
+import torch
 import torch._dynamo
+
+
+@pytest.fixture
+def device() -> torch.device:
+    backend = os.getenv("LUMINAL_BACKEND", "native").lower()
+    return torch.device("cuda") if backend == "cuda" else torch.device("cpu")
 
 
 @pytest.fixture(autouse=True, scope="function")
