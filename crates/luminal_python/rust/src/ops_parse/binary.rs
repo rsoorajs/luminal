@@ -44,7 +44,7 @@ pub fn parse_add_node(
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Add Node");
 
-    return Ok(());
+    Ok(())
 }
 
 /// Handle Mod node: output = input[0] % input[1]
@@ -83,7 +83,7 @@ pub fn parse_mod_node(
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Mod Node");
 
-    return Ok(());
+    Ok(())
 }
 
 /// Handle Sub node: output = input[0] - input[1]
@@ -123,7 +123,7 @@ pub fn parse_sub_node(
     tensors.insert(output_name.clone(), output);
     trace!("Finished parse: Sub Node");
 
-    return Ok(());
+    Ok(())
 }
 
 /// Handle Mul node: output = input[0] * input[1]
@@ -162,7 +162,7 @@ pub fn parse_mul_node(
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Mul Node");
 
-    return Ok(());
+    Ok(())
 }
 
 /// Handle Div node: output = input[0] / input[1]
@@ -201,7 +201,7 @@ pub fn parse_div_node(
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Div Node");
 
-    return Ok(());
+    Ok(())
 }
 
 /// Parse Less node (ONNX element-wise less-than comparison).
@@ -211,7 +211,7 @@ pub fn parse_div_node(
 pub fn parse_less_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
-    known_values: &mut HashMap<String, Vec<f32>>,
+    _known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Less Node");
     assert!(node.input.len() == 2, "Less should have 2 inputs");

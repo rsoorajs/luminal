@@ -34,7 +34,7 @@ pub fn parse_sqrt_node(
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Sqrt Node");
 
-    return Ok(());
+    Ok(())
 }
 
 /// Handle Sin node: output = input[0].sin()
@@ -63,7 +63,7 @@ pub fn parse_sin_node(
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Sin Node");
 
-    return Ok(());
+    Ok(())
 }
 
 /// Handle Cos node: output = input[0].cos()
@@ -92,7 +92,7 @@ pub fn parse_cos_node(
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Cos Node");
 
-    return Ok(());
+    Ok(())
 }
 
 pub fn parse_sigmoid_node(
@@ -120,7 +120,7 @@ pub fn parse_sigmoid_node(
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Sigmoid Node");
 
-    return Ok(());
+    Ok(())
 }
 
 pub fn parse_tanh_node(
@@ -148,7 +148,7 @@ pub fn parse_tanh_node(
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Tanh Node");
 
-    return Ok(());
+    Ok(())
 }
 
 pub fn parse_relu_node(
@@ -176,7 +176,7 @@ pub fn parse_relu_node(
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Relu Node");
 
-    return Ok(());
+    Ok(())
 }
 
 pub fn parse_abs_node(
@@ -204,7 +204,7 @@ pub fn parse_abs_node(
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Abs Node");
 
-    return Ok(());
+    Ok(())
 }
 
 /// Handle Floor node: output = floor(input[0])
@@ -241,7 +241,7 @@ pub fn parse_floor_node(
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Floor Node");
 
-    return Ok(());
+    Ok(())
 }
 
 pub fn parse_cast_node(
