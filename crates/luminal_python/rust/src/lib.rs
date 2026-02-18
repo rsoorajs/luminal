@@ -15,9 +15,10 @@ use std::path::Path;
 #[pyo3(signature = (path, backend="native"))]
 fn process_onnx(path: &str, backend: &str) -> PyResult<OnnxGraphResult> {
     if backend != "native" && backend != "cuda" {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("Invalid backend '{}'. Must be 'native' or 'cuda'", backend)
-        ));
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Invalid backend '{}'. Must be 'native' or 'cuda'",
+            backend
+        )));
     }
 
     parse_onnx(path, backend).map_err(pyo3::exceptions::PyRuntimeError::new_err)

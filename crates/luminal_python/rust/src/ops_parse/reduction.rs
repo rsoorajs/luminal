@@ -36,14 +36,12 @@ pub fn parse_reduce_sum_node(
 
     // Resolve axes from second input (opset 13+) or from attribute (opset 11)
     let raw_axes: Vec<i64> = if node.input.len() > 1 && !node.input[1].is_empty() {
-        let axes_vals = known_values
-            .get(&node.input[1])
-            .ok_or_else(|| {
-                format!(
-                    "ReduceSum: axes input '{}' must be a known constant",
-                    node.input[1]
-                )
-            })?;
+        let axes_vals = known_values.get(&node.input[1]).ok_or_else(|| {
+            format!(
+                "ReduceSum: axes input '{}' must be a known constant",
+                node.input[1]
+            )
+        })?;
         axes_vals.iter().map(|&v| v as i64).collect()
     } else if let Some(attr) = node.attribute.iter().find(|a| a.name == "axes") {
         attr.ints.clone()
@@ -167,14 +165,12 @@ pub fn parse_reduce_max_node(
 
     // Resolve axes from second input (opset 13+) or from attribute (opset 11)
     let raw_axes: Vec<i64> = if node.input.len() > 1 && !node.input[1].is_empty() {
-        let axes_vals = known_values
-            .get(&node.input[1])
-            .ok_or_else(|| {
-                format!(
-                    "ReduceMax: axes input '{}' must be a known constant",
-                    node.input[1]
-                )
-            })?;
+        let axes_vals = known_values.get(&node.input[1]).ok_or_else(|| {
+            format!(
+                "ReduceMax: axes input '{}' must be a known constant",
+                node.input[1]
+            )
+        })?;
         axes_vals.iter().map(|&v| v as i64).collect()
     } else if let Some(attr) = node.attribute.iter().find(|a| a.name == "axes") {
         attr.ints.clone()

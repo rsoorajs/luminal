@@ -1,6 +1,9 @@
 use std::{fs, path::Path};
 
-use luminal::{prelude::{DType, GraphTensor}, shape::Expression};
+use luminal::{
+    prelude::{DType, GraphTensor},
+    shape::Expression,
+};
 use onnx_protobuf::{NodeProto, ValueInfoProto};
 
 // Given a Value from the Onnx proto return its tensor Shape, if it exists
@@ -45,18 +48,18 @@ pub fn get_dtype_for_onnx_value(value: &ValueInfoProto) -> DType {
         }) {
             // ONNX data type enum to luminal DType
             return match tensor_type.elem_type {
-                1 => DType::F32,      // FLOAT
-                10 => DType::F16,     // FLOAT16
-                16 => DType::Bf16,    // BFLOAT16
-                6 => DType::Int,      // INT32
-                7 => DType::Int,      // INT64
-                9 => DType::Bool,     // BOOL
-                11 => DType::F32,     // DOUBLE (downcast to F32, same as Cast does)
-                _ => DType::F32,      // Default fallback
+                1 => DType::F32,   // FLOAT
+                10 => DType::F16,  // FLOAT16
+                16 => DType::Bf16, // BFLOAT16
+                6 => DType::Int,   // INT32
+                7 => DType::Int,   // INT64
+                9 => DType::Bool,  // BOOL
+                11 => DType::F32,  // DOUBLE (downcast to F32, same as Cast does)
+                _ => DType::F32,   // Default fallback
             };
         }
     }
-    DType::F32  // Fallback if no type information
+    DType::F32 // Fallback if no type information
 }
 
 /// Compute the broadcast output shape for two tensors (numpy rules: element-wise max).
@@ -135,9 +138,8 @@ pub fn load_tensor_floats(init: &onnx_protobuf::TensorProto, model_dir: &Path) -
                     init.raw_data
                         .chunks_exact(8)
                         .map(|c| {
-                            i64::from_le_bytes([
-                                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
-                            ]) as f32
+                            i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
+                                as f32
                         })
                         .collect(),
                 );

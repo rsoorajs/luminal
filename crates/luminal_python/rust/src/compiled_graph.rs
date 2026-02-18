@@ -15,8 +15,8 @@ use crate::{
     dispatch::process_onnx_nodes,
     runtime::*,
     util::{
-        get_shape_for_onnx_value, load_initializer_as_f32,
-        load_tensor_floats, transpose_weight_data,
+        get_shape_for_onnx_value, load_initializer_as_f32, load_tensor_floats,
+        transpose_weight_data,
     },
 };
 
@@ -70,8 +70,7 @@ impl OnnxGraphResult {
                 continue;
             }
             // Always F32: Python runtime always sends float32 data via .float().numpy()
-            let tensor = context
-                .named_tensor(input.name.clone(), shape);
+            let tensor = context.named_tensor(input.name.clone(), shape);
             trace!("Input {} added to tensors", input.name.clone());
             tensors.insert(input.name.clone(), tensor);
         }
