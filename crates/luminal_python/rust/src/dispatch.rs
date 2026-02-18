@@ -34,6 +34,7 @@ pub fn process_onnx_nodes(
             "Less" => parse_less_node(node, tensors, known_values)?,
             "Identity" => parse_identity(node, tensors, known_values)?,
             "Unsqueeze" => parse_unsqueeze_node(node, tensors, known_values)?,
+            "Squeeze" => parse_squeeze_node(node, tensors, known_values)?,
             _ => {
                 panic!("Missing Node {}", node.op_type)
             }

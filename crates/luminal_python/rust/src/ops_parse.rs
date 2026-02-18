@@ -1116,12 +1116,7 @@ pub fn parse_gathernd_node(
 
         // Strides for dims b..b+q of data: stride[j] = product(data_shape[b+j+1..b+q]) * slice_size
         let data_strides: Vec<usize> = (0..q)
-            .map(|j| {
-                data_shape[b + j + 1..b + q]
-                    .iter()
-                    .product::<usize>()
-                    * slice_size
-            })
+            .map(|j| data_shape[b + j + 1..b + q].iter().product::<usize>() * slice_size)
             .collect();
 
         let total_size = batch_size * outer_size * slice_size;
@@ -1286,8 +1281,7 @@ pub fn parse_gathernd_node(
             });
         }
 
-        let flat_indices =
-            flat_indices.ok_or_else(|| "GatherND: q must be > 0".to_string())?;
+        let flat_indices = flat_indices.ok_or_else(|| "GatherND: q must be > 0".to_string())?;
 
         // Reshape data to [prefix_size, slice_size] for gather_axis0
         let prefix_size: usize = data_shape[..q].iter().product::<usize>().max(1);
@@ -1402,6 +1396,96 @@ pub fn parse_unsqueeze_node(
     for &axis in &axes {
         result = result.unsqueeze(axis);
     }
+
+    let output_name = &node.output[0];
+    tensors.insert(output_name.clone(), result);
+
+    if let Some(vals) = known_values.get(&node.input[0]).cloned() {
+        known_values.insert(output_name.clone(), vals);
+    }
+    Ok(())
+}
+
+/// Handle Squeeze node: remove size-1 dimensions from a tensor.
+///
+/// Opset 13+: axes come from the second input. Opset 11: from the "axes" attribute.
+/// If no axes are specified, all dimensions of size 1 are removed.
+/// Axes are processed in reverse order to avoid index shifting.
+pub fn parse_squeeze_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    assert!(
+        !node.input.is_empty(),
+        "Squeeze should have at least 1 input"
+    );
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Squeeze: missing input tensor '{}'", node.input[0]))?;
+
+    // Opset 13+: axes come from second input; opset 11: from attribute
+    let axes: Vec<usize> = if node.input.len() > 1 && !node.input[1].is_empty() {
+        let axes_data = known_values
+            .get(&node.input[1])
+            .ok_or_else(|| format!("Squeeze: axes '{}' must be known", node.input[1]))?;
+        let ndim = input.dims().len();
+        axes_data
+            .iter()
+            .map(|&v| {
+                let a = v as i64;
+                if a < 0 {
+                    (ndim as i64 + a) as usize
+                } else {
+                    a as usize
+                }
+            })
+            .collect()
+    } else if let Some(attr) = node.attribute.iter().find(|a| a.name == "axes") {
+        let ndim = input.dims().len();
+        attr.ints
+            .iter()
+            .map(|&v| {
+                if v < 0 {
+                    (ndim as i64 + v) as usize
+                } else {
+                    v as usize
+                }
+            })
+            .collect()
+    } else {
+        // No axes specified: squeeze all dims of size 1
+        input
+            .dims()
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.to_usize() == Some(1))
+            .map(|(i, _)| i)
+            .collect()
+    };
+
+    // Sort in reverse order so removing earlier axes doesn't shift later ones
+    let mut sorted_axes = axes.clone();
+    sorted_axes.sort();
+    sorted_axes.reverse();
+
+    let mut result = input;
+    for &axis in &sorted_axes {
+        result = result.squeeze(axis);
+    }
+
+    // Force materialization to create a distinct graph node for the CUDA backend.
+    // Without this, squeeze (a pure shape op) produces no kernels and the output
+    // cannot be retrieved from the runtime.
+    // (Same pattern as parse_transpose_node, parse_reshape_node, parse_identity.)
+    let output_dims = result.dims();
+    let shape: Vec<usize> = output_dims
+        .iter()
+        .map(|d| d.to_usize().expect("Squeeze: dim must be concrete"))
+        .collect();
+    let one = result.graph().constant_float(1.0);
+    let one_expanded = broadcast_to(one, &shape);
+    result = result * one_expanded;
 
     let output_name = &node.output[0];
     tensors.insert(output_name.clone(), result);
