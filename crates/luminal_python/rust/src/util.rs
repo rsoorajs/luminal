@@ -1,10 +1,10 @@
 use std::{fs, path::Path};
 
 use luminal::{
-    prelude::{DType, GraphTensor},
+    prelude::GraphTensor,
     shape::Expression,
 };
-use onnx_protobuf::{NodeProto, ValueInfoProto};
+use onnx_protobuf::NodeProto;
 
 // Given a Value from the Onnx proto return its tensor Shape, if it exists
 // Note: some times pytorch will create tensors with a 0 shape
@@ -34,32 +34,6 @@ pub fn get_shape_for_onnx_value(value: &onnx_protobuf::ValueInfoProto) -> Vec<us
     }
 
     vec![]
-}
-
-/// Extract DType from ONNX ValueInfoProto
-pub fn get_dtype_for_onnx_value(value: &ValueInfoProto) -> DType {
-    if let Some(type_proto) = value.type_.as_ref() {
-        if let Some(tensor_type) = type_proto.value.as_ref().and_then(|v| {
-            if let onnx_protobuf::type_proto::Value::TensorType(tt) = v {
-                Some(tt)
-            } else {
-                None
-            }
-        }) {
-            // ONNX data type enum to luminal DType
-            return match tensor_type.elem_type {
-                1 => DType::F32,   // FLOAT
-                10 => DType::F16,  // FLOAT16
-                16 => DType::Bf16, // BFLOAT16
-                6 => DType::Int,   // INT32
-                7 => DType::Int,   // INT64
-                9 => DType::Bool,  // BOOL
-                11 => DType::F32,  // DOUBLE (downcast to F32, same as Cast does)
-                _ => DType::F32,   // Default fallback
-            };
-        }
-    }
-    DType::F32 // Fallback if no type information
 }
 
 /// Compute the broadcast output shape for two tensors (numpy rules: element-wise max).
@@ -288,6 +262,7 @@ pub fn load_initializer_as_f32(init: &onnx_protobuf::TensorProto) -> Option<Vec<
 }
 
 /// Transpose weight data from [rows, cols] to [cols, rows] row-major layout
+#[cfg(feature = "cuda")]
 pub fn transpose_weight_data(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let mut transposed = vec![0.0f32; rows * cols];
     for r in 0..rows {

@@ -2,22 +2,19 @@ use luminal::prelude::{
     tracing::{Level, span, trace},
     *,
 };
-use onnx_protobuf::Message;
 use onnx_protobuf::{GraphProto, ModelProto};
-use protobuf::MessageField;
 use pyo3::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
 };
 
+#[cfg(feature = "cuda")]
+use crate::util::transpose_weight_data;
 use crate::{
     dispatch::process_onnx_nodes,
     runtime::*,
-    util::{
-        get_shape_for_onnx_value, load_initializer_as_f32, load_tensor_floats,
-        transpose_weight_data,
-    },
+    util::{get_shape_for_onnx_value, load_initializer_as_f32, load_tensor_floats},
 };
 
 #[pyclass(unsendable)]
@@ -169,35 +166,8 @@ impl OnnxGraphResult {
             .filter(|name| name.ends_with("_kn") && !weight_data_names.contains(*name))
             .cloned()
             .collect();
-        for kn_name in kn_tensors {
+        if !kn_tensors.is_empty() {
             panic!("OTHER KNOW NAME THING");
-            /*
-            // Strip "_kn" to get the base weight name
-            let base_name = &kn_name[..kn_name.len() - 3];
-            // The base tensor's GraphTensor may point to an initializer (via Identity alias).
-            // Look for the data by checking which initializer this tensor's node ID matches.
-            if let Some(base_gt) = tensors.get(base_name) {
-                // Find which weight_data entry has this same node ID (the aliased initializer)
-                for (wd_name, wd_data) in &weight_data.clone() {
-                    if let Some(wd_gt) = tensors.get(wd_name)
-                        && wd_gt.id == base_gt.id
-                    {
-                        // Found the source data, generate transposed version
-                        if let Some(kn_gt) = tensors.get(&kn_name) {
-                            let kn_dims = kn_gt.dims();
-                            if kn_dims.len() == 2 {
-                                let k = kn_dims[0].to_usize().unwrap();
-                                let n = kn_dims[1].to_usize().unwrap();
-                                // The _kn shape is [K, N] where original is [N, K]
-                                let transposed = transpose_weight_data(wd_data, n, k);
-                                weight_data.push((kn_name.clone(), transposed));
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-            */
         }
 
         // Collect tensor name -> NodeIndex mapping
@@ -320,7 +290,7 @@ impl OnnxGraphResult {
         tensors: &mut HashMap<String, GraphTensor>,
         weight_data: &mut Vec<(String, Vec<f32>)>,
         context: &mut Graph,
-        input_tensor_names: &HashSet<String>,
+        _input_tensor_names: &HashSet<String>,
     ) -> Result<RuntimeBackend, String> {
         let mut rt = initialize_native(context)?;
         context.search(NativeRuntime::default(), 1);

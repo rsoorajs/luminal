@@ -115,9 +115,9 @@ pub fn parse_reduce_sum_node(
         let axis = current_axes[i];
         result = result.sum(axis);
         // Each reduction removes a dimension; shift subsequent axis indices down
-        for j in i + 1..current_axes.len() {
-            if current_axes[j] > axis {
-                current_axes[j] -= 1;
+        for item in current_axes.iter_mut().skip(i + 1) {
+            if *item > axis {
+                *item -= 1;
             }
         }
     }
@@ -244,9 +244,9 @@ pub fn parse_reduce_max_node(
         let axis = current_axes[i];
         result = result.max(axis);
         // Each reduction removes a dimension; shift subsequent axis indices down
-        for j in i + 1..current_axes.len() {
-            if current_axes[j] > axis {
-                current_axes[j] -= 1;
+        for item in current_axes.iter_mut().skip(i + 1) {
+            if *item > axis {
+                *item -= 1;
             }
         }
     }

@@ -1,11 +1,11 @@
-use std::sync::Arc;
-
 use luminal::prelude::*;
 #[cfg(feature = "cuda")]
 use luminal_cuda::cudarc::driver::{CudaContext, CudaStream};
 #[cfg(feature = "cuda")]
 use luminal_cuda::runtime::CudaRuntime;
 use rustc_hash::FxHashMap;
+#[cfg(feature = "cuda")]
+use std::sync::Arc;
 
 /// Enum wrapper for runtime backends allowing runtime selection.
 pub enum RuntimeBackend {

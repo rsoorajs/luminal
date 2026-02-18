@@ -32,8 +32,7 @@ fn parse_onnx(path: &str, backend: &str) -> Result<OnnxGraphResult, String> {
     let model = ModelProto::parse_from_bytes(&data)
         .map_err(|e| format!("Failed to parse Onnx Model: {}", e))
         .unwrap();
-    let compiled_graph = OnnxGraphResult::parse_graph(model, model_directory, backend);
-    return compiled_graph;
+    OnnxGraphResult::parse_graph(model, model_directory, backend)
 }
 
 #[pymodule]

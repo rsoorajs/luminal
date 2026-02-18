@@ -166,7 +166,7 @@ pub fn parse_reshape_node(
     // (Same pattern as parse_transpose_node's `permuted * 1.0`.)
     let one = result.graph().constant_float(1.0);
     let one_expanded = broadcast_to(one, &final_shape);
-    result = result * one_expanded;
+    result *= one_expanded;
 
     let output_name = &node.output[0];
     tensors.insert(output_name.clone(), result);
@@ -259,7 +259,7 @@ pub fn parse_squeeze_node(
         .collect();
     let one = result.graph().constant_float(1.0);
     let one_expanded = broadcast_to(one, &shape);
-    result = result * one_expanded;
+    result *= one_expanded;
 
     let output_name = &node.output[0];
     tensors.insert(output_name.clone(), result);
@@ -593,9 +593,7 @@ pub fn parse_gathernd_node(
                     flat_base += coord * data_strides[j];
                 }
                 let out_base = (batch * outer_size + p) * slice_size;
-                for s in 0..slice_size {
-                    folded[out_base + s] = vdata[flat_base + s];
-                }
+                folded[out_base..(slice_size + out_base)].copy_from_slice(&vdata[flat_base..(slice_size + flat_base)]);
             }
         }
 
