@@ -775,3 +775,62 @@ class ReduceMaxInExpressionModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.amax(x, dim=1, keepdim=True) * 2.0  # (3, 4) -> (3, 1)
+
+
+# ========== Sigmoid Node Test Models ==========
+
+class SigmoidTestModel(torch.nn.Module):
+    """Tests sigmoid on a 2D tensor (values in range [0,1] after sigmoid)."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(x)
+
+class SigmoidInExpressionModel(torch.nn.Module):
+    """Tests sigmoid followed by an element-wise multiply."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(x) * 2.0
+
+# ========== Tanh Node Test Models ==========
+
+class TanhTestModel(torch.nn.Module):
+    """Tests tanh on a 2D tensor (outputs in [-1,1])."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(x)
+
+class TanhInExpressionModel(torch.nn.Module):
+    """Tests tanh followed by an element-wise add."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(x) + 1.0
+
+# ========== Relu Node Test Models ==========
+
+class ReluTestModel(torch.nn.Module):
+    """Tests relu with mixed positive/negative inputs (negatives clipped to 0)."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(x)
+
+class ReluAllNegativeModel(torch.nn.Module):
+    """Tests relu with all-negative inputs (entire output should be zeros)."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(x)
+
+class ReluInExpressionModel(torch.nn.Module):
+    """Tests relu followed by an element-wise multiply."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(x) * 2.0
+
+# ========== Abs Node Test Models ==========
+
+class AbsTestModel(torch.nn.Module):
+    """Tests abs with mixed positive/negative inputs."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.abs(x)
+
+class AbsAllNegativeModel(torch.nn.Module):
+    """Tests abs with all-negative inputs (output equals negation of input)."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.abs(x)
+
+class AbsInExpressionModel(torch.nn.Module):
+    """Tests abs followed by an element-wise add."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.abs(x) + 1.0
