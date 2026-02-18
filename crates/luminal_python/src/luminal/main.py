@@ -15,7 +15,9 @@ def luminal_backend(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]
     backend = os.getenv("LUMINAL_BACKEND", "native").lower()
 
     if backend not in ["native", "cuda"]:
-        raise ValueError(f"Invalid LUMINAL_BACKEND value: {backend}. Must be 'native' or 'cuda'")
+        raise ValueError(
+            f"Invalid LUMINAL_BACKEND value: {backend}. Must be 'native' or 'cuda'"
+        )
 
     tmp = tempfile.NamedTemporaryFile(suffix=".onnx", delete=False)
     tmp_path = tmp.name
