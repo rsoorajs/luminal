@@ -15,9 +15,6 @@ use crate::util::{broadcast_to, compute_broadcast_shape, get_int_attr};
 pub fn parse_add_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
-    cx: &mut Graph,
-    weight_data: &mut Vec<(String, Vec<f32>)>,
-    known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Add Node");
     assert!(
@@ -57,9 +54,6 @@ pub fn parse_add_node(
 pub fn parse_mod_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
-    cx: &mut Graph,
-    weight_data: &mut Vec<(String, Vec<f32>)>,
-    known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Mod Node");
     assert!(
@@ -99,9 +93,6 @@ pub fn parse_mod_node(
 pub fn parse_sub_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
-    cx: &mut Graph,
-    weight_data: &mut Vec<(String, Vec<f32>)>,
-    known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Sub Node");
     assert!(
@@ -142,9 +133,6 @@ pub fn parse_sub_node(
 pub fn parse_mul_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
-    cx: &mut Graph,
-    weight_data: &mut Vec<(String, Vec<f32>)>,
-    known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Mul Node");
     assert!(
@@ -204,9 +192,6 @@ pub fn parse_matmul_node(
 pub fn parse_div_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
-    cx: &mut Graph,
-    weight_data: &mut Vec<(String, Vec<f32>)>,
-    known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Div Node");
     assert!(
@@ -246,9 +231,6 @@ pub fn parse_div_node(
 pub fn parse_sqrt_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
-    cx: &mut Graph,
-    weight_data: &mut Vec<(String, Vec<f32>)>,
-    known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Sqrt Node");
     assert!(
@@ -281,9 +263,6 @@ pub fn parse_sqrt_node(
 pub fn parse_transpose_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
-    cx: &mut Graph,
-    weight_data: &mut Vec<(String, Vec<f32>)>,
-    known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Transpose Node");
 
@@ -407,9 +386,6 @@ pub fn parse_floor_node(
 pub fn parse_sin_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
-    cx: &mut Graph,
-    weight_data: &mut Vec<(String, Vec<f32>)>,
-    known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Sin Node");
     assert!(
@@ -439,9 +415,6 @@ pub fn parse_sin_node(
 pub fn parse_cos_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
-    cx: &mut Graph,
-    weight_data: &mut Vec<(String, Vec<f32>)>,
-    known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Cos Node");
     assert!(
@@ -786,6 +759,7 @@ pub fn parse_less_node(
     tensors: &mut HashMap<String, GraphTensor>,
     known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
+    trace!("Starting parse: Less Node");
     assert!(node.input.len() == 2, "Less should have 2 inputs");
     let a = *tensors
         .get(&node.input[0])
@@ -803,6 +777,7 @@ pub fn parse_less_node(
 
     let output_name = &node.output[0];
     tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Less Node");
     Ok(())
 }
 
@@ -818,6 +793,7 @@ pub fn parse_gather_node(
     weight_data: &mut Vec<(String, Vec<f32>)>,
     known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
+    trace!("Starting parse: Gather Node");
     assert!(node.input.len() == 2, "Gather should have 2 inputs");
 
     let data = *tensors
@@ -900,6 +876,7 @@ pub fn parse_gather_node(
         tensors.insert(output_name.clone(), tensor);
         known_values.insert(output_name.clone(), folded.clone());
         weight_data.push((output_name.clone(), folded));
+        trace!("Finished parse: Gather Node (constant folded)");
         return Ok(());
     }
 
@@ -987,6 +964,7 @@ pub fn parse_gather_node(
     let output_name = &node.output[0];
     tensors.insert(output_name.clone(), result);
 
+    trace!("Finished parse: Gather Node");
     Ok(())
 }
 
@@ -1322,6 +1300,7 @@ pub fn parse_identity(
     tensors: &mut HashMap<String, GraphTensor>,
     known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
+    trace!("Starting parse: Identity Node");
     assert!(node.input.len() == 1, "Identity should only have one input");
     let a = *tensors
         .get(&node.input[0])
@@ -1353,6 +1332,7 @@ pub fn parse_identity(
         known_values.insert(output_name.clone(), vals);
     }
 
+    trace!("Finished parse: Identity Node");
     Ok(())
 }
 
@@ -1365,6 +1345,7 @@ pub fn parse_unsqueeze_node(
     tensors: &mut HashMap<String, GraphTensor>,
     known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
+    trace!("Starting parse: Unsqueeze Node");
     assert!(
         node.input.len() == 2,
         "Unsqueeze should have exactly 2 inputs"
@@ -1403,6 +1384,7 @@ pub fn parse_unsqueeze_node(
     if let Some(vals) = known_values.get(&node.input[0]).cloned() {
         known_values.insert(output_name.clone(), vals);
     }
+    trace!("Finished parse: Unsqueeze Node");
     Ok(())
 }
 
@@ -1416,6 +1398,7 @@ pub fn parse_squeeze_node(
     tensors: &mut HashMap<String, GraphTensor>,
     known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
+    trace!("Starting parse: Squeeze Node");
     assert!(
         !node.input.is_empty(),
         "Squeeze should have at least 1 input"
@@ -1493,6 +1476,7 @@ pub fn parse_squeeze_node(
     if let Some(vals) = known_values.get(&node.input[0]).cloned() {
         known_values.insert(output_name.clone(), vals);
     }
+    trace!("Finished parse: Squeeze Node");
     Ok(())
 }
 
