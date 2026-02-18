@@ -70,18 +70,24 @@ impl OnnxGraphResult {
                 continue;
             }
             let dtype = get_dtype_for_onnx_value(input);
-            let tensor = context.named_tensor(input.name.clone(), shape).as_dtype(dtype);
+            let tensor = context
+                .named_tensor(input.name.clone(), shape)
+                .as_dtype(dtype);
             eprintln!(
                 "[DEBUG] Input '{}' created with dtype {:?} (ONNX elem_type: {:?})",
                 input.name.clone(),
                 dtype,
-                input.type_.as_ref().and_then(|t| t.value.as_ref()).and_then(|v| {
-                    if let onnx_protobuf::type_proto::Value::TensorType(tt) = v {
-                        Some(tt.elem_type)
-                    } else {
-                        None
-                    }
-                })
+                input
+                    .type_
+                    .as_ref()
+                    .and_then(|t| t.value.as_ref())
+                    .and_then(|v| {
+                        if let onnx_protobuf::type_proto::Value::TensorType(tt) = v {
+                            Some(tt.elem_type)
+                        } else {
+                            None
+                        }
+                    })
             );
             trace!(
                 "Input {} added to tensors with dtype {:?}",

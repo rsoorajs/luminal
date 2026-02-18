@@ -611,8 +611,28 @@ pub fn parse_cast_node(
         _ => DType::F32,     // fallback
     };
 
-    let result = input.cast(dtype);
+    let cast_result = input.cast(dtype);
     let output_name = &node.output[0];
+
+    // Use the *1.0 workaround when:
+    // 1. cast() was a no-op (input already has target dtype — same node returned), OR
+    // 2. source dtype is Int (e.g., ONNX INT32/INT64 → F32):
+    //    the CUDA backend lacks a Cast(Int→F32) kernel; since all runtime data is
+    //    already stored as F32 (Python converts inputs via .float()), this cast is
+    //    semantically a no-op and *1.0 produces a CUDA-executable Mul node instead.
+    let result = if cast_result.id == input.id || input.dtype == DType::Int {
+        let src_dims = input.dims();
+        let shape: Vec<usize> = src_dims
+            .iter()
+            .map(|d| d.to_usize().expect("cast no-op: dim must be concrete"))
+            .collect();
+        let one = input.graph().constant_float(1.0);
+        let one_expanded = broadcast_to(one, &shape);
+        input * one_expanded
+    } else {
+        cast_result
+    };
+
     tensors.insert(output_name.clone(), result);
 
     // Propagate known values (cast is a no-op for our f32 storage)
