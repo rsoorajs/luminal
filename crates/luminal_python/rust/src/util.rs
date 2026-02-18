@@ -11,6 +11,10 @@ pub fn get_shape_for_onnx_value(value: &onnx_protobuf::ValueInfoProto) -> Vec<us
         && let Some(onnx_protobuf::type_proto::Value::TensorType(tensor)) = &type_proto.value
         && let Some(shape) = tensor.shape.as_ref()
     {
+        // Scalar (0-dim) tensors have an empty dim list; represent as [1] in luminal
+        if shape.dim.is_empty() {
+            return vec![1];
+        }
         return shape
             .dim
             .iter()

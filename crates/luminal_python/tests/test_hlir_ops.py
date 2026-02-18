@@ -77,6 +77,26 @@ from test_models import (
     SqueezeMultipleAxesModel,
     SqueezeNegativeAxisModel,
     SqueezeInExpressionModel,
+    # ReduceSum models
+    ReduceSumAxis0Model,
+    ReduceSumAxis1Model,
+    ReduceSumKeepDimsModel,
+    ReduceSumAllAxesModel,
+    ReduceSum3DAxis1Model,
+    ReduceSumMultiAxisModel,
+    ReduceSumMultiAxisKeepDimsModel,
+    ReduceSumNegativeAxisModel,
+    ReduceSumInExpressionModel,
+    # ReduceMax models
+    ReduceMaxAxis0Model,
+    ReduceMaxAxis1Model,
+    ReduceMaxKeepDimsModel,
+    ReduceMaxAllAxesModel,
+    ReduceMax3DAxis1Model,
+    ReduceMaxMultiAxisModel,
+    ReduceMaxMultiAxisKeepDimsModel,
+    ReduceMaxNegativeAxisModel,
+    ReduceMaxInExpressionModel,
 )
 
 from luminal import luminal_backend
@@ -818,3 +838,153 @@ def test_squeeze_in_expression():
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
+
+
+# ========== ONNX ReduceSum Node Tests ==========
+
+
+def test_reduce_sum_axis0():
+    """Test sum reduction along axis 0."""
+    model: torch.nn.Module = ReduceSumAxis0Model()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_sum_axis1():
+    """Test sum reduction along axis 1."""
+    model: torch.nn.Module = ReduceSumAxis1Model()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_sum_keepdims():
+    """Test sum reduction along axis 1 with keepdim=True."""
+    model: torch.nn.Module = ReduceSumKeepDimsModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_sum_all_axes():
+    """Test sum reduction over all axes (produces a scalar)."""
+    model: torch.nn.Module = ReduceSumAllAxesModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_sum_3d_axis1():
+    """Test sum reduction along axis 1 for a 3D tensor."""
+    model: torch.nn.Module = ReduceSum3DAxis1Model()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_sum_multi_axis():
+    """Test sum reduction along multiple axes (0 and 2)."""
+    model: torch.nn.Module = ReduceSumMultiAxisModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_sum_multi_axis_keepdims():
+    """Test sum reduction along axes (0, 2) with keepdim=True."""
+    model: torch.nn.Module = ReduceSumMultiAxisKeepDimsModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_sum_negative_axis():
+    """Test sum reduction along axis -1 (last axis)."""
+    model: torch.nn.Module = ReduceSumNegativeAxisModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_sum_in_expression():
+    """Test ReduceSum used in a larger expression (mean via sum / n)."""
+    model: torch.nn.Module = ReduceSumInExpressionModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+# ========== ONNX ReduceMax Node Tests ==========
+
+
+def test_reduce_max_axis0():
+    """Test max reduction along axis 0."""
+    model: torch.nn.Module = ReduceMaxAxis0Model()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_max_axis1():
+    """Test max reduction along axis 1."""
+    model: torch.nn.Module = ReduceMaxAxis1Model()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_max_keepdims():
+    """Test max reduction along axis 1 with keepdim=True."""
+    model: torch.nn.Module = ReduceMaxKeepDimsModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_max_all_axes():
+    """Test max reduction over all axes (produces a scalar)."""
+    model: torch.nn.Module = ReduceMaxAllAxesModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_max_3d_axis1():
+    """Test max reduction along axis 1 for a 3D tensor."""
+    model: torch.nn.Module = ReduceMax3DAxis1Model()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_max_multi_axis():
+    """Test max reduction along multiple axes (0 and 2)."""
+    model: torch.nn.Module = ReduceMaxMultiAxisModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_max_multi_axis_keepdims():
+    """Test max reduction along axes (0, 2) with keepdim=True."""
+    model: torch.nn.Module = ReduceMaxMultiAxisKeepDimsModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_max_negative_axis():
+    """Test max reduction along axis -1 (last axis)."""
+    model: torch.nn.Module = ReduceMaxNegativeAxisModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_max_in_expression():
+    """Test ReduceMax used in a larger expression (max * 2.0)."""
+    model: torch.nn.Module = ReduceMaxInExpressionModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4))
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)

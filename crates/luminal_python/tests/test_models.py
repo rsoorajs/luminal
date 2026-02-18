@@ -643,3 +643,135 @@ class SqueezeInExpressionModel(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         squeezed = x.squeeze(0)  # (1, 5) -> (5,)
         return squeezed + self.weight
+
+
+# ========== ReduceSum Node Test Models ==========
+
+
+class ReduceSumAxis0Model(torch.nn.Module):
+    """Tests sum reduction along axis 0."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum(dim=0)  # (4, 5) -> (5,)
+
+
+class ReduceSumAxis1Model(torch.nn.Module):
+    """Tests sum reduction along axis 1."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum(dim=1)  # (4, 5) -> (4,)
+
+
+class ReduceSumKeepDimsModel(torch.nn.Module):
+    """Tests sum reduction along axis 1 with keepdim=True."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum(dim=1, keepdim=True)  # (4, 5) -> (4, 1)
+
+
+class ReduceSumAllAxesModel(torch.nn.Module):
+    """Tests sum reduction over all axes (scalar result)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum()  # (3, 4) -> scalar
+
+
+class ReduceSum3DAxis1Model(torch.nn.Module):
+    """Tests sum reduction along axis 1 for 3D tensor."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum(dim=1)  # (2, 3, 4) -> (2, 4)
+
+
+class ReduceSumMultiAxisModel(torch.nn.Module):
+    """Tests sum reduction along multiple axes (0 and 2)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum(dim=(0, 2))  # (2, 3, 4) -> (3,)
+
+
+class ReduceSumMultiAxisKeepDimsModel(torch.nn.Module):
+    """Tests sum reduction along axes (0, 2) with keepdim=True."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum(dim=(0, 2), keepdim=True)  # (2, 3, 4) -> (1, 3, 1)
+
+
+class ReduceSumNegativeAxisModel(torch.nn.Module):
+    """Tests sum reduction along axis -1 (last axis)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum(dim=-1)  # (3, 4) -> (3,)
+
+
+class ReduceSumInExpressionModel(torch.nn.Module):
+    """Tests ReduceSum used in a larger expression (mean via sum/n)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.sum(dim=1, keepdim=True) / x.shape[1]  # (3, 4) -> (3, 1) mean
+
+
+# ========== ReduceMax Node Test Models ==========
+
+
+class ReduceMaxAxis0Model(torch.nn.Module):
+    """Tests max reduction along axis 0."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amax(x, dim=0)  # (4, 5) -> (5,)
+
+
+class ReduceMaxAxis1Model(torch.nn.Module):
+    """Tests max reduction along axis 1."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amax(x, dim=1)  # (4, 5) -> (4,)
+
+
+class ReduceMaxKeepDimsModel(torch.nn.Module):
+    """Tests max reduction along axis 1 with keepdim=True."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amax(x, dim=1, keepdim=True)  # (4, 5) -> (4, 1)
+
+
+class ReduceMaxAllAxesModel(torch.nn.Module):
+    """Tests max reduction over all axes (scalar result)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.max()  # (3, 4) -> scalar
+
+
+class ReduceMax3DAxis1Model(torch.nn.Module):
+    """Tests max reduction along axis 1 for 3D tensor."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amax(x, dim=1)  # (2, 3, 4) -> (2, 4)
+
+
+class ReduceMaxMultiAxisModel(torch.nn.Module):
+    """Tests max reduction along multiple axes (0 and 2)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amax(x, dim=(0, 2))  # (2, 3, 4) -> (3,)
+
+
+class ReduceMaxMultiAxisKeepDimsModel(torch.nn.Module):
+    """Tests max reduction along axes (0, 2) with keepdim=True."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amax(x, dim=(0, 2), keepdim=True)  # (2, 3, 4) -> (1, 3, 1)
+
+
+class ReduceMaxNegativeAxisModel(torch.nn.Module):
+    """Tests max reduction along axis -1 (last axis)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amax(x, dim=-1)  # (3, 4) -> (3,)
+
+
+class ReduceMaxInExpressionModel(torch.nn.Module):
+    """Tests ReduceMax used in a larger expression (max * 2.0)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amax(x, dim=1, keepdim=True) * 2.0  # (3, 4) -> (3, 1)
