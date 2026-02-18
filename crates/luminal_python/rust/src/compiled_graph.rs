@@ -15,7 +15,7 @@ use crate::{
     dispatch::process_onnx_nodes,
     runtime::*,
     util::{
-        get_dtype_for_onnx_value, get_shape_for_onnx_value, load_initializer_as_f32,
+        get_shape_for_onnx_value, load_initializer_as_f32,
         load_tensor_floats, transpose_weight_data,
     },
 };
@@ -69,31 +69,10 @@ impl OnnxGraphResult {
                 trace!("Input {} skipped because it is empty", input.name.clone());
                 continue;
             }
-            let dtype = get_dtype_for_onnx_value(input);
+            // Always F32: Python runtime always sends float32 data via .float().numpy()
             let tensor = context
-                .named_tensor(input.name.clone(), shape)
-                .as_dtype(dtype);
-            eprintln!(
-                "[DEBUG] Input '{}' created with dtype {:?} (ONNX elem_type: {:?})",
-                input.name.clone(),
-                dtype,
-                input
-                    .type_
-                    .as_ref()
-                    .and_then(|t| t.value.as_ref())
-                    .and_then(|v| {
-                        if let onnx_protobuf::type_proto::Value::TensorType(tt) = v {
-                            Some(tt.elem_type)
-                        } else {
-                            None
-                        }
-                    })
-            );
-            trace!(
-                "Input {} added to tensors with dtype {:?}",
-                input.name.clone(),
-                dtype
-            );
+                .named_tensor(input.name.clone(), shape);
+            trace!("Input {} added to tensors", input.name.clone());
             tensors.insert(input.name.clone(), tensor);
         }
 
