@@ -1,0 +1,205 @@
+use std::collections::HashMap;
+
+use luminal::prelude::{tracing::trace, *};
+use onnx_protobuf::NodeProto;
+
+use crate::util::broadcast_to;
+
+/// Handle Constant node: creates a tensor from embedded data in the node attributes.
+///
+/// Supports FLOAT, INT64, INT32, and FLOAT64 data types (all converted to f32).
+/// The resulting tensor is registered as a known constant for downstream folding.
+pub fn parse_constant_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    cx: &mut Graph,
+    weight_data: &mut Vec<(String, Vec<f32>)>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: Constant Node");
+    assert!(
+        node.output.len() == 1,
+        "Constant should have exactly one output"
+    );
+
+    // Find the "value" attribute (type TENSOR)
+    let value_attr = node
+        .attribute
+        .iter()
+        .find(|a| a.name == "value")
+        .ok_or_else(|| "Constant node missing 'value' attribute".to_string())?;
+
+    let tensor_proto = value_attr
+        .t
+        .as_ref()
+        .ok_or_else(|| "Constant 'value' attribute has no TensorProto".to_string())?;
+
+    // Determine shape: empty dims = scalar = [1] for luminal
+    let shape: Vec<usize> = if tensor_proto.dims.is_empty() {
+        vec![1]
+    } else {
+        tensor_proto.dims.iter().map(|&d| d as usize).collect()
+    };
+
+    // Extract float data based on data_type
+    let floats: Vec<f32> = match tensor_proto.data_type {
+        1 => {
+            // FLOAT (f32)
+            if !tensor_proto.float_data.is_empty() {
+                tensor_proto.float_data.clone()
+            } else {
+                tensor_proto
+                    .raw_data
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect()
+            }
+        }
+        7 => {
+            // INT64
+            // There is a cast from Int64 -> f32 here because Luminal does not support f32
+            if !tensor_proto.int64_data.is_empty() {
+                tensor_proto.int64_data.iter().map(|&v| v as f32).collect()
+            } else {
+                tensor_proto
+                    .raw_data
+                    .chunks_exact(8)
+                    .map(|c| {
+                        i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
+                    })
+                    .collect()
+            }
+        }
+        6 => {
+            // INT32
+            // There is a cast from Int32 -> f32 here because Luminal does not support f32
+            if !tensor_proto.int32_data.is_empty() {
+                tensor_proto.int32_data.iter().map(|&v| v as f32).collect()
+            } else {
+                tensor_proto
+                    .raw_data
+                    .chunks_exact(4)
+                    .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32)
+                    .collect()
+            }
+        }
+        9 => {
+            // Bool
+            // Bools are stored as bytes in raw_data or as int32 in int32_data
+            if !tensor_proto.int32_data.is_empty() {
+                tensor_proto
+                    .int32_data
+                    .iter()
+                    .map(|&v| if v != 0 { 1.0 } else { 0.0 })
+                    .collect()
+            } else {
+                tensor_proto
+                    .raw_data
+                    .iter()
+                    .map(|&b| if b != 0 { 1.0 } else { 0.0 })
+                    .collect()
+            }
+        }
+        11 => {
+            // FLOAT64 (f64)
+            // There is a cast from f64 -> f32 here because Luminal does not support f32
+            // TODO: add f64 as this will loss information, this is a bad approach
+            tensor_proto
+                .raw_data
+                .chunks_exact(8)
+                .map(|c| {
+                    f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
+                })
+                .collect()
+        }
+        dt => return Err(format!("Constant node: unsupported data_type {}", dt)),
+    };
+
+    let output_name = &node.output[0];
+    let tensor = cx.named_tensor(output_name.clone(), shape);
+    tensors.insert(output_name.clone(), tensor);
+    known_values.insert(output_name.clone(), floats.clone());
+    weight_data.push((output_name.clone(), floats));
+
+    trace!("Finished parse: Constant Node");
+    Ok(())
+}
+
+/// Handle Shape node: extract the shape of the input tensor as a 1D constant.
+///
+/// All dimensions must be statically known. The shape values are stored as
+/// known constants for downstream operations (Reshape, Expand, etc.).
+pub fn parse_shape_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    cx: &mut Graph,
+    weight_data: &mut Vec<(String, Vec<f32>)>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Started parse: Shape");
+    assert!(node.input.len() == 1, "Shape should have exactly 1 input");
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Shape: missing input tensor '{}'", node.input[0]))?;
+
+    let dims = input.dims();
+    let shape_values: Vec<f32> = dims
+        .iter()
+        .map(|d| {
+            d.to_usize()
+                .expect("Shape: all dimensions must be concrete") as f32
+        })
+        .collect();
+
+    let output_name = &node.output[0];
+    let tensor = cx.named_tensor(output_name.clone(), vec![shape_values.len()]);
+    tensors.insert(output_name.clone(), tensor);
+    known_values.insert(output_name.clone(), shape_values.clone());
+    weight_data.push((output_name.clone(), shape_values));
+    trace!("Finished parse: Shape");
+    Ok(())
+}
+
+/// Handle Identity node: output is a direct alias of the input tensor.
+///
+/// Propagates known constant values for downstream constant folding.
+pub fn parse_identity(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: Identity Node");
+    assert!(node.input.len() == 1, "Identity should only have one input");
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Identity: missing input tensor '{}'", node.input[0]))?;
+
+    assert!(
+        node.output.len() == 1,
+        "Identity should only have a single output"
+    );
+
+    let output_name = &node.output[0];
+
+    // Force materialization to create a distinct graph node for the CUDA backend.
+    // Without this, the output shares the same NodeIndex as the input tensor,
+    // and CudaRuntime::get_f32 cannot retrieve data for input-aliased outputs.
+    // (Same pattern as parse_reshape_node and parse_transpose_node.)
+    let shape: Vec<usize> = a
+        .dims()
+        .iter()
+        .map(|d| d.to_usize().expect("Identity: dim must be concrete"))
+        .collect();
+    let one = a.graph().constant_float(1.0);
+    let one_expanded = broadcast_to(one, &shape);
+    let result = a * one_expanded;
+    tensors.insert(output_name.clone(), result);
+
+    // Propagate known values
+    if let Some(vals) = known_values.get(&node.input[0]).cloned() {
+        known_values.insert(output_name.clone(), vals);
+    }
+
+    trace!("Finished parse: Identity Node");
+    Ok(())
+}
