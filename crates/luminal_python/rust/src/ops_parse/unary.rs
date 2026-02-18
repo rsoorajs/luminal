@@ -95,6 +95,118 @@ pub fn parse_cos_node(
     return Ok(());
 }
 
+pub fn parse_sigmoid_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Sigmoid Node");
+    assert!(
+        node.input.len() == 1,
+        "Sigmoid nodes need to have one input {} where present",
+        node.input.len()
+    );
+
+    assert!(
+        node.output.len() == 1,
+        "Sigmoid nodes only have one output, {} where present",
+        node.output.len(),
+    );
+    let output_name = &node.output[0];
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Sigmoid: missing input tensor '{}'", node.input[0]))?;
+
+    let result = a.sigmoid();
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Sigmoid Node");
+
+    return Ok(());
+}
+
+pub fn parse_tanh_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Tanh Node");
+    assert!(
+        node.input.len() == 1,
+        "Tanh nodes need to have one input {} where present",
+        node.input.len()
+    );
+
+    assert!(
+        node.output.len() == 1,
+        "Tanh nodes only have one output, {} where present",
+        node.output.len(),
+    );
+    let output_name = &node.output[0];
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Tanh: missing input tensor '{}'", node.input[0]))?;
+
+    let result = a.tanh();
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Tanh Node");
+
+    return Ok(());
+}
+
+pub fn parse_relu_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Relu Node");
+    assert!(
+        node.input.len() == 1,
+        "Relu nodes need to have one input {} where present",
+        node.input.len()
+    );
+
+    assert!(
+        node.output.len() == 1,
+        "Relu nodes only have one output, {} where present",
+        node.output.len(),
+    );
+    let output_name = &node.output[0];
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Relu: missing input tensor '{}'", node.input[0]))?;
+
+    let result = a.relu();
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Relu Node");
+
+    return Ok(());
+}
+
+pub fn parse_abs_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Abs Node");
+    assert!(
+        node.input.len() == 1,
+        "Abs nodes need to have one input {} where present",
+        node.input.len()
+    );
+
+    assert!(
+        node.output.len() == 1,
+        "Abs nodes only have one output, {} where present",
+        node.output.len(),
+    );
+    let output_name = &node.output[0];
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Abs: missing input tensor '{}'", node.input[0]))?;
+
+    let result = a.abs();
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Abs Node");
+
+    return Ok(());
+}
+
 /// Handle Floor node: output = floor(input[0])
 ///
 /// Implemented as: trunc(x) - (x < trunc(x) ? 1 : 0)
