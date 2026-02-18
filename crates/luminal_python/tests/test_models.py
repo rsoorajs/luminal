@@ -599,3 +599,47 @@ class GatherConstantFoldModel(torch.nn.Module):
         data = torch.tensor([10.0, 20.0, 30.0, 40.0, 50.0])
         indices = torch.tensor([4, 1, 3])
         return x + data[indices]
+
+
+# ========== Squeeze Node Test Models ==========
+# These models test ONNX Squeeze node handling in ops_parse.rs
+
+
+class SqueezeAxisModel(torch.nn.Module):
+    """Tests squeezing a single size-1 leading dimension."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.squeeze(0)  # (1, 3, 4) -> (3, 4)
+
+
+class SqueezeAllDimsModel(torch.nn.Module):
+    """Tests squeezing all size-1 dimensions (no explicit axes)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.squeeze()  # (1, 3, 1, 4) -> (3, 4)
+
+
+class SqueezeMultipleAxesModel(torch.nn.Module):
+    """Tests squeezing multiple explicit size-1 dimensions."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.squeeze(0).squeeze(1)  # (1, 3, 1, 4) -> (3, 4)
+
+
+class SqueezeNegativeAxisModel(torch.nn.Module):
+    """Tests squeezing a size-1 dimension using a negative axis index."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.squeeze(-1)  # (3, 4, 1) -> (3, 4)
+
+
+class SqueezeInExpressionModel(torch.nn.Module):
+    """Tests squeeze as part of a larger expression (squeeze then add)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight: torch.Tensor = torch.rand(5)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        squeezed = x.squeeze(0)  # (1, 5) -> (5,)
+        return squeezed + self.weight

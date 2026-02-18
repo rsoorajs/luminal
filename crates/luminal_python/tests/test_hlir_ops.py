@@ -71,6 +71,12 @@ from test_models import (
     Gather2DAxis1Model,
     GatherNegativeIndicesModel,
     GatherConstantFoldModel,
+    # Squeeze models
+    SqueezeAxisModel,
+    SqueezeAllDimsModel,
+    SqueezeMultipleAxesModel,
+    SqueezeNegativeAxisModel,
+    SqueezeInExpressionModel,
 )
 
 from luminal import luminal_backend
@@ -755,6 +761,60 @@ def test_gather_constant_fold():
     model: torch.nn.Module = GatherConstantFoldModel()
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0])
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ONNX Squeeze Node Tests ==========
+# These tests verify parse_squeeze_node in ops_parse.rs
+
+
+def test_squeeze_axis():
+    """Test squeezing a single size-1 leading dimension."""
+    model: torch.nn.Module = SqueezeAxisModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(1, 3, 4)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_squeeze_all_dims():
+    """Test squeezing all size-1 dimensions with no explicit axes."""
+    model: torch.nn.Module = SqueezeAllDimsModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(1, 3, 1, 4)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_squeeze_multiple_axes():
+    """Test squeezing multiple explicit size-1 dimensions."""
+    model: torch.nn.Module = SqueezeMultipleAxesModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(1, 3, 1, 4)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_squeeze_negative_axis():
+    """Test squeezing a trailing size-1 dimension using a negative axis."""
+    model: torch.nn.Module = SqueezeNegativeAxisModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(3, 4, 1)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_squeeze_in_expression():
+    """Test squeeze followed by an add (squeeze as part of a larger graph)."""
+    model: torch.nn.Module = SqueezeInExpressionModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(1, 5)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
