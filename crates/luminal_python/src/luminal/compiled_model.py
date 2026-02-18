@@ -42,10 +42,12 @@ class CompiledModel:
                 f"Expected {len(self._input_names)} inputs, got {len(inputs)}"
             )
 
+        input_device = inputs[0].device if inputs else torch.device("cpu")
+
         # Set input data
         for name, tensor in zip(self._input_names, inputs):
-            # Convert to contiguous float32 numpy array
-            arr = tensor.detach().contiguous().float().numpy()
+            # Convert to contiguous float32 numpy array (move to CPU first for CUDA tensors)
+            arr = tensor.detach().cpu().contiguous().float().numpy()
             data = arr.flatten().tolist()
             self._graph.set_input(name, data)
 
@@ -60,11 +62,11 @@ class CompiledModel:
         # Run the graph
         self._graph.run()
 
-        # Get outputs and convert back to PyTorch tensors
+        # Get outputs and convert back to PyTorch tensors on the same device as inputs
         outputs = []
         for name, shape in zip(self._output_names, self._output_shapes):
             data = self._graph.get_output(name)
-            tensor = torch.tensor(data, dtype=torch.float32).reshape(tuple(shape))
+            tensor = torch.tensor(data, dtype=torch.float32).reshape(tuple(shape)).to(input_device)
             outputs.append(tensor)
 
         # Return as a tuple (TorchDynamo expects tuple return from backend callables)

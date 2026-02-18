@@ -6,7 +6,7 @@ import torch
 class AddTestModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.weight: torch.Tensor = torch.rand((5, 5))
+        self.register_buffer('weight', torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor):
         return self.weight + x
@@ -15,7 +15,7 @@ class AddTestModel(torch.nn.Module):
 class MulTestModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.weight: torch.Tensor = torch.rand((5, 5))
+        self.register_buffer('weight', torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor):
         return self.weight * x
@@ -24,7 +24,7 @@ class MulTestModel(torch.nn.Module):
 class DivTestModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.weight: torch.Tensor = torch.rand((5, 5))
+        self.register_buffer('weight', torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor):
         return self.weight / x
@@ -33,8 +33,8 @@ class DivTestModel(torch.nn.Module):
 class AddAddTestModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.weight_1: torch.Tensor = torch.rand((5, 5))
-        self.weight_2: torch.Tensor = torch.rand((5, 5))
+        self.register_buffer('weight_1', torch.rand((5, 5)))
+        self.register_buffer('weight_2', torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor):
         return self.weight_1 + x + self.weight_2
@@ -51,8 +51,8 @@ class AddConstantTestModel(torch.nn.Module):
 class LinearLayerModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.weight: torch.Tensor = torch.rand((5, 5))
-        self.bias: torch.Tensor = torch.rand((5, 5))
+        self.register_buffer('weight', torch.rand((5, 5)))
+        self.register_buffer('bias', torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor):
         return (self.weight @ x) + self.bias
@@ -85,7 +85,7 @@ class CosTestModel(torch.nn.Module):
 class SubTestModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.weight: torch.Tensor = torch.rand((10, 10))
+        self.register_buffer('weight', torch.rand((10, 10)))
 
     def forward(self, x: torch.Tensor):
         return self.weight - x
@@ -137,7 +137,7 @@ class TransposeInExpressionModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.weight: torch.Tensor = torch.rand((10, 5))
+        self.register_buffer('weight', torch.rand((10, 5)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x is (5, 10), transpose to (10, 5), add weight
@@ -155,7 +155,7 @@ class ConstantScalarFloatModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor(10.5)
+        constant = torch.tensor(10.5).to(x.device)
         return x + constant
 
 
@@ -166,7 +166,7 @@ class Constant1DArrayFloatModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0])
+        constant = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0]).to(x.device)
         return x * constant
 
 
@@ -177,7 +177,7 @@ class Constant2DMatrixFloatModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        constant = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]).to(x.device)
         return x + constant
 
 
@@ -188,7 +188,7 @@ class ConstantRawDataFloatModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor([7.5, 8.5, 9.5])
+        constant = torch.tensor([7.5, 8.5, 9.5]).to(x.device)
         return x + constant
 
 
@@ -199,7 +199,7 @@ class ConstantInt32ConversionModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32)
+        constant = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32).to(x.device)
         return x + constant.float()
 
 
@@ -210,7 +210,7 @@ class ConstantInt64ConversionModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor([100, 200, 300], dtype=torch.int64)
+        constant = torch.tensor([100, 200, 300], dtype=torch.int64).to(x.device)
         return x * constant.float()
 
 
@@ -221,7 +221,7 @@ class ConstantFloat64ConversionModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor([1.5, 2.5, 3.5], dtype=torch.float64)
+        constant = torch.tensor([1.5, 2.5, 3.5], dtype=torch.float64).to(x.device)
         return x * constant.float()
 
 
@@ -232,7 +232,7 @@ class ConstantBoolConversionModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor([True, False, True, False, True], dtype=torch.bool)
+        constant = torch.tensor([True, False, True, False, True], dtype=torch.bool).to(x.device)
         return x * constant.float()
 
 
@@ -243,7 +243,7 @@ class ConstantInt64RawDataModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor([1000, 2000, 3000], dtype=torch.int64)
+        constant = torch.tensor([1000, 2000, 3000], dtype=torch.int64).to(x.device)
         return x + constant.float()
 
 
@@ -254,7 +254,7 @@ class ConstantNegativeValuesModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor([-5.0, -10.0, -15.0])
+        constant = torch.tensor([-5.0, -10.0, -15.0]).to(x.device)
         return x + constant
 
 
@@ -265,7 +265,7 @@ class ConstantZeroValueModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor([0.0, 0.0, 0.0, 0.0])
+        constant = torch.tensor([0.0, 0.0, 0.0, 0.0]).to(x.device)
         return x * constant
 
 
@@ -276,8 +276,8 @@ class ConstantMultipleInGraphModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        const1 = torch.tensor([10.0, 20.0, 30.0])
-        const2 = torch.tensor([1.0, 2.0, 3.0])
+        const1 = torch.tensor([10.0, 20.0, 30.0]).to(x.device)
+        const2 = torch.tensor([1.0, 2.0, 3.0]).to(x.device)
         return x + const1 + const2
 
 
@@ -334,7 +334,7 @@ class CastInComputationGraphModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         casted = x.to(torch.float32)
-        constant = torch.tensor([2.0, 2.0, 2.0])
+        constant = torch.tensor([2.0, 2.0, 2.0]).to(x.device)
         return casted + constant
 
 
@@ -376,7 +376,7 @@ class ModTestModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.weight: torch.Tensor = torch.rand((5, 5)) + 1.0  # ensure non-zero divisor
+        self.register_buffer('weight', torch.rand((5, 5)) + 1.0)  # ensure non-zero divisor
 
     def forward(self, x: torch.Tensor):
         return x % self.weight
@@ -389,7 +389,7 @@ class ModByConstantModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor([3.0, 4.0, 5.0])
+        constant = torch.tensor([3.0, 4.0, 5.0]).to(x.device)
         return x % constant
 
 
@@ -468,7 +468,7 @@ class ReshapeInExpressionModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.weight: torch.Tensor = torch.rand((2, 6))
+        self.register_buffer('weight', torch.rand((2, 6)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         reshaped = x.reshape(2, 6)  # (12,) -> (2, 6)
@@ -514,7 +514,7 @@ class LessTestModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.weight: torch.Tensor = torch.rand((5, 5))
+        self.register_buffer('weight', torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return (x < self.weight).to(torch.float32)
@@ -525,7 +525,7 @@ class LessBroadcastModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.weight: torch.Tensor = torch.rand((5, 5))
+        self.register_buffer('weight', torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return (x < self.weight).to(torch.float32)
@@ -535,7 +535,7 @@ class LessWithConstantModel(torch.nn.Module):
     """Tests less-than against an inline constant (ONNX Constant + Less nodes)."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor([0.25, 0.5, 0.75])
+        constant = torch.tensor([0.25, 0.5, 0.75]).to(x.device)
         return (x < constant).to(torch.float32)
 
 
@@ -567,7 +567,7 @@ class Gather2DAxis0Model(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.weight: torch.Tensor = torch.rand(6, 4)
+        self.register_buffer('weight', torch.rand(6, 4))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.weight[x]
@@ -586,7 +586,7 @@ class GatherNegativeIndicesModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.weight: torch.Tensor = torch.rand(6, 4)
+        self.register_buffer('weight', torch.rand(6, 4))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.weight[x]
@@ -596,7 +596,7 @@ class GatherConstantFoldModel(torch.nn.Module):
     """Tests Gather constant folding: both data and indices are ONNX Constant nodes."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        data = torch.tensor([10.0, 20.0, 30.0, 40.0, 50.0])
+        data = torch.tensor([10.0, 20.0, 30.0, 40.0, 50.0]).to(x.device)
         indices = torch.tensor([4, 1, 3])
         return x + data[indices]
 
@@ -638,7 +638,7 @@ class SqueezeInExpressionModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.weight: torch.Tensor = torch.rand(5)
+        self.register_buffer('weight', torch.rand(5))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         squeezed = x.squeeze(0)  # (1, 5) -> (5,)
