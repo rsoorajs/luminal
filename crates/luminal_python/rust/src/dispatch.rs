@@ -25,6 +25,7 @@ pub fn process_onnx_nodes(
             "Sin" => parse_sin_node(node, tensors)?,
             "Neg" => parse_neg_node(node, tensors)?,
             "Cos" => parse_cos_node(node, tensors)?,
+            "Pow" => parse_pow_node(node, tensors)?,
             "Sigmoid" => parse_sigmoid_node(node, tensors)?,
             "Tanh" => parse_tanh_node(node, tensors)?,
             "Relu" => parse_relu_node(node, tensors)?,

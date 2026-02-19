@@ -235,6 +235,38 @@ pub fn parse_less_node(
     Ok(())
 }
 
+/// Handle Pow node: input[0].pow(input[1])
+///
+pub fn parse_pow_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Pow Node");
+    assert!(node.input.len() == 2, "Pow should have 2 inputs");
+    assert!(
+        node.output.len() == 1,
+        "Pow nodes only have one output, got {}",
+        node.output.len()
+    );
+    let output_name = &node.output[0];
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Pow: missing input tensor '{}'", node.input[0]))?;
+    let b = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("Pow: missing input tensor '{}'", node.input[1]))?;
+
+    // Broadcast both operands to the same shape
+    let broadcast_shape = compute_broadcast_shape(&a.dims(), &b.dims());
+    let a_bc = broadcast_to(a, &broadcast_shape);
+    let b_bc = broadcast_to(b, &broadcast_shape);
+
+    let result = a_bc.pow(b_bc);
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Pow Node");
+    Ok(())
+}
+
 /// Handle Equal node: element-wise equality comparison.
 ///
 /// Outputs 1.0 where inputs are equal, 0.0 otherwise. Supports broadcasting

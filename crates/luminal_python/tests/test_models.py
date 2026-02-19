@@ -942,3 +942,25 @@ class ClipMaxOnlyTestModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.clamp(x, max=0.5)
+
+
+# ========== Pow Node Test Models ==========
+
+
+class PowTestModel(torch.nn.Module):
+    """Tests element-wise power against a stored weight tensor."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((5, 5)) + 1.0)  # positive exponents
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x ** self.weight
+
+
+class PowByConstantModel(torch.nn.Module):
+    """Tests power by an inline constant tensor (exercises Pow + Constant nodes)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        constant = torch.tensor([2.0, 3.0, 0.5]).to(x.device)
+        return x ** constant
