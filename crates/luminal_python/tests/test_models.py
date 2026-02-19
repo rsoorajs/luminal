@@ -834,3 +834,72 @@ class AbsInExpressionModel(torch.nn.Module):
     """Tests abs followed by an element-wise add."""
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.abs(x) + 1.0
+
+# ========== Neg Node Test Models ==========
+
+class NegTestModel(torch.nn.Module):
+    """Tests neg with mixed positive/negative inputs (sign is flipped)."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.neg(x)
+
+class NegAllPositiveModel(torch.nn.Module):
+    """Tests neg with all-positive inputs (output should be all negative)."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.neg(x)
+
+class NegInExpressionModel(torch.nn.Module):
+    """Tests neg followed by an element-wise add."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.neg(x) + 1.0
+
+# ========== Equal Node Test Models ==========
+
+class EqualTestModel(torch.nn.Module):
+    """Tests element-wise equality against a stored weight with discrete values."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer('weight', torch.randint(0, 3, (5, 5)).float())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x == self.weight).to(torch.float32)
+
+
+class EqualBroadcastModel(torch.nn.Module):
+    """Tests equality with broadcasting (1D input broadcasts against 2D weight)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer('weight', torch.randint(0, 3, (5, 5)).float())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x == self.weight).to(torch.float32)
+
+
+class EqualWithConstantModel(torch.nn.Module):
+    """Tests equality against an inline constant (exercises Equal + Constant nodes)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        constant = torch.tensor([1.0, 2.0, 3.0]).to(x.device)
+        return (x == constant).to(torch.float32)
+
+
+# ========== Clip Node Test Models ==========
+
+
+class ClipTestModel(torch.nn.Module):
+    """Tests clip (clamp) with both min and max bounds."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.clamp(x, min=-0.5, max=0.5)
+
+
+class ClipMinOnlyTestModel(torch.nn.Module):
+    """Tests clip with only a min bound."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.clamp(x, min=0.0)
+
+
+class ClipMaxOnlyTestModel(torch.nn.Module):
+    """Tests clip with only a max bound."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.clamp(x, max=0.5)

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Neg};
 
 use luminal::prelude::{tracing::trace, *};
 use onnx_protobuf::NodeProto;
@@ -62,6 +62,35 @@ pub fn parse_sin_node(
     let result = a.sin();
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Sin Node");
+
+    Ok(())
+}
+
+/// Handle Neg node: output = -input[0]
+pub fn parse_neg_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Neg Node");
+    assert!(
+        node.input.len() == 1,
+        "Neg nodes need to have one input {} where present",
+        node.input.len()
+    );
+
+    assert!(
+        node.output.len() == 1,
+        "Neg nodes only have one output, {} where present",
+        node.output.len(),
+    );
+    let output_name = &node.output[0];
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Neg: missing input tensor '{}'", node.input[0]))?;
+
+    let result = a.neg();
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Neg Node");
 
     Ok(())
 }
@@ -204,6 +233,48 @@ pub fn parse_abs_node(
     tensors.insert(output_name.clone(), result);
     trace!("Finished parse: Abs Node");
 
+    Ok(())
+}
+
+/// Handle Clip node: output = clip(input[0], min, max)
+///
+/// Equivalent to torch.clamp. min and max are optional tensor inputs
+/// (typically constants) residing in known_values.
+pub fn parse_clip_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: Clip Node");
+    let output_name = &node.output[0];
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Clip: missing input tensor '{}'", node.input[0]))?;
+
+    // input[1] = min (optional), input[2] = max (optional)
+    let min_name = node.input.get(1).map(String::as_str).unwrap_or("");
+    let max_name = node.input.get(2).map(String::as_str).unwrap_or("");
+
+    let min_val = if min_name.is_empty() {
+        None
+    } else {
+        known_values.get(min_name).map(|v| v[0])
+    };
+    let max_val = if max_name.is_empty() {
+        None
+    } else {
+        known_values.get(max_name).map(|v| v[0])
+    };
+
+    let result = match (min_val, max_val) {
+        (Some(lo), Some(hi)) => a.clip(lo, hi),
+        (Some(lo), None) => a.maximum_f32(lo),
+        (None, Some(hi)) => a.minimum_f32(hi),
+        (None, None) => a,
+    };
+
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Clip Node");
     Ok(())
 }
 
