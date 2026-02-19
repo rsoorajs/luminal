@@ -593,7 +593,8 @@ pub fn parse_gathernd_node(
                     flat_base += coord * data_strides[j];
                 }
                 let out_base = (batch * outer_size + p) * slice_size;
-                folded[out_base..(slice_size + out_base)].copy_from_slice(&vdata[flat_base..(slice_size + flat_base)]);
+                folded[out_base..(slice_size + out_base)]
+                    .copy_from_slice(&vdata[flat_base..(slice_size + flat_base)]);
             }
         }
 
