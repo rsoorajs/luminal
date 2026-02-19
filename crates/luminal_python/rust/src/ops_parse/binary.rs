@@ -234,3 +234,31 @@ pub fn parse_less_node(
     trace!("Finished parse: Less Node");
     Ok(())
 }
+
+/// Handle Equal node: element-wise equality comparison.
+///
+/// Outputs 1.0 where inputs are equal, 0.0 otherwise. Supports broadcasting
+/// and constant folding.
+pub fn parse_equal_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 2, "Equal should have 2 inputs");
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Equal: missing input tensor '{}'", node.input[0]))?;
+    let b = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("Equal: missing input tensor '{}'", node.input[1]))?;
+
+    // Broadcast both operands to the same shape
+    let broadcast_shape = compute_broadcast_shape(&a.dims(), &b.dims());
+    let a_bc = broadcast_to(a, &broadcast_shape);
+    let b_bc = broadcast_to(b, &broadcast_shape);
+
+    let result = a_bc.eq(b_bc);
+    let output_name = &node.output[0];
+    tensors.insert(output_name.clone(), result);
+
+    Ok(())
+}
