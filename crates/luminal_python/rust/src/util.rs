@@ -1,9 +1,6 @@
 use std::{fs, path::Path};
 
-use luminal::{
-    prelude::GraphTensor,
-    shape::Expression,
-};
+use luminal::{prelude::GraphTensor, shape::Expression};
 use onnx_protobuf::NodeProto;
 
 // Given a Value from the Onnx proto return its tensor Shape, if it exists
