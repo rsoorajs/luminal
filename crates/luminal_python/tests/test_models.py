@@ -964,3 +964,34 @@ class PowByConstantModel(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([2.0, 3.0, 0.5]).to(x.device)
         return x ** constant
+
+
+# ========== Where Node Test Models ==========
+
+
+class WhereTestModel(torch.nn.Module):
+    """Tests element-wise where with condition derived from input comparison, selecting from weight buffers."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("true_vals", torch.rand((5, 5)) + 1.0)
+        self.register_buffer("false_vals", torch.rand((5, 5)) - 2.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.where(x > 0.0, self.true_vals, self.false_vals)
+
+
+class WhereSelfSelectModel(torch.nn.Module):
+    """Tests where selecting between input x and its negation (abs-like pattern)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.where(x > 0.0, x, -x)
+
+
+class WhereWithConstantModel(torch.nn.Module):
+    """Tests where with inline constant tensors for both branches (exercises Where + Constant nodes)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pos = torch.tensor([1.0, 2.0, 3.0]).to(x.device)
+        neg = torch.tensor([-1.0, -2.0, -3.0]).to(x.device)
+        return torch.where(x > 0.0, pos, neg)

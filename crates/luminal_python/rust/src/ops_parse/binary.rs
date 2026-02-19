@@ -294,3 +294,55 @@ pub fn parse_equal_node(
 
     Ok(())
 }
+
+/// Parse Greater node (ONNX element-wise greater-than comparison).
+///
+/// Outputs 1.0 where a > b, 0.0 otherwise. Supports broadcasting.
+pub fn parse_greater_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Greater Node");
+    assert!(node.input.len() == 2, "Greater should have 2 inputs");
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Greater: missing input tensor '{}'", node.input[0]))?;
+    let b = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("Greater: missing input tensor '{}'", node.input[1]))?;
+
+    let broadcast_shape = compute_broadcast_shape(&a.dims(), &b.dims());
+    let a_bc = broadcast_to(a, &broadcast_shape);
+    let b_bc = broadcast_to(b, &broadcast_shape);
+
+    // a > b  ≡  b < a
+    let result = b_bc.lt(a_bc);
+
+    let output_name = &node.output[0];
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Greater Node");
+    Ok(())
+}
+
+/// Handle Where node: conditional select — output[i] = condition[i] ? x[i] : y[i]
+pub fn parse_where_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 3, "Where should have 3 inputs");
+    let condition = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Where: missing condition tensor '{}'", node.input[0]))?;
+    let x = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("Where: missing X tensor '{}'", node.input[1]))?;
+    let y = *tensors
+        .get(&node.input[2])
+        .ok_or_else(|| format!("Where: missing Y tensor '{}'", node.input[2]))?;
+
+    let output_name = &node.output[0];
+
+    let result = x.cond(condition, y);
+    tensors.insert(output_name.clone(), result);
+    Ok(())
+}
