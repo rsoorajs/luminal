@@ -31,6 +31,10 @@ from test_models import (
     ConstantZeroValueModel,
     CosTestModel,
     DivTestModel,
+    # Equal models
+    EqualBroadcastModel,
+    EqualTestModel,
+    EqualWithConstantModel,
     FloorInExpressionModel,
     FloorNegativeModel,
     # Floor models
@@ -42,10 +46,6 @@ from test_models import (
     GatherConstantFoldModel,
     GatherEmbeddingModel,
     GatherNegativeIndicesModel,
-    # Equal models
-    EqualBroadcastModel,
-    EqualTestModel,
-    EqualWithConstantModel,
     LessBroadcastModel,
     # Less models
     LessTestModel,
@@ -520,10 +520,6 @@ def test_cast_scalar_value(device: torch.device):
 
 
 def test_mod(device: torch.device):
-    # This is a flaky test, disabling it for the moment
-    # TODO: Understand this test some fails the allclose
-    assert True
-    return
     """Test basic element-wise modulo."""
     model: torch.nn.Module = ModTestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
@@ -534,10 +530,6 @@ def test_mod(device: torch.device):
 
 
 def test_mod_broadcast(device: torch.device):
-    # This is a flaky test, disabling it for the moment
-    # TODO: Understand this test some fails the allclose
-    assert True
-    return
     """Test modulo with broadcasting (1D input vs 2D weight)."""
     model: torch.nn.Module = ModTestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
