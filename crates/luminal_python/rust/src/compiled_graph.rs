@@ -143,18 +143,6 @@ impl OnnxGraphResult {
                 }
             };
             weight_data.push((init.name.clone(), floats.clone()));
-            // Also store transposed data for _kn tensors
-            let kn_name = format!("{}_kn", &init.name);
-            if tensors.contains_key(&kn_name) {
-                panic!("THere is a know name thing")
-                /*
-                let dims: Vec<usize> = init.dims.iter().map(|&d| d as usize).collect();
-                if dims.len() == 2 {
-                    let transposed = transpose_weight_data(&floats, dims[0], dims[1]);
-                    weight_data.push((kn_name, transposed));
-                }
-                */
-            }
         }
 
         // Handle _kn tensors from Identity-aliased weights (e.g., layer 1 sharing layer 0 weights).
