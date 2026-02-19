@@ -104,6 +104,10 @@ from test_models import (
     TransposeInExpressionModel,
     TransposeReverseTestModel,
     TransposeTestModel,
+    # Where models
+    WhereSelfSelectModel,
+    WhereTestModel,
+    WhereWithConstantModel,
 )
 
 from luminal import luminal_backend
@@ -1067,3 +1071,37 @@ def test_pow_by_constant(device: torch.device):
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original, rtol=1e-4, atol=1e-4)
+
+
+# ========== ONNX Where Node Tests ==========
+# These tests verify parse_where_node in ops_parse/binary.rs
+
+
+def test_where(device: torch.device):
+    """Test element-wise where with condition selecting from weight buffers."""
+    model: torch.nn.Module = WhereTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device) - 0.5  # mix of positive and negative
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_where_self_select(device: torch.device):
+    """Test where selecting between input and its negation (abs-like pattern)."""
+    model: torch.nn.Module = WhereSelfSelectModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device) - 0.5  # mix of positive and negative
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_where_with_constant(device: torch.device):
+    """Test where with inline constant tensors as branches (exercises Where + Constant nodes)."""
+    model: torch.nn.Module = WhereWithConstantModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([-0.5, 0.5, -1.0]).to(device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
