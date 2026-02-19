@@ -42,6 +42,8 @@ pub fn process_onnx_nodes(
             "GatherND" => parse_gathernd_node(node, tensors, cx, weight_data, known_values)?,
             "Less" => parse_less_node(node, tensors, known_values)?,
             "Greater" => parse_greater_node(node, tensors)?,
+            "Min" => parse_min_node(node, tensors)?,
+            "Max" => parse_max_node(node, tensors)?,
             "Identity" => parse_identity(node, tensors, known_values)?,
             "Unsqueeze" => parse_unsqueeze_node(node, tensors, known_values)?,
             "Squeeze" => parse_squeeze_node(node, tensors, known_values)?,

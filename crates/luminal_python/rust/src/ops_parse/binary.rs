@@ -324,6 +324,80 @@ pub fn parse_greater_node(
     Ok(())
 }
 
+/// Handle Min node: element-wise minimum over 2+ inputs with numpy-style broadcasting.
+pub fn parse_min_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Min Node");
+    assert!(
+        node.input.len() >= 2,
+        "Min nodes need at least two inputs, got {}",
+        node.input.len()
+    );
+    assert!(
+        node.output.len() == 1,
+        "Min nodes only have one output, got {}",
+        node.output.len()
+    );
+
+    let output_name = &node.output[0];
+    let mut result = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Min: missing input tensor '{}'", node.input[0]))?;
+
+    for input_name in &node.input[1..] {
+        let rhs = *tensors
+            .get(input_name)
+            .ok_or_else(|| format!("Min: missing input tensor '{}'", input_name))?;
+        let broadcast_shape = compute_broadcast_shape(&result.dims(), &rhs.dims());
+        let lhs_bc = broadcast_to(result, &broadcast_shape);
+        let rhs_bc = broadcast_to(rhs, &broadcast_shape);
+        result = lhs_bc.minimum(rhs_bc);
+    }
+
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Min Node");
+    Ok(())
+}
+
+/// Handle Max node: element-wise maximum over 2+ inputs with numpy-style broadcasting.
+pub fn parse_max_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Max Node");
+    assert!(
+        node.input.len() >= 2,
+        "Max nodes need at least two inputs, got {}",
+        node.input.len()
+    );
+    assert!(
+        node.output.len() == 1,
+        "Max nodes only have one output, got {}",
+        node.output.len()
+    );
+
+    let output_name = &node.output[0];
+    let mut result = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Max: missing input tensor '{}'", node.input[0]))?;
+
+    for input_name in &node.input[1..] {
+        let rhs = *tensors
+            .get(input_name)
+            .ok_or_else(|| format!("Max: missing input tensor '{}'", input_name))?;
+        let broadcast_shape = compute_broadcast_shape(&result.dims(), &rhs.dims());
+        let lhs_bc = broadcast_to(result, &broadcast_shape);
+        let rhs_bc = broadcast_to(rhs, &broadcast_shape);
+        result = lhs_bc.maximum(rhs_bc);
+    }
+
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Max Node");
+    Ok(())
+}
+
 /// Handle Where node: conditional select — output[i] = condition[i] ? x[i] : y[i]
 pub fn parse_where_node(
     node: &NodeProto,

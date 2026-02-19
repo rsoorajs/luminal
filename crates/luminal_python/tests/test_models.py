@@ -969,6 +969,50 @@ class PowByConstantModel(torch.nn.Module):
 # ========== Where Node Test Models ==========
 
 
+# ========== Max Node Test Models ==========
+
+
+class MaxTestModel(torch.nn.Module):
+    """Tests element-wise maximum against a stored weight tensor."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((5, 5)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.maximum(x, self.weight)
+
+
+class MaxWithConstantModel(torch.nn.Module):
+    """Tests element-wise maximum against an inline constant (ONNX Max + Constant nodes)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        constant = torch.tensor([0.2, 0.4, 0.6, 0.8, 1.0]).to(x.device)
+        return torch.maximum(x, constant)
+
+
+# ========== Min Node Test Models ==========
+
+
+class MinTestModel(torch.nn.Module):
+    """Tests element-wise minimum against a stored weight tensor."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((5, 5)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.minimum(x, self.weight)
+
+
+class MinWithConstantModel(torch.nn.Module):
+    """Tests element-wise minimum against an inline constant (ONNX Min + Constant nodes)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        constant = torch.tensor([0.2, 0.4, 0.6, 0.8, 1.0]).to(x.device)
+        return torch.minimum(x, constant)
+
+
 class WhereTestModel(torch.nn.Module):
     """Tests element-wise where with condition derived from input comparison, selecting from weight buffers."""
 
