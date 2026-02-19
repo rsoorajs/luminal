@@ -55,6 +55,9 @@ from test_models import (
     # Mod models
     ModTestModel,
     MulTestModel,
+    PowByConstantModel,
+    # Pow models
+    PowTestModel,
     ReduceMax3DAxis1Model,
     ReduceMaxAllAxesModel,
     # ReduceMax models
@@ -1030,3 +1033,37 @@ def test_reduce_max_in_expression(device: torch.device):
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.rand((3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+# ========== ONNX Pow Node Tests ==========
+# These tests verify parse_pow_node in ops_parse/binary.rs
+
+
+def test_pow(device: torch.device):
+    """Test basic element-wise power."""
+    model: torch.nn.Module = PowTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device) + 0.1
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, rtol=1e-4, atol=1e-4)
+
+
+def test_pow_broadcast(device: torch.device):
+    """Test power with broadcasting (1D input broadcasts against 2D weight)."""
+    model: torch.nn.Module = PowTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(5, device=device) + 0.1
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, rtol=1e-4, atol=1e-4)
+
+
+def test_pow_by_constant(device: torch.device):
+    """Test power by an inline constant (exercises Pow + Constant nodes)."""
+    model: torch.nn.Module = PowByConstantModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([2.0, 3.0, 4.0]).to(device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, rtol=1e-4, atol=1e-4)
