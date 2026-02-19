@@ -1115,3 +1115,99 @@ class SoftmaxDim0TestModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.softmax(x, dim=0)
+
+
+# ========== LessOrEqual Node Test Models ==========
+
+
+class LessOrEqualTestModel(torch.nn.Module):
+    """Tests element-wise less-than-or-equal comparison against a stored weight."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((5, 5)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x <= self.weight).to(torch.float32)
+
+
+class LessOrEqualWithConstantModel(torch.nn.Module):
+    """Tests less-than-or-equal against an inline constant (ONNX Constant + LessOrEqual nodes)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        constant = torch.tensor([0.25, 0.5, 0.75]).to(x.device)
+        return (x <= constant).to(torch.float32)
+
+
+# ========== GreaterOrEqual Node Test Models ==========
+
+
+class GreaterOrEqualTestModel(torch.nn.Module):
+    """Tests element-wise greater-than-or-equal comparison against a stored weight."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((5, 5)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x >= self.weight).to(torch.float32)
+
+
+class GreaterOrEqualWithConstantModel(torch.nn.Module):
+    """Tests greater-than-or-equal against an inline constant (ONNX Constant + GreaterOrEqual nodes)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        constant = torch.tensor([0.25, 0.5, 0.75]).to(x.device)
+        return (x >= constant).to(torch.float32)
+
+
+# ========== Not Node Test Models ==========
+
+
+class NotTestModel(torch.nn.Module):
+    """Tests logical NOT on a boolean tensor derived from comparison."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.logical_not(x > 0.5).float()
+
+
+# ========== And Node Test Models ==========
+
+
+class AndTestModel(torch.nn.Module):
+    """Tests logical AND between two boolean tensors."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((5, 5)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.logical_and(x > 0.3, self.weight > 0.3).float()
+
+
+# ========== Or Node Test Models ==========
+
+
+class OrTestModel(torch.nn.Module):
+    """Tests logical OR between two boolean tensors."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((5, 5)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.logical_or(x > 0.7, self.weight > 0.7).float()
+
+
+# ========== Xor Node Test Models ==========
+
+
+class XorTestModel(torch.nn.Module):
+    """Tests logical XOR between two boolean tensors."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((5, 5)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.logical_xor(x > 0.5, self.weight > 0.5).float()

@@ -274,6 +274,32 @@ pub fn parse_softmax_node(
     Ok(())
 }
 
+/// Handle Not node: logical NOT — output = 1.0 - input[0]
+pub fn parse_not_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Not Node");
+    assert!(
+        node.input.len() == 1,
+        "Not nodes need to have one input {} where present",
+        node.input.len()
+    );
+    assert!(
+        node.output.len() == 1,
+        "Not nodes only have one output, {} where present",
+        node.output.len()
+    );
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Not: missing input tensor '{}'", node.input[0]))?;
+    let a_f32 = a.cast(DType::F32);
+    let result = 1.0_f32 - a_f32;
+    tensors.insert(node.output[0].clone(), result);
+    trace!("Finished parse: Not Node");
+    Ok(())
+}
+
 /// Handle Clip node: output = clip(input[0], min, max)
 ///
 /// Equivalent to torch.clamp. min and max are optional tensor inputs

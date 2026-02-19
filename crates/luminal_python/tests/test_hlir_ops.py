@@ -123,6 +123,20 @@ from test_models import (
     # Softmax models
     SoftmaxTestModel,
     SoftmaxDim0TestModel,
+    # LessOrEqual models
+    LessOrEqualTestModel,
+    LessOrEqualWithConstantModel,
+    # GreaterOrEqual models
+    GreaterOrEqualTestModel,
+    GreaterOrEqualWithConstantModel,
+    # Not model
+    NotTestModel,
+    # And model
+    AndTestModel,
+    # Or model
+    OrTestModel,
+    # Xor model
+    XorTestModel,
 )
 
 from luminal import luminal_backend
@@ -1236,3 +1250,101 @@ def test_softmax_dim0(device: torch.device):
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original, atol=1e-5)
+
+
+# ========== ONNX LessOrEqual Node Tests ==========
+
+
+def test_less_or_equal(device: torch.device):
+    """Test element-wise less-than-or-equal comparison against a stored weight."""
+    model: torch.nn.Module = LessOrEqualTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_less_or_equal_with_constant(device: torch.device):
+    """Test less-than-or-equal against an inline constant tensor."""
+    model: torch.nn.Module = LessOrEqualWithConstantModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(3, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ONNX GreaterOrEqual Node Tests ==========
+
+
+def test_greater_or_equal(device: torch.device):
+    """Test element-wise greater-than-or-equal comparison against a stored weight."""
+    model: torch.nn.Module = GreaterOrEqualTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_greater_or_equal_with_constant(device: torch.device):
+    """Test greater-than-or-equal against an inline constant tensor."""
+    model: torch.nn.Module = GreaterOrEqualWithConstantModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(3, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ONNX Not Node Tests ==========
+
+
+def test_not(device: torch.device):
+    """Test logical NOT on a boolean tensor derived from comparison."""
+    model: torch.nn.Module = NotTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ONNX And Node Tests ==========
+
+
+def test_and(device: torch.device):
+    """Test logical AND between two boolean tensors."""
+    model: torch.nn.Module = AndTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ONNX Or Node Tests ==========
+
+
+def test_or(device: torch.device):
+    """Test logical OR between two boolean tensors."""
+    model: torch.nn.Module = OrTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ONNX Xor Node Tests ==========
+
+
+def test_xor(device: torch.device):
+    """Test logical XOR between two boolean tensors."""
+    model: torch.nn.Module = XorTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
