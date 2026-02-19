@@ -104,6 +104,12 @@ from test_models import (
     TransposeInExpressionModel,
     TransposeReverseTestModel,
     TransposeTestModel,
+    # Max models
+    MaxTestModel,
+    MaxWithConstantModel,
+    # Min models
+    MinTestModel,
+    MinWithConstantModel,
     # Where models
     WhereSelfSelectModel,
     WhereTestModel,
@@ -1102,6 +1108,54 @@ def test_where_with_constant(device: torch.device):
     model: torch.nn.Module = WhereWithConstantModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.tensor([-0.5, 0.5, -1.0]).to(device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ONNX Max Node Tests ==========
+# These tests verify parse_max_node in ops_parse/binary.rs
+
+
+def test_max(device: torch.device):
+    """Test element-wise maximum against a stored weight tensor."""
+    model: torch.nn.Module = MaxTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_max_with_constant(device: torch.device):
+    """Test element-wise maximum against an inline constant (exercises Max + Constant nodes)."""
+    model: torch.nn.Module = MaxWithConstantModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(5, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ONNX Min Node Tests ==========
+# These tests verify parse_min_node in ops_parse/binary.rs
+
+
+def test_min(device: torch.device):
+    """Test element-wise minimum against a stored weight tensor."""
+    model: torch.nn.Module = MinTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_min_with_constant(device: torch.device):
+    """Test element-wise minimum against an inline constant (exercises Min + Constant nodes)."""
+    model: torch.nn.Module = MinWithConstantModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(5, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
