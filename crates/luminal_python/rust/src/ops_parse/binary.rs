@@ -398,6 +398,116 @@ pub fn parse_max_node(
     Ok(())
 }
 
+/// Handle LessOrEqual node: output = input[0] <= input[1]
+pub fn parse_less_or_equal_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: LessOrEqual Node");
+    assert!(node.input.len() == 2, "LessOrEqual should have 2 inputs");
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("LessOrEqual: missing input tensor '{}'", node.input[0]))?;
+    let b = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("LessOrEqual: missing input tensor '{}'", node.input[1]))?;
+    let broadcast_shape = compute_broadcast_shape(&a.dims(), &b.dims());
+    let a_bc = broadcast_to(a, &broadcast_shape);
+    let b_bc = broadcast_to(b, &broadcast_shape);
+    let result = a_bc.le(b_bc);
+    tensors.insert(node.output[0].clone(), result);
+    trace!("Finished parse: LessOrEqual Node");
+    Ok(())
+}
+
+/// Handle GreaterOrEqual node: output = input[0] >= input[1]
+pub fn parse_greater_or_equal_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: GreaterOrEqual Node");
+    assert!(node.input.len() == 2, "GreaterOrEqual should have 2 inputs");
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("GreaterOrEqual: missing input tensor '{}'", node.input[0]))?;
+    let b = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("GreaterOrEqual: missing input tensor '{}'", node.input[1]))?;
+    let broadcast_shape = compute_broadcast_shape(&a.dims(), &b.dims());
+    let a_bc = broadcast_to(a, &broadcast_shape);
+    let b_bc = broadcast_to(b, &broadcast_shape);
+    let result = a_bc.ge(b_bc);
+    tensors.insert(node.output[0].clone(), result);
+    trace!("Finished parse: GreaterOrEqual Node");
+    Ok(())
+}
+
+/// Handle And node: logical AND — output = input[0] * input[1]  (boolean: 1×1=1, else 0)
+pub fn parse_and_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: And Node");
+    assert!(node.input.len() == 2, "And should have 2 inputs");
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("And: missing input tensor '{}'", node.input[0]))?;
+    let b = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("And: missing input tensor '{}'", node.input[1]))?;
+    let broadcast_shape = compute_broadcast_shape(&a.dims(), &b.dims());
+    let a_bc = broadcast_to(a.cast(DType::F32), &broadcast_shape);
+    let b_bc = broadcast_to(b.cast(DType::F32), &broadcast_shape);
+    let result = a_bc.mul(b_bc);
+    tensors.insert(node.output[0].clone(), result);
+    trace!("Finished parse: And Node");
+    Ok(())
+}
+
+/// Handle Or node: logical OR — output = min(input[0] + input[1], 1.0)
+pub fn parse_or_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Or Node");
+    assert!(node.input.len() == 2, "Or should have 2 inputs");
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Or: missing input tensor '{}'", node.input[0]))?;
+    let b = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("Or: missing input tensor '{}'", node.input[1]))?;
+    let broadcast_shape = compute_broadcast_shape(&a.dims(), &b.dims());
+    let a_bc = broadcast_to(a.cast(DType::F32), &broadcast_shape);
+    let b_bc = broadcast_to(b.cast(DType::F32), &broadcast_shape);
+    let result = a_bc.add(b_bc).minimum_f32(1.0);
+    tensors.insert(node.output[0].clone(), result);
+    trace!("Finished parse: Or Node");
+    Ok(())
+}
+
+/// Handle Xor node: logical XOR — XOR on boolean tensors equals not-equal
+pub fn parse_xor_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Xor Node");
+    assert!(node.input.len() == 2, "Xor should have 2 inputs");
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Xor: missing input tensor '{}'", node.input[0]))?;
+    let b = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("Xor: missing input tensor '{}'", node.input[1]))?;
+    let broadcast_shape = compute_broadcast_shape(&a.dims(), &b.dims());
+    let a_bc = broadcast_to(a, &broadcast_shape);
+    let b_bc = broadcast_to(b, &broadcast_shape);
+    let result = a_bc.ne(b_bc);
+    tensors.insert(node.output[0].clone(), result);
+    trace!("Finished parse: Xor Node");
+    Ok(())
+}
+
 /// Handle Where node: conditional select — output[i] = condition[i] ? x[i] : y[i]
 pub fn parse_where_node(
     node: &NodeProto,
