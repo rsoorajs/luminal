@@ -6,7 +6,7 @@ import torch
 class AddTestModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.rand((5, 5)))
+        self.register_buffer("weight", torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor):
         return self.weight + x
@@ -15,7 +15,7 @@ class AddTestModel(torch.nn.Module):
 class MulTestModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.rand((5, 5)))
+        self.register_buffer("weight", torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor):
         return self.weight * x
@@ -24,7 +24,7 @@ class MulTestModel(torch.nn.Module):
 class DivTestModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.rand((5, 5)))
+        self.register_buffer("weight", torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor):
         return self.weight / x
@@ -33,8 +33,8 @@ class DivTestModel(torch.nn.Module):
 class AddAddTestModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight_1', torch.rand((5, 5)))
-        self.register_buffer('weight_2', torch.rand((5, 5)))
+        self.register_buffer("weight_1", torch.rand((5, 5)))
+        self.register_buffer("weight_2", torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor):
         return self.weight_1 + x + self.weight_2
@@ -51,8 +51,8 @@ class AddConstantTestModel(torch.nn.Module):
 class LinearLayerModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.rand((5, 5)))
-        self.register_buffer('bias', torch.rand((5, 5)))
+        self.register_buffer("weight", torch.rand((5, 5)))
+        self.register_buffer("bias", torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor):
         return (self.weight @ x) + self.bias
@@ -85,7 +85,7 @@ class CosTestModel(torch.nn.Module):
 class SubTestModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.rand((10, 10)))
+        self.register_buffer("weight", torch.rand((10, 10)))
 
     def forward(self, x: torch.Tensor):
         return self.weight - x
@@ -137,7 +137,7 @@ class TransposeInExpressionModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.rand((10, 5)))
+        self.register_buffer("weight", torch.rand((10, 5)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x is (5, 10), transpose to (10, 5), add weight
@@ -232,7 +232,9 @@ class ConstantBoolConversionModel(torch.nn.Module):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        constant = torch.tensor([True, False, True, False, True], dtype=torch.bool).to(x.device)
+        constant = torch.tensor([True, False, True, False, True], dtype=torch.bool).to(
+            x.device
+        )
         return x * constant.float()
 
 
@@ -376,10 +378,12 @@ class ModTestModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.rand((5, 5)) + 1.0)  # ensure non-zero divisor
+        self.register_buffer(
+            "weight", torch.rand((5, 5)) + 1.0
+        )  # ensure non-zero divisor
 
     def forward(self, x: torch.Tensor):
-        return x % self.weight
+        return x.fmod(self.weight)
 
 
 class ModByConstantModel(torch.nn.Module):
@@ -390,7 +394,7 @@ class ModByConstantModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([3.0, 4.0, 5.0]).to(x.device)
-        return x % constant
+        return x.fmod(constant)
 
 
 # ========== Floor Node Test Models ==========
@@ -468,7 +472,7 @@ class ReshapeInExpressionModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.rand((2, 6)))
+        self.register_buffer("weight", torch.rand((2, 6)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         reshaped = x.reshape(2, 6)  # (12,) -> (2, 6)
@@ -514,7 +518,7 @@ class LessTestModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.rand((5, 5)))
+        self.register_buffer("weight", torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return (x < self.weight).to(torch.float32)
@@ -525,7 +529,7 @@ class LessBroadcastModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.rand((5, 5)))
+        self.register_buffer("weight", torch.rand((5, 5)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return (x < self.weight).to(torch.float32)
@@ -567,7 +571,7 @@ class Gather2DAxis0Model(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.rand(6, 4))
+        self.register_buffer("weight", torch.rand(6, 4))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.weight[x]
@@ -586,7 +590,7 @@ class GatherNegativeIndicesModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.rand(6, 4))
+        self.register_buffer("weight", torch.rand(6, 4))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.weight[x]
@@ -638,7 +642,7 @@ class SqueezeInExpressionModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.rand(5))
+        self.register_buffer("weight", torch.rand(5))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         squeezed = x.squeeze(0)  # (1, 5) -> (5,)
@@ -779,87 +783,119 @@ class ReduceMaxInExpressionModel(torch.nn.Module):
 
 # ========== Sigmoid Node Test Models ==========
 
+
 class SigmoidTestModel(torch.nn.Module):
     """Tests sigmoid on a 2D tensor (values in range [0,1] after sigmoid)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.sigmoid(x)
 
+
 class SigmoidInExpressionModel(torch.nn.Module):
     """Tests sigmoid followed by an element-wise multiply."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.sigmoid(x) * 2.0
 
+
 # ========== Tanh Node Test Models ==========
+
 
 class TanhTestModel(torch.nn.Module):
     """Tests tanh on a 2D tensor (outputs in [-1,1])."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.tanh(x)
 
+
 class TanhInExpressionModel(torch.nn.Module):
     """Tests tanh followed by an element-wise add."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.tanh(x) + 1.0
 
+
 # ========== Relu Node Test Models ==========
+
 
 class ReluTestModel(torch.nn.Module):
     """Tests relu with mixed positive/negative inputs (negatives clipped to 0)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.relu(x)
+
 
 class ReluAllNegativeModel(torch.nn.Module):
     """Tests relu with all-negative inputs (entire output should be zeros)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.relu(x)
 
+
 class ReluInExpressionModel(torch.nn.Module):
     """Tests relu followed by an element-wise multiply."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.relu(x) * 2.0
 
+
 # ========== Abs Node Test Models ==========
+
 
 class AbsTestModel(torch.nn.Module):
     """Tests abs with mixed positive/negative inputs."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.abs(x)
+
 
 class AbsAllNegativeModel(torch.nn.Module):
     """Tests abs with all-negative inputs (output equals negation of input)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.abs(x)
 
+
 class AbsInExpressionModel(torch.nn.Module):
     """Tests abs followed by an element-wise add."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.abs(x) + 1.0
 
+
 # ========== Neg Node Test Models ==========
+
 
 class NegTestModel(torch.nn.Module):
     """Tests neg with mixed positive/negative inputs (sign is flipped)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.neg(x)
+
 
 class NegAllPositiveModel(torch.nn.Module):
     """Tests neg with all-positive inputs (output should be all negative)."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.neg(x)
 
+
 class NegInExpressionModel(torch.nn.Module):
     """Tests neg followed by an element-wise add."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.neg(x) + 1.0
 
+
 # ========== Equal Node Test Models ==========
+
 
 class EqualTestModel(torch.nn.Module):
     """Tests element-wise equality against a stored weight with discrete values."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.randint(0, 3, (5, 5)).float())
+        self.register_buffer("weight", torch.randint(0, 3, (5, 5)).float())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return (x == self.weight).to(torch.float32)
@@ -870,7 +906,7 @@ class EqualBroadcastModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer('weight', torch.randint(0, 3, (5, 5)).float())
+        self.register_buffer("weight", torch.randint(0, 3, (5, 5)).float())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return (x == self.weight).to(torch.float32)
@@ -889,17 +925,20 @@ class EqualWithConstantModel(torch.nn.Module):
 
 class ClipTestModel(torch.nn.Module):
     """Tests clip (clamp) with both min and max bounds."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.clamp(x, min=-0.5, max=0.5)
 
 
 class ClipMinOnlyTestModel(torch.nn.Module):
     """Tests clip with only a min bound."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.clamp(x, min=0.0)
 
 
 class ClipMaxOnlyTestModel(torch.nn.Module):
     """Tests clip with only a max bound."""
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.clamp(x, max=0.5)
