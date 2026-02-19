@@ -1039,3 +1039,79 @@ class WhereWithConstantModel(torch.nn.Module):
         pos = torch.tensor([1.0, 2.0, 3.0]).to(x.device)
         neg = torch.tensor([-1.0, -2.0, -3.0]).to(x.device)
         return torch.where(x > 0.0, pos, neg)
+
+
+# ========== Concat Node Test Models ==========
+
+
+class ConcatAxis0Model(torch.nn.Module):
+    """Tests concatenation along axis 0 (stacking rows)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((3, 4)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([self.weight, x], dim=0)
+
+
+class ConcatAxis1Model(torch.nn.Module):
+    """Tests concatenation along axis 1 (stacking columns)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((3, 4)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([self.weight, x], dim=1)
+
+
+class ConcatThreeTensorsModel(torch.nn.Module):
+    """Tests concatenation of three tensors along axis 0."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight1", torch.rand((2, 4)))
+        self.register_buffer("weight2", torch.rand((3, 4)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([self.weight1, self.weight2, x], dim=0)
+
+
+class ConcatNegativeAxisModel(torch.nn.Module):
+    """Tests concatenation with negative axis (-1 = last axis)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((3, 4)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([self.weight, x], dim=-1)
+
+
+class ConcatInExpressionModel(torch.nn.Module):
+    """Tests concat followed by an element-wise operation."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((3, 4)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([self.weight, x], dim=0) * 2.0
+
+
+# ========== Softmax Node Test Models ==========
+
+
+class SoftmaxTestModel(torch.nn.Module):
+    """Tests softmax along the last dimension (default axis=-1)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.softmax(x, dim=-1)
+
+
+class SoftmaxDim0TestModel(torch.nn.Module):
+    """Tests softmax along dim=0."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.softmax(x, dim=0)

@@ -114,6 +114,15 @@ from test_models import (
     WhereSelfSelectModel,
     WhereTestModel,
     WhereWithConstantModel,
+    # Concat models
+    ConcatAxis0Model,
+    ConcatAxis1Model,
+    ConcatThreeTensorsModel,
+    ConcatNegativeAxisModel,
+    ConcatInExpressionModel,
+    # Softmax models
+    SoftmaxTestModel,
+    SoftmaxDim0TestModel,
 )
 
 from luminal import luminal_backend
@@ -1159,3 +1168,71 @@ def test_min_with_constant(device: torch.device):
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
+
+
+# ========== ONNX Concat Node Tests ==========
+# These tests verify parse_concat_node in ops_parse/movement.rs
+
+
+def test_concat_axis0(device: torch.device):
+    """Test concatenation along axis 0 (stacking rows)."""
+    model: torch.nn.Module = ConcatAxis0Model().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+def test_concat_axis1(device: torch.device):
+    """Test concatenation along axis 1 (stacking columns)."""
+    model: torch.nn.Module = ConcatAxis1Model().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+def test_concat_three_tensors(device: torch.device):
+    """Test concatenation of three tensors along axis 0."""
+    model: torch.nn.Module = ConcatThreeTensorsModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+def test_concat_negative_axis(device: torch.device):
+    """Test concatenation with negative axis (-1 = last axis)."""
+    model: torch.nn.Module = ConcatNegativeAxisModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+def test_concat_in_expression(device: torch.device):
+    """Test concat followed by an element-wise operation."""
+    model: torch.nn.Module = ConcatInExpressionModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+# ========== ONNX Softmax Node Tests ==========
+# These tests verify parse_softmax_node in ops_parse/unary.rs
+
+
+def test_softmax(device: torch.device):
+    """Test softmax along last dimension (default axis=-1)."""
+    model: torch.nn.Module = SoftmaxTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 8), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-5)
+
+
+def test_softmax_dim0(device: torch.device):
+    """Test softmax along dim=0."""
+    model: torch.nn.Module = SoftmaxDim0TestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 8), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-5)

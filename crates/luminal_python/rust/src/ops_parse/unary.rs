@@ -236,6 +236,44 @@ pub fn parse_abs_node(
     Ok(())
 }
 
+/// Handle Softmax node: output = softmax(input[0], axis)
+///
+/// ONNX axis attribute defaults to -1 (last dimension, opset 13+).
+/// Negative axis is normalized against the input rank.
+pub fn parse_softmax_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Softmax Node");
+    assert!(
+        node.input.len() == 1,
+        "Softmax nodes need to have one input, {} where present",
+        node.input.len()
+    );
+    assert!(
+        node.output.len() == 1,
+        "Softmax nodes only have one output, {} where present",
+        node.output.len(),
+    );
+    let output_name = &node.output[0];
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Softmax: missing input tensor '{}'", node.input[0]))?;
+
+    let ndim = a.dims().len();
+    let raw_axis = get_int_attr(node, "axis", -1);
+    let axis = if raw_axis < 0 {
+        (ndim as i64 + raw_axis) as usize
+    } else {
+        raw_axis as usize
+    };
+
+    let result = a.softmax(axis);
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Softmax Node");
+    Ok(())
+}
+
 /// Handle Clip node: output = clip(input[0], min, max)
 ///
 /// Equivalent to torch.clamp. min and max are optional tensor inputs

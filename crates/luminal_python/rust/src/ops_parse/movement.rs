@@ -323,6 +323,57 @@ pub fn parse_unsqueeze_node(
     Ok(())
 }
 
+/// Handle Concat node: concatenate multiple tensors along a given axis.
+///
+/// The axis attribute specifies which dimension to concatenate along.
+/// Negative axis values are resolved relative to the input rank.
+/// All inputs must have the same shape except along the concat axis.
+pub fn parse_concat_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Concat Node");
+    assert!(
+        !node.input.is_empty(),
+        "Concat needs at least 1 input, {} present",
+        node.input.len()
+    );
+    assert!(
+        node.output.len() == 1,
+        "Concat must have exactly one output, {} present",
+        node.output.len()
+    );
+
+    let output_name = &node.output[0];
+
+    let first = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Concat: missing input tensor '{}'", node.input[0]))?;
+
+    let ndim = first.dims().len();
+
+    // Extract axis attribute, supporting negative indexing
+    let axis_raw = get_int_attr(node, "axis", 0);
+    let axis = if axis_raw < 0 {
+        (ndim as i64 + axis_raw) as usize
+    } else {
+        axis_raw as usize
+    };
+
+    // Iteratively concat all inputs along the axis
+    let mut result = first;
+    for input_name in &node.input[1..] {
+        let rhs = *tensors
+            .get(input_name)
+            .ok_or_else(|| format!("Concat: missing input tensor '{}'", input_name))?;
+        result = result.concat_along(rhs, axis);
+    }
+
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Concat Node");
+    Ok(())
+}
+
 /// Handle Gather node: index into a tensor along a specified axis.
 ///
 /// For 1D data, performs simple element-wise gathering. For ND data, gathers
