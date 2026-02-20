@@ -824,6 +824,76 @@ pub fn parse_gathernd_node(
     Ok(())
 }
 
+/// Handle Trilu node: apply lower or upper triangular mask to a tensor.
+///
+/// `upper=1` (default) → upper triangle (triu), `upper=0` → lower triangle (tril).
+/// Optional `k` input specifies the diagonal offset (default 0).
+/// Luminal's tril/triu require a square matrix; the last two dims must be equal.
+pub fn parse_trilu_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    cx: &mut Graph,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: Trilu Node");
+
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Trilu: missing input '{}'", node.input[0]))?;
+
+    // Optional k (diagonal offset) — provided as a constant tensor input
+    let k: i32 = if node.input.len() > 1 && !node.input[1].is_empty() {
+        known_values
+            .get(&node.input[1])
+            .and_then(|v| v.first())
+            .map(|&f| f as i32)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let upper = get_int_attr(node, "upper", 1);
+
+    // Validate that the last two dims form a square matrix
+    let dims = input.dims();
+    let ndim = dims.len();
+    assert!(ndim >= 2, "Trilu: input must have at least 2 dimensions");
+    let rows = dims[ndim - 2]
+        .to_usize()
+        .ok_or_else(|| "Trilu: could not resolve row dimension".to_string())?;
+    let cols = dims[ndim - 1]
+        .to_usize()
+        .ok_or_else(|| "Trilu: could not resolve col dimension".to_string())?;
+    assert_eq!(
+        rows,
+        cols,
+        "Trilu: luminal only supports square matrices, got {}x{}",
+        rows,
+        cols
+    );
+    let size = cols;
+
+    // Generate triangular mask (square, size x size), returns Bool dtype
+    let mask = if upper == 0 {
+        cx.tril(size, k)
+    } else {
+        cx.triu(size, k)
+    };
+
+    // Cast Bool mask to F32 and broadcast to match input shape (e.g. batch dims)
+    let target_shape: Vec<usize> = dims
+        .iter()
+        .map(|e| e.to_usize().unwrap_or(1))
+        .collect();
+    let mask_f32 = broadcast_to(mask.cast(DType::F32), &target_shape);
+
+    let result = input * mask_f32;
+    tensors.insert(node.output[0].clone(), result);
+
+    trace!("Finished parse: Trilu Node");
+    Ok(())
+}
+
 /// Helper function for gathering along axis 0
 fn gather_axis0(
     data: GraphTensor,

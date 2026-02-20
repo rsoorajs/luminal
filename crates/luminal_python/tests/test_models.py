@@ -1211,3 +1211,34 @@ class XorTestModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.logical_xor(x > 0.5, self.weight > 0.5).float()
+
+
+# ========== Trilu Node Test Models ==========
+
+
+class TrilTestModel(torch.nn.Module):
+    """Tests lower triangular selection (tril, diagonal=0)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.tril(x)
+
+
+class TriuTestModel(torch.nn.Module):
+    """Tests upper triangular selection (triu, diagonal=0)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.triu(x)
+
+
+class TrilDiagonalTestModel(torch.nn.Module):
+    """Tests tril with a positive diagonal offset."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.tril(x, diagonal=1)
+
+
+class TriuDiagonalTestModel(torch.nn.Module):
+    """Tests triu with a negative diagonal offset."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.triu(x, diagonal=-1)
