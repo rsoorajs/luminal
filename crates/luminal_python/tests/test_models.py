@@ -847,6 +847,72 @@ class ReduceMinInExpressionModel(torch.nn.Module):
         return torch.amin(x, dim=1, keepdim=True) * 2.0  # (3, 4) -> (3, 1)
 
 
+# ========== ReduceMean Node Test Models ==========
+
+
+class ReduceMeanAxis0Model(torch.nn.Module):
+    """Tests mean reduction along axis 0."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.mean(x, dim=0)  # (4, 5) -> (5,)
+
+
+class ReduceMeanAxis1Model(torch.nn.Module):
+    """Tests mean reduction along axis 1."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.mean(x, dim=1)  # (4, 5) -> (4,)
+
+
+class ReduceMeanKeepDimsModel(torch.nn.Module):
+    """Tests mean reduction along axis 1 with keepdim=True."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.mean(x, dim=1, keepdim=True)  # (4, 5) -> (4, 1)
+
+
+class ReduceMeanAllAxesModel(torch.nn.Module):
+    """Tests mean reduction over all axes (scalar result)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.mean()  # (3, 4) -> scalar
+
+
+class ReduceMean3DAxis1Model(torch.nn.Module):
+    """Tests mean reduction along axis 1 for 3D tensor."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.mean(x, dim=1)  # (2, 3, 4) -> (2, 4)
+
+
+class ReduceMeanMultiAxisModel(torch.nn.Module):
+    """Tests mean reduction along multiple axes (0 and 2)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.mean(x, dim=(0, 2))  # (2, 3, 4) -> (3,)
+
+
+class ReduceMeanMultiAxisKeepDimsModel(torch.nn.Module):
+    """Tests mean reduction along axes (0, 2) with keepdim=True."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.mean(x, dim=(0, 2), keepdim=True)  # (2, 3, 4) -> (1, 3, 1)
+
+
+class ReduceMeanNegativeAxisModel(torch.nn.Module):
+    """Tests mean reduction along axis -1 (last axis)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.mean(x, dim=-1)  # (3, 4) -> (3,)
+
+
+class ReduceMeanInExpressionModel(torch.nn.Module):
+    """Tests ReduceMean used in a larger expression (mean * 2.0)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.mean(x, dim=1, keepdim=True) * 2.0  # (3, 4) -> (3, 1)
+
+
 # ========== Sigmoid Node Test Models ==========
 
 

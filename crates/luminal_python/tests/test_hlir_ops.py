@@ -92,6 +92,16 @@ from test_models import (
     ReduceMaxMultiAxisKeepDimsModel,
     ReduceMaxMultiAxisModel,
     ReduceMaxNegativeAxisModel,
+    ReduceMean3DAxis1Model,
+    ReduceMeanAllAxesModel,
+    # ReduceMean models
+    ReduceMeanAxis0Model,
+    ReduceMeanAxis1Model,
+    ReduceMeanInExpressionModel,
+    ReduceMeanKeepDimsModel,
+    ReduceMeanMultiAxisKeepDimsModel,
+    ReduceMeanMultiAxisModel,
+    ReduceMeanNegativeAxisModel,
     ReduceMin3DAxis1Model,
     ReduceMinAllAxesModel,
     # ReduceMin models
@@ -1154,6 +1164,82 @@ def test_reduce_min_negative_axis(device: torch.device):
 def test_reduce_min_in_expression(device: torch.device):
     """Test ReduceMin used in a larger expression (min * 2.0)."""
     model: torch.nn.Module = ReduceMinInExpressionModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+# ========== ONNX ReduceMean Node Tests ==========
+# These tests verify parse_reduce_mean_node in ops_parse/reduction.rs
+
+
+def test_reduce_mean_axis0(device: torch.device):
+    """Test mean reduction along axis 0."""
+    model: torch.nn.Module = ReduceMeanAxis0Model().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_mean_axis1(device: torch.device):
+    """Test mean reduction along axis 1."""
+    model: torch.nn.Module = ReduceMeanAxis1Model().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_mean_keepdims(device: torch.device):
+    """Test mean reduction along axis 1 with keepdim=True."""
+    model: torch.nn.Module = ReduceMeanKeepDimsModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_mean_all_axes(device: torch.device):
+    """Test mean reduction over all axes (produces a scalar)."""
+    model: torch.nn.Module = ReduceMeanAllAxesModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_mean_3d_axis1(device: torch.device):
+    """Test mean reduction along axis 1 for a 3D tensor."""
+    model: torch.nn.Module = ReduceMean3DAxis1Model().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_mean_multi_axis(device: torch.device):
+    """Test mean reduction along multiple axes (0 and 2)."""
+    model: torch.nn.Module = ReduceMeanMultiAxisModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_mean_multi_axis_keepdims(device: torch.device):
+    """Test mean reduction along axes (0, 2) with keepdim=True."""
+    model: torch.nn.Module = ReduceMeanMultiAxisKeepDimsModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_mean_negative_axis(device: torch.device):
+    """Test mean reduction along axis -1 (last axis)."""
+    model: torch.nn.Module = ReduceMeanNegativeAxisModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_mean_in_expression(device: torch.device):
+    """Test ReduceMean used in a larger expression (mean * 2.0)."""
+    model: torch.nn.Module = ReduceMeanInExpressionModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.rand((3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
