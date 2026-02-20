@@ -57,6 +57,7 @@ pub fn process_onnx_nodes(
             "Squeeze" => parse_squeeze_node(node, tensors, known_values)?,
             "ReduceSum" => parse_reduce_sum_node(node, tensors, known_values)?,
             "ReduceMax" => parse_reduce_max_node(node, tensors, known_values)?,
+            "Trilu" => parse_trilu_node(node, tensors, cx, known_values)?,
             _ => {
                 panic!("Missing Node {}", node.op_type)
             }

@@ -7,6 +7,8 @@ from test_models import (
     AddAddTestModel,
     AddConstantTestModel,
     AddTestModel,
+    # And model
+    AndTestModel,
     CastBoolToFloatModel,
     # Cast models
     CastDoubleToFloatModel,
@@ -16,6 +18,12 @@ from test_models import (
     CastNegativeValuesModel,
     CastScalarValueModel,
     CastWith2DTensorModel,
+    # Concat models
+    ConcatAxis0Model,
+    ConcatAxis1Model,
+    ConcatInExpressionModel,
+    ConcatNegativeAxisModel,
+    ConcatThreeTensorsModel,
     Constant1DArrayFloatModel,
     Constant2DMatrixFloatModel,
     ConstantBoolConversionModel,
@@ -46,15 +54,31 @@ from test_models import (
     GatherConstantFoldModel,
     GatherEmbeddingModel,
     GatherNegativeIndicesModel,
+    # GreaterOrEqual models
+    GreaterOrEqualTestModel,
+    GreaterOrEqualWithConstantModel,
     LessBroadcastModel,
+    # LessOrEqual models
+    LessOrEqualTestModel,
+    LessOrEqualWithConstantModel,
     # Less models
     LessTestModel,
     LessWithConstantModel,
     LinearLayerModel,
+    # Max models
+    MaxTestModel,
+    MaxWithConstantModel,
+    # Min models
+    MinTestModel,
+    MinWithConstantModel,
     ModByConstantModel,
     # Mod models
     ModTestModel,
     MulTestModel,
+    # Not model
+    NotTestModel,
+    # Or model
+    OrTestModel,
     PowByConstantModel,
     # Pow models
     PowTestModel,
@@ -91,6 +115,9 @@ from test_models import (
     ShapeReshapeBatchFlattenModel,
     ShapeReshapeKeepBatchModel,
     SinTestModel,
+    SoftmaxDim0TestModel,
+    # Softmax models
+    SoftmaxTestModel,
     SqrtTestModel,
     SqueezeAllDimsModel,
     # Squeeze models
@@ -104,37 +131,15 @@ from test_models import (
     TransposeInExpressionModel,
     TransposeReverseTestModel,
     TransposeTestModel,
-    # Max models
-    MaxTestModel,
-    MaxWithConstantModel,
-    # Min models
-    MinTestModel,
-    MinWithConstantModel,
+    TrilDiagonalTestModel,
+    # Trilu models
+    TrilTestModel,
+    TriuDiagonalTestModel,
+    TriuTestModel,
     # Where models
     WhereSelfSelectModel,
     WhereTestModel,
     WhereWithConstantModel,
-    # Concat models
-    ConcatAxis0Model,
-    ConcatAxis1Model,
-    ConcatThreeTensorsModel,
-    ConcatNegativeAxisModel,
-    ConcatInExpressionModel,
-    # Softmax models
-    SoftmaxTestModel,
-    SoftmaxDim0TestModel,
-    # LessOrEqual models
-    LessOrEqualTestModel,
-    LessOrEqualWithConstantModel,
-    # GreaterOrEqual models
-    GreaterOrEqualTestModel,
-    GreaterOrEqualWithConstantModel,
-    # Not model
-    NotTestModel,
-    # And model
-    AndTestModel,
-    # Or model
-    OrTestModel,
     # Xor model
     XorTestModel,
 )
@@ -1110,7 +1115,9 @@ def test_where(device: torch.device):
     """Test element-wise where with condition selecting from weight buffers."""
     model: torch.nn.Module = WhereTestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((5, 5), device=device) - 0.5  # mix of positive and negative
+    x: torch.Tensor = (
+        torch.rand((5, 5), device=device) - 0.5
+    )  # mix of positive and negative
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
@@ -1120,7 +1127,9 @@ def test_where_self_select(device: torch.device):
     """Test where selecting between input and its negation (abs-like pattern)."""
     model: torch.nn.Module = WhereSelfSelectModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.rand((5, 5), device=device) - 0.5  # mix of positive and negative
+    x: torch.Tensor = (
+        torch.rand((5, 5), device=device) - 0.5
+    )  # mix of positive and negative
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
@@ -1348,3 +1357,38 @@ def test_xor(device: torch.device):
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
+
+
+# ========== ONNX Trilu Node Tests ==========
+
+
+def test_tril(device: torch.device):
+    """Test lower triangular masking (tril, diagonal=0)."""
+    model: torch.nn.Module = TrilTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+def test_triu(device: torch.device):
+    """Test upper triangular masking (triu, diagonal=0)."""
+    model: torch.nn.Module = TriuTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+def test_tril_diagonal(device: torch.device):
+    """Test tril with a positive diagonal offset."""
+    model: torch.nn.Module = TrilDiagonalTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+def test_triu_diagonal(device: torch.device):
+    """Test triu with a negative diagonal offset."""
+    model: torch.nn.Module = TriuDiagonalTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device)
+    assert torch.allclose(model_compiled(x), model(x))
