@@ -253,10 +253,18 @@ pub fn parse_squeeze_node(
     // cannot be retrieved from the runtime.
     // (Same pattern as parse_transpose_node, parse_reshape_node, parse_identity.)
     let output_dims = result.dims();
-    let shape: Vec<usize> = output_dims
-        .iter()
-        .map(|d| d.to_usize().expect("Squeeze: dim must be concrete"))
-        .collect();
+    // If squeezing produced a 0-dim scalar, represent as [1] to avoid CUDA launching
+    // kernels with grid (0, 1, 1). luminal's Expression::product() returns 0 for empty
+    // iterators, making any kernel on a 0-dim tensor invalid on CUDA.
+    let shape: Vec<usize> = if output_dims.is_empty() {
+        result.shape = ShapeTracker::new(vec![1usize]);
+        vec![1usize]
+    } else {
+        output_dims
+            .iter()
+            .map(|d| d.to_usize().expect("Squeeze: dim must be concrete"))
+            .collect()
+    };
     let one = result.graph().constant_float(1.0);
     let one_expanded = broadcast_to(one, &shape);
     result *= one_expanded;
