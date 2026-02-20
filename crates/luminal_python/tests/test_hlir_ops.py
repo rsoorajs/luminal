@@ -92,6 +92,16 @@ from test_models import (
     ReduceMaxMultiAxisKeepDimsModel,
     ReduceMaxMultiAxisModel,
     ReduceMaxNegativeAxisModel,
+    ReduceMin3DAxis1Model,
+    ReduceMinAllAxesModel,
+    # ReduceMin models
+    ReduceMinAxis0Model,
+    ReduceMinAxis1Model,
+    ReduceMinInExpressionModel,
+    ReduceMinKeepDimsModel,
+    ReduceMinMultiAxisKeepDimsModel,
+    ReduceMinMultiAxisModel,
+    ReduceMinNegativeAxisModel,
     ReduceSum3DAxis1Model,
     ReduceSumAllAxesModel,
     # ReduceSum models
@@ -1068,6 +1078,82 @@ def test_reduce_max_negative_axis(device: torch.device):
 def test_reduce_max_in_expression(device: torch.device):
     """Test ReduceMax used in a larger expression (max * 2.0)."""
     model: torch.nn.Module = ReduceMaxInExpressionModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+# ========== ONNX ReduceMin Node Tests ==========
+# These tests verify parse_reduce_min_node in ops_parse/reduction.rs
+
+
+def test_reduce_min_axis0(device: torch.device):
+    """Test min reduction along axis 0."""
+    model: torch.nn.Module = ReduceMinAxis0Model().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_min_axis1(device: torch.device):
+    """Test min reduction along axis 1."""
+    model: torch.nn.Module = ReduceMinAxis1Model().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_min_keepdims(device: torch.device):
+    """Test min reduction along axis 1 with keepdim=True."""
+    model: torch.nn.Module = ReduceMinKeepDimsModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_min_all_axes(device: torch.device):
+    """Test min reduction over all axes (produces a scalar)."""
+    model: torch.nn.Module = ReduceMinAllAxesModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_min_3d_axis1(device: torch.device):
+    """Test min reduction along axis 1 for a 3D tensor."""
+    model: torch.nn.Module = ReduceMin3DAxis1Model().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_min_multi_axis(device: torch.device):
+    """Test min reduction along multiple axes (0 and 2)."""
+    model: torch.nn.Module = ReduceMinMultiAxisModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_min_multi_axis_keepdims(device: torch.device):
+    """Test min reduction along axes (0, 2) with keepdim=True."""
+    model: torch.nn.Module = ReduceMinMultiAxisKeepDimsModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_min_negative_axis(device: torch.device):
+    """Test min reduction along axis -1 (last axis)."""
+    model: torch.nn.Module = ReduceMinNegativeAxisModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+def test_reduce_min_in_expression(device: torch.device):
+    """Test ReduceMin used in a larger expression (min * 2.0)."""
+    model: torch.nn.Module = ReduceMinInExpressionModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.rand((3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)

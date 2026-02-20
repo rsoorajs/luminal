@@ -781,6 +781,72 @@ class ReduceMaxInExpressionModel(torch.nn.Module):
         return torch.amax(x, dim=1, keepdim=True) * 2.0  # (3, 4) -> (3, 1)
 
 
+# ========== ReduceMin Node Test Models ==========
+
+
+class ReduceMinAxis0Model(torch.nn.Module):
+    """Tests min reduction along axis 0."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amin(x, dim=0)  # (4, 5) -> (5,)
+
+
+class ReduceMinAxis1Model(torch.nn.Module):
+    """Tests min reduction along axis 1."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amin(x, dim=1)  # (4, 5) -> (4,)
+
+
+class ReduceMinKeepDimsModel(torch.nn.Module):
+    """Tests min reduction along axis 1 with keepdim=True."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amin(x, dim=1, keepdim=True)  # (4, 5) -> (4, 1)
+
+
+class ReduceMinAllAxesModel(torch.nn.Module):
+    """Tests min reduction over all axes (scalar result)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.min()  # (3, 4) -> scalar
+
+
+class ReduceMin3DAxis1Model(torch.nn.Module):
+    """Tests min reduction along axis 1 for 3D tensor."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amin(x, dim=1)  # (2, 3, 4) -> (2, 4)
+
+
+class ReduceMinMultiAxisModel(torch.nn.Module):
+    """Tests min reduction along multiple axes (0 and 2)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amin(x, dim=(0, 2))  # (2, 3, 4) -> (3,)
+
+
+class ReduceMinMultiAxisKeepDimsModel(torch.nn.Module):
+    """Tests min reduction along axes (0, 2) with keepdim=True."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amin(x, dim=(0, 2), keepdim=True)  # (2, 3, 4) -> (1, 3, 1)
+
+
+class ReduceMinNegativeAxisModel(torch.nn.Module):
+    """Tests min reduction along axis -1 (last axis)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amin(x, dim=-1)  # (3, 4) -> (3,)
+
+
+class ReduceMinInExpressionModel(torch.nn.Module):
+    """Tests ReduceMin used in a larger expression (min * 2.0)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.amin(x, dim=1, keepdim=True) * 2.0  # (3, 4) -> (3, 1)
+
+
 # ========== Sigmoid Node Test Models ==========
 
 
