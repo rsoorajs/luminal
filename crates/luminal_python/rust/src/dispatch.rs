@@ -43,7 +43,7 @@ pub fn process_onnx_nodes(
             "Shape" => parse_shape_node(node, tensors, cx, weight_data, known_values)?,
             "Gather" => parse_gather_node(node, tensors, cx, weight_data, known_values)?,
             "GatherND" => parse_gathernd_node(node, tensors, cx, weight_data, known_values)?,
-            "Less" => parse_less_node(node, tensors, known_values)?,
+            "Less" => parse_less_node(node, tensors)?,
             "Greater" => parse_greater_node(node, tensors)?,
             "LessOrEqual" => parse_less_or_equal_node(node, tensors)?,
             "GreaterOrEqual" => parse_greater_or_equal_node(node, tensors)?,

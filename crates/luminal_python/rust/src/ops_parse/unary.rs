@@ -5,235 +5,60 @@ use onnx_protobuf::NodeProto;
 
 use crate::util::{broadcast_to, get_int_attr};
 
-/// Handle Sqrt node: output = input[0].sqrt()
-///
-/// Supports numpy-style broadcasting and constant folding when both inputs
-/// have known values at graph-build time.
 pub fn parse_sqrt_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
 ) -> Result<(), String> {
-    trace!("Starting parse: Sqrt Node");
-    assert!(
-        node.input.len() == 1,
-        "Sqrt nodes need to have one input {} where present",
-        node.input.len()
-    );
-
-    assert!(
-        node.output.len() == 1,
-        "Div nodes only have one input, {} where present",
-        node.input.len(),
-    );
-    let output_name = &node.output[0];
-    let a = *tensors
-        .get(&node.input[0])
-        .ok_or_else(|| format!("Sqrt: missing input tensor '{}'", node.input[0]))?;
-
-    let result = a.sqrt();
-    tensors.insert(output_name.clone(), result);
-    trace!("Finished parse: Sqrt Node");
-
-    Ok(())
+    parse_unary_op(node, tensors, "Sqrt", |a| a.sqrt())
 }
 
-/// Handle Sin node: output = input[0].sin()
 pub fn parse_sin_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
 ) -> Result<(), String> {
-    trace!("Starting parse: Sin Node");
-    assert!(
-        node.input.len() == 1,
-        "Sin nodes need to have one input {} where present",
-        node.input.len()
-    );
-
-    assert!(
-        node.output.len() == 1,
-        "Sin nodes only have one output, {} where present",
-        node.output.len(),
-    );
-    let output_name = &node.output[0];
-    let a = *tensors
-        .get(&node.input[0])
-        .ok_or_else(|| format!("Sin: missing input tensor '{}'", node.input[0]))?;
-
-    let result = a.sin();
-    tensors.insert(output_name.clone(), result);
-    trace!("Finished parse: Sin Node");
-
-    Ok(())
+    parse_unary_op(node, tensors, "Sin", |a| a.sin())
 }
 
-/// Handle Neg node: output = -input[0]
 pub fn parse_neg_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
 ) -> Result<(), String> {
-    trace!("Starting parse: Neg Node");
-    assert!(
-        node.input.len() == 1,
-        "Neg nodes need to have one input {} where present",
-        node.input.len()
-    );
-
-    assert!(
-        node.output.len() == 1,
-        "Neg nodes only have one output, {} where present",
-        node.output.len(),
-    );
-    let output_name = &node.output[0];
-    let a = *tensors
-        .get(&node.input[0])
-        .ok_or_else(|| format!("Neg: missing input tensor '{}'", node.input[0]))?;
-
-    let result = a.neg();
-    tensors.insert(output_name.clone(), result);
-    trace!("Finished parse: Neg Node");
-
-    Ok(())
+    parse_unary_op(node, tensors, "Neg", |a| a.neg())
 }
 
-/// Handle Cos node: output = input[0].cos()
 pub fn parse_cos_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
 ) -> Result<(), String> {
-    trace!("Starting parse: Cos Node");
-    assert!(
-        node.input.len() == 1,
-        "Cos nodes need to have one input {} where present",
-        node.input.len()
-    );
-
-    assert!(
-        node.output.len() == 1,
-        "Cos nodes only have one output, {} where present",
-        node.output.len(),
-    );
-    let output_name = &node.output[0];
-    let a = *tensors
-        .get(&node.input[0])
-        .ok_or_else(|| format!("Cos: missing input tensor '{}'", node.input[0]))?;
-
-    let result = a.cos();
-    tensors.insert(output_name.clone(), result);
-    trace!("Finished parse: Cos Node");
-
-    Ok(())
+    parse_unary_op(node, tensors, "Cos", |a| a.cos())
 }
 
 pub fn parse_sigmoid_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
 ) -> Result<(), String> {
-    trace!("Starting parse: Sigmoid Node");
-    assert!(
-        node.input.len() == 1,
-        "Sigmoid nodes need to have one input {} where present",
-        node.input.len()
-    );
-
-    assert!(
-        node.output.len() == 1,
-        "Sigmoid nodes only have one output, {} where present",
-        node.output.len(),
-    );
-    let output_name = &node.output[0];
-    let a = *tensors
-        .get(&node.input[0])
-        .ok_or_else(|| format!("Sigmoid: missing input tensor '{}'", node.input[0]))?;
-
-    let result = a.sigmoid();
-    tensors.insert(output_name.clone(), result);
-    trace!("Finished parse: Sigmoid Node");
-
-    Ok(())
+    parse_unary_op(node, tensors, "Sigmoid", |a| a.sigmoid())
 }
 
 pub fn parse_tanh_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
 ) -> Result<(), String> {
-    trace!("Starting parse: Tanh Node");
-    assert!(
-        node.input.len() == 1,
-        "Tanh nodes need to have one input {} where present",
-        node.input.len()
-    );
-
-    assert!(
-        node.output.len() == 1,
-        "Tanh nodes only have one output, {} where present",
-        node.output.len(),
-    );
-    let output_name = &node.output[0];
-    let a = *tensors
-        .get(&node.input[0])
-        .ok_or_else(|| format!("Tanh: missing input tensor '{}'", node.input[0]))?;
-
-    let result = a.tanh();
-    tensors.insert(output_name.clone(), result);
-    trace!("Finished parse: Tanh Node");
-
-    Ok(())
+    parse_unary_op(node, tensors, "Tanh", |a| a.tanh())
 }
 
 pub fn parse_relu_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
 ) -> Result<(), String> {
-    trace!("Starting parse: Relu Node");
-    assert!(
-        node.input.len() == 1,
-        "Relu nodes need to have one input {} where present",
-        node.input.len()
-    );
-
-    assert!(
-        node.output.len() == 1,
-        "Relu nodes only have one output, {} where present",
-        node.output.len(),
-    );
-    let output_name = &node.output[0];
-    let a = *tensors
-        .get(&node.input[0])
-        .ok_or_else(|| format!("Relu: missing input tensor '{}'", node.input[0]))?;
-
-    let result = a.relu();
-    tensors.insert(output_name.clone(), result);
-    trace!("Finished parse: Relu Node");
-
-    Ok(())
+    parse_unary_op(node, tensors, "Relu", |a| a.relu())
 }
 
 pub fn parse_abs_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
 ) -> Result<(), String> {
-    trace!("Starting parse: Abs Node");
-    assert!(
-        node.input.len() == 1,
-        "Abs nodes need to have one input {} where present",
-        node.input.len()
-    );
-
-    assert!(
-        node.output.len() == 1,
-        "Abs nodes only have one output, {} where present",
-        node.output.len(),
-    );
-    let output_name = &node.output[0];
-    let a = *tensors
-        .get(&node.input[0])
-        .ok_or_else(|| format!("Abs: missing input tensor '{}'", node.input[0]))?;
-
-    let result = a.abs();
-    tensors.insert(output_name.clone(), result);
-    trace!("Finished parse: Abs Node");
-
-    Ok(())
+    parse_unary_op(node, tensors, "Abs", |a| a.abs())
 }
 
 /// Handle Softmax node: output = softmax(input[0], axis)
@@ -482,5 +307,33 @@ pub fn parse_cast_node(
     }
 
     trace!("Finished parse: Cast Node");
+    Ok(())
+}
+
+fn parse_unary_op(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    op_name: &str,
+    op: impl Fn(GraphTensor) -> GraphTensor,
+) -> Result<(), String> {
+    trace!("Starting parse: {} Node", op_name);
+    assert!(
+        node.input.len() == 1,
+        "{} should have 1 input, got {}",
+        op_name,
+        node.input.len()
+    );
+    assert!(
+        node.output.len() == 1,
+        "{} should have 1 output, got {}",
+        op_name,
+        node.output.len()
+    );
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("{}: missing input tensor '{}'", op_name, node.input[0]))?;
+    let result = op(a);
+    tensors.insert(node.output[0].clone(), result);
+    trace!("Finished parse: {} Node", op_name);
     Ok(())
 }
