@@ -8,7 +8,7 @@ use crate::util::get_int_attr;
 /// Handle ReduceSum node: reduce tensor by summing along specified axes.
 ///
 /// Supports multi-axis reduction, keepdims, and noop_with_empty_axes.
-/// Bridges ONNX spec to luminal's single-axis .sum() by iterating axis-by-axis.
+/// Delegates to luminal's ToAxes API for multi-axis reduction.
 /// Opset 13+: axes come from second input; Opset 11: from "axes" attribute.
 pub fn parse_reduce_sum_node(
     node: &NodeProto,
@@ -20,7 +20,7 @@ pub fn parse_reduce_sum_node(
         tensors,
         known_values,
         "ReduceSum",
-        |t, ax| t.sum(ax),
+        |t, axes| t.sum(axes),
         |flat, _n| flat.sum(1),
     )
 }
@@ -28,7 +28,7 @@ pub fn parse_reduce_sum_node(
 /// Handle ReduceMax node: computes the maximum along specified axes.
 ///
 /// Supports multi-axis reduction, keepdims, and noop_with_empty_axes.
-/// Bridges ONNX spec to luminal's single-axis .max() by iterating axis-by-axis.
+/// Delegates to luminal's ToAxes API for multi-axis reduction.
 /// Opset 13+: axes come from second input; Opset 11: from "axes" attribute.
 pub fn parse_reduce_max_node(
     node: &NodeProto,
@@ -40,7 +40,7 @@ pub fn parse_reduce_max_node(
         tensors,
         known_values,
         "ReduceMax",
-        |t, ax| t.max(ax),
+        |t, axes| t.max(axes),
         |flat, _n| flat.max(1),
     )
 }
@@ -48,7 +48,7 @@ pub fn parse_reduce_max_node(
 /// Handle ReduceMin node: computes the minimum along specified axes.
 ///
 /// Supports multi-axis reduction, keepdims, and noop_with_empty_axes.
-/// Bridges ONNX spec to luminal's single-axis .min() by iterating axis-by-axis.
+/// Delegates to luminal's ToAxes API for multi-axis reduction.
 /// Opset 13+: axes come from second input; Opset 11: from "axes" attribute.
 pub fn parse_reduce_min_node(
     node: &NodeProto,
@@ -60,7 +60,7 @@ pub fn parse_reduce_min_node(
         tensors,
         known_values,
         "ReduceMin",
-        |t, ax| t.min(ax),
+        |t, axes| t.min(axes),
         |flat, _n| flat.min(1),
     )
 }
@@ -68,7 +68,7 @@ pub fn parse_reduce_min_node(
 /// Handle ReduceMean node: computes the mean along specified axes.
 ///
 /// Supports multi-axis reduction, keepdims, and noop_with_empty_axes.
-/// Bridges ONNX spec to luminal's single-axis .mean() by iterating axis-by-axis.
+/// Delegates to luminal's ToAxes API for multi-axis reduction.
 /// Opset 13+: axes come from second input; Opset 11: from "axes" attribute.
 pub fn parse_reduce_mean_node(
     node: &NodeProto,
@@ -82,7 +82,7 @@ pub fn parse_reduce_mean_node(
         tensors,
         known_values,
         "ReduceMean",
-        |t, ax| t.mean(ax),
+        |t, axes| t.mean(axes),
         |flat, n| flat.sum(1) / n as f32,
     )
 }
@@ -92,7 +92,7 @@ fn parse_reduce_op(
     tensors: &mut HashMap<String, GraphTensor>,
     known_values: &mut HashMap<String, Vec<f32>>,
     op_name: &str,
-    per_axis_op: impl Fn(GraphTensor, usize) -> GraphTensor,
+    reduce_op: impl Fn(GraphTensor, Vec<usize>) -> GraphTensor,
     all_axes_op: impl Fn(GraphTensor, usize) -> GraphTensor,
 ) -> Result<(), String> {
     trace!("Starting parse: {} Node", op_name);
@@ -190,19 +190,8 @@ fn parse_reduce_op(
         return Ok(());
     }
 
-    // Partial reduction: iterative single-axis reduction
-    let mut result = input;
-    let mut current_axes = normalized_axes;
-    for i in 0..current_axes.len() {
-        let axis = current_axes[i];
-        result = per_axis_op(result, axis);
-        // Each reduction removes a dimension; shift subsequent axis indices down
-        for item in current_axes.iter_mut().skip(i + 1) {
-            if *item > axis {
-                *item -= 1;
-            }
-        }
-    }
+    // Partial reduction: luminal's ToAxes API handles axis shifting internally
+    let mut result = reduce_op(input, normalized_axes);
 
     // Re-insert size-1 dims at original positions (ascending order keeps positions correct)
     if keepdims {
