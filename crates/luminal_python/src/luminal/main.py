@@ -12,12 +12,8 @@ from .compiled_model import CompiledModel
 
 
 def luminal_backend(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]):
-    backend = os.getenv("LUMINAL_BACKEND", "native").lower()
-
-    if backend not in ["native", "cuda"]:
-        raise ValueError(
-            f"Invalid LUMINAL_BACKEND value: {backend}. Must be 'native' or 'cuda'"
-        )
+    device = example_inputs[0].device if example_inputs else torch.device("cpu")
+    backend = "cuda" if device.type == "cuda" else "native"
 
     tmp = tempfile.NamedTemporaryFile(suffix=".onnx", delete=False)
     tmp_path = tmp.name
