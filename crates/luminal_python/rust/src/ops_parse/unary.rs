@@ -379,6 +379,42 @@ pub fn parse_floor_node(
     Ok(())
 }
 
+/// Handle Ceil node: output = ceil(input[0])
+///
+/// Implemented as: trunc(x) + (x > trunc(x) ? 1 : 0)
+/// where trunc is truncation toward zero via cast to Int then back to F32.
+/// This correctly handles positive non-integer values (e.g. ceil(1.5) = 2).
+pub fn parse_ceil_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: Ceil Node");
+    assert!(
+        node.input.len() == 1,
+        "Ceil nodes need to have one input {} where present",
+        node.input.len()
+    );
+    assert!(
+        node.output.len() == 1,
+        "Ceil nodes only have one output, {} where present",
+        node.output.len(),
+    );
+    let output_name = &node.output[0];
+    let a = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Ceil: missing input tensor '{}'", node.input[0]))?;
+
+    // trunc(x): truncation toward zero
+    let trunc = a.cast(DType::Int).cast(DType::F32);
+    // For positive non-integers, x > trunc(x), so add 1
+    let adjustment = a.gt(trunc).cast(DType::F32);
+    let result = trunc + adjustment;
+    tensors.insert(output_name.clone(), result);
+    trace!("Finished parse: Ceil Node");
+
+    Ok(())
+}
+
 pub fn parse_cast_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,

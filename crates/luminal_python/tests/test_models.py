@@ -421,6 +421,30 @@ class FloorInExpressionModel(torch.nn.Module):
         return torch.floor(x) * 2.0
 
 
+# ========== Ceil Node Test Models ==========
+
+
+class CeilTestModel(torch.nn.Module):
+    """Tests element-wise ceil operation."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ceil(x)
+
+
+class CeilNegativeModel(torch.nn.Module):
+    """Tests ceil with negative values."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ceil(x)
+
+
+class CeilInExpressionModel(torch.nn.Module):
+    """Tests ceil as part of a larger expression (ceil + mul)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ceil(x) * 2.0
+
+
 # ========== Reshape Node Test Models ==========
 # These models test ONNX Reshape node handling in ops_parse.rs
 
