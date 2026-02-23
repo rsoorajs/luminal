@@ -23,6 +23,7 @@ pub fn process_onnx_nodes(
             "Transpose" => parse_transpose_node(node, tensors)?,
             "Concat" => parse_concat_node(node, tensors)?,
             "Floor" => parse_floor_node(node, tensors)?,
+            "Ceil" => parse_ceil_node(node, tensors)?,
             "Sin" => parse_sin_node(node, tensors)?,
             "Neg" => parse_neg_node(node, tensors)?,
             "Cos" => parse_cos_node(node, tensors)?,

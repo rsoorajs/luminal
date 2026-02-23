@@ -873,11 +873,9 @@ pub fn parse_trilu_node(
         .to_usize()
         .ok_or_else(|| "Trilu: could not resolve col dimension".to_string())?;
     assert_eq!(
-        rows,
-        cols,
+        rows, cols,
         "Trilu: luminal only supports square matrices, got {}x{}",
-        rows,
-        cols
+        rows, cols
     );
     let size = cols;
 
@@ -889,10 +887,7 @@ pub fn parse_trilu_node(
     };
 
     // Cast Bool mask to F32 and broadcast to match input shape (e.g. batch dims)
-    let target_shape: Vec<usize> = dims
-        .iter()
-        .map(|e| e.to_usize().unwrap_or(1))
-        .collect();
+    let target_shape: Vec<usize> = dims.iter().map(|e| e.to_usize().unwrap_or(1)).collect();
     let mask_f32 = broadcast_to(mask.cast(DType::F32), &target_shape);
 
     let result = input * mask_f32;

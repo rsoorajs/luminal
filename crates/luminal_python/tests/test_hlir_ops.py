@@ -43,6 +43,10 @@ from test_models import (
     EqualBroadcastModel,
     EqualTestModel,
     EqualWithConstantModel,
+    CeilInExpressionModel,
+    CeilNegativeModel,
+    # Ceil models
+    CeilTestModel,
     FloorInExpressionModel,
     FloorNegativeModel,
     # Floor models
@@ -636,6 +640,39 @@ def test_floor_negative(device: torch.device):
 def test_floor_in_expression(device: torch.device):
     """Test floor followed by mul (floor as part of a larger graph)."""
     model: torch.nn.Module = FloorInExpressionModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([1.5, 2.8, 3.3, 4.1]).to(device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ONNX Ceil Node Tests ==========
+
+
+def test_ceil(device: torch.device):
+    """Test element-wise ceil on positive floats."""
+    model: torch.nn.Module = CeilTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([1.2, 2.7, 3.0, 4.9, 5.5]).to(device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_ceil_negative(device: torch.device):
+    """Test ceil with negative values."""
+    model: torch.nn.Module = CeilNegativeModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([-1.2, -2.7, -0.1, 0.9, -3.5]).to(device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_ceil_in_expression(device: torch.device):
+    """Test ceil followed by mul (ceil as part of a larger graph)."""
+    model: torch.nn.Module = CeilInExpressionModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.tensor([1.5, 2.8, 3.3, 4.1]).to(device)
     original: torch.Tensor = model(x)
