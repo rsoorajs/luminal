@@ -3,7 +3,7 @@ use std::{collections::HashMap, ops::Neg};
 use luminal::prelude::{tracing::trace, *};
 use onnx_protobuf::NodeProto;
 
-use crate::util::{broadcast_to, get_int_attr};
+use crate::util::{broadcast_to, get_float_attr, get_int_attr};
 
 pub fn parse_sqrt_node(
     node: &NodeProto,
@@ -335,5 +335,65 @@ fn parse_unary_op(
     let result = op(a);
     tensors.insert(node.output[0].clone(), result);
     trace!("Finished parse: {} Node", op_name);
+    Ok(())
+}
+
+/// Handle IsNaN node: return 1.0 where input is NaN, 0.0 otherwise.
+///
+/// Note: luminal's ne(x, x) returns 0 for normal floats and may not correctly
+/// detect actual NaN values (hardware-dependent). For inference with non-NaN
+/// inputs this is correct.
+pub fn parse_isnan_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    parse_unary_op(node, tensors, "IsNaN", |a| a.ne(a))
+}
+
+/// Handle LayerNormalization node (opset 17).
+///
+/// Inputs: X (required), scale (required), bias (optional)
+/// Attributes: axis (default -1), epsilon (default 1e-5)
+/// Normalizes over axes [axis, axis+1, ..., rank-1], then applies scale and bias.
+/// Only output 0 (the normalized result) is wired; outputs 1/2 (mean, inv_std_var)
+/// are training-only and not supported for inference.
+pub fn parse_layernorm_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: LayerNormalization Node");
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("LayerNorm: missing input '{}'", node.input[0]))?;
+    let scale = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("LayerNorm: missing scale '{}'", node.input[1]))?;
+
+    let ndim = input.dims().len();
+    let axis_raw = get_int_attr(node, "axis", -1);
+    let axis = if axis_raw < 0 {
+        (ndim as i64 + axis_raw) as usize
+    } else {
+        axis_raw as usize
+    };
+    let epsilon = get_float_attr(node, "epsilon", 1e-5);
+    let axes: Vec<usize> = (axis..ndim).collect();
+
+    let mut result = input.layer_norm(axes, epsilon);
+
+    // Apply scale (broadcast to input shape)
+    let input_shape: Vec<usize> = input.dims().iter().map(|d| d.to_usize().unwrap()).collect();
+    result = result * broadcast_to(scale, &input_shape);
+
+    // Apply optional bias
+    if node.input.len() > 2 && !node.input[2].is_empty() {
+        let bias = *tensors
+            .get(&node.input[2])
+            .ok_or_else(|| format!("LayerNorm: missing bias '{}'", node.input[2]))?;
+        result = result + broadcast_to(bias, &input_shape);
+    }
+
+    tensors.insert(node.output[0].clone(), result);
+    trace!("Finished parse: LayerNormalization Node");
     Ok(())
 }

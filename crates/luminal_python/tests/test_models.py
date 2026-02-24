@@ -1398,3 +1398,167 @@ class TriuDiagonalTestModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.triu(x, diagonal=-1)
+
+
+# ========== Unsqueeze Node Test Models ==========
+
+
+class UnsqueezeAxis0Model(torch.nn.Module):
+    """Tests unsqueeze along axis 0: adds a leading size-1 dimension."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.unsqueeze(0)  # (N,) -> (1, N)
+
+
+class UnsqueezeMiddleModel(torch.nn.Module):
+    """Tests unsqueeze along axis 1: inserts a size-1 dimension in the middle."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.unsqueeze(1)  # (B, N) -> (B, 1, N)
+
+
+# ========== Greater Node Test Models ==========
+
+
+class GreaterTestModel(torch.nn.Module):
+    """Tests element-wise greater-than comparison between two input tensors."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((5, 5)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x > self.weight).to(torch.float32)
+
+
+class GreaterWithConstantModel(torch.nn.Module):
+    """Tests greater-than against a scalar constant (ONNX Greater + Constant nodes)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x > 0.5).to(torch.float32)
+
+
+# ========== MatMul Test Models ==========
+
+
+class MatMul2DModel(torch.nn.Module):
+    """Tests direct 2D matrix multiplication: (3,4) @ (4,5) -> (3,5)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((4, 5)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.matmul(x, self.weight)
+
+
+class MatMulBatchedModel(torch.nn.Module):
+    """Tests batched 3D matrix multiplication: (2,3,4) @ (2,4,5) -> (2,3,5)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("weight", torch.rand((2, 4, 5)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.matmul(x, self.weight)
+
+
+# ========== Multi-op Chain Test Models ==========
+
+
+class ManualLayerNormModel(torch.nn.Module):
+    """Tests manual layer normalization: ReduceMean -> Sub -> Pow -> ReduceMean -> Add -> Sqrt -> Div."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mean = x.mean(dim=-1, keepdim=True)
+        var = ((x - mean) ** 2).mean(dim=-1, keepdim=True)
+        return (x - mean) / torch.sqrt(var + 1e-5)
+
+
+class ScaledDotProductModel(torch.nn.Module):
+    """Tests scaled dot-product attention: softmax(Q @ K.T / sqrt(d)) @ V."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("k", torch.rand((4, 8)))
+        self.register_buffer("v", torch.rand((4, 8)))
+
+    def forward(self, q: torch.Tensor) -> torch.Tensor:
+        d = q.shape[-1] ** 0.5
+        scores = torch.matmul(q, self.k.transpose(-2, -1)) / d
+        weights = torch.softmax(scores, dim=-1)
+        return torch.matmul(weights, self.v)
+
+
+class MLPBlockModel(torch.nn.Module):
+    """Tests two-layer MLP using matmul+bias: (8->16, ReLU) -> (16->4)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("w1", torch.rand((8, 16)))
+        self.register_buffer("b1", torch.rand(16))
+        self.register_buffer("w2", torch.rand((16, 4)))
+        self.register_buffer("b2", torch.rand(4))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = torch.relu(torch.matmul(x, self.w1) + self.b1)
+        return torch.matmul(h, self.w2) + self.b2
+
+
+# ========== GatherElements Node Test Models ==========
+
+
+class GatherElementsTestModel(torch.nn.Module):
+    """Tests element-wise gather along axis=1 using torch.gather (→ ONNX GatherElements)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        idx = torch.tensor([[0, 1, 1], [1, 0, 0]], device=x.device)
+        return torch.gather(x, 1, idx)
+
+
+# ========== Expand Node Test Models ==========
+
+
+class ExpandTestModel(torch.nn.Module):
+    """Tests broadcasting a (1, 4) tensor to (3, 4) via .expand() (→ ONNX Expand)."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.expand(3, 4)
+
+
+# ========== IsNaN Node Test Models ==========
+
+
+class IsNaNTestModel(torch.nn.Module):
+    """Tests IsNaN — for normal float inputs should return all zeros."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.isnan(x).float()
+
+
+# ========== LayerNormalization Node Test Models ==========
+
+
+class LayerNormTestModel(torch.nn.Module):
+    """Tests nn.LayerNorm which exports as ONNX LayerNormalization."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.norm = torch.nn.LayerNorm(4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.norm(x)
+
+
+# ========== Gemm Node Test Models ==========
+
+
+class GemmTestModel(torch.nn.Module):
+    """Tests Gemm: nn.Linear exports as ONNX Gemm (weight transposed)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = torch.nn.Linear(4, 8)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)

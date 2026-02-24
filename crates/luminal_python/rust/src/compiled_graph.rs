@@ -103,8 +103,6 @@ impl OnnxGraphResult {
                 }
             }
         }
-        // Added by claude, still unsure of its purpose
-
         // Process computation nodes (Constant nodes add to weight_data)
         process_onnx_nodes(
             &onnx_graph.node,
@@ -166,7 +164,6 @@ impl OnnxGraphResult {
 
         // Track which tensor names are Input nodes (includes those created during process_onnx_nodes)
         let input_tensor_names: HashSet<String> = tensors.keys().cloned().collect();
-        //        context.build_search_space::<NativeRuntime>();
 
         let rt = match backend {
             #[cfg(feature = "cuda")]

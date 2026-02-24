@@ -1,4 +1,22 @@
 A couple of short things to keep in mind
+
+## Lessons Learned
+
+At the end of any session that involved a hard or non-obvious bug, append an entry to
+`LessonsLearned.md` in this directory. A "hard bug" means any bug that required significant
+investigation — intermittent failures, wrong output without a crash, egglog/optimizer issues,
+or anything that took more than a few minutes to locate.
+
+Each entry should cover:
+1. **What the symptom was** (test failure, wrong output, panic, etc.)
+2. **What the actual root cause was** (the specific code/logic that was wrong)
+3. **Why it was hard to find** (what made it non-obvious or intermittent)
+4. **The fix** (what changed and why it works)
+5. **A general principle** extracted from the bug — something that helps avoid the same
+   class of mistake in future code
+
+The goal is to build a living record of codebase-specific pitfalls that future sessions can
+consult before writing new egglog rules, CUDA kernels, or optimizer passes.
 1. If you want to run tests:
    - `./run_test.sh` - runs tests with the native backend
    - `./run_tests_cuda.sh` - runs tests with the CUDA backend
