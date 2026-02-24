@@ -166,6 +166,36 @@ from test_models import (
     WhereWithConstantModel,
     # Xor model
     XorTestModel,
+    # Activation function models
+    ReluTestModel,
+    SigmoidTestModel,
+    TanhTestModel,
+    # Clip models
+    ClipTestModel,
+    ClipMinOnlyTestModel,
+    # Unsqueeze models
+    UnsqueezeAxis0Model,
+    UnsqueezeMiddleModel,
+    # Greater models
+    GreaterTestModel,
+    GreaterWithConstantModel,
+    # MatMul models
+    MatMul2DModel,
+    MatMulBatchedModel,
+    # Multi-op chain models
+    ManualLayerNormModel,
+    ScaledDotProductModel,
+    MLPBlockModel,
+    # GatherElements model
+    GatherElementsTestModel,
+    # Expand model
+    ExpandTestModel,
+    # IsNaN model
+    IsNaNTestModel,
+    # LayerNormalization model
+    LayerNormTestModel,
+    # Gemm model
+    GemmTestModel,
 )
 
 from luminal import luminal_backend
@@ -1601,3 +1631,216 @@ def test_triu_diagonal(device: torch.device):
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.rand((5, 5), device=device)
     assert torch.allclose(model_compiled(x), model(x))
+
+
+# ========== Activation Function Tests ==========
+
+
+def test_relu(device: torch.device):
+    """Test relu with mixed positive/negative inputs (negatives clipped to 0)."""
+    model: torch.nn.Module = ReluTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0], device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_sigmoid(device: torch.device):
+    """Test sigmoid on a 2D tensor (outputs in range [0, 1])."""
+    model: torch.nn.Module = SigmoidTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 8), device=device) * 4.0 - 2.0
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-5)
+
+
+def test_tanh(device: torch.device):
+    """Test tanh on a 2D tensor (outputs in range [-1, 1])."""
+    model: torch.nn.Module = TanhTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 8), device=device) * 4.0 - 2.0
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-5)
+
+
+# ========== Clip Tests ==========
+
+
+def test_clip(device: torch.device):
+    """Test clamp with both min and max bounds."""
+    model: torch.nn.Module = ClipTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5), device=device) * 2.0 - 1.0
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_clip_min_only(device: torch.device):
+    """Test clamp with only a min bound (no upper limit)."""
+    model: torch.nn.Module = ClipMinOnlyTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 5), device=device) * 2.0 - 1.0
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== Unsqueeze Tests ==========
+
+
+def test_unsqueeze(device: torch.device):
+    """Test unsqueeze along axis 0: (N,) -> (1, N)."""
+    model: torch.nn.Module = UnsqueezeAxis0Model().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(6, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_unsqueeze_middle(device: torch.device):
+    """Test unsqueeze along axis 1: (B, N) -> (B, 1, N)."""
+    model: torch.nn.Module = UnsqueezeMiddleModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== Greater Tests ==========
+
+
+def test_greater(device: torch.device):
+    """Test element-wise greater-than comparison against a stored weight tensor."""
+    model: torch.nn.Module = GreaterTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((5, 5), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_greater_with_constant(device: torch.device):
+    """Test greater-than against a scalar constant (exercises Greater + Constant nodes)."""
+    model: torch.nn.Module = GreaterWithConstantModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== MatMul Tests ==========
+
+
+def test_matmul_2d(device: torch.device):
+    """Test direct 2D matrix multiplication: (3,4) @ (4,5) -> (3,5)."""
+    model: torch.nn.Module = MatMul2DModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-5)
+
+
+def test_matmul_batched(device: torch.device):
+    """Test batched 3D matrix multiplication: (2,3,4) @ (2,4,5) -> (2,3,5)."""
+    model: torch.nn.Module = MatMulBatchedModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3, 4), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-5)
+
+
+# ========== Multi-op Chain Tests ==========
+
+
+def test_layer_norm(device: torch.device):
+    """Test manual layer normalization over the last dimension of a (2, 4) tensor."""
+    model: torch.nn.Module = ManualLayerNormModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 4), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-5)
+
+
+def test_scaled_dot_product_attention(device: torch.device):
+    """Test scaled dot-product attention pattern: softmax(Q @ K.T / sqrt(d)) @ V."""
+    model: torch.nn.Module = ScaledDotProductModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    q: torch.Tensor = torch.rand((4, 8), device=device)
+    original: torch.Tensor = model(q)
+    output: torch.Tensor = model_compiled(q)
+    assert torch.allclose(output, original, atol=1e-5)
+
+
+def test_mlp_block(device: torch.device):
+    """Test two-layer MLP: Linear(8,16) -> ReLU -> Linear(16,4) on input (2,8)."""
+    model: torch.nn.Module = MLPBlockModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 8), device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-5)
+
+
+# ========== ONNX GatherElements Node Tests ==========
+
+
+def test_gather_elements(device: torch.device):
+    """Tests GatherElements op (torch.gather → ONNX GatherElements)."""
+    model: torch.nn.Module = GatherElementsTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 3), device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+# ========== ONNX Expand Node Tests ==========
+
+
+def test_expand(device: torch.device):
+    """Tests Expand op (tensor.expand → ONNX Expand)."""
+    model: torch.nn.Module = ExpandTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((1, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+# ========== ONNX IsNaN Node Tests ==========
+
+
+def test_isnan(device: torch.device):
+    """Tests IsNaN op — all zeros for normal float inputs."""
+    model: torch.nn.Module = IsNaNTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 3), device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+# ========== ONNX LayerNormalization Node Tests ==========
+
+
+def test_layernorm(device: torch.device):
+    """Tests LayerNormalization op (nn.LayerNorm → ONNX LayerNormalization)."""
+    model: torch.nn.Module = LayerNormTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((2, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+# ========== ONNX Gemm Node Tests ==========
+
+
+def test_gemm(device: torch.device):
+    """Tests Gemm op (nn.Linear → ONNX Gemm)."""
+    model: torch.nn.Module = GemmTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((3, 4), device=device)
+    assert torch.allclose(model_compiled(x), model(x), atol=1e-5)

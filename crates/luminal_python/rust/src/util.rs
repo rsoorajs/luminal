@@ -279,3 +279,13 @@ pub fn get_int_attr(node: &NodeProto, name: &str, default: i64) -> i64 {
     }
     default
 }
+
+/// Get a float attribute from a node, with a default value
+pub fn get_float_attr(node: &NodeProto, name: &str, default: f32) -> f32 {
+    for attr in &node.attribute {
+        if attr.name == name {
+            return attr.f;
+        }
+    }
+    default
+}

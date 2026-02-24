@@ -5,6 +5,56 @@ use onnx_protobuf::NodeProto;
 
 use crate::util::{broadcast_to, get_int_attr};
 
+/// Handle GatherElements node: gather elements along an axis using per-element indices.
+///
+/// ONNX semantics: output[i0,..,ik] = data[i0,..,i_{axis-1}, indices[i0,..,ik], i_{axis+1},..,ik]
+pub fn parse_gather_elements_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 2, "GatherElements needs 2 inputs");
+    let data = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("GatherElements: missing data '{}'", node.input[0]))?;
+    let indices = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("GatherElements: missing indices '{}'", node.input[1]))?;
+
+    let ndim = data.dims().len();
+    let axis_raw = get_int_attr(node, "axis", 0);
+    let axis = if axis_raw < 0 {
+        (ndim as i64 + axis_raw) as usize
+    } else {
+        axis_raw as usize
+    };
+
+    let result = data.gather_elements(indices, axis) * 1.0;
+    tensors.insert(node.output[0].clone(), result);
+    Ok(())
+}
+
+/// Handle Expand node: broadcast input to a target shape.
+///
+/// The target shape is provided as the second input (must be a known constant).
+pub fn parse_expand_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 2, "Expand needs 2 inputs");
+    let input = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Expand: missing input '{}'", node.input[0]))?;
+    let shape_vals = known_values
+        .get(&node.input[1])
+        .ok_or_else(|| format!("Expand: shape '{}' must be a known constant", node.input[1]))?;
+
+    let target_shape: Vec<usize> = shape_vals.iter().map(|&v| v as usize).collect();
+    let result = broadcast_to(input, &target_shape) * 1.0;
+    tensors.insert(node.output[0].clone(), result);
+    Ok(())
+}
+
 /// Handle Transpose node: output = permute(input, perm)
 ///
 /// The perm attribute specifies the permutation of dimensions.
@@ -320,6 +370,24 @@ pub fn parse_unsqueeze_node(
     for &axis in &axes {
         result = result.unsqueeze(axis);
     }
+
+    let output_dims = result.dims();
+    // If squeezing produced a 0-dim scalar, represent as [1] to avoid CUDA launching
+    // kernels with grid (0, 1, 1). luminal's Expression::product() returns 0 for empty
+    // iterators, making any kernel on a 0-dim tensor invalid on CUDA.
+    let shape: Vec<usize> = if output_dims.is_empty() {
+        result.shape = ShapeTracker::new(vec![1usize]);
+        vec![1usize]
+    } else {
+        output_dims
+            .iter()
+            .map(|d| d.to_usize().expect("Squeeze: dim must be concrete"))
+            .collect()
+    };
+
+    let one = result.graph().constant_float(1.0);
+    let one_expanded = broadcast_to(one, &shape);
+    result *= one_expanded;
 
     let output_name = &node.output[0];
     tensors.insert(output_name.clone(), result);
