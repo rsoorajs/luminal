@@ -32,6 +32,27 @@ fn parse_onnx(path: &str, backend: &str) -> Result<OnnxGraphResult, String> {
     let model = ModelProto::parse_from_bytes(&data)
         .map_err(|e| format!("Failed to parse Onnx Model: {}", e))
         .unwrap();
+
+    let opset_version = model
+        .opset_import
+        .iter()
+        .find(|entry| entry.domain.is_empty())
+        .map(|entry| entry.version);
+
+    match opset_version {
+        Some(20) => {}
+        Some(v) => {
+            return Err(format!(
+                "Unsupported ONNX opset version {v}. Only opset 25 is supported."
+            ));
+        }
+        None => {
+            return Err(
+                "No ONNX opset version found in model. Only opset 25 is supported.".to_string(),
+            );
+        }
+    }
+
     OnnxGraphResult::parse_graph(model, model_directory, backend)
 }
 
