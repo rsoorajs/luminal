@@ -320,6 +320,12 @@ impl GraphTensor {
         self.argsort(axis, true).slice_along(..k, axis)
     }
 
+    /// Sort and retrieve top-k **values** (largest first)
+    pub fn topk_values(self, k: usize, axis: usize) -> GraphTensor {
+        let top_k_idx = self.topk_indexes(k, axis);
+        self.gather_elements(top_k_idx, axis)
+    }
+
     /// Apply a cumulative reduction operation along dimensions
     ///
     /// See `cumsum` or `cummax` for usage examples.

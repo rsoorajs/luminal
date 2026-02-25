@@ -17,7 +17,8 @@
         ; Match Sum that reduces the Mul (k dimension)
         (= ?sum (Sum ?out_shape ?k ?mul ?sum_in_stride ?k_stride ?sum_out_stride))
 
-        ; Get dimensions from output shape
+        ; Get dimensions from output shape (must be exactly 2D for cuBLAS)
+        (= (len ?out_shape) 2)
         (= ?m (nth_from_end ?out_shape 1))
         (= ?n (nth_from_end ?out_shape 0))
         (!= ?m (MNum 0))

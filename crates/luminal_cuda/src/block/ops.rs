@@ -1828,6 +1828,7 @@ impl EgglogOp for RowEmbed {
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
                     (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
+                    (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
                     (= ?token_ids_cast (Cast ?token_ids ?cast_size ?cast_dtype))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
@@ -1846,6 +1847,7 @@ impl EgglogOp for RowEmbed {
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
                     (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
+                    (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
                     (= ?token_ids_cast (Cast ?token_ids ?cast_size ?cast_dtype))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
@@ -1864,6 +1866,7 @@ impl EgglogOp for RowEmbed {
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
                     (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
+                    (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
@@ -1881,6 +1884,7 @@ impl EgglogOp for RowEmbed {
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
                     (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
+                    (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))

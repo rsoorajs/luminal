@@ -375,6 +375,10 @@ impl KernelOp for KernelSumReduce {
         let dtype = cuda_dtype(self.dtype);
         let includes = dtype_includes(&[self.dtype]);
         let n_outputs: Expression = self.out_shape.iter().copied().product();
+        eprintln!(
+            "[KernelSumReduce] out_shape={:?} n_outputs={:?}",
+            self.out_shape, n_outputs
+        );
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
         let dyn_dims_param = if vars.is_empty() {
             ""
@@ -2435,6 +2439,7 @@ impl EgglogOp for KernelEmbed {
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
                     (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
+                    (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
                     (= ?token_ids_cast (Cast ?token_ids ?cast_size ?cast_dtype))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
@@ -2453,6 +2458,7 @@ impl EgglogOp for KernelEmbed {
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
                     (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
+                    (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
                     (= ?token_ids_cast (Cast ?token_ids ?cast_size ?cast_dtype))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
@@ -2471,6 +2477,7 @@ impl EgglogOp for KernelEmbed {
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
                     (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
+                    (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
@@ -2488,6 +2495,7 @@ impl EgglogOp for KernelEmbed {
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
                     (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
+                    (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))

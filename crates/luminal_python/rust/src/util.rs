@@ -280,6 +280,16 @@ pub fn get_int_attr(node: &NodeProto, name: &str, default: i64) -> i64 {
     default
 }
 
+/// Get a string attribute from a node, with a default value
+pub fn get_str_attr(node: &NodeProto, name: &str, default: &str) -> String {
+    for attr in &node.attribute {
+        if attr.name == name {
+            return String::from_utf8_lossy(&attr.s).into_owned();
+        }
+    }
+    default.to_string()
+}
+
 /// Get a float attribute from a node, with a default value
 pub fn get_float_attr(node: &NodeProto, name: &str, default: f32) -> f32 {
     for attr in &node.attribute {

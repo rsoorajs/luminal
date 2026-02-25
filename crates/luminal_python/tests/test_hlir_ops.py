@@ -166,6 +166,11 @@ from test_models import (
     ReshapeToFlatModel,
     ReshapeToMatrixModel,
     ScaledDotProductModel,
+    # ScatterElements models
+    ScatterElementsTestModel,
+    ScatterElementsAxis0TestModel,
+    # ScatterND model
+    ScatterNDTestModel,
     ShapeReshapeBatchFlattenModel,
     ShapeReshapeKeepBatchModel,
     SigmoidTestModel,
@@ -1930,6 +1935,48 @@ def test_onehot(device: torch.device):
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.tensor([0, 2, 4, 1, 3], device=device)
     assert torch.allclose(model_compiled(x), model(x))
+
+
+# ========== ScatterElements Tests ==========
+
+
+def test_scatter_elements(device: torch.device):
+    """Tests scatter along axis=1 using torch.scatter."""
+    model: torch.nn.Module = ScatterElementsTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor(
+        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], device=device
+    )
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+def test_scatter_elements_axis0(device: torch.device):
+    """Tests scatter along axis=0 using torch.scatter."""
+    model: torch.nn.Module = ScatterElementsAxis0TestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor(
+        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], device=device
+    )
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== ScatterND Tests ==========
+
+
+def test_scatter_nd(device: torch.device):
+    """Tests ScatterND via index_put: x[indices] = updates."""
+    model: torch.nn.Module = ScatterNDTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor(
+        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], device=device
+    )
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
 
 
 # ========== LLaMA3 Model Test ==========

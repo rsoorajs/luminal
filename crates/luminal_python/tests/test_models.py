@@ -1629,3 +1629,40 @@ class OneHotTestModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.one_hot(x.long(), num_classes=5).float()
+
+
+# ========== ScatterElements Node Test Models ==========
+
+
+class ScatterElementsTestModel(torch.nn.Module):
+    """Tests scatter along axis=1 using torch.scatter."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        idx = torch.tensor([[0, 2], [1, 0]], device=x.device)
+        src = torch.tensor([[10.0, 30.0], [20.0, 40.0]], device=x.device)
+        return x.scatter(1, idx, src)
+
+
+class ScatterElementsAxis0TestModel(torch.nn.Module):
+    """Tests scatter along axis=0 using torch.scatter."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        idx = torch.tensor([[1], [0]], device=x.device)
+        src = torch.tensor([[99.0], [88.0]], device=x.device)
+        return x.scatter(0, idx, src)
+
+
+# ========== ScatterND Node Test Models ==========
+
+
+class ScatterNDTestModel(torch.nn.Module):
+    """Tests ScatterND via index_put: x[indices] = updates."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        indices = torch.tensor([0, 2], device=x.device)
+        updates = torch.tensor(
+            [[10.0, 11.0, 12.0], [20.0, 21.0, 22.0]], device=x.device
+        )
+        result = x.clone()
+        result[indices] = updates
+        return result
