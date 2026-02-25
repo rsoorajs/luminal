@@ -375,10 +375,7 @@ impl KernelOp for KernelSumReduce {
         let dtype = cuda_dtype(self.dtype);
         let includes = dtype_includes(&[self.dtype]);
         let n_outputs: Expression = self.out_shape.iter().copied().product();
-        eprintln!(
-            "[KernelSumReduce] out_shape={:?} n_outputs={:?}",
-            self.out_shape, n_outputs
-        );
+
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
         let dyn_dims_param = if vars.is_empty() {
             ""
