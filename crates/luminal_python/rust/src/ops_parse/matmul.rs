@@ -17,7 +17,7 @@ pub fn parse_matmul_node(
     let b = *tensors
         .get(&node.input[1])
         .ok_or_else(|| format!("MatMul: missing input tensor '{}'", node.input[1]))?;
-    eprintln!("[parse_matmul] a.dims={:?} b.dims={:?}", a.dims(), b.dims());
+
     //TODO: enforce some kind of check here that they are broadcastable
     let result = a.matmul(b);
     let output_name = &node.output[0];

@@ -275,12 +275,16 @@ pub fn parse_cast_node(
     let output_name = &node.output[0];
 
     // Use the *1.0 workaround when:
-    // 1. cast() was a no-op (input already has target dtype — same node returned), OR
+    // 1. cast() was a no-op (input already has target dtype — same node returned):
+    //    multiply to force materialization while preserving the original dtype.
     // 2. source dtype is Int (e.g., ONNX INT32/INT64 → F32):
     //    the CUDA backend lacks a Cast(Int→F32) kernel; since all runtime data is
     //    already stored as F32 (Python converts inputs via .float()), this cast is
     //    semantically a no-op and *1.0 produces a CUDA-executable Mul node instead.
-    let result = if cast_result.id == input.id || input.dtype == DType::Int {
+    //    IMPORTANT: put the F32 constant on the LEFT so the result dtype is F32
+    //    (GraphTensor Mul uses the left operand's dtype).
+    let result = if cast_result.id == input.id {
+        // No-op cast: materialize while preserving original dtype
         let src_dims = input.dims();
         let shape: Vec<usize> = src_dims
             .iter()
@@ -289,6 +293,16 @@ pub fn parse_cast_node(
         let one = input.graph().constant_float(1.0);
         let one_expanded = broadcast_to(one, &shape);
         input * one_expanded
+    } else if input.dtype == DType::Int {
+        // Int → non-Int: put F32 constant on left so result dtype is F32
+        let src_dims = input.dims();
+        let shape: Vec<usize> = src_dims
+            .iter()
+            .map(|d| d.to_usize().expect("cast no-op: dim must be concrete"))
+            .collect();
+        let one = input.graph().constant_float(1.0);
+        let one_expanded = broadcast_to(one, &shape);
+        one_expanded * input
     } else {
         cast_result
     };

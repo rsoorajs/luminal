@@ -14,7 +14,7 @@ uv run maturin develop --manifest-path rust/Cargo.toml
 
 # Run pytest
 echo "Step 3: Running pytest..."
-uv run pytest tests/test_hlir_ops.py::test_onehot -v
+uv run pytest tests/ -v
 
 echo ""
 echo "=== Tests Complete ==="
