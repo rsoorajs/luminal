@@ -61,6 +61,13 @@ pub fn parse_abs_node(
     parse_unary_op(node, tensors, "Abs", |a| a.abs())
 }
 
+pub fn parse_reciprocal_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    parse_unary_op(node, tensors, "Reciprocal", |a| a.reciprocal())
+}
+
 /// Handle Softmax node: output = softmax(input[0], axis)
 ///
 /// ONNX axis attribute defaults to -1 (last dimension, opset 13+).
@@ -348,6 +355,36 @@ pub fn parse_isnan_node(
     tensors: &mut HashMap<String, GraphTensor>,
 ) -> Result<(), String> {
     parse_unary_op(node, tensors, "IsNaN", |a| a.ne(a))
+}
+
+/// Handle Erf node: output = erf(input[0])
+///
+/// Uses the Abramowitz & Stegun 7.1.26 polynomial approximation (max error < 1.5e-7):
+///   For x ≥ 0: erf(x) ≈ 1 - (a1·t + a2·t² + a3·t³ + a4·t⁴ + a5·t⁵) · exp(-x²)
+///   where t = 1 / (1 + 0.3275911·x)
+///     a1 =  0.254829592
+///     a2 = -0.284496736
+///     a3 =  1.421413741
+///     a4 = -1.453152027
+///     a5 =  1.061405429
+/// Extended to all x via odd symmetry: erf(-x) = -erf(x).
+pub fn parse_erf_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    parse_unary_op(node, tensors, "Erf", |x| {
+        let a = x.abs();
+        let t = (1.0_f32 + 0.3275911_f32 * a).reciprocal();
+        // Horner evaluation of a1*t + a2*t² + a3*t³ + a4*t⁴ + a5*t⁵
+        // poly = t*(a1 + t*(a2 + t*(a3 + t*(a4 + a5*t))))
+        let h = t * 1.061405429_f32 - 1.453152027_f32;  // a4 + a5*t
+        let h = t * h + 1.421413741_f32;
+        let h = t * h - 0.284496736_f32;
+        let h = t * h + 0.254829592_f32;
+        let poly = t * h;
+        let erf_abs = 1.0_f32 - poly * (-a * a).exp();
+        x.sign() * erf_abs
+    })
 }
 
 /// Handle LayerNormalization node (opset 17).

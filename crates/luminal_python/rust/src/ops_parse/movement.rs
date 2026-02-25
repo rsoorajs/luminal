@@ -965,6 +965,221 @@ pub fn parse_trilu_node(
     Ok(())
 }
 
+/// Handle Slice node: extract a sub-tensor using start/end/axes/steps inputs.
+///
+/// Steps must be 1 (non-unit steps require unfold which is out of scope).
+/// Negative starts/ends are normalized against the axis dimension.
+/// ONNX INT64_MAX for "to end" is handled by clamping to the axis dimension.
+/// Multiple axes are handled by chaining slice_along calls.
+pub fn parse_slice_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    let data = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Slice: missing data '{}'", node.input[0]))?;
+    let dims: Vec<usize> = data
+        .dims()
+        .iter()
+        .map(|d| d.to_usize().expect("Slice: dim must be concrete"))
+        .collect();
+    let rank = dims.len();
+
+    let starts: Vec<i64> = known_values
+        .get(&node.input[1])
+        .ok_or("Slice: starts must be constant")?
+        .iter()
+        .map(|&v| v as i64)
+        .collect();
+
+    let ends: Vec<i64> = known_values
+        .get(&node.input[2])
+        .ok_or("Slice: ends must be constant")?
+        .iter()
+        .map(|&v| v as i64)
+        .collect();
+
+    let axes: Vec<usize> = if node.input.len() > 3 && !node.input[3].is_empty() {
+        known_values
+            .get(&node.input[3])
+            .ok_or("Slice: axes must be constant")?
+            .iter()
+            .map(|&a| {
+                let a = a as i64;
+                if a < 0 {
+                    (a + rank as i64) as usize
+                } else {
+                    a as usize
+                }
+            })
+            .collect()
+    } else {
+        (0..starts.len()).collect()
+    };
+
+    // Validate steps=1 if provided
+    if node.input.len() > 4 && !node.input[4].is_empty() {
+        if let Some(steps) = known_values.get(&node.input[4]) {
+            for &s in steps {
+                if s as i64 != 1 {
+                    return Err(format!(
+                        "Slice: step={} not supported (only step=1)",
+                        s as i64
+                    ));
+                }
+            }
+        }
+    }
+
+    // Build ranges for all axes, defaulting to full range
+    let mut ranges: Vec<(usize, usize)> = dims.iter().map(|&d| (0, d)).collect();
+    for (i, &ax) in axes.iter().enumerate() {
+        let dim = dims[ax] as i64;
+        let start = {
+            let s = starts[i];
+            let s = if s < 0 { s + dim } else { s };
+            s.max(0).min(dim) as usize
+        };
+        let end = {
+            let e = ends[i];
+            let e = if e < 0 { e + dim } else { e };
+            e.max(0).min(dim) as usize
+        };
+        ranges[ax] = (start, end);
+    }
+    let result = data.slice(&ranges);
+
+    tensors.insert(node.output[0].clone(), result);
+    Ok(())
+}
+
+/// Handle Split node: split a tensor into multiple chunks along an axis.
+///
+/// Split sizes come from the optional second input (must be constant) or are
+/// computed as equal chunks from the number of outputs.
+/// Each non-empty output is inserted into the tensors map under its output name.
+pub fn parse_split_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    let data = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Split: missing data '{}'", node.input[0]))?;
+    let rank = data.dims().len();
+    let raw_axis = get_int_attr(node, "axis", 0);
+    let axis = if raw_axis < 0 {
+        (raw_axis + rank as i64) as usize
+    } else {
+        raw_axis as usize
+    };
+    let axis_dim = data.dims()[axis]
+        .to_usize()
+        .expect("Split: axis dim must be concrete");
+
+    let split_sizes: Vec<usize> = if node.input.len() > 1 && !node.input[1].is_empty() {
+        known_values
+            .get(&node.input[1])
+            .ok_or("Split: split sizes must be constant")?
+            .iter()
+            .map(|&v| v as usize)
+            .collect()
+    } else {
+        let n = node.output.len();
+        let each = axis_dim / n;
+        vec![each; n]
+    };
+
+    assert_eq!(
+        split_sizes.iter().sum::<usize>(),
+        axis_dim,
+        "Split: split sizes sum {} != axis_dim {}",
+        split_sizes.iter().sum::<usize>(),
+        axis_dim
+    );
+
+    let mut offset = 0usize;
+    for (i, &size) in split_sizes.iter().enumerate() {
+        if !node.output[i].is_empty() {
+            let segment = data.slice_along(offset..offset + size, axis);
+            tensors.insert(node.output[i].clone(), segment);
+        }
+        offset += size;
+    }
+    Ok(())
+}
+
+/// Handle OneHot node: convert integer indices to one-hot encoded vectors.
+///
+/// Builds the result as: mask * (on_value - off_value) + off_value
+/// where mask = (arange(depth) == indices) broadcasted to output_shape.
+/// This avoids needing a dedicated OneHot primitive.
+pub fn parse_onehot_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    let indices = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("OneHot: missing indices '{}'", node.input[0]))?;
+    let rank = indices.dims().len();
+
+    let depth = known_values
+        .get(&node.input[1])
+        .ok_or("OneHot: depth must be constant")?[0] as usize;
+
+    let values = known_values
+        .get(&node.input[2])
+        .ok_or("OneHot: values must be constant")?;
+    let (off_value, on_value) = (values[0], values[1]);
+
+    let raw_axis = get_int_attr(node, "axis", -1);
+    // Axis is into the OUTPUT shape (rank+1 dims), so normalize against rank+1
+    let axis = if raw_axis < 0 {
+        (raw_axis + rank as i64 + 1) as usize
+    } else {
+        raw_axis as usize
+    };
+
+    // output_shape: insert depth at position `axis` in indices.dims()
+    let output_shape: Vec<usize> = {
+        let mut s: Vec<usize> = indices
+            .dims()
+            .iter()
+            .map(|d| d.to_usize().unwrap())
+            .collect();
+        s.insert(axis, depth);
+        s
+    };
+
+    // Build arange shaped to [1]*axis + [depth] + [1]*(rank-axis)
+    // then broadcast to output_shape
+    let mut ar = indices.graph().arange(depth);
+    for _ in 0..axis {
+        ar = ar.expand_dim(0, 1);
+    }
+    for _ in (axis + 1)..(rank + 1) {
+        let n = ar.dims().len();
+        ar = ar.expand_dim(n, 1);
+    }
+    ar.shape.expand(output_shape.clone());
+
+    // Expand indices to output_shape: insert size-1 at axis, broadcast
+    let mut idx = indices.cast(DType::Int);
+    idx = idx.expand_dim(axis, 1);
+    idx.shape.expand(output_shape.clone());
+
+    // Use ne (not-equal) which returns F32 (0.0=equal, 1.0=not-equal), avoiding Bool dtype
+    // At one-hot position: 0.0 * (off - on) + on = on_value
+    // Elsewhere:           1.0 * (off - on) + on = off_value
+    let ne_mask = idx.cast(DType::F32).ne(ar.cast(DType::F32));
+
+    let result = ne_mask * (off_value - on_value) + on_value;
+    tensors.insert(node.output[0].clone(), result);
+    Ok(())
+}
+
 /// Helper function for gathering along axis 0
 fn gather_axis0(
     data: GraphTensor,

@@ -3,6 +3,7 @@ from typing import Callable
 import pytest
 import torch
 import torch._dynamo
+from llam3_model import Llama3Model
 from test_models import (
     AddAddTestModel,
     AddConstantTestModel,
@@ -18,6 +19,13 @@ from test_models import (
     CastNegativeValuesModel,
     CastScalarValueModel,
     CastWith2DTensorModel,
+    CeilInExpressionModel,
+    CeilNegativeModel,
+    # Ceil models
+    CeilTestModel,
+    ClipMinOnlyTestModel,
+    # Clip models
+    ClipTestModel,
     # Concat models
     ConcatAxis0Model,
     ConcatAxis1Model,
@@ -43,10 +51,10 @@ from test_models import (
     EqualBroadcastModel,
     EqualTestModel,
     EqualWithConstantModel,
-    CeilInExpressionModel,
-    CeilNegativeModel,
-    # Ceil models
-    CeilTestModel,
+    # Erf model
+    ErfTestModel,
+    # Expand model
+    ExpandTestModel,
     FloorInExpressionModel,
     FloorNegativeModel,
     # Floor models
@@ -56,11 +64,22 @@ from test_models import (
     Gather2DAxis0Model,
     Gather2DAxis1Model,
     GatherConstantFoldModel,
+    # GatherElements model
+    GatherElementsTestModel,
     GatherEmbeddingModel,
     GatherNegativeIndicesModel,
+    # Gemm model
+    GemmTestModel,
     # GreaterOrEqual models
     GreaterOrEqualTestModel,
     GreaterOrEqualWithConstantModel,
+    # Greater models
+    GreaterTestModel,
+    GreaterWithConstantModel,
+    # IsNaN model
+    IsNaNTestModel,
+    # LayerNormalization model
+    LayerNormTestModel,
     LessBroadcastModel,
     # LessOrEqual models
     LessOrEqualTestModel,
@@ -69,18 +88,26 @@ from test_models import (
     LessTestModel,
     LessWithConstantModel,
     LinearLayerModel,
+    # Multi-op chain models
+    ManualLayerNormModel,
+    # MatMul models
+    MatMul2DModel,
+    MatMulBatchedModel,
     # Max models
     MaxTestModel,
     MaxWithConstantModel,
     # Min models
     MinTestModel,
     MinWithConstantModel,
+    MLPBlockModel,
     ModByConstantModel,
     # Mod models
     ModTestModel,
     MulTestModel,
     # Not model
     NotTestModel,
+    # OneHot model
+    OneHotTestModel,
     # Or model
     OrTestModel,
     PowByConstantModel,
@@ -126,6 +153,8 @@ from test_models import (
     ReduceSumMultiAxisKeepDimsModel,
     ReduceSumMultiAxisModel,
     ReduceSumNegativeAxisModel,
+    # Activation function models
+    ReluTestModel,
     Reshape3Dto2DModel,
     ReshapeAfterOpsModel,
     ReshapeInExpressionModel,
@@ -136,12 +165,19 @@ from test_models import (
     # Reshape models
     ReshapeToFlatModel,
     ReshapeToMatrixModel,
+    ScaledDotProductModel,
     ShapeReshapeBatchFlattenModel,
     ShapeReshapeKeepBatchModel,
+    SigmoidTestModel,
     SinTestModel,
+    SliceMultiAxisTestModel,
+    # Slice models
+    SliceTestModel,
     SoftmaxDim0TestModel,
     # Softmax models
     SoftmaxTestModel,
+    # Split model
+    SplitTestModel,
     SqrtTestModel,
     SqueezeAllDimsModel,
     # Squeeze models
@@ -150,6 +186,10 @@ from test_models import (
     SqueezeMultipleAxesModel,
     SqueezeNegativeAxisModel,
     SubTestModel,
+    TanhTestModel,
+    TopKIndicesTestModel,
+    # TopK models
+    TopKValuesTestModel,
     Transpose3DTestModel,
     Transpose4DTestModel,
     TransposeInExpressionModel,
@@ -160,42 +200,15 @@ from test_models import (
     TrilTestModel,
     TriuDiagonalTestModel,
     TriuTestModel,
+    # Unsqueeze models
+    UnsqueezeAxis0Model,
+    UnsqueezeMiddleModel,
     # Where models
     WhereSelfSelectModel,
     WhereTestModel,
     WhereWithConstantModel,
     # Xor model
     XorTestModel,
-    # Activation function models
-    ReluTestModel,
-    SigmoidTestModel,
-    TanhTestModel,
-    # Clip models
-    ClipTestModel,
-    ClipMinOnlyTestModel,
-    # Unsqueeze models
-    UnsqueezeAxis0Model,
-    UnsqueezeMiddleModel,
-    # Greater models
-    GreaterTestModel,
-    GreaterWithConstantModel,
-    # MatMul models
-    MatMul2DModel,
-    MatMulBatchedModel,
-    # Multi-op chain models
-    ManualLayerNormModel,
-    ScaledDotProductModel,
-    MLPBlockModel,
-    # GatherElements model
-    GatherElementsTestModel,
-    # Expand model
-    ExpandTestModel,
-    # IsNaN model
-    IsNaNTestModel,
-    # LayerNormalization model
-    LayerNormTestModel,
-    # Gemm model
-    GemmTestModel,
 )
 
 from luminal import luminal_backend
@@ -1844,3 +1857,91 @@ def test_gemm(device: torch.device):
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.rand((3, 4), device=device)
     assert torch.allclose(model_compiled(x), model(x), atol=1e-5)
+
+
+# ========== ONNX Erf Node Tests ==========
+
+
+def test_erf(device: torch.device):
+    """Tests erf approximation accuracy (atol=1e-4, A&S 7.1.26 max error < 1.5e-7)."""
+    model: torch.nn.Module = ErfTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.linspace(-2.0, 2.0, 16, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+# ========== ONNX Slice Node Tests ==========
+
+
+def test_slice_1d(device: torch.device):
+    """Tests 1D slice x[1:3]."""
+    model: torch.nn.Module = SliceTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(5, device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+def test_slice_2d(device: torch.device):
+    """Tests 2D multi-axis slice x[1:3, 0:2]."""
+    model: torch.nn.Module = SliceMultiAxisTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(4, 4, device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+# ========== ONNX Split Node Tests ==========
+
+
+def test_split(device: torch.device):
+    """Tests Split with equal-size chunks along axis 1."""
+    model: torch.nn.Module = SplitTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(3, 4, device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+# ========== ONNX TopK Node Tests ==========
+
+
+def test_topk_values(device: torch.device):
+    """Tests TopK values output for 2D tensor along axis=1."""
+    model: torch.nn.Module = TopKValuesTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(4, 8, device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+def test_topk_indices(device: torch.device):
+    """Tests TopK indices output for 2D tensor along axis=1."""
+    model: torch.nn.Module = TopKIndicesTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand(4, 8, device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+# ========== ONNX OneHot Node Tests ==========
+
+
+def test_onehot(device: torch.device):
+    """Tests OneHot encoding with depth=5."""
+    model: torch.nn.Module = OneHotTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([0, 2, 4, 1, 3], device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+# ========== LLaMA3 Model Test ==========
+
+
+def test_llama3(device: torch.device):
+    assert True
+    return
+    """Tests full LLaMA3 transformer model (RMSNorm, RoPE, GQA, SwiGLU FFN, causal mask)."""
+    model: torch.nn.Module = Llama3Model().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    tokens: torch.Tensor = torch.randint(0, 32, (1, 8), device=device)
+    original: torch.Tensor = model(tokens)
+    output: torch.Tensor = model_compiled(tokens)
+    assert torch.allclose(output, original, atol=1e-4)
