@@ -24,6 +24,7 @@ def luminal_backend(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]
             gm,
             tuple(example_inputs),
             tmp_path,
+            opset_version=20,
             input_names=[f"input_{i}" for i in range(len(example_inputs))],
         )
 
