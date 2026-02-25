@@ -118,9 +118,23 @@ impl OnnxGraphResult {
         let mut output_shapes = Vec::new();
 
         for output_vi in &onnx_graph.output {
-            if let Some(gt) = tensors.get(&output_vi.name) {
+            if let Some(&gt) = tensors.get(&output_vi.name) {
+                // Force contiguous if the shape tracker is a non-contiguous view
+                // (e.g. a view-only slice that changed dims without a gather).
+                // Without this, get_f32 returns the full underlying buffer.
+                let gt = if gt.shape != gt.shape.contiguous() {
+                    let contiguous = gt * 1.0;
+                    tensors.insert(output_vi.name.clone(), contiguous);
+                    contiguous
+                } else {
+                    gt
+                };
                 gt.output();
-                let shape = get_shape_for_onnx_value(output_vi);
+                let shape: Vec<usize> = gt
+                    .dims()
+                    .iter()
+                    .map(|d| d.to_usize().expect("Output dim must be concrete"))
+                    .collect();
                 if shape.is_empty() {
                     return Err(format!(
                         "Output tensor '{}' has no shape information in the ONNX model",
