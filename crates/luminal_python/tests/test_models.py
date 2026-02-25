@@ -1562,3 +1562,70 @@ class GemmTestModel(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(x)
+
+
+# ========== Erf Node Test Models ==========
+
+
+class ErfTestModel(torch.nn.Module):
+    """Tests erf (Gaussian error function) via tanh approximation."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.erf(x)
+
+
+# ========== Slice Node Test Models ==========
+
+
+class SliceTestModel(torch.nn.Module):
+    """Tests ONNX Slice: slice axis 0 from index 1 to 3."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x[1:3]
+
+
+class SliceMultiAxisTestModel(torch.nn.Module):
+    """Tests ONNX Slice along multiple axes: x[1:3, 0:2]."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x[1:3, 0:2]
+
+
+# ========== Split Node Test Models ==========
+
+
+class SplitTestModel(torch.nn.Module):
+    """Tests Split into equal-size chunks along axis 1; combines outputs with addition."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        a, b = torch.split(x, 2, dim=1)
+        return a + b
+
+
+# ========== TopK Node Test Models ==========
+
+
+class TopKValuesTestModel(torch.nn.Module):
+    """Tests TopK values output (largest=True) along axis 1."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        values, _ = torch.topk(x, 3, dim=1)
+        return values
+
+
+class TopKIndicesTestModel(torch.nn.Module):
+    """Tests TopK indices output (largest=True) along axis 1."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        _, indices = torch.topk(x, 3, dim=1)
+        return indices.float()
+
+
+# ========== OneHot Node Test Models ==========
+
+
+class OneHotTestModel(torch.nn.Module):
+    """Tests OneHot encoding: integer indices -> one-hot matrix with depth=5."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.one_hot(x.long(), num_classes=5).float()

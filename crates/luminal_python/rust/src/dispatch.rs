@@ -33,6 +33,7 @@ pub fn process_onnx_nodes(
             "Relu" => parse_relu_node(node, tensors)?,
             "Softmax" => parse_softmax_node(node, tensors)?,
             "Abs" => parse_abs_node(node, tensors)?,
+            "Reciprocal" => parse_reciprocal_node(node, tensors)?,
             "Clip" => parse_clip_node(node, tensors, known_values)?,
             "Equal" => parse_equal_node(node, tensors)?,
             "Where" => parse_where_node(node, tensors)?,
@@ -66,6 +67,11 @@ pub fn process_onnx_nodes(
             "IsNaN" => parse_isnan_node(node, tensors)?,
             "LayerNormalization" => parse_layernorm_node(node, tensors)?,
             "Gemm" => parse_gemm_node(node, tensors)?,
+            "Erf" => parse_erf_node(node, tensors)?,
+            "Slice" => parse_slice_node(node, tensors, known_values)?,
+            "Split" => parse_split_node(node, tensors, known_values)?,
+            "TopK" => parse_topk_node(node, tensors, known_values)?,
+            "OneHot" => parse_onehot_node(node, tensors, known_values)?,
             _ => {
                 panic!("Missing Node {}", node.op_type)
             }

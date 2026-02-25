@@ -87,6 +87,58 @@ pub fn parse_reduce_mean_node(
     )
 }
 
+/// Handle TopK node: return the top-k values and indices along an axis.
+///
+/// output[0] = values (F32), output[1] = indices (Int, can be empty/unused).
+/// For largest=true (default): uses topk_indexes + gather_elements.
+/// For largest=false: uses argsort(ascending).slice_along(..k) + gather_elements.
+/// Indices output is stored as-is (Int dtype); downstream Cast handles F32 conversion.
+/// The "sorted" attribute is ignored — output is always sorted.
+pub fn parse_topk_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    let x = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("TopK: missing input '{}'", node.input[0]))?;
+    let k = known_values
+        .get(&node.input[1])
+        .ok_or("TopK: k must be constant")?[0] as usize;
+
+    let rank = x.dims().len() as i64;
+    let raw_axis = get_int_attr(node, "axis", -1);
+    let axis = if raw_axis < 0 {
+        (raw_axis + rank) as usize
+    } else {
+        raw_axis as usize
+    };
+
+    let largest = get_int_attr(node, "largest", 1) != 0;
+
+    // Compute top-k indices (axis-local, Int dtype)
+    let indices = if largest {
+        x.topk_indexes(k, axis)
+    } else {
+        // smallest-first: sort ascending, take first k
+        x.argsort(axis, false).slice_along(..k, axis)
+    };
+
+    // Gather values at those positions
+    let values = x.gather_elements(indices, axis);
+
+    // ONNX output[0] = values, output[1] = indices
+    if !node.output[0].is_empty() {
+        tensors.insert(node.output[0].clone(), values);
+    }
+    if node.output.len() > 1 && !node.output[1].is_empty() {
+        // Force materialization of Int indices; downstream Cast(INT64→FLOAT) handles the
+        // F32 conversion via the *1.0 workaround in parse_cast_node.
+        tensors.insert(node.output[1].clone(), indices * 1.0);
+    }
+    Ok(())
+}
+
 fn parse_reduce_op(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
