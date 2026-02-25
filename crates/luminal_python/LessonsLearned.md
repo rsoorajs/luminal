@@ -170,3 +170,46 @@ a different (broken) e-node from the same e-class.
 2. Compare passing vs. failing runs to see which kernels are/aren't invoked
 3. The missing kernel's e-class contains a broken alternative — find it via the egglog rewrite rules
 4. Check the op that *is* executing — its `output_size()` reveals what's wrong with the false match
+
+---
+
+## 2026-02-25 — OneHot Test Panic: Cast(Int→F32) Produces Int Output
+
+### What the symptom was
+
+`test_onehot` panicked at `src/hlir.rs:1625` in `get_f32()`: the output buffer was
+`NativeData::Int` instead of the expected `NativeData::F32`.
+
+### What the actual root cause was
+
+The Cast parser's `* 1.0` workaround for `Int → F32` casts used `input * one_expanded`
+(Int GraphTensor on the left, F32 constant on the right). However, `Mul for GraphTensor`
+always uses `self.dtype` (the **left** operand's dtype) for the result, and the native
+runtime's `Mul::execute` dispatches on the **first** input's `NativeData` variant. So
+`Int * F32` produced `DType::Int` / `NativeData::Int` — the exact opposite of the intended
+F32 output.
+
+### Why it was hard to find
+
+1. **The OneHot parser was a red herring**: The initial plan assumed the OneHot ONNX node
+   was being parsed, but `torch.onnx.export` decomposes `one_hot` into
+   `Unsqueeze → Equal → Cast(Bool→Int) → Cast(Int→F32)`. The OneHot parser was never called.
+2. **The `* 1.0` workaround looked correct**: It was used successfully in many other parsers,
+   but those all had F32 inputs (where `F32 * F32 = F32`). The Int→F32 case was the only
+   path where the left operand was Int.
+3. **Operand order matters silently**: Nothing warns about mixed-dtype Mul — it just takes
+   the left operand's dtype.
+
+### The fix
+
+In `ops_parse/unary.rs` `parse_cast_node`, split the combined condition into two cases:
+- **No-op cast** (`cast_result.id == input.id`): `input * one_expanded` — preserves dtype
+- **Int source** (`input.dtype == DType::Int`): `one_expanded * input` — F32 on the left
+  ensures F32 output
+
+### General principle
+
+**In luminal, binary op dtype is always the LEFT operand's dtype.** When constructing
+`GraphTensor * constant_float(1.0)` for type materialization, always put the operand
+whose dtype you want to preserve on the LEFT side. When converting Int→F32, the F32
+constant must be the left operand.

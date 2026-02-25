@@ -1201,7 +1201,7 @@ pub fn parse_onehot_node(
     // Elsewhere:           1.0 * (off - on) + on = off_value
     let ne_mask = idx.cast(DType::F32).ne(ar.cast(DType::F32));
 
-    let result = ne_mask * (off_value - on_value) + on_value;
+    let result = (ne_mask * (off_value - on_value) + on_value) * 1.0;
     tensors.insert(node.output[0].clone(), result);
     Ok(())
 }

@@ -6,9 +6,6 @@ use onnx_protobuf::NodeProto;
 use crate::util::{broadcast_to, compute_broadcast_shape};
 
 /// Handle Add node: output = input[0] + input[1]
-///
-/// Supports numpy-style broadcasting and constant folding when both inputs
-/// have known values at graph-build time.
 pub fn parse_add_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
@@ -17,9 +14,6 @@ pub fn parse_add_node(
 }
 
 /// Handle Mod node: output = input[0] % input[1]
-///
-/// Supports numpy-style broadcasting and constant folding when both inputs
-/// have known values at graph-build time.
 pub fn parse_mod_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
@@ -28,9 +22,6 @@ pub fn parse_mod_node(
 }
 
 /// Handle Sub node: output = input[0] - input[1]
-///
-/// Supports numpy-style broadcasting and constant folding when both inputs
-/// have known values at graph-build time.
 pub fn parse_sub_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
@@ -39,9 +30,6 @@ pub fn parse_sub_node(
 }
 
 /// Handle Mul node: output = input[0] * input[1]
-///
-/// Supports numpy-style broadcasting and constant folding when both inputs
-/// have known values at graph-build time.
 pub fn parse_mul_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
@@ -50,9 +38,6 @@ pub fn parse_mul_node(
 }
 
 /// Handle Div node: output = input[0] / input[1]
-///
-/// Supports numpy-style broadcasting and constant folding when both inputs
-/// have known values at graph-build time.
 pub fn parse_div_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
@@ -62,7 +47,7 @@ pub fn parse_div_node(
 
 /// Parse Less node (ONNX element-wise less-than comparison).
 ///
-/// Outputs 1.0 where a < b, 0.0 otherwise. Supports broadcasting.
+/// Outputs 1.0 where a < b, 0.0 otherwise.
 pub fn parse_less_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
@@ -80,7 +65,7 @@ pub fn parse_pow_node(
 
 /// Handle Equal node: element-wise equality comparison.
 ///
-/// Outputs 1.0 where inputs are equal, 0.0 otherwise. Supports broadcasting.
+/// Outputs 1.0 where inputs are equal, 0.0 otherwise
 pub fn parse_equal_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
@@ -90,7 +75,7 @@ pub fn parse_equal_node(
 
 /// Parse Greater node (ONNX element-wise greater-than comparison).
 ///
-/// Outputs 1.0 where a > b, 0.0 otherwise. Supports broadcasting.
+/// Outputs 1.0 where a > b, 0.0 otherwise
 pub fn parse_greater_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
@@ -143,7 +128,7 @@ pub fn parse_xor_node(
     parse_binary_broadcast_op(node, tensors, "Xor", |a, b| a.ne(b))
 }
 
-/// Handle Min node: element-wise minimum over 2+ inputs with numpy-style broadcasting.
+/// Handle Min node: element-wise minimum over 2+ inputs
 pub fn parse_min_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
@@ -151,7 +136,7 @@ pub fn parse_min_node(
     parse_variadic_broadcast_op(node, tensors, "Min", |a, b| a.minimum(b))
 }
 
-/// Handle Max node: element-wise maximum over 2+ inputs with numpy-style broadcasting.
+/// Handle Max node: element-wise maximum over 2+ inputs
 pub fn parse_max_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
