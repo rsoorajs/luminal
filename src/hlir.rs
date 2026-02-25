@@ -1403,6 +1403,10 @@ impl HLIROp for SumReduce {
         let reduced_stride = self.input_shape.strides[self.dim];
         let mut reduced_strides = self.input_shape.strides;
         reduced_strides.remove(self.dim);
+        eprintln!(
+            "[SumReduce::to_egglog] dim={} input_shape={:?} out_shape={:?}",
+            self.dim, inputs[0].2.dims, reduced_shape.dims
+        );
         format!(
             "(Sum {} {} {} {} {} {})",
             elist_to_egglog(&reduced_shape.dims),

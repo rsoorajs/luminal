@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use luminal::prelude::{tracing::trace, *};
 use onnx_protobuf::NodeProto;
 
-use crate::util::{broadcast_to, get_int_attr};
+use crate::util::{broadcast_to, get_int_attr, get_str_attr};
 
 /// Handle GatherElements node: gather elements along an axis using per-element indices.
 ///
@@ -1238,4 +1238,62 @@ fn gather_axis0(
     } else {
         Ok(gathered)
     }
+}
+
+/// Handle ScatterElements node: scatter updates into data along an axis using per-element indices.
+///
+/// ONNX semantics: output[i0,..,i_{a-1}, indices[i0,..,ik], i_{a+1},..,ik] = updates[i0,..,ik]
+pub fn parse_scatter_elements_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 3, "ScatterElements needs 3 inputs");
+    let data = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("ScatterElements: missing data '{}'", node.input[0]))?;
+    let indices = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("ScatterElements: missing indices '{}'", node.input[1]))?;
+    let updates = *tensors
+        .get(&node.input[2])
+        .ok_or_else(|| format!("ScatterElements: missing updates '{}'", node.input[2]))?;
+
+    let ndim = data.dims().len();
+    let axis_raw = get_int_attr(node, "axis", 0);
+    let axis = if axis_raw < 0 {
+        (ndim as i64 + axis_raw) as usize
+    } else {
+        axis_raw as usize
+    };
+
+    let reduction = get_str_attr(node, "reduction", "none");
+
+    let result = data.scatter_elements(indices, updates, axis, &reduction) * 1.0;
+    tensors.insert(node.output[0].clone(), result);
+    Ok(())
+}
+
+/// Handle ScatterND node: scatter updates into data using multi-dimensional index vectors.
+///
+/// ONNX semantics: for each batch element, use K-element index vector to address into data.
+pub fn parse_scatter_nd_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    assert!(node.input.len() == 3, "ScatterND needs 3 inputs");
+    let data = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("ScatterND: missing data '{}'", node.input[0]))?;
+    let indices = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("ScatterND: missing indices '{}'", node.input[1]))?;
+    let updates = *tensors
+        .get(&node.input[2])
+        .ok_or_else(|| format!("ScatterND: missing updates '{}'", node.input[2]))?;
+
+    let reduction = get_str_attr(node, "reduction", "none");
+
+    let result = data.scatter_nd(indices, updates, &reduction) * 1.0;
+    tensors.insert(node.output[0].clone(), result);
+    Ok(())
 }

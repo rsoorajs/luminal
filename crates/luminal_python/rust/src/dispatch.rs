@@ -63,6 +63,8 @@ pub fn process_onnx_nodes(
             "ReduceMean" => parse_reduce_mean_node(node, tensors, known_values)?,
             "Trilu" => parse_trilu_node(node, tensors, cx, known_values)?,
             "GatherElements" => parse_gather_elements_node(node, tensors)?,
+            "ScatterElements" => parse_scatter_elements_node(node, tensors)?,
+            "ScatterND" => parse_scatter_nd_node(node, tensors)?,
             "Expand" => parse_expand_node(node, tensors, known_values)?,
             "IsNaN" => parse_isnan_node(node, tensors)?,
             "LayerNormalization" => parse_layernorm_node(node, tensors)?,

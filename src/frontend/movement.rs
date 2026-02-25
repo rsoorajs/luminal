@@ -97,6 +97,367 @@ impl GraphTensor {
         self
     }
 
+    /// Gather elements along an axis using per-element indices (ONNX GatherElements semantics).
+    ///
+    /// `output[i0,..,ik] = self[i0,..,i_{axis-1}, indices[i0,..,ik], i_{axis+1},..,ik]`
+    ///
+    /// indices must have the same rank as self and the same shape as the output.
+    pub fn gather_elements(self, indexes: GraphTensor, axis: usize) -> GraphTensor {
+        let dims = self.dims();
+        let rank = dims.len();
+        let out_shape: Vec<usize> = indexes
+            .dims()
+            .iter()
+            .map(|d| {
+                d.to_usize()
+                    .expect("gather_elements: index dim must be concrete")
+            })
+            .collect();
+
+        // Row-major strides: stride[i] = prod(dims[i+1..])
+        let strides: Vec<usize> = (0..rank)
+            .map(|i| {
+                dims[i + 1..]
+                    .iter()
+                    .map(|d| d.to_usize().unwrap())
+                    .product()
+            })
+            .collect();
+
+        // Normalize negative indices for axis dim
+        let axis_dim = dims[axis].to_usize().unwrap();
+        let idx_f32 = indexes.cast(DType::F32);
+        let zero = idx_f32
+            .graph()
+            .constant_float(0.0)
+            .expand_rhs(idx_f32.shape);
+        let adj = idx_f32
+            .graph()
+            .constant_float(axis_dim as f32)
+            .expand_rhs(idx_f32.shape);
+        let is_neg = idx_f32.lt(zero).cast(DType::F32);
+        let idx_normalized = (idx_f32 + (is_neg * adj)).cast(DType::Int);
+
+        // Axis contribution: flat_idx = indices * stride[axis]
+        let s = self
+            .graph()
+            .constant(strides[axis] as i32)
+            .expand_rhs(idx_normalized.shape);
+        let mut flat_idx = idx_normalized * s;
+
+        // Non-axis dimension contributions
+        for d in 0..rank {
+            if d == axis {
+                continue;
+            }
+            let ar = self.graph().arange(out_shape[d]); // shape [out_shape[d]], Int
+
+            // Place arange at dimension d by surrounding with size-1 dims,
+            // then broadcast to out_shape.
+            let mut ar_shaped = ar;
+            // Add trailing size-1 dims (for dimensions d+1..rank)
+            for _ in d + 1..rank {
+                let n = ar_shaped.dims().len();
+                ar_shaped = ar_shaped.expand_dim(n, 1);
+            }
+            // Add leading size-1 dims (for dimensions 0..d)
+            for _ in 0..d {
+                ar_shaped = ar_shaped.expand_dim(0, 1);
+            }
+            // Broadcast all size-1 dims to out_shape
+            ar_shaped.shape.expand(out_shape.clone());
+
+            let s = self
+                .graph()
+                .constant(strides[d] as i32)
+                .expand_rhs(ar_shaped.shape);
+            flat_idx = flat_idx + (ar_shaped * s);
+        }
+
+        self.gather(flat_idx)
+    }
+
+    /// Scatter updates into a copy of self at positions specified by per-element indices along an axis.
+    ///
+    /// ONNX ScatterElements semantics:
+    /// `output[i0,..,i_{a-1}, indices[i0,..,ik], i_{a+1},..,ik] = updates[i0,..,ik]`
+    ///
+    /// indices and updates must have the same shape.
+    /// If `reduction` is "none", overlapping writes produce the sum of colliding values.
+    /// If `reduction` is "add", updates are added to existing data values.
+    pub fn scatter_elements(
+        self,
+        indices: GraphTensor,
+        updates: GraphTensor,
+        axis: usize,
+        reduction: &str,
+    ) -> GraphTensor {
+        let data_dims = self.dims();
+        let rank = data_dims.len();
+        let idx_shape: Vec<usize> = indices
+            .dims()
+            .iter()
+            .map(|d| {
+                d.to_usize()
+                    .expect("scatter_elements: index dim must be concrete")
+            })
+            .collect();
+
+        // Row-major strides for data
+        let strides: Vec<usize> = (0..rank)
+            .map(|i| {
+                data_dims[i + 1..]
+                    .iter()
+                    .map(|d| d.to_usize().unwrap())
+                    .product()
+            })
+            .collect();
+
+        let data_numel: usize = data_dims.iter().map(|d| d.to_usize().unwrap()).product();
+        let idx_numel: usize = idx_shape.iter().product();
+
+        // Normalize negative indices for axis dim
+        let axis_dim = data_dims[axis].to_usize().unwrap();
+        let idx_f32 = indices.cast(DType::F32);
+        let zero = idx_f32
+            .graph()
+            .constant_float(0.0)
+            .expand_rhs(idx_f32.shape);
+        let adj = idx_f32
+            .graph()
+            .constant_float(axis_dim as f32)
+            .expand_rhs(idx_f32.shape);
+        let is_neg = idx_f32.lt(zero).cast(DType::F32);
+        let idx_normalized = (idx_f32 + (is_neg * adj)).cast(DType::Int);
+
+        // Compute flat destination index (same logic as gather_elements)
+        let s = self
+            .graph()
+            .constant(strides[axis] as i32)
+            .expand_rhs(idx_normalized.shape);
+        let mut flat_dest = idx_normalized * s;
+
+        for d in 0..rank {
+            if d == axis {
+                continue;
+            }
+            let ar = self.graph().arange(idx_shape[d]);
+            let mut ar_shaped = ar;
+            for _ in d + 1..rank {
+                let n = ar_shaped.dims().len();
+                ar_shaped = ar_shaped.expand_dim(n, 1);
+            }
+            for _ in 0..d {
+                ar_shaped = ar_shaped.expand_dim(0, 1);
+            }
+            ar_shaped.shape.expand(idx_shape.clone());
+
+            let s = self
+                .graph()
+                .constant(strides[d] as i32)
+                .expand_rhs(ar_shaped.shape);
+            flat_dest = flat_dest + (ar_shaped * s);
+        }
+
+        // Flatten to 1D using materialize + reshape (merge_dims is unimplemented)
+        let mut flat_dest_1d = flat_dest * 1;
+        flat_dest_1d.shape = ShapeTracker::new(vec![idx_numel]);
+
+        let mut flat_updates = updates * 1.0;
+        flat_updates.shape = ShapeTracker::new(vec![idx_numel]);
+
+        let mut flat_data = self * 1.0;
+        flat_data.shape = ShapeTracker::new(vec![data_numel]);
+
+        // Match matrix: [idx_numel, data_numel]
+        // match[i, j] = (flat_dest[i] == j)
+        let dest_expanded = flat_dest_1d.expand_dim(1, data_numel);
+        let positions = self.graph().arange(data_numel).expand_dim(0, idx_numel);
+        let match_matrix = dest_expanded.eq(positions);
+
+        // scattered = sum over idx_numel of (flat_updates * match)
+        let match_f32 = match_matrix.cast(DType::F32);
+        let updates_expanded = flat_updates.expand_dim(1, data_numel);
+        let scattered = (updates_expanded * match_f32).sum(0);
+
+        // Blend with original data
+        let output_flat = match reduction {
+            "add" => flat_data + scattered,
+            _ => {
+                // reduction="none": replace where updated
+                let was_updated = match_matrix.cast(DType::F32).sum(0);
+                let zero_val = self
+                    .graph()
+                    .constant_float(0.0)
+                    .expand_rhs(was_updated.shape);
+                let mask = was_updated.gt(zero_val);
+                scattered.cond(mask, flat_data)
+            }
+        };
+
+        // Reshape back to data_shape
+        let data_shape_usize: Vec<usize> =
+            data_dims.iter().map(|d| d.to_usize().unwrap()).collect();
+        let mut result = output_flat * 1.0;
+        result.shape = ShapeTracker::new(data_shape_usize);
+
+        result
+    }
+
+    /// Scatter updates into a copy of self using multi-dimensional index vectors (ONNX ScatterND semantics).
+    ///
+    /// `indices` has shape [S0, ..., Sq-2, K] where K <= rank(data).
+    /// `updates` has shape [S0, ..., Sq-2, D_K, ..., D_{r-1}].
+    /// For each batch element (s0, ..., sq-2):
+    ///   multi_idx = indices[s0, ..., sq-2, :]
+    ///   output[multi_idx[0], ..., multi_idx[K-1], :, ..] = updates[s0, ..., sq-2, :, ..]
+    pub fn scatter_nd(
+        self,
+        indices: GraphTensor,
+        updates: GraphTensor,
+        reduction: &str,
+    ) -> GraphTensor {
+        let data_dims = self.dims();
+        let data_rank = data_dims.len();
+        let idx_dims = indices.dims();
+        let idx_rank = idx_dims.len();
+
+        let data_shape: Vec<usize> = data_dims
+            .iter()
+            .map(|d| d.to_usize().expect("scatter_nd: data dim must be concrete"))
+            .collect();
+        let idx_shape: Vec<usize> = idx_dims
+            .iter()
+            .map(|d| {
+                d.to_usize()
+                    .expect("scatter_nd: indices dim must be concrete")
+            })
+            .collect();
+
+        let k = idx_shape[idx_rank - 1]; // last dim of indices = number of index dimensions
+        assert!(k <= data_rank, "scatter_nd: K must be <= data rank");
+
+        // Batch shape = indices shape without last dim: [S0, ..., Sq-2]
+        let batch_shape: Vec<usize> = idx_shape[..idx_rank - 1].to_vec();
+        let batch_numel: usize = batch_shape.iter().product::<usize>().max(1);
+
+        // Trailing shape = data_shape[K..]
+        let trailing_shape: Vec<usize> = data_shape[k..].to_vec();
+        let trailing_numel: usize = trailing_shape.iter().product::<usize>().max(1);
+
+        // Row-major strides for data
+        let data_strides: Vec<usize> = (0..data_rank)
+            .map(|i| data_shape[i + 1..].iter().product::<usize>().max(1))
+            .collect();
+
+        let data_numel: usize = data_shape.iter().product();
+
+        // Flatten batch dims of indices to [batch_numel, K] using materialize + reshape
+        let mut indices_flat = indices * 1;
+        if idx_rank > 2 {
+            indices_flat.shape = ShapeTracker::new(vec![batch_numel, k]);
+        }
+        // indices_flat: [batch_numel, K] or [K] if idx_rank == 1
+
+        // For each k_dim, extract the slice and multiply by stride
+        let mut flat_base: Option<GraphTensor> = None;
+        for k_dim in 0..k {
+            let idx_k = indices_flat.slice_along(k_dim..k_dim + 1, indices_flat.dims().len() - 1);
+            let idx_k = idx_k.squeeze(idx_k.dims().len() - 1);
+
+            let stride_val = data_strides[k_dim] as i32;
+            let stride_tensor = self.graph().constant(stride_val).expand_rhs(idx_k.shape);
+            let contribution = idx_k * stride_tensor;
+
+            flat_base = Some(match flat_base {
+                Some(fb) => fb + contribution,
+                None => contribution,
+            });
+        }
+        let flat_base = flat_base.unwrap(); // [batch_numel], Int
+
+        // Compute update_numel
+        let update_numel = batch_numel * trailing_numel;
+
+        let mut full_flat_dest = if trailing_shape.is_empty() || trailing_numel == 1 {
+            flat_base
+        } else {
+            // Expand flat_base to [batch_numel, trailing_numel]
+            let mut base_expanded = flat_base.expand_dim(1, trailing_numel);
+
+            let trailing_rank = trailing_shape.len();
+            for (ti, d) in (k..data_rank).enumerate() {
+                let ar = self.graph().arange(data_shape[d]);
+                let mut ar_shaped = ar;
+                for _ in ti + 1..trailing_rank {
+                    let n = ar_shaped.dims().len();
+                    ar_shaped = ar_shaped.expand_dim(n, 1);
+                }
+                for _ in 0..ti {
+                    ar_shaped = ar_shaped.expand_dim(0, 1);
+                }
+                ar_shaped.shape.expand(trailing_shape.clone());
+                // Flatten trailing dims using materialize + reshape
+                let mut ar_flat = ar_shaped * 1;
+                ar_flat.shape = ShapeTracker::new(vec![trailing_numel]);
+                // Expand to [batch_numel, trailing_numel]
+                ar_flat = ar_flat.expand_dim(0, batch_numel);
+
+                let stride_tensor = self
+                    .graph()
+                    .constant(data_strides[d] as i32)
+                    .expand_rhs(ar_flat.shape);
+                base_expanded = base_expanded + (ar_flat * stride_tensor);
+            }
+            base_expanded
+        };
+
+        // Flatten full_flat_dest to [update_numel]
+        if full_flat_dest.dims().len() > 1 {
+            let mut fd = full_flat_dest * 1;
+            fd.shape = ShapeTracker::new(vec![update_numel]);
+            full_flat_dest = fd;
+        }
+
+        // Flatten updates to [update_numel]
+        let mut flat_updates = updates * 1.0;
+        flat_updates.shape = ShapeTracker::new(vec![update_numel]);
+
+        // Flatten data to [data_numel]
+        let mut flat_data = self * 1.0;
+        flat_data.shape = ShapeTracker::new(vec![data_numel]);
+
+        // Match matrix: [update_numel, data_numel]
+        let dest_expanded = full_flat_dest.expand_dim(1, data_numel);
+        let positions = self.graph().arange(data_numel).expand_dim(0, update_numel);
+        let match_matrix = dest_expanded.eq(positions);
+
+        // scattered = sum over update_numel of (flat_updates * match)
+        let match_f32 = match_matrix.cast(DType::F32);
+        let updates_expanded = flat_updates.expand_dim(1, data_numel);
+        let scattered = (updates_expanded * match_f32).sum(0);
+
+        // Blend with original data
+        let output_flat = match reduction {
+            "add" => flat_data + scattered,
+            _ => {
+                let was_updated = match_matrix.cast(DType::F32).sum(0);
+                let zero_val = self
+                    .graph()
+                    .constant_float(0.0)
+                    .expand_rhs(was_updated.shape);
+                let mask = was_updated.gt(zero_val);
+                scattered.cond(mask, flat_data)
+            }
+        };
+
+        // Reshape back to data_shape
+        let mut result = output_flat * 1.0;
+        result.shape = ShapeTracker::new(data_shape);
+
+        result
+    }
+
     pub fn gather(self, indexes: GraphTensor) -> GraphTensor {
         assert_eq!(
             indexes.dtype,

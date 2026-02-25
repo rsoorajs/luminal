@@ -377,7 +377,7 @@ pub fn parse_erf_node(
         let t = (1.0_f32 + 0.3275911_f32 * a).reciprocal();
         // Horner evaluation of a1*t + a2*t² + a3*t³ + a4*t⁴ + a5*t⁵
         // poly = t*(a1 + t*(a2 + t*(a3 + t*(a4 + a5*t))))
-        let h = t * 1.061405429_f32 - 1.453152027_f32;  // a4 + a5*t
+        let h = t * 1.061405429_f32 - 1.453152027_f32; // a4 + a5*t
         let h = t * h + 1.421413741_f32;
         let h = t * h - 0.284496736_f32;
         let h = t * h + 0.254829592_f32;
