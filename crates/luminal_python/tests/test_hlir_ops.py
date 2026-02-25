@@ -274,6 +274,8 @@ def test_add_add(device: torch.device):
     original: torch.Tensor = add_test_model(x)
     output: torch.Tensor = add_test_mode_compiled(x)
     assert torch.allclose(output, original)
+    other_x: torch.Tensor = torch.rand((5), device=device)
+    assert torch.allclose(add_test_mode_compiled(other_x), add_test_model(other_x))
 
 
 def test_add_broadcast(device: torch.device):
