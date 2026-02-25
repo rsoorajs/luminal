@@ -50,7 +50,31 @@ pub fn parse_expand_node(
         .ok_or_else(|| format!("Expand: shape '{}' must be a known constant", node.input[1]))?;
 
     let target_shape: Vec<usize> = shape_vals.iter().map(|&v| v as usize).collect();
-    let result = broadcast_to(input, &target_shape) * 1.0;
+
+    // ONNX Expand uses numpy broadcasting: output_dim = max(input_dim, target_dim).
+    // A target dim of 1 means "keep the input dim", not "shrink to 1".
+    let input_dims = input.dims();
+    let input_rank = input_dims.len();
+    let target_rank = target_shape.len();
+    let out_rank = input_rank.max(target_rank);
+    let mut broadcast_shape = vec![1usize; out_rank];
+    for i in 0..out_rank {
+        let in_dim = if i + input_rank >= out_rank {
+            input_dims[i + input_rank - out_rank]
+                .to_usize()
+                .unwrap_or(1)
+        } else {
+            1
+        };
+        let tgt_dim = if i + target_rank >= out_rank {
+            target_shape[i + target_rank - out_rank]
+        } else {
+            1
+        };
+        broadcast_shape[i] = in_dim.max(tgt_dim);
+    }
+
+    let result = broadcast_to(input, &broadcast_shape) * 1.0;
     tensors.insert(node.output[0].clone(), result);
     Ok(())
 }
@@ -976,6 +1000,7 @@ pub fn parse_slice_node(
     tensors: &mut HashMap<String, GraphTensor>,
     known_values: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
+    trace!("Starting Parse: Slice Node");
     let data = *tensors
         .get(&node.input[0])
         .ok_or_else(|| format!("Slice: missing data '{}'", node.input[0]))?;
@@ -1051,6 +1076,7 @@ pub fn parse_slice_node(
     let result = data.slice(&ranges);
 
     tensors.insert(node.output[0].clone(), result);
+    trace!("Ending Parse: Slice Node");
     Ok(())
 }
 

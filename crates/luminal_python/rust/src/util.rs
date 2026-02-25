@@ -238,6 +238,22 @@ pub fn load_initializer_as_f32(init: &onnx_protobuf::TensorProto) -> Option<Vec<
                 None
             }
         }
+        16 => {
+            // BFLOAT16 — 2 bytes per element, upper 16 bits of f32
+            if !init.raw_data.is_empty() {
+                Some(
+                    init.raw_data
+                        .chunks_exact(2)
+                        .map(|c| {
+                            let bits = u16::from_le_bytes([c[0], c[1]]);
+                            f32::from_bits((bits as u32) << 16)
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            }
+        }
         11 => {
             // FLOAT64
             if !init.raw_data.is_empty() {

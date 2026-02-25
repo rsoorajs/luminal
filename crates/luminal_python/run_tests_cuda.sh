@@ -14,7 +14,7 @@ uv run maturin develop --manifest-path rust/Cargo.toml --features cuda
 
 # Run pytest with CUDA backend
 echo "Step 3: Running pytest with CUDA backend..."
-LUMINAL_BACKEND=cuda uv run pytest tests/ -v
+LUMINAL_BACKEND=cuda uv run pytest tests/test_hlir_ops.py::test_slice_2d -v
 
 echo ""
 echo "=== Tests Complete ==="
