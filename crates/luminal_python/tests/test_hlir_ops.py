@@ -3,7 +3,7 @@ from typing import Callable
 import pytest
 import torch
 import torch._dynamo
-from llam3_model import Llama3Model
+from llama3.llama3_model import Llama3Model
 from test_models import (
     AddAddTestModel,
     AddConstantTestModel,
@@ -166,9 +166,9 @@ from test_models import (
     ReshapeToFlatModel,
     ReshapeToMatrixModel,
     ScaledDotProductModel,
+    ScatterElementsAxis0TestModel,
     # ScatterElements models
     ScatterElementsTestModel,
-    ScatterElementsAxis0TestModel,
     # ScatterND model
     ScatterNDTestModel,
     ShapeReshapeBatchFlattenModel,
@@ -1944,9 +1944,7 @@ def test_scatter_elements(device: torch.device):
     """Tests scatter along axis=1 using torch.scatter."""
     model: torch.nn.Module = ScatterElementsTestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor(
-        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], device=device
-    )
+    x: torch.Tensor = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
@@ -1956,9 +1954,7 @@ def test_scatter_elements_axis0(device: torch.device):
     """Tests scatter along axis=0 using torch.scatter."""
     model: torch.nn.Module = ScatterElementsAxis0TestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    x: torch.Tensor = torch.tensor(
-        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], device=device
-    )
+    x: torch.Tensor = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
@@ -1988,7 +1984,7 @@ def test_llama3(device: torch.device):
     """Tests full LLaMA3 transformer model (RMSNorm, RoPE, GQA, SwiGLU FFN, causal mask)."""
     model: torch.nn.Module = Llama3Model().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
-    tokens: torch.Tensor = torch.randint(0, 32, (1, 8), device=device)
+    tokens: torch.Tensor = torch.randint(0, 256, (1, 8), device=device)
     original: torch.Tensor = model(tokens)
     output: torch.Tensor = model_compiled(tokens)
     assert torch.allclose(output, original, atol=1e-4)
