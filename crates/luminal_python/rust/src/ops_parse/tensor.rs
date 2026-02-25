@@ -55,21 +55,6 @@ pub fn parse_constant_node(
                     .collect()
             }
         }
-        7 => {
-            // INT64
-            // There is a cast from Int64 -> f32 here because Luminal does not support f32
-            if !tensor_proto.int64_data.is_empty() {
-                tensor_proto.int64_data.iter().map(|&v| v as f32).collect()
-            } else {
-                tensor_proto
-                    .raw_data
-                    .chunks_exact(8)
-                    .map(|c| {
-                        i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
-                    })
-                    .collect()
-            }
-        }
         6 => {
             // INT32
             // There is a cast from Int32 -> f32 here because Luminal does not support f32
@@ -82,35 +67,6 @@ pub fn parse_constant_node(
                     .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32)
                     .collect()
             }
-        }
-        9 => {
-            // Bool
-            // Bools are stored as bytes in raw_data or as int32 in int32_data
-            if !tensor_proto.int32_data.is_empty() {
-                tensor_proto
-                    .int32_data
-                    .iter()
-                    .map(|&v| if v != 0 { 1.0 } else { 0.0 })
-                    .collect()
-            } else {
-                tensor_proto
-                    .raw_data
-                    .iter()
-                    .map(|&b| if b != 0 { 1.0 } else { 0.0 })
-                    .collect()
-            }
-        }
-        11 => {
-            // FLOAT64 (f64)
-            // There is a cast from f64 -> f32 here because Luminal does not support f32
-            // TODO: add f64 as this will loss information, this is a bad approach
-            tensor_proto
-                .raw_data
-                .chunks_exact(8)
-                .map(|c| {
-                    f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
-                })
-                .collect()
         }
         dt => return Err(format!("Constant node: unsupported data_type {}", dt)),
     };
