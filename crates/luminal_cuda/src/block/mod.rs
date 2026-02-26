@@ -20,7 +20,7 @@ use luminal::{
         FxHashMap, FxHashSet, NodeIndex,
         petgraph::{Direction, algo::toposort, visit::EdgeRef},
     },
-    shape::{Expression, flatten_z_strides},
+    shape::{Expression, flatten_strides},
 };
 use std::{
     collections::HashMap,
@@ -1274,7 +1274,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
                 .chain(once(op.launch_range().iter().copied().product()))
         })
         .chain(producer_barrier_strides.iter().map(|(n, e)| {
-            flatten_z_strides(
+            flatten_strides(
                 &llir_graph[*n]
                     .to_dialect::<dyn BlockOp>()
                     .unwrap()
@@ -1283,7 +1283,7 @@ pub(crate) fn make_megakernel_from_llir_graph(
             )
         }))
         .chain(consumer_barrier_strides.iter().map(|((n, _), e)| {
-            flatten_z_strides(
+            flatten_strides(
                 &llir_graph[*n]
                     .to_dialect::<dyn BlockOp>()
                     .unwrap()
@@ -1378,19 +1378,19 @@ pub(crate) fn make_megakernel_from_llir_graph(
         let range = op.launch_range();
         let in_dep_a_stride = consumer_barrier_strides
             .get(&(node, 0))
-            .map(|s| flatten_z_strides(&range, s))
+            .map(|s| flatten_strides(&range, s))
             .unwrap_or(0.into());
         let in_dep_b_stride = consumer_barrier_strides
             .get(&(node, 1))
-            .map(|s| flatten_z_strides(&range, s))
+            .map(|s| flatten_strides(&range, s))
             .unwrap_or(0.into());
         let in_dep_c_stride = consumer_barrier_strides
             .get(&(node, 2))
-            .map(|s| flatten_z_strides(&range, s))
+            .map(|s| flatten_strides(&range, s))
             .unwrap_or(0.into());
         let out_dep_stride = producer_barrier_strides
             .get(&node)
-            .map(|s| flatten_z_strides(&range, s))
+            .map(|s| flatten_strides(&range, s))
             .unwrap_or(0.into());
         node_to_task_index.insert(node, tasks.len());
         let task_range = expressions[&range.iter().copied().product()];

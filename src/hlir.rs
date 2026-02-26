@@ -1313,23 +1313,27 @@ impl EgglogOp for SumReduce {
 impl NativeOp for SumReduce {
     fn execute(&self, inputs: Vec<&NativeData>, dyn_map: &FxHashMap<char, usize>) -> NativeData {
         let ind = StridedIterator::new(&self.shape, &self.strides, dyn_map);
-        let iter_stride = self.iter_stride.exec(dyn_map).unwrap();
+        // Resolve dyn vars in iter_stride, then evaluate z-stride at each iteration
+        let mut resolved_stride = self.iter_stride;
+        for (&var, &val) in dyn_map {
+            resolved_stride = resolved_stride.substitute(var, Expression::from(val as i32));
+        }
         let iters = self.iters.exec(dyn_map).unwrap();
         match inputs[0] {
             NativeData::F32(a) => NativeData::F32(
-                ind.map(|start| (0..iters).map(|i| a[start + i * iter_stride]).sum())
+                ind.map(|start| (0..iters).map(|i| a[start + resolved_stride.exec_single_var(i)]).sum())
                     .collect(),
             ),
             NativeData::F16(a) => NativeData::F16(
-                ind.map(|start| (0..iters).map(|i| a[start + i * iter_stride]).sum())
+                ind.map(|start| (0..iters).map(|i| a[start + resolved_stride.exec_single_var(i)]).sum())
                     .collect(),
             ),
             NativeData::Bf16(a) => NativeData::Bf16(
-                ind.map(|start| (0..iters).map(|i| a[start + i * iter_stride]).sum())
+                ind.map(|start| (0..iters).map(|i| a[start + resolved_stride.exec_single_var(i)]).sum())
                     .collect(),
             ),
             NativeData::Int(a) => NativeData::Int(
-                ind.map(|start| (0..iters).map(|i| a[start + i * iter_stride]).sum())
+                ind.map(|start| (0..iters).map(|i| a[start + resolved_stride.exec_single_var(i)]).sum())
                     .collect(),
             ),
             NativeData::Bool(_) => panic!("Cannot sum Bool tensors, cast to F32 first"),
@@ -1403,13 +1407,17 @@ impl EgglogOp for MaxReduce {
 impl NativeOp for MaxReduce {
     fn execute(&self, inputs: Vec<&NativeData>, dyn_map: &FxHashMap<char, usize>) -> NativeData {
         let ind = StridedIterator::new(&self.shape, &self.strides, dyn_map);
-        let iter_stride = self.iter_stride.exec(dyn_map).unwrap();
+        // Resolve dyn vars in iter_stride, then evaluate z-stride at each iteration
+        let mut resolved_stride = self.iter_stride;
+        for (&var, &val) in dyn_map {
+            resolved_stride = resolved_stride.substitute(var, Expression::from(val as i32));
+        }
         let iters = self.iters.exec(dyn_map).unwrap();
         match inputs[0] {
             NativeData::F32(a) => NativeData::F32(
                 ind.map(|start| {
                     (0..iters)
-                        .map(|i| a[start + i * iter_stride])
+                        .map(|i| a[start + resolved_stride.exec_single_var(i)])
                         .max_by(|a, b| a.total_cmp(b))
                         .unwrap_or_default()
                 })
@@ -1418,7 +1426,7 @@ impl NativeOp for MaxReduce {
             NativeData::F16(a) => NativeData::F16(
                 ind.map(|start| {
                     (0..iters)
-                        .map(|i| a[start + i * iter_stride])
+                        .map(|i| a[start + resolved_stride.exec_single_var(i)])
                         .max_by(|a, b| a.total_cmp(b))
                         .unwrap_or_default()
                 })
@@ -1427,7 +1435,7 @@ impl NativeOp for MaxReduce {
             NativeData::Bf16(a) => NativeData::Bf16(
                 ind.map(|start| {
                     (0..iters)
-                        .map(|i| a[start + i * iter_stride])
+                        .map(|i| a[start + resolved_stride.exec_single_var(i)])
                         .max_by(|a, b| a.total_cmp(b))
                         .unwrap_or_default()
                 })
@@ -1436,7 +1444,7 @@ impl NativeOp for MaxReduce {
             NativeData::Int(a) => NativeData::Int(
                 ind.map(|start| {
                     (0..iters)
-                        .map(|i| a[start + i * iter_stride])
+                        .map(|i| a[start + resolved_stride.exec_single_var(i)])
                         .max()
                         .unwrap_or_default()
                 })
@@ -1685,7 +1693,7 @@ impl NativeRuntime {
 
 struct StridedIterator {
     shape: Vec<usize>,
-    strides: Vec<usize>,
+    strides: Vec<Expression>,
     index: Vec<usize>,
     done: bool,
 }
@@ -1693,12 +1701,20 @@ struct StridedIterator {
 impl StridedIterator {
     fn new(shape: &[Expression], strides: &[Expression], dyn_map: &FxHashMap<char, usize>) -> Self {
         let shape: Vec<usize> = shape.iter().map(|e| e.exec(dyn_map).unwrap()).collect();
+        // Resolve dynamic vars in strides but keep 'z' as a variable
+        let strides: Vec<Expression> = strides
+            .iter()
+            .map(|e| {
+                let mut resolved = *e;
+                for (&var, &val) in dyn_map {
+                    resolved = resolved.substitute(var, Expression::from(val as i32));
+                }
+                resolved
+            })
+            .collect();
         Self {
             index: vec![0; shape.len()],
-            strides: strides
-                .iter()
-                .map(|e| e.exec(dyn_map).unwrap())
-                .collect_vec(),
+            strides,
             done: shape.contains(&0),
             shape,
         }
@@ -1717,7 +1733,7 @@ impl Iterator for StridedIterator {
             .strides
             .iter()
             .zip(self.index.iter())
-            .map(|(&s, &idx)| idx * s)
+            .map(|(s, &idx)| s.exec_single_var(idx))
             .sum();
 
         for i in (0..self.shape.len()).rev() {

@@ -229,8 +229,8 @@ extern \"C\" {{
     }}
 }}",
             dtype = dtype,
-            in_index = flatten_mul_strides(&self.out_shape, &self.in_stride).to_kernel(),
-            out_index = flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            in_index = flatten_strides(&self.out_shape, &self.in_stride).to_kernel(),
+            out_index = flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
             iters = self.iters.to_kernel(),
             iter_stride = self.iter_stride.to_kernel(),
         );
@@ -402,8 +402,8 @@ extern \"C\" {{
     }}
 }}",
             dtype = dtype,
-            in_index = flatten_mul_strides(&self.out_shape, &self.in_stride).to_kernel(),
-            out_index = flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            in_index = flatten_strides(&self.out_shape, &self.in_stride).to_kernel(),
+            out_index = flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
             iters = self.iters.to_kernel(),
             iter_stride = self.iter_stride.to_kernel(),
         );
@@ -561,9 +561,9 @@ extern \"C\" {{
         C[{}] = A[{}] + B[{}];
     }}
 }}",
-            flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
-            flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
+            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.a_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.b_stride).to_kernel()
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -724,9 +724,9 @@ extern \"C\" {{
         C[{}] = A[{}] * B[{}];
     }}
 }}",
-            flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
-            flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.a_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.b_stride).to_kernel(),
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -917,9 +917,9 @@ extern \"C\" {{
         *out = data[{}];
     }}
 }}",
-            flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            flatten_mul_strides(&self.out_shape, &self.index_stride).to_kernel(),
-            flatten_mul_strides(&self.data_shape, &self.data_stride).to_kernel()
+            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.index_stride).to_kernel(),
+            flatten_strides(&self.data_shape, &self.data_stride).to_kernel()
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -1195,8 +1195,8 @@ extern \"C\" {{
         out[{}] = exp2f(in[{}]);
     }}
 }}",
-            flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
-            flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
+            flatten_strides(&self.shape, &self.out_strides).to_kernel(),
+            flatten_strides(&self.shape, &self.in_strides).to_kernel()
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -1339,8 +1339,8 @@ extern \"C\" {{
         out[{}] = log2f(in[{}]);
     }}
 }}",
-            flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
-            flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
+            flatten_strides(&self.shape, &self.out_strides).to_kernel(),
+            flatten_strides(&self.shape, &self.in_strides).to_kernel()
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -1483,8 +1483,8 @@ extern \"C\" {{
         out[{}] = sinf(in[{}]);
     }}
 }}",
-            flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
-            flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
+            flatten_strides(&self.shape, &self.out_strides).to_kernel(),
+            flatten_strides(&self.shape, &self.in_strides).to_kernel()
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -1627,8 +1627,8 @@ extern \"C\" {{
         out[{}] = 1.0f / in[{}];
     }}
 }}",
-            flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
-            flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
+            flatten_strides(&self.shape, &self.out_strides).to_kernel(),
+            flatten_strides(&self.shape, &self.in_strides).to_kernel()
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -1771,8 +1771,8 @@ extern \"C\" {{
         out[{}] = sqrtf(in[{}]);
     }}
 }}",
-            flatten_mul_strides(&self.shape, &self.out_strides).to_kernel(),
-            flatten_mul_strides(&self.shape, &self.in_strides).to_kernel()
+            flatten_strides(&self.shape, &self.out_strides).to_kernel(),
+            flatten_strides(&self.shape, &self.in_strides).to_kernel()
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -1919,9 +1919,9 @@ extern \"C\" {{
         C[{}] = fmodf(A[{}], B[{}]);
     }}
 }}",
-            flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
-            flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
+            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.a_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.b_stride).to_kernel()
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -2078,9 +2078,9 @@ extern \"C\" {{
         C[{}] = A[{}] < B[{}] ? 1 : 0;
     }}
 }}",
-            flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            flatten_mul_strides(&self.out_shape, &self.a_stride).to_kernel(),
-            flatten_mul_strides(&self.out_shape, &self.b_stride).to_kernel()
+            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.a_stride).to_kernel(),
+            flatten_strides(&self.out_shape, &self.b_stride).to_kernel()
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -2557,8 +2557,8 @@ impl KernelOp for KernelEmbed {
             .chain(self.embed_dim.dyn_vars())
             .collect::<FxHashSet<_>>();
         let token_offset_expr =
-            flatten_mul_strides(&self.batch_shape, &self.token_stride).to_kernel();
-        let out_offset_expr = flatten_mul_strides(&self.batch_shape, &self.out_stride).to_kernel();
+            flatten_strides(&self.batch_shape, &self.token_stride).to_kernel();
+        let out_offset_expr = flatten_strides(&self.batch_shape, &self.out_stride).to_kernel();
         let embed_dim_expr = self.embed_dim.to_kernel();
         let kernel = format!(
             "

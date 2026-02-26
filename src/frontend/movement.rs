@@ -209,7 +209,7 @@ impl GraphTensor {
             axis_exprs.push(Expression::from('z') * dilation[i] * in_strides[i]);
         }
 
-        let index_expression = flatten_z_strides(&final_shape, &axis_exprs).simplify();
+        let index_expression = flatten_strides(&final_shape, &axis_exprs).simplify();
         let iota = self.graph().iota(index_expression, final_shape);
         self.gather(iota)
     }
@@ -243,7 +243,7 @@ impl GraphTensor {
             }
             new_dims.reverse();
             index_expressions.reverse();
-            let index_expression = flatten_z_strides(&new_dims, &index_expressions);
+            let index_expression = flatten_strides(&new_dims, &index_expressions);
             let iota = self.graph().iota(index_expression, new_dims);
             self.gather(iota)
         } else {
@@ -318,7 +318,7 @@ impl GraphTensor {
         }
         new_dims.reverse();
         index_expressions.reverse();
-        let index_expression = flatten_z_strides(&new_dims, &index_expressions);
+        let index_expression = flatten_strides(&new_dims, &index_expressions);
         // get indexed tensor
         let new_tensor = self.gather(self.graph().iota(index_expression, new_dims.clone()));
         // mask out padded elements
@@ -333,7 +333,15 @@ impl GraphTensor {
             }
             mask_expressions.push(mask);
         }
-        let mask_expression = flatten_z_strides_mask(&new_dims, &mask_expressions);
+        let mut current_elem_size = Expression::from(1);
+        let mut flat_stride = Expression::from(1);
+        for (dim, (range, stride)) in new_dims.iter().zip(mask_expressions).enumerate().rev() {
+            let div = expr('z') / current_elem_size;
+            let m = if dim > 0 { div % range } else { div };
+            flat_stride *= stride.substitute('z', m);
+            current_elem_size *= range;
+        }
+        let mask_expression = flat_stride.simplify();
         let mask = self
             .graph()
             .iota(mask_expression, new_dims)

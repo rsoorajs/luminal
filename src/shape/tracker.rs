@@ -30,7 +30,7 @@ impl ShapeTracker {
             dims: Default::default(),
             strides: Default::default(),
         };
-        let mut stride = Expression::from(1);
+        let mut stride = expr('z');
         for d in dims.to_shape().into_iter().rev() {
             s.dims.insert(0, d);
             s.strides.insert(0, stride);
@@ -145,7 +145,7 @@ impl ShapeTracker {
             return 'z'.into();
         }
         let mut ind_expr = 0.into(); // The final index expression
-        let mut current_elem_size = Expression::from(1); // Keep track of the size of each element of the current dim (last dim elem size: 1)
+        let mut current_elem_size = expr(1); // Keep track of the size of each element of the current dim (last dim elem size: 1)
 
         // Loop through all dims in reverse order
         for (d, s) in self.dims.iter().zip(&self.strides).rev() {
@@ -154,13 +154,13 @@ impl ShapeTracker {
                 current_elem_size *= d;
                 continue;
             }
-            let mut dim_ind = Expression::from('z');
+            let mut dim_ind = expr('z');
             // Remove other dim components
             dim_ind /= current_elem_size;
             // Get position in current dim
             dim_ind %= d;
-            // Add to index expression
-            ind_expr += dim_ind * s;
+            // Add to index expression (substitute z in stride with the dimension index)
+            ind_expr += s.substitute('z', dim_ind);
             // Keep track of element size for next dimension
             current_elem_size *= d;
         }
@@ -187,7 +187,7 @@ impl ShapeTracker {
         self.dims
             .iter()
             .rev()
-            .scan(Expression::from(1), |acc, d| {
+            .scan(expr('z'), |acc, d| {
                 let r = *acc;
                 *acc *= d;
                 Some(r)
@@ -265,8 +265,8 @@ impl ShapeTracker {
         // let inner_dim = self.dims.remove(axis2);
         // self.dims[axis1] *= inner_dim;
         // self.strides[axis1] = (self.strides[axis1]
-        //     .substitute('z', Expression::from('z') / inner_dim)
-        //     + inner_stride.substitute('z', Expression::from('z') % inner_dim))
+        //     .substitute('z', expr('z') / inner_dim)
+        //     + inner_stride.substitute('z', expr('z') % inner_dim))
         // .simplify();
     }
 
@@ -286,11 +286,7 @@ mod tests {
     use proptest::prelude::*;
     #[test]
     fn test_idx_expr() {
-        let mut tracker = ShapeTracker::new([
-            Expression::from(10),
-            Expression::from(5),
-            Expression::from(3),
-        ]);
+        let mut tracker = ShapeTracker::new([expr(10), expr(5), expr(3)]);
         tracker.permute(&[2, 0, 1]);
         println!("Shape: [10, 5, 3]");
         println!("Strides: {:?}", tracker.strides);
@@ -302,71 +298,62 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
         fn test_permute_and_expand(a in 1usize..10, b in 1usize..10, c in 1usize..10, expand_a in 2usize..10) {
+            let z = expr('z');
+            // Build expected strides the same way new() does: z, z*c, z*c*b
+            let zc = z * expr(c);
+            let zcb = zc * expr(b);
             let mut tracker = ShapeTracker::new((a, b, c));
             assert!(tracker.is_contiguous());
             assert_eq!(
                 tracker.strides.as_slice(),
-                &[
-                    Expression::from(b * c),
-                    Expression::from(c),
-                    Expression::from(1)
-                ]
+                &[zcb, zc, z]
             );
             tracker.permute((1, 2, 0));
             assert_eq!(
                 tracker.dims.as_slice(),
                 &[
-                    Expression::from(b),
-                    Expression::from(c),
-                    Expression::from(a)
+                    expr(b),
+                    expr(c),
+                    expr(a)
                 ]
             );
             assert_eq!(
                 tracker.strides.as_slice(),
-                &[
-                    Expression::from(c),
-                    Expression::from(1),
-                    Expression::from(b * c)
-                ]
+                &[zc, z, zcb]
             );
             tracker.expand_dim(1, 1);
             assert_eq!(
                 tracker.dims.as_slice(),
                 &[
-                    Expression::from(b),
-                    Expression::from(1),
-                    Expression::from(c),
-                    Expression::from(a)
+                    expr(b),
+                    expr(1),
+                    expr(c),
+                    expr(a)
                 ]
             );
             assert_eq!(
                 tracker.strides.as_slice(),
-                &[
-                    Expression::from(c),
-                    Expression::from(0),
-                    Expression::from(1),
-                    Expression::from(b * c)
-                ]
+                &[zc, expr(0), z, zcb]
             );
             let removed = tracker.remove_dim(1);
-            assert_eq!(removed, Expression::from(1));
+            assert_eq!(removed, expr(1));
             assert_eq!(
                 tracker.dims.as_slice(),
                 &[
-                    Expression::from(b),
-                    Expression::from(c),
-                    Expression::from(a)
+                    expr(b),
+                    expr(c),
+                    expr(a)
                 ]
             );
             let mut tracker = ShapeTracker::new((1, c));
             tracker.expand((expand_a, c));
             assert_eq!(
                 tracker.dims.as_slice(),
-                &[Expression::from(expand_a), Expression::from(c)]
+                &[expr(expand_a), expr(c)]
             );
             assert_eq!(
                 tracker.strides.as_slice(),
-                &[Expression::from(0), Expression::from(1)]
+                &[expr(0), z]
             );
         }
     }
