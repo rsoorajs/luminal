@@ -22,6 +22,10 @@ use luminal::{
     },
     shape::{Expression, flatten_strides},
 };
+use luminal_tracing::schema::{
+    self as schema, TrackEvent, debug_annotation::NameField, trace_packet, track_descriptor,
+    track_event,
+};
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -30,10 +34,6 @@ use std::{
     sync::Arc,
 };
 use tracing::{Level, span};
-use tracing_perfetto_sdk_schema::{
-    self as schema, TrackEvent, debug_annotation::NameField, trace_packet, track_descriptor,
-    track_event,
-};
 
 use crate::block::cstruct::CStruct;
 
@@ -596,7 +596,7 @@ fn annotation_matches_id(
         return false;
     }
     match &a.value {
-        Some(tracing_perfetto_sdk_schema::debug_annotation::Value::StringValue(v)) => {
+        Some(luminal_tracing::schema::debug_annotation::Value::StringValue(v)) => {
             *v == format!("{id}")
         }
         _ => false,

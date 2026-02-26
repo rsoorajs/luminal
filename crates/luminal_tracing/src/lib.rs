@@ -22,6 +22,14 @@ use tracing_subscriber::filter::{LevelFilter, Targets};
 mod perfetto;
 pub use perfetto::*;
 
+/// Perfetto protobuf schema types for post-processing traces.
+#[path = "perfetto_protos.rs"]
+#[allow(clippy::all)]
+#[rustfmt::skip]
+pub mod schema;
+
+pub use prost;
+
 /// Sets some default crate filters: `luminal=info, egglog=off, everything_else=error`
 pub fn luminal_filter() -> Targets {
     Targets::new()
