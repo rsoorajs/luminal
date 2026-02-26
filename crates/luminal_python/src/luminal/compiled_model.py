@@ -20,14 +20,6 @@ class CompiledModel:
         self._output_names = graph_result.output_names
         self._output_shapes = graph_result.output_shapes
 
-        # Find all tensor names to detect _kn (transposed) variants
-        all_tensor_names: Set[str] = set(graph_result.tensor_names)
-        self._kn_inputs = {}  # Maps input name to its _kn variant name
-        for name in self._input_names:
-            kn_name = f"{name}_kn"
-            if kn_name in all_tensor_names:
-                self._kn_inputs[name] = kn_name
-
     def __call__(self, *inputs: torch.Tensor) -> List[torch.Tensor]:
         """Execute the compiled model with PyTorch tensor inputs.
 
@@ -51,14 +43,6 @@ class CompiledModel:
             data = arr.flatten().tolist()
             self._graph.set_input(name, data)
 
-            # If this input has a _kn (transposed) variant, set that too
-            if name in self._kn_inputs:
-                kn_name = self._kn_inputs[name]
-                # _kn tensors are 2D matrix transposes
-                if arr.ndim == 2:
-                    transposed = arr.T.flatten().tolist()
-                    self._graph.set_input(kn_name, transposed)
-
         # Run the graph
         self._graph.run()
 
@@ -66,7 +50,11 @@ class CompiledModel:
         outputs = []
         for name, shape in zip(self._output_names, self._output_shapes):
             data = self._graph.get_output(name)
-            tensor = torch.tensor(data, dtype=torch.float32).reshape(tuple(shape)).to(input_device)
+            tensor = (
+                torch.tensor(data, dtype=torch.float32)
+                .reshape(tuple(shape))
+                .to(input_device)
+            )
             outputs.append(tensor)
 
         # Return as a tuple (TorchDynamo expects tuple return from backend callables)

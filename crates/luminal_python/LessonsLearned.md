@@ -213,3 +213,54 @@ In `ops_parse/unary.rs` `parse_cast_node`, split the combined condition into two
 `GraphTensor * constant_float(1.0)` for type materialization, always put the operand
 whose dtype you want to preserve on the LEFT side. When converting Int→F32, the F32
 constant must be the left operand.
+
+---
+
+## 2026-02-26 — ScatterND Fails on CUDA: "does not produce an egraph"
+
+### What the symptom was
+
+`test_scatter_nd` passed on native backend but failed on CUDA with "does not produce an
+egraph". The CUDA compilation could not extract a valid program from the e-graph.
+
+### What the actual root cause was
+
+`scatter_nd` in `movement.rs` does `indices * 1` (line 353) to materialize the tensor for
+reshaping. The `* 1` dispatches to `Mul<S: Into<Expression>>`, which creates a `constant(1)`
+→ `Iota(1,1)` → `DType::Int`. But the ONNX parser creates all tensors as `DType::F32`
+(via `named_tensor()` in `compiled_graph.rs:70`), so indices arrive as F32. This produces
+`Mul(F32, Int)` — mixed dtypes.
+
+The HLIR Mul dtype rule (`hlir.rs:886-888`) uses `(= ?dty (dtype ?lhs))` and
+`(= ?dty (dtype ?rhs))` with the same `?dty` variable, requiring both inputs to have
+matching dtypes. `F32 != Int` → the rule never fires → the Mul node gets **no dtype**.
+
+Every downstream op checks `(= ?dty (dtype ?upstream))`. Without dtype on the Mul, no
+CUDA kernel rewrite rules fire for any downstream op (KernelMul, KernelAdd, KernelLessThan,
+etc.). When `cleanup_hlir` runs (enabled for CUDA, disabled for native), it deletes all
+unrewritten HLIR ops, leaving empty e-classes → egraph extraction fails.
+
+### Why it was hard to find
+
+1. **Works on native**: `cleanup_hlir = false` for NativeRuntime, so unrewritten HLIR ops
+   are never deleted. NativeOp dispatches on actual runtime data, not egglog dtype.
+2. **Cascading failure**: The root cause (missing dtype on one Mul) silently propagated
+   through every downstream op, making it look like a systemic CUDA issue rather than a
+   single dtype mismatch.
+3. **`scatter_elements` works fine**: The sibling op already cast indices via
+   `(idx_f32 + (is_neg * adj)).cast(DType::Int)`, so only `scatter_nd` had this bug.
+
+### The fix
+
+Added `let indices = indices.cast(DType::Int);` at the top of `scatter_nd` in
+`movement.rs`, before any arithmetic on indices. `GraphTensor::cast()` short-circuits
+when `self.dtype == dtype`, so this is safe for callers already passing Int indices.
+Also added the same cast in `parse_scatter_nd_node` for explicitness.
+
+### General principle
+
+**Always cast index tensors to `DType::Int` before arithmetic in graph-building code.**
+ONNX tensors arrive as F32 from the Python bridge. Any `indices * stride` or
+`indices * 1` will produce `Mul(F32, Int)` which breaks HLIR dtype propagation on CUDA.
+The pattern `let indices = indices.cast(DType::Int);` at the top of any index-consuming
+function is defensive and free (no-op when already Int).
