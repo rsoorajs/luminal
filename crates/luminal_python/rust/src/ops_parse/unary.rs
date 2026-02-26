@@ -1,72 +1,9 @@
-use std::{collections::HashMap, ops::Neg};
+use std::collections::HashMap;
 
 use luminal::prelude::{tracing::trace, *};
 use onnx_protobuf::NodeProto;
 
 use crate::util::{broadcast_to, get_float_attr, get_int_attr};
-
-pub fn parse_sqrt_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_unary_op(node, tensors, "Sqrt", |a| a.sqrt())
-}
-
-pub fn parse_sin_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_unary_op(node, tensors, "Sin", |a| a.sin())
-}
-
-pub fn parse_neg_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_unary_op(node, tensors, "Neg", |a| a.neg())
-}
-
-pub fn parse_cos_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_unary_op(node, tensors, "Cos", |a| a.cos())
-}
-
-pub fn parse_sigmoid_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_unary_op(node, tensors, "Sigmoid", |a| a.sigmoid())
-}
-
-pub fn parse_tanh_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_unary_op(node, tensors, "Tanh", |a| a.tanh())
-}
-
-pub fn parse_relu_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_unary_op(node, tensors, "Relu", |a| a.relu())
-}
-
-pub fn parse_abs_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_unary_op(node, tensors, "Abs", |a| a.abs())
-}
-
-pub fn parse_reciprocal_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_unary_op(node, tensors, "Reciprocal", |a| a.reciprocal())
-}
 
 /// Handle Softmax node: output = softmax(input[0], axis)
 ///
@@ -331,7 +268,7 @@ pub fn parse_cast_node(
     Ok(())
 }
 
-fn parse_unary_op(
+pub fn parse_unary_op(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
     op_name: &str,
@@ -357,18 +294,6 @@ fn parse_unary_op(
     tensors.insert(node.output[0].clone(), result);
     trace!("Finished parse: {} Node", op_name);
     Ok(())
-}
-
-/// Handle IsNaN node: return 1.0 where input is NaN, 0.0 otherwise.
-///
-/// Note: luminal's ne(x, x) returns 0 for normal floats and may not correctly
-/// detect actual NaN values (hardware-dependent). For inference with non-NaN
-/// inputs this is correct.
-pub fn parse_isnan_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_unary_op(node, tensors, "IsNaN", |a| a.ne(a))
 }
 
 /// Handle Erf node: output = erf(input[0])

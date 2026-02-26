@@ -5,88 +5,6 @@ use onnx_protobuf::NodeProto;
 
 use crate::util::get_int_attr;
 
-/// Handle ReduceSum node: reduce tensor by summing along specified axes.
-///
-/// Supports multi-axis reduction, keepdims, and noop_with_empty_axes.
-/// Delegates to luminal's ToAxes API for multi-axis reduction.
-/// Opset 13+: axes come from second input; Opset 11: from "axes" attribute.
-pub fn parse_reduce_sum_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-    known_values: &mut HashMap<String, Vec<f32>>,
-) -> Result<(), String> {
-    parse_reduce_op(
-        node,
-        tensors,
-        known_values,
-        "ReduceSum",
-        |t, axes| t.sum(axes),
-        |flat, _n| flat.sum(1),
-    )
-}
-
-/// Handle ReduceMax node: computes the maximum along specified axes.
-///
-/// Supports multi-axis reduction, keepdims, and noop_with_empty_axes.
-/// Delegates to luminal's ToAxes API for multi-axis reduction.
-/// Opset 13+: axes come from second input; Opset 11: from "axes" attribute.
-pub fn parse_reduce_max_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-    known_values: &mut HashMap<String, Vec<f32>>,
-) -> Result<(), String> {
-    parse_reduce_op(
-        node,
-        tensors,
-        known_values,
-        "ReduceMax",
-        |t, axes| t.max(axes),
-        |flat, _n| flat.max(1),
-    )
-}
-
-/// Handle ReduceMin node: computes the minimum along specified axes.
-///
-/// Supports multi-axis reduction, keepdims, and noop_with_empty_axes.
-/// Delegates to luminal's ToAxes API for multi-axis reduction.
-/// Opset 13+: axes come from second input; Opset 11: from "axes" attribute.
-pub fn parse_reduce_min_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-    known_values: &mut HashMap<String, Vec<f32>>,
-) -> Result<(), String> {
-    parse_reduce_op(
-        node,
-        tensors,
-        known_values,
-        "ReduceMin",
-        |t, axes| t.min(axes),
-        |flat, _n| flat.min(1),
-    )
-}
-
-/// Handle ReduceMean node: computes the mean along specified axes.
-///
-/// Supports multi-axis reduction, keepdims, and noop_with_empty_axes.
-/// Delegates to luminal's ToAxes API for multi-axis reduction.
-/// Opset 13+: axes come from second input; Opset 11: from "axes" attribute.
-pub fn parse_reduce_mean_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-    known_values: &mut HashMap<String, Vec<f32>>,
-) -> Result<(), String> {
-    // all_axes path uses sum(1)/N instead of mean() to avoid the Div<Expression>
-    // path that creates an Iota+Cast chain triggering CUDA_ERROR_INVALID_VALUE.
-    parse_reduce_op(
-        node,
-        tensors,
-        known_values,
-        "ReduceMean",
-        |t, axes| t.mean(axes),
-        |flat, n| flat.sum(1) / n as f32,
-    )
-}
-
 /// Handle TopK node: return the top-k values and indices along an axis.
 ///
 /// output[0] = values (F32), output[1] = indices (Int, can be empty/unused).
@@ -139,7 +57,7 @@ pub fn parse_topk_node(
     Ok(())
 }
 
-fn parse_reduce_op(
+pub fn parse_reduce_op(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
     known_values: &mut HashMap<String, Vec<f32>>,
