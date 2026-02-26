@@ -1354,10 +1354,8 @@ impl EgglogOp for MetalGather {
 
 impl MetalKernelOp for MetalGather {
     fn compile(&self, device: &Device) -> ComputePipelineState {
-        let out_idx = lower_expression_for_metal(
-            &flatten_strides(&self.out_shape, &self.out_stride),
-            "idx",
-        );
+        let out_idx =
+            lower_expression_for_metal(&flatten_strides(&self.out_shape, &self.out_stride), "idx");
         let index_idx = lower_expression_for_metal(
             &flatten_strides(&self.out_shape, &self.index_stride),
             "idx",

@@ -247,14 +247,7 @@ impl ShapeTracker {
     /// Given a dyn dim map, resolve global dyn dims into known dims
     pub fn resolve_dyn_dims(&mut self, dyn_dim_map: &FxHashMap<char, usize>) {
         for d in self.dims.iter_mut().chain(&mut self.strides) {
-            for t in d.terms.write().iter_mut() {
-                if let Term::Var(v) = *t
-                    && let Some(val) = dyn_dim_map.get(&v)
-                {
-                    *t = Term::Num(*val as i32);
-                }
-            }
-            d.resolve_vars(dyn_dim_map);
+            *d = d.resolve_vars(dyn_dim_map);
         }
     }
 

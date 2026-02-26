@@ -350,8 +350,7 @@ impl EgglogOp for Iota {
 impl NativeOp for Iota {
     fn execute(&self, _: Vec<&NativeData>, dyn_map: &FxHashMap<char, usize>) -> NativeData {
         let length = self.1.exec(dyn_map).unwrap();
-        let mut expr = self.0;
-        expr.resolve_vars(dyn_map);
+        let mut expr = self.0.resolve_vars(dyn_map);
         NativeData::Int(
             (0..length)
                 .map(|i| expr.exec_single_var(i) as i32)
@@ -1321,20 +1320,36 @@ impl NativeOp for SumReduce {
         let iters = self.iters.exec(dyn_map).unwrap();
         match inputs[0] {
             NativeData::F32(a) => NativeData::F32(
-                ind.map(|start| (0..iters).map(|i| a[start + resolved_stride.exec_single_var(i)]).sum())
-                    .collect(),
+                ind.map(|start| {
+                    (0..iters)
+                        .map(|i| a[start + resolved_stride.exec_single_var(i)])
+                        .sum()
+                })
+                .collect(),
             ),
             NativeData::F16(a) => NativeData::F16(
-                ind.map(|start| (0..iters).map(|i| a[start + resolved_stride.exec_single_var(i)]).sum())
-                    .collect(),
+                ind.map(|start| {
+                    (0..iters)
+                        .map(|i| a[start + resolved_stride.exec_single_var(i)])
+                        .sum()
+                })
+                .collect(),
             ),
             NativeData::Bf16(a) => NativeData::Bf16(
-                ind.map(|start| (0..iters).map(|i| a[start + resolved_stride.exec_single_var(i)]).sum())
-                    .collect(),
+                ind.map(|start| {
+                    (0..iters)
+                        .map(|i| a[start + resolved_stride.exec_single_var(i)])
+                        .sum()
+                })
+                .collect(),
             ),
             NativeData::Int(a) => NativeData::Int(
-                ind.map(|start| (0..iters).map(|i| a[start + resolved_stride.exec_single_var(i)]).sum())
-                    .collect(),
+                ind.map(|start| {
+                    (0..iters)
+                        .map(|i| a[start + resolved_stride.exec_single_var(i)])
+                        .sum()
+                })
+                .collect(),
             ),
             NativeData::Bool(_) => panic!("Cannot sum Bool tensors, cast to F32 first"),
         }
@@ -1704,13 +1719,8 @@ impl StridedIterator {
         // Resolve dynamic vars in strides but keep 'z' as a variable
         let strides: Vec<Expression> = strides
             .iter()
-            .map(|e| {
-                let mut resolved = *e;
-                for (&var, &val) in dyn_map {
-                    resolved = resolved.substitute(var, Expression::from(val as i32));
-                }
-                resolved
-            })
+            .copied()
+            .map(|e| e.resolve_vars(dyn_map))
             .collect();
         Self {
             index: vec![0; shape.len()],

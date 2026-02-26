@@ -2556,8 +2556,7 @@ impl KernelOp for KernelEmbed {
             .chain(self.out_stride.iter().flat_map(|e| e.dyn_vars()))
             .chain(self.embed_dim.dyn_vars())
             .collect::<FxHashSet<_>>();
-        let token_offset_expr =
-            flatten_strides(&self.batch_shape, &self.token_stride).to_kernel();
+        let token_offset_expr = flatten_strides(&self.batch_shape, &self.token_stride).to_kernel();
         let out_offset_expr = flatten_strides(&self.batch_shape, &self.out_stride).to_kernel();
         let embed_dim_expr = self.embed_dim.to_kernel();
         let kernel = format!(

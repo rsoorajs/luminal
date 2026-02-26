@@ -354,10 +354,7 @@ impl BlockOp for QwenAttention {
             .ptr_const_f32("q_norm_weights", self.q_norm_ptr as *const f32)
             .ptr_const_f32("k_norm_weights", self.k_norm_ptr as *const f32)
             .expr("prev_seq", self.prev_seq)
-            .expr(
-                "q_pos_stride",
-                flatten_strides(&self.range, &q_pos_stride),
-            )
+            .expr("q_pos_stride", flatten_strides(&self.range, &q_pos_stride))
             .expr(
                 "group_pos_stride",
                 flatten_strides(&self.range, &group_pos_stride),

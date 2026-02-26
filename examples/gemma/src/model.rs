@@ -352,10 +352,7 @@ impl BlockOp for GemmaAttention {
             .ptr_mut_f32("key_cache", self.k_cache as *mut f32)
             .ptr_mut_f32("val_cache", self.v_cache as *mut f32)
             .expr("prev_seq", self.prev_seq)
-            .expr(
-                "q_pos_stride",
-                flatten_strides(&self.range, &q_pos_stride),
-            )
+            .expr("q_pos_stride", flatten_strides(&self.range, &q_pos_stride))
             .expr(
                 "group_pos_stride",
                 flatten_strides(&self.range, &group_pos_stride),

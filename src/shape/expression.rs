@@ -577,14 +577,22 @@ impl Expression {
             .collect()
     }
     /// Resolve all known variables from dyn map into real values
-    pub fn resolve_vars(&mut self, dyn_map: &FxHashMap<char, usize>) {
-        for term in self.terms.write().iter_mut() {
-            if let Term::Var(v) = *term
-                && let Some(val) = dyn_map.get(&v)
-            {
-                *term = Term::Num(*val as i32);
-            }
-        }
+    pub fn resolve_vars(&self, dyn_map: &FxHashMap<char, usize>) -> Expression {
+        let new_terms: Vec<Term> = self
+            .terms
+            .read()
+            .iter()
+            .map(|term| {
+                if let Term::Var(v) = *term
+                    && let Some(val) = dyn_map.get(&v)
+                {
+                    Term::Num(*val as i32)
+                } else {
+                    *term
+                }
+            })
+            .collect();
+        Expression::new(new_terms)
     }
     /// Run proper equality check inside egglog
     #[tracing::instrument(skip_all)]
