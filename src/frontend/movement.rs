@@ -317,6 +317,7 @@ impl GraphTensor {
         updates: GraphTensor,
         reduction: &str,
     ) -> GraphTensor {
+        let indices = indices.cast(DType::Int);
         let data_dims = self.dims();
         let data_rank = data_dims.len();
         let idx_dims = indices.dims();

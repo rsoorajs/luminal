@@ -1318,6 +1318,7 @@ pub fn parse_scatter_nd_node(
         .ok_or_else(|| format!("ScatterND: missing updates '{}'", node.input[2]))?;
 
     let reduction = get_str_attr(node, "reduction", "none");
+    let indices = indices.cast(DType::Int);
 
     let result = data.scatter_nd(indices, updates, &reduction) * 1.0;
     tensors.insert(node.output[0].clone(), result);
