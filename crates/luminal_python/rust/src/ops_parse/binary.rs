@@ -5,145 +5,6 @@ use onnx_protobuf::NodeProto;
 
 use crate::util::{broadcast_to, compute_broadcast_shape};
 
-/// Handle Add node: output = input[0] + input[1]
-pub fn parse_add_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_binary_broadcast_op(node, tensors, "Add", |a, b| a + b)
-}
-
-/// Handle Mod node: output = input[0] % input[1]
-pub fn parse_mod_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_binary_broadcast_op(node, tensors, "Mod", |a, b| a % b)
-}
-
-/// Handle Sub node: output = input[0] - input[1]
-pub fn parse_sub_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_binary_broadcast_op(node, tensors, "Sub", |a, b| a - b)
-}
-
-/// Handle Mul node: output = input[0] * input[1]
-pub fn parse_mul_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_binary_broadcast_op(node, tensors, "Mul", |a, b| a * b)
-}
-
-/// Handle Div node: output = input[0] / input[1]
-pub fn parse_div_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_binary_broadcast_op(node, tensors, "Div", |a, b| a / b)
-}
-
-/// Parse Less node (ONNX element-wise less-than comparison).
-///
-/// Outputs 1.0 where a < b, 0.0 otherwise.
-pub fn parse_less_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_binary_broadcast_op(node, tensors, "Less", |a, b| a.lt(b))
-}
-
-/// Handle Pow node: input[0].pow(input[1])
-pub fn parse_pow_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_binary_broadcast_op(node, tensors, "Pow", |a, b| a.pow(b))
-}
-
-/// Handle Equal node: element-wise equality comparison.
-///
-/// Outputs 1.0 where inputs are equal, 0.0 otherwise
-pub fn parse_equal_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_binary_broadcast_op(node, tensors, "Equal", |a, b| a.eq(b))
-}
-
-/// Parse Greater node (ONNX element-wise greater-than comparison).
-///
-/// Outputs 1.0 where a > b, 0.0 otherwise
-pub fn parse_greater_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    // a > b  ≡  b < a
-    parse_binary_broadcast_op(node, tensors, "Greater", |a, b| b.lt(a))
-}
-
-/// Handle LessOrEqual node: output = input[0] <= input[1]
-pub fn parse_less_or_equal_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_binary_broadcast_op(node, tensors, "LessOrEqual", |a, b| a.le(b))
-}
-
-/// Handle GreaterOrEqual node: output = input[0] >= input[1]
-pub fn parse_greater_or_equal_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_binary_broadcast_op(node, tensors, "GreaterOrEqual", |a, b| a.ge(b))
-}
-
-/// Handle And node: logical AND — output = input[0] * input[1]  (boolean: 1×1=1, else 0)
-pub fn parse_and_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_binary_broadcast_op(node, tensors, "And", |a, b| {
-        a.cast(DType::F32) * b.cast(DType::F32)
-    })
-}
-
-/// Handle Or node: logical OR — output = min(input[0] + input[1], 1.0)
-pub fn parse_or_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_binary_broadcast_op(node, tensors, "Or", |a, b| {
-        (a.cast(DType::F32) + b.cast(DType::F32)).minimum_f32(1.0)
-    })
-}
-
-/// Handle Xor node: logical XOR — XOR on boolean tensors equals not-equal
-pub fn parse_xor_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_binary_broadcast_op(node, tensors, "Xor", |a, b| a.ne(b))
-}
-
-/// Handle Min node: element-wise minimum over 2+ inputs
-pub fn parse_min_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_variadic_broadcast_op(node, tensors, "Min", |a, b| a.minimum(b))
-}
-
-/// Handle Max node: element-wise maximum over 2+ inputs
-pub fn parse_max_node(
-    node: &NodeProto,
-    tensors: &mut HashMap<String, GraphTensor>,
-) -> Result<(), String> {
-    parse_variadic_broadcast_op(node, tensors, "Max", |a, b| a.maximum(b))
-}
-
 /// Handle Where node: conditional select — output[i] = condition[i] ? x[i] : y[i]
 pub fn parse_where_node(
     node: &NodeProto,
@@ -167,7 +28,7 @@ pub fn parse_where_node(
     Ok(())
 }
 
-fn parse_binary_broadcast_op(
+pub fn parse_binary_broadcast_op(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
     op_name: &str,
@@ -201,7 +62,7 @@ fn parse_binary_broadcast_op(
     Ok(())
 }
 
-fn parse_variadic_broadcast_op(
+pub fn parse_variadic_broadcast_op(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
     op_name: &str,
