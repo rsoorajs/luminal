@@ -3,6 +3,7 @@ from typing import Callable
 import pytest
 import torch
 import torch._dynamo
+from kimik25.kimi_k25_model import KimiK25Model
 from llama3.llama3_model import Llama3Model
 from test_models import (
     AddAddTestModel,
@@ -1985,6 +1986,19 @@ def test_llama3(device: torch.device):
     return
     """Tests full LLaMA3 transformer model (RMSNorm, RoPE, GQA, SwiGLU FFN, causal mask)."""
     model: torch.nn.Module = Llama3Model().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    tokens: torch.Tensor = torch.randint(0, 256, (1, 8), device=device)
+    original: torch.Tensor = model(tokens)
+    output: torch.Tensor = model_compiled(tokens)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+# ========== Kimi K2.5 (DeepSeek-V3) Model Test ==========
+
+
+def test_kimi_k25(device: torch.device):
+    """Tests DeepSeek-V3 text backbone (MLA attention, MoE FFN, RMSNorm, RoPE)."""
+    model: torch.nn.Module = KimiK25Model().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     tokens: torch.Tensor = torch.randint(0, 256, (1, 8), device=device)
     original: torch.Tensor = model(tokens)

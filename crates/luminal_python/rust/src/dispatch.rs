@@ -38,6 +38,7 @@ pub fn process_onnx_nodes(
             "Equal" => parse_binary_broadcast_op(node, tensors, "Equal", |a, b| a.eq(b))?,
             "Where" => parse_where_node(node, tensors)?,
             "Constant" => parse_constant_node(node, tensors, cx, weight_data, known_values)?,
+            "ConstantOfShape" => parse_constant_of_shape(node, tensors, cx, weight_data, known_values)?,
             "Cast" => parse_cast_node(node, tensors, weight_data, known_values)?,
             "MatMul" => parse_matmul_node(node, tensors)?,
             "Reshape" => parse_reshape_node(node, tensors, known_values)?,
