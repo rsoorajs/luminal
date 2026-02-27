@@ -116,6 +116,95 @@ pub fn parse_shape_node(
     Ok(())
 }
 
+/// Handle ConstantOfShape node: creates a tensor of a given shape filled with a constant value.
+///
+/// The shape is taken from the input tensor (which must be a known constant).
+/// The fill value comes from the "value" attribute (default 0.0).
+pub fn parse_constant_of_shape(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    cx: &mut Graph,
+    weight_data: &mut Vec<(String, Vec<f32>)>,
+    known_values: &mut HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: ConstantOfShape Node");
+    assert!(
+        node.input.len() == 1,
+        "ConstantOfShape should have exactly one input (shape)"
+    );
+    assert!(
+        node.output.len() == 1,
+        "ConstantOfShape should have exactly one output"
+    );
+
+    // The input is a 1D tensor containing the desired output shape
+    let shape_values = known_values
+        .get(&node.input[0])
+        .ok_or_else(|| {
+            format!(
+                "ConstantOfShape: shape input '{}' must be a known constant",
+                node.input[0]
+            )
+        })?;
+
+    let shape: Vec<usize> = shape_values.iter().map(|&v| v as usize).collect();
+
+    // Extract fill value from "value" attribute (TensorProto scalar), default 0.0
+    let fill_value: f32 = node
+        .attribute
+        .iter()
+        .find(|a| a.name == "value")
+        .and_then(|attr| attr.t.as_ref())
+        .map(|tp| {
+            if !tp.float_data.is_empty() {
+                tp.float_data[0]
+            } else if !tp.int32_data.is_empty() {
+                tp.int32_data[0] as f32
+            } else if !tp.raw_data.is_empty() {
+                match tp.data_type {
+                    1 => f32::from_le_bytes([
+                        tp.raw_data[0],
+                        tp.raw_data[1],
+                        tp.raw_data[2],
+                        tp.raw_data[3],
+                    ]),
+                    6 => i32::from_le_bytes([
+                        tp.raw_data[0],
+                        tp.raw_data[1],
+                        tp.raw_data[2],
+                        tp.raw_data[3],
+                    ]) as f32,
+                    7 => i64::from_le_bytes([
+                        tp.raw_data[0],
+                        tp.raw_data[1],
+                        tp.raw_data[2],
+                        tp.raw_data[3],
+                        tp.raw_data[4],
+                        tp.raw_data[5],
+                        tp.raw_data[6],
+                        tp.raw_data[7],
+                    ]) as f32,
+                    _ => 0.0,
+                }
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
+
+    let numel: usize = shape.iter().product();
+    let floats: Vec<f32> = vec![fill_value; numel];
+
+    let output_name = &node.output[0];
+    let tensor = cx.named_tensor(output_name.clone(), shape);
+    tensors.insert(output_name.clone(), tensor);
+    known_values.insert(output_name.clone(), floats.clone());
+    weight_data.push((output_name.clone(), floats));
+
+    trace!("Finished parse: ConstantOfShape Node");
+    Ok(())
+}
+
 /// Handle Identity node: output is a direct alias of the input tensor.
 ///
 /// Propagates known constant values for downstream constant folding.
