@@ -10,6 +10,7 @@ use crate::{hlir::CustomOpHLIR, op::*, prelude::*};
 use colored::Colorize;
 use itertools::Itertools;
 use petgraph::{Direction, algo::toposort, stable_graph::StableGraph, visit::EdgeRef};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     any::TypeId,
@@ -301,8 +302,16 @@ impl Graph {
             }
         }
 
-        // Search each group's representative
-        let mut rng = rand::rng();
+        // Search each group's representative.
+        // Optional deterministic seed for reproducible search runs.
+        let search_seed = std::env::var("LUMINAL_SEARCH_SEED")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok());
+        let fallback_seed = rand::rng().random::<u64>();
+        let mut rng = StdRng::seed_from_u64(search_seed.unwrap_or(fallback_seed));
+        let print_signature = std::env::var("LUMINAL_SEARCH_SIGNATURE")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
         let mut group_best_llirs: Vec<Option<LLIRGraph>> = (0..n_groups).map(|_| None).collect();
         let mut group_best_genomes: Vec<Option<crate::egglog_utils::EGraphChoiceSet>> =
             (0..n_groups).map(|_| None).collect();
@@ -505,6 +514,23 @@ impl Graph {
                 print!("\r\x1b[2K");
             }
             std::io::stdout().flush().unwrap();
+        }
+
+        if print_signature {
+            if let Some(seed) = search_seed {
+                println!("   {:>6}  seed={seed}", "Sig".cyan().bold());
+            }
+            for (group_idx, group) in self.chunk_groups.iter().enumerate() {
+                if let Some(genome) = group_best_genomes[group_idx].as_ref() {
+                    let choice_hash = hash_choice_set(genome);
+                    println!(
+                        "   {:>6}  group={group_idx} rep={} members={} choice_hash={choice_hash:016x}",
+                        "Sig".cyan().bold(),
+                        group.representative,
+                        group.members.iter().join(",")
+                    );
+                }
+            }
         }
 
         // Build per-chunk LLIRs: representative uses searched LLIR,
