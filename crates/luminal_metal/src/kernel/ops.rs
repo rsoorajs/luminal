@@ -8,7 +8,7 @@ use luminal::{
     hlir::{Add, Cast, Constant, Gather, Iota, LessThan, MaxReduce, Mod, Mul, SumReduce},
     op::*,
     prelude::*,
-    shape::flatten_mul_strides,
+    shape::flatten_strides,
 };
 use metal::{Buffer, ComputeCommandEncoderRef, ComputePipelineState, Device, MTLSize};
 
@@ -190,8 +190,8 @@ macro_rules! metal_unary_op {
         impl MetalKernelOp for $name {
             fn compile(&self, device: &Device) -> ComputePipelineState {
                 // Generate strided index expressions
-                let inp_index = flatten_mul_strides(&self.shape, &self.input_strides);
-                let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
+                let inp_index = flatten_strides(&self.shape, &self.input_strides);
+                let out_index = flatten_strides(&self.shape, &self.output_strides);
 
                 // Convert expressions to Metal code
                 let inp_idx = lower_expression_for_metal(&inp_index, "idx");
@@ -324,9 +324,9 @@ impl EgglogOp for MetalAdd {
 impl MetalKernelOp for MetalAdd {
     fn compile(&self, device: &Device) -> ComputePipelineState {
         // Generate strided index expressions using 'z' = thread index
-        let a_index = flatten_mul_strides(&self.shape, &self.a_strides);
-        let b_index = flatten_mul_strides(&self.shape, &self.b_strides);
-        let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
+        let a_index = flatten_strides(&self.shape, &self.a_strides);
+        let b_index = flatten_strides(&self.shape, &self.b_strides);
+        let out_index = flatten_strides(&self.shape, &self.output_strides);
 
         // Convert expressions to Metal code, replacing 'const_z' with 'idx'
         let a_idx = lower_expression_for_metal(&a_index, "idx");
@@ -442,9 +442,9 @@ impl EgglogOp for MetalMul {
 
 impl MetalKernelOp for MetalMul {
     fn compile(&self, device: &Device) -> ComputePipelineState {
-        let a_index = flatten_mul_strides(&self.shape, &self.a_strides);
-        let b_index = flatten_mul_strides(&self.shape, &self.b_strides);
-        let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
+        let a_index = flatten_strides(&self.shape, &self.a_strides);
+        let b_index = flatten_strides(&self.shape, &self.b_strides);
+        let out_index = flatten_strides(&self.shape, &self.output_strides);
 
         let a_idx = lower_expression_for_metal(&a_index, "idx");
         let b_idx = lower_expression_for_metal(&b_index, "idx");
@@ -560,9 +560,9 @@ impl EgglogOp for MetalMod {
 
 impl MetalKernelOp for MetalMod {
     fn compile(&self, device: &Device) -> ComputePipelineState {
-        let a_index = flatten_mul_strides(&self.shape, &self.a_strides);
-        let b_index = flatten_mul_strides(&self.shape, &self.b_strides);
-        let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
+        let a_index = flatten_strides(&self.shape, &self.a_strides);
+        let b_index = flatten_strides(&self.shape, &self.b_strides);
+        let out_index = flatten_strides(&self.shape, &self.output_strides);
 
         let a_idx = lower_expression_for_metal(&a_index, "idx");
         let b_idx = lower_expression_for_metal(&b_index, "idx");
@@ -678,9 +678,9 @@ impl EgglogOp for MetalLessThan {
 
 impl MetalKernelOp for MetalLessThan {
     fn compile(&self, device: &Device) -> ComputePipelineState {
-        let a_index = flatten_mul_strides(&self.shape, &self.a_strides);
-        let b_index = flatten_mul_strides(&self.shape, &self.b_strides);
-        let out_index = flatten_mul_strides(&self.shape, &self.output_strides);
+        let a_index = flatten_strides(&self.shape, &self.a_strides);
+        let b_index = flatten_strides(&self.shape, &self.b_strides);
+        let out_index = flatten_strides(&self.shape, &self.output_strides);
 
         let a_idx = lower_expression_for_metal(&a_index, "idx");
         let b_idx = lower_expression_for_metal(&b_index, "idx");
@@ -801,8 +801,8 @@ impl EgglogOp for MetalSumReduce {
 
 impl MetalKernelOp for MetalSumReduce {
     fn compile(&self, device: &Device) -> ComputePipelineState {
-        let in_index = flatten_mul_strides(&self.out_shape, &self.in_stride);
-        let out_index = flatten_mul_strides(&self.out_shape, &self.out_stride);
+        let in_index = flatten_strides(&self.out_shape, &self.in_stride);
+        let out_index = flatten_strides(&self.out_shape, &self.out_stride);
 
         let in_idx = lower_expression_for_metal(&in_index, "gid");
         let out_idx = lower_expression_for_metal(&out_index, "gid");
@@ -954,8 +954,8 @@ impl EgglogOp for MetalMaxReduce {
 
 impl MetalKernelOp for MetalMaxReduce {
     fn compile(&self, device: &Device) -> ComputePipelineState {
-        let in_index = flatten_mul_strides(&self.out_shape, &self.in_stride);
-        let out_index = flatten_mul_strides(&self.out_shape, &self.out_stride);
+        let in_index = flatten_strides(&self.out_shape, &self.in_stride);
+        let out_index = flatten_strides(&self.out_shape, &self.out_stride);
 
         let in_idx = lower_expression_for_metal(&in_index, "gid");
         let out_idx = lower_expression_for_metal(&out_index, "gid");
@@ -1332,16 +1332,14 @@ impl EgglogOp for MetalGather {
 
 impl MetalKernelOp for MetalGather {
     fn compile(&self, device: &Device) -> ComputePipelineState {
-        let out_idx = lower_expression_for_metal(
-            &flatten_mul_strides(&self.out_shape, &self.out_stride),
-            "idx",
-        );
+        let out_idx =
+            lower_expression_for_metal(&flatten_strides(&self.out_shape, &self.out_stride), "idx");
         let index_idx = lower_expression_for_metal(
-            &flatten_mul_strides(&self.out_shape, &self.index_stride),
+            &flatten_strides(&self.out_shape, &self.index_stride),
             "idx",
         );
         let data_idx = lower_expression_for_metal(
-            &flatten_mul_strides(&self.out_shape, &self.data_stride),
+            &flatten_strides(&self.out_shape, &self.data_stride),
             "gathered_index",
         );
 

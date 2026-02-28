@@ -178,8 +178,8 @@ extern \"C\" {{
     }}
 }}",
             dtype = dtype,
-            in_index = flatten_mul_strides(&self.out_shape, &self.in_stride).to_kernel(),
-            out_index = flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            in_index = flatten_strides(&self.out_shape, &self.in_stride).to_kernel(),
+            out_index = flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
             iters = self.iters.to_kernel(),
             iter_stride = self.iter_stride.to_kernel(),
         );

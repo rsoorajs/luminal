@@ -12,7 +12,7 @@ use luminal::{
 };
 
 use crate::block::{BlockOp, CStruct};
-use luminal::shape::flatten_mul_strides;
+use luminal::shape::flatten_strides;
 
 pub type Ops = (
     RowAdd,
@@ -157,17 +157,11 @@ impl BlockOp for RowAdd {
 
     fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
         payload
-            .expr(
-                "a_strides",
-                flatten_mul_strides(&self.range, &self.a_stride),
-            )
-            .expr(
-                "b_strides",
-                flatten_mul_strides(&self.range, &self.b_stride),
-            )
+            .expr("a_strides", flatten_strides(&self.range, &self.a_stride))
+            .expr("b_strides", flatten_strides(&self.range, &self.b_stride))
             .expr(
                 "out_strides",
-                flatten_mul_strides(&self.range, &self.out_stride),
+                flatten_strides(&self.range, &self.out_stride),
             )
             .expr("row_width", self.row_width)
     }
@@ -351,9 +345,9 @@ impl BlockOp for RowSwishMul {
 
         let launch_range = self.launch_range();
         payload
-            .expr("a", flatten_mul_strides(&launch_range, &a_stride_ext))
-            .expr("b", flatten_mul_strides(&launch_range, &b_stride_ext))
-            .expr("out", flatten_mul_strides(&launch_range, &a_stride_ext))
+            .expr("a", flatten_strides(&launch_range, &a_stride_ext))
+            .expr("b", flatten_strides(&launch_range, &b_stride_ext))
+            .expr("out", flatten_strides(&launch_range, &a_stride_ext))
             .expr("row_width", self.row_width)
             .expr("sm_count", self.sm_count)
     }
@@ -535,8 +529,8 @@ impl BlockOp for RowRMSNorm {
 
     fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
         payload
-            .expr("inp", flatten_mul_strides(&self.range, &self.a_stride))
-            .expr("out", flatten_mul_strides(&self.range, &self.a_stride))
+            .expr("inp", flatten_strides(&self.range, &self.a_stride))
+            .expr("out", flatten_strides(&self.range, &self.a_stride))
             .expr("row_width", self.row_width)
     }
 
@@ -939,8 +933,8 @@ impl BlockOp for RowRope {
 
     fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
         payload
-            .expr("inp", flatten_mul_strides(&self.range, &self.a_stride))
-            .expr("out", flatten_mul_strides(&self.range, &self.a_stride))
+            .expr("inp", flatten_strides(&self.range, &self.a_stride))
+            .expr("out", flatten_strides(&self.range, &self.a_stride))
             .expr("row_width", self.row_width)
             .expr("token_ids", 'z')
     }
@@ -1234,24 +1228,18 @@ impl BlockOp for TileMatmulSplitK {
         n_pos_stride[self.range.len() - 1] = 1.into();
         payload
             .expr_arr("untiled_range", &self.untiled_range)
-            .expr("a", flatten_mul_strides(&self.range, &self.a_stride))
-            .expr("b", flatten_mul_strides(&self.range, &self.b_stride))
-            .expr("c", flatten_mul_strides(&self.range, &self.out_stride))
+            .expr("a", flatten_strides(&self.range, &self.a_stride))
+            .expr("b", flatten_strides(&self.range, &self.b_stride))
+            .expr("c", flatten_strides(&self.range, &self.out_stride))
             .expr("total_k", self.total_k)
             .expr("a_width", self.a_m_stride)
             .expr("b_width", self.b_n_stride)
             .expr("c_width", self.out_m_stride)
-            .expr(
-                "m_pos_stride",
-                flatten_mul_strides(&self.range, &m_pos_stride),
-            )
-            .expr(
-                "n_pos_stride",
-                flatten_mul_strides(&self.range, &n_pos_stride),
-            )
+            .expr("m_pos_stride", flatten_strides(&self.range, &m_pos_stride))
+            .expr("n_pos_stride", flatten_strides(&self.range, &n_pos_stride))
             .expr(
                 "k_chunk_stride",
-                flatten_mul_strides(&self.range, &k_chunk_stride),
+                flatten_strides(&self.range, &k_chunk_stride),
             )
             .expr("k_chunk_size", self.k_chunk)
     }
@@ -1794,15 +1782,15 @@ impl BlockOp for TileMatmulFullSplit {
             .expr("n_tiles", self.n_tiles)
             .expr("total_k", self.total_k)
             .expr("sm_count", self.sm_count)
-            .expr("a", flatten_mul_strides(&[self.sm_count], &[0.into()]))
+            .expr("a", flatten_strides(&[self.sm_count], &[0.into()]))
             .expr("a_m_stride", self.a_m_stride)
             .expr("a_k_stride", self.a_k_stride)
             .expr("a_width", self.a_m_stride) // a_width = a_m_stride for row-major
-            .expr("b", flatten_mul_strides(&[self.sm_count], &[0.into()]))
+            .expr("b", flatten_strides(&[self.sm_count], &[0.into()]))
             .expr("b_n_stride", self.b_n_stride)
             .expr("b_k_stride", self.b_k_stride)
             .expr("b_width", self.b_n_stride) // b_width = b_n_stride for col-major
-            .expr("c", flatten_mul_strides(&[self.sm_count], &[0.into()]))
+            .expr("c", flatten_strides(&[self.sm_count], &[0.into()]))
             .expr("c_m_stride", self.out_m_stride)
             .expr("c_n_stride", self.out_n_stride)
             .expr("c_width", self.out_m_stride) // c_width = c_m_stride
@@ -2001,12 +1989,9 @@ impl BlockOp for RowEmbed {
         payload
             .expr(
                 "token_stride",
-                flatten_mul_strides(&self.range, &self.token_stride),
+                flatten_strides(&self.range, &self.token_stride),
             )
-            .expr(
-                "out_stride",
-                flatten_mul_strides(&self.range, &self.out_stride),
-            )
+            .expr("out_stride", flatten_strides(&self.range, &self.out_stride))
             .expr("embed_dim", self.embed_dim)
     }
 }

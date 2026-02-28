@@ -24,6 +24,10 @@ static EXPRESSION_INTERNER: OnceLock<RwLock<FxHashMap<Vec<Term>, ExprBox>>> = On
 
 const MAX_CACHED_SIMPLIFICATIONS: usize = 10_000;
 
+pub fn expr(e: impl Into<Expression>) -> Expression {
+    e.into()
+}
+
 #[derive(Copy, Clone)]
 pub struct Expression {
     pub terms: ExprBox,
@@ -573,14 +577,22 @@ impl Expression {
             .collect()
     }
     /// Resolve all known variables from dyn map into real values
-    pub fn resolve_vars(&mut self, dyn_map: &FxHashMap<char, usize>) {
-        for term in self.terms.write().iter_mut() {
-            if let Term::Var(v) = *term
-                && let Some(val) = dyn_map.get(&v)
-            {
-                *term = Term::Num(*val as i32);
-            }
-        }
+    pub fn resolve_vars(&self, dyn_map: &FxHashMap<char, usize>) -> Expression {
+        let new_terms: Vec<Term> = self
+            .terms
+            .read()
+            .iter()
+            .map(|term| {
+                if let Term::Var(v) = *term
+                    && let Some(val) = dyn_map.get(&v)
+                {
+                    Term::Num(*val as i32)
+                } else {
+                    *term
+                }
+            })
+            .collect();
+        Expression::new(new_terms)
     }
     /// Run proper equality check inside egglog
     #[tracing::instrument(skip_all)]
@@ -687,7 +699,7 @@ impl Add<Expression> for usize {
 impl Sub<Expression> for usize {
     type Output = Expression;
     fn sub(self, rhs: Expression) -> Self::Output {
-        Expression::from(self) - rhs
+        expr(self) - rhs
     }
 }
 
@@ -701,14 +713,14 @@ impl Mul<Expression> for usize {
 impl Div<Expression> for usize {
     type Output = Expression;
     fn div(self, rhs: Expression) -> Self::Output {
-        Expression::from(self) / rhs
+        expr(self) / rhs
     }
 }
 
 impl Rem<Expression> for usize {
     type Output = Expression;
     fn rem(self, rhs: Expression) -> Self::Output {
-        Expression::from(self) % rhs
+        expr(self) % rhs
     }
 }
 
@@ -736,7 +748,7 @@ impl Add<Expression> for i32 {
 impl Sub<Expression> for i32 {
     type Output = Expression;
     fn sub(self, rhs: Expression) -> Self::Output {
-        Expression::from(self) - rhs
+        expr(self) - rhs
     }
 }
 
@@ -750,14 +762,14 @@ impl Mul<Expression> for i32 {
 impl Div<Expression> for i32 {
     type Output = Expression;
     fn div(self, rhs: Expression) -> Self::Output {
-        Expression::from(self) / rhs
+        expr(self) / rhs
     }
 }
 
 impl Rem<Expression> for i32 {
     type Output = Expression;
     fn rem(self, rhs: Expression) -> Self::Output {
-        Expression::from(self) % rhs
+        expr(self) % rhs
     }
 }
 
@@ -1065,8 +1077,8 @@ mod tests {
 
     #[test]
     fn test_basic_simplifications() {
-        let x = Expression::from('x');
-        let a = Expression::from('a');
+        let x = expr('x');
+        let a = expr('a');
         // Identity operations simplify away
         assert_eq!(((a * 1) + 0) / 1 + (1 - 1), a);
         // Evaluation after simplification
@@ -1076,34 +1088,29 @@ mod tests {
 
     #[test]
     fn test_substitution() {
-        let x = Expression::from('x');
+        let x = expr('x');
         let new = (x - 255).substitute('x', x / 2).simplify();
         assert_eq!(new.len(), 5);
     }
 
     #[test]
     fn test_group_terms() {
-        let s = Expression::from('s');
+        let s = expr('s');
         let expr = (s * ((s - 4) + 1)) + (((s + 1) * ((s - 4) + 1)) - (s * ((s - 4) + 1)));
         assert_eq!(expr.simplify().len(), 7);
     }
 
     #[test]
     fn test_egglog_equality() {
-        let a = Expression::from('a');
-        let b = Expression::from('b');
+        let a = expr('a');
+        let b = expr('b');
         assert!((a + (b - a)).egglog_equal(b));
         assert!(!(a + 1).egglog_equal(a + 2));
     }
 
     #[test]
     fn test_simplify() {
-        let (z, w, h, s) = (
-            Expression::from('z'),
-            Expression::from('w'),
-            Expression::from('h'),
-            Expression::from('s'),
-        );
+        let (z, w, h, s) = (expr('z'), expr('w'), expr('h'), expr('s'));
         // Nested divisions combine: ((((w + 3) / 2) + 2) / 2) -> (w + 7) / 4
         assert_eq!(((((w + 3) / 2) + 2) / 2).simplify(), (w + 7) / 4);
         // Complex division simplification
@@ -1133,7 +1140,7 @@ mod tests {
     #[test]
     fn test_no_explode() {
         // This expression previously caused e-graph explosion with naive associativity rules
-        let x: Expression = 1 + ((8 / Expression::from(32)) + 27);
+        let x: Expression = 1 + ((8 / expr(32)) + 27);
         x.simplify();
     }
 
@@ -1141,7 +1148,7 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
         fn test_simplify_preserves_eval(x_val in 0usize..100, y_val in 0usize..100, z_val in 0usize..100) {
-            let (x, y, z) = (Expression::from('x'), Expression::from('y'), Expression::from('z'));
+            let (x, y, z) = (expr('x'), expr('y'), expr('z'));
             // Simplification preserves evaluation
             let expr = ((x + 3) * 2) - (x * 2) + (y % 5);
             let env = [('x', x_val), ('y', y_val)].into_iter().collect();
@@ -1161,10 +1168,10 @@ mod tests {
         let unique_var = '\u{E000}'; // Private use area character unlikely to conflict
 
         // Create expression with unique var + 42
-        let x1 = Expression::from(unique_var) + 42;
+        let x1 = expr(unique_var) + 42;
 
         // Create the same expression again - should reuse storage
-        let x2 = Expression::from(unique_var) + 42;
+        let x2 = expr(unique_var) + 42;
 
         // The expressions should be equal
         assert_eq!(x1, x2);
@@ -1179,7 +1186,7 @@ mod tests {
 
         // Different expression should create new entry
         let unique_var2 = '\u{E001}';
-        let y = Expression::from(unique_var2) + 43;
+        let y = expr(unique_var2) + 43;
         assert_ne!(
             x1.terms.id(),
             y.terms.id(),

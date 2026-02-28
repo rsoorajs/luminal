@@ -2,7 +2,7 @@ use luminal::{
     graph::Graph,
     op::{CustomOp, DType, LLIROp},
     prelude::GraphTensor,
-    shape::{flatten_mul_strides, Expression, ToShape},
+    shape::{flatten_strides, Expression, ToShape},
 };
 use luminal_cuda::{
     block::{cstruct::CStruct, BlockOp},
@@ -430,26 +430,23 @@ impl BlockOp for QwenAttention {
             .expr("head_size", self.head_dim)
             .expr("cur_seq", self.cur_seq)
             .expr("kv_row_stride", self.kv_row_stride)
-            .expr("q", flatten_mul_strides(&self.range, &self.q_stride))
-            .expr("k", flatten_mul_strides(&self.range, &self.k_stride))
-            .expr("v", flatten_mul_strides(&self.range, &self.v_stride))
-            .expr("out", flatten_mul_strides(&self.range, &self.o_stride))
+            .expr("q", flatten_strides(&self.range, &self.q_stride))
+            .expr("k", flatten_strides(&self.range, &self.k_stride))
+            .expr("v", flatten_strides(&self.range, &self.v_stride))
+            .expr("out", flatten_strides(&self.range, &self.o_stride))
             .ptr_mut_f32("key_cache", self.k_cache as *mut f32)
             .ptr_mut_f32("val_cache", self.v_cache as *mut f32)
             .ptr_const_f32("q_norm_weights", self.q_norm_ptr as *const f32)
             .ptr_const_f32("k_norm_weights", self.k_norm_ptr as *const f32)
             .expr("prev_seq", self.prev_seq)
-            .expr(
-                "q_pos_stride",
-                flatten_mul_strides(&self.range, &q_pos_stride),
-            )
+            .expr("q_pos_stride", flatten_strides(&self.range, &q_pos_stride))
             .expr(
                 "group_pos_stride",
-                flatten_mul_strides(&self.range, &group_pos_stride),
+                flatten_strides(&self.range, &group_pos_stride),
             )
             .expr(
                 "head_pos_stride",
-                flatten_mul_strides(&self.range, &head_pos_stride),
+                flatten_strides(&self.range, &head_pos_stride),
             )
     }
 

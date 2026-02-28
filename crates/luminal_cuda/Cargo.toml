@@ -16,8 +16,6 @@ itertools = "0.12.1"
 fixedbitset = "0.5.7"
 safetensors = "0.7.0"
 tracing = "0.1.43"
-tracing-perfetto-sdk-schema = "0.13.0"
-prost = "0.14.1"
 half = { version = "2.7.1", features = ["num-traits"] }
 pretty-duration = "0.1.1"
 bytemuck = "1.24.0"
