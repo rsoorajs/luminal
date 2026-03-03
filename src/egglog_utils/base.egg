@@ -41,8 +41,9 @@
         (Bf16)
         (Int)
         (Bool)
-        (NvFp4)
-        (Mxfp4)
+        (F4E2M1)
+        (F8E4M3)
+        (F8UE8M0)
     )
 )
 
