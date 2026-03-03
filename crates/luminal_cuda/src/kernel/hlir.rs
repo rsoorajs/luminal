@@ -232,7 +232,11 @@ extern \"C\" {{
             in_index = flatten_strides(&self.out_shape, &self.in_stride).to_kernel(),
             out_index = flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
             iters = self.iters.to_kernel(),
-            iter_stride = self.iter_stride.to_kernel(),
+            iter_stride = self
+                .iter_stride
+                .substitute('z', Expression::from(1))
+                .simplify()
+                .to_kernel(),
         );
 
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
@@ -405,7 +409,11 @@ extern \"C\" {{
             in_index = flatten_strides(&self.out_shape, &self.in_stride).to_kernel(),
             out_index = flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
             iters = self.iters.to_kernel(),
-            iter_stride = self.iter_stride.to_kernel(),
+            iter_stride = self
+                .iter_stride
+                .substitute('z', Expression::from(1))
+                .simplify()
+                .to_kernel(),
         );
 
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
