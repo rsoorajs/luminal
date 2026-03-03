@@ -909,7 +909,7 @@ pub fn base_expression_egglog() -> String {
             .ruleset("expr"),
     );
 
-    // RowMajor rules
+    // RowMajor rules (z-strides: base stride is MIter/'z', not 1)
     p.add_rule(
         Rule::new()
             .facts(vec![
@@ -920,7 +920,7 @@ pub fn base_expression_egglog() -> String {
             ])
             .action(Action::Union(
                 v("?e"),
-                cons(v("?n_elems"), rowmajor(v("?other"))),
+                cons(mul(v("?n_elems"), iter()), rowmajor(v("?other"))),
             ))
             .ruleset("expr"),
     );
@@ -928,7 +928,7 @@ pub fn base_expression_egglog() -> String {
         rewrite(
             "rowmajor-base",
             rowmajor(cons(v("?dim"), nil())),
-            cons(num(i64(1)), nil()),
+            cons(iter(), nil()),
         )
         .ruleset("expr"),
     );

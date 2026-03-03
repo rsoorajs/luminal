@@ -128,6 +128,8 @@ impl KernelOp for KernelMeanReduce {
             ", const int* dyn_dims"
         };
 
+        let iter_stride_of_i = self.iter_stride.to_kernel().replace("const_z", "i");
+
         let kernel = format!(
             "{includes}
 #define WARP_SIZE 32
@@ -145,11 +147,10 @@ extern \"C\" {{
 
         long long in_start = {in_index};
         long long iters = {iters};
-        long long iter_stride = {iter_stride};
 
         {dtype} sum = 0;
         for (long long i = tid; i < iters; i += THREADS_PER_BLOCK) {{
-            sum += in[in_start + i * iter_stride];
+            sum += in[in_start + {iter_stride_of_i}];
         }}
 
         #pragma unroll
@@ -181,7 +182,7 @@ extern \"C\" {{
             in_index = flatten_strides(&self.out_shape, &self.in_stride).to_kernel(),
             out_index = flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
             iters = self.iters.to_kernel(),
-            iter_stride = self.iter_stride.to_kernel(),
+            iter_stride_of_i = iter_stride_of_i,
         );
 
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
