@@ -78,7 +78,7 @@ pub fn prepare_cuda(context: &mut Graph) -> Result<(CudaRuntime, Arc<CudaStream>
 /// Finalize CUDA runtime: run search with data already set.
 #[cfg(feature = "cuda")]
 pub fn finalize_cuda(context: &mut Graph, rt: CudaRuntime) -> RuntimeBackend {
-    let optimized_rt = context.search(rt, 1);
+    let optimized_rt = context.search(rt, 5);
     RuntimeBackend::Cuda(Box::new(optimized_rt))
 }
 

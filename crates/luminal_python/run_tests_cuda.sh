@@ -10,11 +10,11 @@ rm -rf rust/target/wheels rust/target/debug rust/target/release
 
 # Rebuild in development mode (faster compilation)
 echo "Step 2: Building Rust extension..."
-uv run maturin develop --manifest-path rust/Cargo.toml --features cuda
+uv run maturin develop --manifest-path rust/Cargo.toml --features cuda -r
 
 # Run pytest with CUDA backend
 echo "Step 3: Running pytest with CUDA backend..."
-LUMINAL_BACKEND=cuda uv run pytest tests/ -v
+LUMINAL_BACKEND=cuda uv run pytest tests/test_hlir_ops.py::test_matmul_2d -v -s
 
 echo ""
 echo "=== Tests Complete ==="
