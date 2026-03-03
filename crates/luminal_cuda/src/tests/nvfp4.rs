@@ -61,22 +61,22 @@ fn float_to_fp4_e2m1(val: f32) -> u8 {
     best_code
 }
 
-/// Pack FP32 weights [N, K] (row-major, k-contiguous per row) into NvFp4 buffer.
+/// Pack FP32 weights [N, K] into separate NvFp4 buffers.
 ///
-/// Buffer layout: N columns, each column = [packed_data: K/2 bytes][block_scales: K/16 bytes]
-/// Returns (packed_buffer, tensor_scale).
-fn pack_nvfp4(weights: &[f32], n: usize, k: usize) -> (Vec<u8>, f32) {
+/// Returns (packed_data, block_scales, tensor_scale) where:
+/// - packed_data: N * K/2 bytes (F4E2M1, 2 values per byte, k-contiguous per column)
+/// - block_scales: N * K/16 bytes (F8E4M3, 1 scale per 16 elements per column)
+fn pack_nvfp4(weights: &[f32], n: usize, k: usize) -> (Vec<u8>, Vec<u8>, f32) {
     assert_eq!(weights.len(), n * k);
     assert!(k.is_multiple_of(16), "K must be divisible by 16");
 
     let tensor_scale = 1.0f32;
     let packed_per_col = k / 2;
     let scales_per_col = k / 16;
-    let col_stride = packed_per_col + scales_per_col;
-    let mut buf = vec![0u8; n * col_stride];
+    let mut data_buf = vec![0u8; n * packed_per_col];
+    let mut scales_buf = vec![0u8; n * scales_per_col];
 
     for col in 0..n {
-        let col_offset = col * col_stride;
         let col_weights = &weights[col * k..(col + 1) * k];
 
         for block in 0..(k / 16) {
@@ -87,7 +87,7 @@ fn pack_nvfp4(weights: &[f32], n: usize, k: usize) -> (Vec<u8>, f32) {
             // block_scale chosen so max_abs / block_scale <= 6.0 (max FP4 value)
             let block_scale = if max_abs == 0.0 { 1.0 } else { max_abs / 6.0 };
             let fp8_scale = float_to_fp8_e4m3(block_scale);
-            buf[col_offset + packed_per_col + block] = fp8_scale;
+            scales_buf[col * scales_per_col + block] = fp8_scale;
 
             let block_scale_float = fp8_e4m3_to_float(fp8_scale);
             let effective_scale = block_scale_float * tensor_scale;
@@ -102,36 +102,35 @@ fn pack_nvfp4(weights: &[f32], n: usize, k: usize) -> (Vec<u8>, f32) {
                 let fp4_code = float_to_fp4_e2m1(scaled);
                 let k_idx = block_start + i;
                 if k_idx & 1 == 0 {
-                    buf[col_offset + k_idx / 2] |= fp4_code;
+                    data_buf[col * packed_per_col + k_idx / 2] |= fp4_code;
                 } else {
-                    buf[col_offset + k_idx / 2] |= fp4_code << 4;
+                    data_buf[col * packed_per_col + k_idx / 2] |= fp4_code << 4;
                 }
             }
         }
     }
 
-    (buf, tensor_scale)
+    (data_buf, scales_buf, tensor_scale)
 }
 
-/// Reference dequantized matmul: A [M,K] x dequant(B_packed) [K,N] -> C [M,N]
+/// Reference dequantized matmul: A [M,K] x dequant(B_data, B_scales) [K,N] -> C [M,N]
 fn reference_nvfp4_matmul(
     a: &[f32],
     m: usize,
     k: usize,
-    packed_b: &[u8],
+    b_data: &[u8],
+    b_scales: &[u8],
     n: usize,
     tensor_scale: f32,
 ) -> Vec<f32> {
     let packed_per_col = k / 2;
     let scales_per_col = k / 16;
-    let col_stride = packed_per_col + scales_per_col;
 
     let mut result = vec![0.0f32; m * n];
     for row in 0..m {
         for col in 0..n {
-            let col_data = &packed_b[col * col_stride..];
-            let packed = &col_data[..packed_per_col];
-            let scales = &col_data[packed_per_col..packed_per_col + scales_per_col];
+            let packed = &b_data[col * packed_per_col..(col + 1) * packed_per_col];
+            let scales = &b_scales[col * scales_per_col..(col + 1) * scales_per_col];
             let mut acc = 0.0f32;
             for ki in 0..k {
                 let packed_byte = packed[ki / 2];
@@ -150,6 +149,25 @@ fn reference_nvfp4_matmul(
     result
 }
 
+/// Build the explicit dequant graph pattern for NvFp4:
+///   b_data.cast(F32) * b_scales.cast(F32) → matmul with A
+fn build_nvfp4_graph(
+    cx: &mut Graph,
+    m: usize,
+    k: usize,
+    n: usize,
+) -> (GraphTensor, GraphTensor, GraphTensor, GraphTensor) {
+    let a = cx.tensor((m, k));
+    let b_data = cx.tensor((n, k)).as_dtype(DType::F4E2M1);
+    let b_scales = cx.tensor((n, k / 16)).as_dtype(DType::F8E4M3);
+
+    // Explicit dequant: Cast + Mul
+    let dequant = b_data.cast(DType::F32) * b_scales.cast(DType::F32);
+    let c = a.matmul(dequant.t()).output();
+
+    (a, b_data, b_scales, c)
+}
+
 /// Minimal NvFp4 test: M=1, K=16, N=1, all ones activation, all-1.0 weight
 #[test]
 fn test_matmul_nvfp4_minimal() {
@@ -161,29 +179,19 @@ fn test_matmul_nvfp4_minimal() {
     let k = 16;
     let n = 1;
 
-    // All activations = 1.0
     let a_data: Vec<f32> = vec![1.0; m * k];
-
-    // All weights = 1.0 (FP4 code 2)
-    // block_scale for a block of all 1.0: max_abs=1.0, block_scale=1.0/6.0=0.1667
-    // FP8 encoding of 0.1667 → closest is 0.171875 (bits 0x23)
-    // scaled = 1.0 / 0.171875 = 5.818... → nearest FP4 = 6.0 (code 7)
-    // dequant = 6.0 * 0.171875 = 1.03125
-    // So expected result ≈ 16 * 1.0 * 1.03125 = 16.5
-
     let b_fp32: Vec<f32> = vec![1.0; n * k];
-    let (packed_b, tensor_scale) = pack_nvfp4(&b_fp32, n, k);
-    let expected = reference_nvfp4_matmul(&a_data, m, k, &packed_b, n, tensor_scale);
+    let (packed_data, scale_data, tensor_scale) = pack_nvfp4(&b_fp32, n, k);
+    let expected = reference_nvfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n, tensor_scale);
 
     let mut cx = Graph::default();
-    let a = cx.tensor((m, k));
-    let b = cx.tensor((n, k)).as_dtype(DType::NvFp4);
-    let c = a.matmul(b.t()).output();
+    let (a, b_data, b_scales, c) = build_nvfp4_graph(&mut cx, m, k, n);
 
     cx.build_search_space::<CudaRuntime>();
     let mut rt = CudaRuntime::initialize(stream);
     rt.set_data(a, a_data);
-    rt.set_data(b, packed_b);
+    rt.set_data(b_data, packed_data);
+    rt.set_data(b_scales, scale_data);
     rt = cx.search(rt, 5);
     rt.execute(&cx.dyn_map);
 
@@ -203,7 +211,6 @@ fn test_matmul_nvfp4_exact() {
     let k = 32; // Must be divisible by 16
     let n = 8;
 
-    // Random activations
     let a_data = random_f32_vec(m * k, 0, -0.5, 0.5);
 
     // Weights using exact FP4 values (block_scale=1.0 means no quantization error)
@@ -212,23 +219,18 @@ fn test_matmul_nvfp4_exact() {
         .map(|_| FP4_LUT[rng.random_range(0..16usize)])
         .collect();
 
-    // Pack into NvFp4 format
-    let (packed_b, tensor_scale) = pack_nvfp4(&b_fp32, n, k);
+    let (packed_data, scale_data, tensor_scale) = pack_nvfp4(&b_fp32, n, k);
     assert_eq!(tensor_scale, 1.0);
+    let expected = reference_nvfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n, tensor_scale);
 
-    // Reference result
-    let expected = reference_nvfp4_matmul(&a_data, m, k, &packed_b, n, tensor_scale);
-
-    // Build graph: b is [N, K] with k-contiguous, a is [M, K]
     let mut cx = Graph::default();
-    let a = cx.tensor((m, k));
-    let b = cx.tensor((n, k)).as_dtype(DType::NvFp4);
-    let c = a.matmul(b.t()).output();
+    let (a, b_data, b_scales, c) = build_nvfp4_graph(&mut cx, m, k, n);
 
     cx.build_search_space::<CudaRuntime>();
     let mut rt = CudaRuntime::initialize(stream);
-    rt.set_data(a, a_data.clone());
-    rt.set_data(b, packed_b.clone());
+    rt.set_data(a, a_data);
+    rt.set_data(b_data, packed_data);
+    rt.set_data(b_scales, scale_data);
     rt = cx.search(rt, 5);
 
     rt.execute(&cx.dyn_map);
@@ -253,18 +255,17 @@ fn test_matmul_nvfp4_random() {
     let mut rng = StdRng::seed_from_u64(99);
     let b_fp32: Vec<f32> = (0..n * k).map(|_| rng.random_range(-3.0..3.0f32)).collect();
 
-    let (packed_b, tensor_scale) = pack_nvfp4(&b_fp32, n, k);
-    let expected = reference_nvfp4_matmul(&a_data, m, k, &packed_b, n, tensor_scale);
+    let (packed_data, scale_data, tensor_scale) = pack_nvfp4(&b_fp32, n, k);
+    let expected = reference_nvfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n, tensor_scale);
 
     let mut cx = Graph::default();
-    let a = cx.tensor((m, k));
-    let b = cx.tensor((n, k)).as_dtype(DType::NvFp4);
-    let c = a.matmul(b.t()).output();
+    let (a, b_data, b_scales, c) = build_nvfp4_graph(&mut cx, m, k, n);
 
     cx.build_search_space::<CudaRuntime>();
     let mut rt = CudaRuntime::initialize(stream);
     rt.set_data(a, a_data);
-    rt.set_data(b, packed_b);
+    rt.set_data(b_data, packed_data);
+    rt.set_data(b_scales, scale_data);
     rt = cx.search(rt, 5);
     rt.execute(&cx.dyn_map);
 
@@ -291,18 +292,17 @@ fn test_matmul_nvfp4_m1() {
         .map(|_| FP4_LUT[rng.random_range(0..16usize)])
         .collect();
 
-    let (packed_b, tensor_scale) = pack_nvfp4(&b_fp32, n, k);
-    let expected = reference_nvfp4_matmul(&a_data, m, k, &packed_b, n, tensor_scale);
+    let (packed_data, scale_data, tensor_scale) = pack_nvfp4(&b_fp32, n, k);
+    let expected = reference_nvfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n, tensor_scale);
 
     let mut cx = Graph::default();
-    let a = cx.tensor((m, k));
-    let b = cx.tensor((n, k)).as_dtype(DType::NvFp4);
-    let c = a.matmul(b.t()).output();
+    let (a, b_data, b_scales, c) = build_nvfp4_graph(&mut cx, m, k, n);
 
     cx.build_search_space::<CudaRuntime>();
     let mut rt = CudaRuntime::initialize(stream);
     rt.set_data(a, a_data);
-    rt.set_data(b, packed_b);
+    rt.set_data(b_data, packed_data);
+    rt.set_data(b_scales, scale_data);
     rt = cx.search(rt, 5);
     rt.execute(&cx.dyn_map);
 

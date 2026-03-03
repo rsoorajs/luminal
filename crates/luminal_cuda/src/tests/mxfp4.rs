@@ -42,20 +42,21 @@ fn float_to_fp4_e2m1(val: f32) -> u8 {
     best_code
 }
 
-/// Pack FP32 weights [N, K] (row-major, k-contiguous per row) into MXFP4 buffer.
+/// Pack FP32 weights [N, K] into separate MXFP4 buffers.
 ///
-/// Buffer layout: N columns, each column = [packed_data: K/2 bytes][block_scales: K/32 bytes]
-fn pack_mxfp4(weights: &[f32], n: usize, k: usize) -> Vec<u8> {
+/// Returns (packed_data, block_scales) where:
+/// - packed_data: N * K/2 bytes (F4E2M1, 2 values per byte, k-contiguous per column)
+/// - block_scales: N * K/32 bytes (F8UE8M0, 1 scale per 32 elements per column)
+fn pack_mxfp4(weights: &[f32], n: usize, k: usize) -> (Vec<u8>, Vec<u8>) {
     assert_eq!(weights.len(), n * k);
     assert!(k.is_multiple_of(32), "K must be divisible by 32");
 
     let packed_per_col = k / 2;
     let scales_per_col = k / 32;
-    let col_stride = packed_per_col + scales_per_col;
-    let mut buf = vec![0u8; n * col_stride];
+    let mut data_buf = vec![0u8; n * packed_per_col];
+    let mut scales_buf = vec![0u8; n * scales_per_col];
 
     for col in 0..n {
-        let col_offset = col * col_stride;
         let col_weights = &weights[col * k..(col + 1) * k];
 
         for block in 0..(k / 32) {
@@ -66,7 +67,7 @@ fn pack_mxfp4(weights: &[f32], n: usize, k: usize) -> Vec<u8> {
             // block_scale chosen so max_abs / block_scale <= 6.0 (max FP4 value)
             let block_scale = if max_abs == 0.0 { 1.0 } else { max_abs / 6.0 };
             let e8m0_scale = float_to_e8m0(block_scale);
-            buf[col_offset + packed_per_col + block] = e8m0_scale;
+            scales_buf[col * scales_per_col + block] = e8m0_scale;
 
             let block_scale_float = e8m0_to_float(e8m0_scale);
 
@@ -80,29 +81,34 @@ fn pack_mxfp4(weights: &[f32], n: usize, k: usize) -> Vec<u8> {
                 let fp4_code = float_to_fp4_e2m1(scaled);
                 let k_idx = block_start + i;
                 if k_idx & 1 == 0 {
-                    buf[col_offset + k_idx / 2] |= fp4_code;
+                    data_buf[col * packed_per_col + k_idx / 2] |= fp4_code;
                 } else {
-                    buf[col_offset + k_idx / 2] |= fp4_code << 4;
+                    data_buf[col * packed_per_col + k_idx / 2] |= fp4_code << 4;
                 }
             }
         }
     }
 
-    buf
+    (data_buf, scales_buf)
 }
 
-/// Reference dequantized matmul: A [M,K] x dequant(B_packed) [K,N] -> C [M,N]
-fn reference_mxfp4_matmul(a: &[f32], m: usize, k: usize, packed_b: &[u8], n: usize) -> Vec<f32> {
+/// Reference dequantized matmul: A [M,K] x dequant(B_data, B_scales) [K,N] -> C [M,N]
+fn reference_mxfp4_matmul(
+    a: &[f32],
+    m: usize,
+    k: usize,
+    b_data: &[u8],
+    b_scales: &[u8],
+    n: usize,
+) -> Vec<f32> {
     let packed_per_col = k / 2;
     let scales_per_col = k / 32;
-    let col_stride = packed_per_col + scales_per_col;
 
     let mut result = vec![0.0f32; m * n];
     for row in 0..m {
         for col in 0..n {
-            let col_data = &packed_b[col * col_stride..];
-            let packed = &col_data[..packed_per_col];
-            let scales = &col_data[packed_per_col..packed_per_col + scales_per_col];
+            let packed = &b_data[col * packed_per_col..(col + 1) * packed_per_col];
+            let scales = &b_scales[col * scales_per_col..(col + 1) * scales_per_col];
             let mut acc = 0.0f32;
             for ki in 0..k {
                 let packed_byte = packed[ki / 2];
@@ -121,6 +127,25 @@ fn reference_mxfp4_matmul(a: &[f32], m: usize, k: usize, packed_b: &[u8], n: usi
     result
 }
 
+/// Build the explicit dequant graph pattern for MXFP4:
+///   b_data.cast(F32) * b_scales.cast(F32) → matmul with A
+fn build_mxfp4_graph(
+    cx: &mut Graph,
+    m: usize,
+    k: usize,
+    n: usize,
+) -> (GraphTensor, GraphTensor, GraphTensor, GraphTensor) {
+    let a = cx.tensor((m, k));
+    let b_data = cx.tensor((n, k)).as_dtype(DType::F4E2M1);
+    let b_scales = cx.tensor((n, k / 32)).as_dtype(DType::F8UE8M0);
+
+    // Explicit dequant: Cast + Mul
+    let dequant = b_data.cast(DType::F32) * b_scales.cast(DType::F32);
+    let c = a.matmul(dequant.t()).output();
+
+    (a, b_data, b_scales, c)
+}
+
 /// Minimal MXFP4 test: M=1, K=32, N=1, all ones activation, all-1.0 weight
 #[test]
 fn test_matmul_mxfp4_minimal() {
@@ -134,18 +159,17 @@ fn test_matmul_mxfp4_minimal() {
 
     let a_data: Vec<f32> = vec![1.0; m * k];
     let b_fp32: Vec<f32> = vec![1.0; n * k];
-    let packed_b = pack_mxfp4(&b_fp32, n, k);
-    let expected = reference_mxfp4_matmul(&a_data, m, k, &packed_b, n);
+    let (packed_data, scale_data) = pack_mxfp4(&b_fp32, n, k);
+    let expected = reference_mxfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n);
 
     let mut cx = Graph::default();
-    let a = cx.tensor((m, k));
-    let b = cx.tensor((n, k)).as_dtype(DType::Mxfp4);
-    let c = a.matmul(b.t()).output();
+    let (a, b_data, b_scales, c) = build_mxfp4_graph(&mut cx, m, k, n);
 
     cx.build_search_space::<CudaRuntime>();
     let mut rt = CudaRuntime::initialize(stream);
     rt.set_data(a, a_data);
-    rt.set_data(b, packed_b);
+    rt.set_data(b_data, packed_data);
+    rt.set_data(b_scales, scale_data);
     rt = cx.search(rt, 5);
     rt.execute(&cx.dyn_map);
 
@@ -172,18 +196,17 @@ fn test_matmul_mxfp4_exact() {
         .map(|_| FP4_LUT[rng.random_range(0..16usize)])
         .collect();
 
-    let packed_b = pack_mxfp4(&b_fp32, n, k);
-    let expected = reference_mxfp4_matmul(&a_data, m, k, &packed_b, n);
+    let (packed_data, scale_data) = pack_mxfp4(&b_fp32, n, k);
+    let expected = reference_mxfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n);
 
     let mut cx = Graph::default();
-    let a = cx.tensor((m, k));
-    let b = cx.tensor((n, k)).as_dtype(DType::Mxfp4);
-    let c = a.matmul(b.t()).output();
+    let (a, b_data, b_scales, c) = build_mxfp4_graph(&mut cx, m, k, n);
 
     cx.build_search_space::<CudaRuntime>();
     let mut rt = CudaRuntime::initialize(stream);
-    rt.set_data(a, a_data.clone());
-    rt.set_data(b, packed_b.clone());
+    rt.set_data(a, a_data);
+    rt.set_data(b_data, packed_data);
+    rt.set_data(b_scales, scale_data);
     rt = cx.search(rt, 5);
 
     rt.execute(&cx.dyn_map);
@@ -207,18 +230,17 @@ fn test_matmul_mxfp4_random() {
     let mut rng = StdRng::seed_from_u64(99);
     let b_fp32: Vec<f32> = (0..n * k).map(|_| rng.random_range(-3.0..3.0f32)).collect();
 
-    let packed_b = pack_mxfp4(&b_fp32, n, k);
-    let expected = reference_mxfp4_matmul(&a_data, m, k, &packed_b, n);
+    let (packed_data, scale_data) = pack_mxfp4(&b_fp32, n, k);
+    let expected = reference_mxfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n);
 
     let mut cx = Graph::default();
-    let a = cx.tensor((m, k));
-    let b = cx.tensor((n, k)).as_dtype(DType::Mxfp4);
-    let c = a.matmul(b.t()).output();
+    let (a, b_data, b_scales, c) = build_mxfp4_graph(&mut cx, m, k, n);
 
     cx.build_search_space::<CudaRuntime>();
     let mut rt = CudaRuntime::initialize(stream);
     rt.set_data(a, a_data);
-    rt.set_data(b, packed_b);
+    rt.set_data(b_data, packed_data);
+    rt.set_data(b_scales, scale_data);
     rt = cx.search(rt, 5);
     rt.execute(&cx.dyn_map);
 
@@ -244,18 +266,17 @@ fn test_matmul_mxfp4_m1() {
         .map(|_| FP4_LUT[rng.random_range(0..16usize)])
         .collect();
 
-    let packed_b = pack_mxfp4(&b_fp32, n, k);
-    let expected = reference_mxfp4_matmul(&a_data, m, k, &packed_b, n);
+    let (packed_data, scale_data) = pack_mxfp4(&b_fp32, n, k);
+    let expected = reference_mxfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n);
 
     let mut cx = Graph::default();
-    let a = cx.tensor((m, k));
-    let b = cx.tensor((n, k)).as_dtype(DType::Mxfp4);
-    let c = a.matmul(b.t()).output();
+    let (a, b_data, b_scales, c) = build_mxfp4_graph(&mut cx, m, k, n);
 
     cx.build_search_space::<CudaRuntime>();
     let mut rt = CudaRuntime::initialize(stream);
     rt.set_data(a, a_data);
-    rt.set_data(b, packed_b);
+    rt.set_data(b_data, packed_data);
+    rt.set_data(b_scales, scale_data);
     rt = cx.search(rt, 5);
     rt.execute(&cx.dyn_map);
 
