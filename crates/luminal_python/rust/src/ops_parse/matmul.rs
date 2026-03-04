@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use luminal::prelude::{tracing::trace, *};
 use onnx_protobuf::NodeProto;
 
-use crate::util::{broadcast_to, get_float_attr, get_int_attr};
+use crate::util::{broadcast_to_expr, get_float_attr, get_int_attr};
 
 pub fn parse_matmul_node(
     node: &NodeProto,
@@ -60,12 +60,8 @@ pub fn parse_gemm_node(
             .get(&node.input[2])
             .ok_or_else(|| format!("Gemm: missing bias C '{}'", node.input[2]))?;
         let c_scaled = if beta != 1.0 { c * beta } else { c };
-        let result_shape: Vec<usize> = result
-            .dims()
-            .iter()
-            .map(|d| d.to_usize().unwrap())
-            .collect();
-        result = result + broadcast_to(c_scaled, &result_shape);
+        let result_shape = result.dims();
+        result = result + broadcast_to_expr(c_scaled, &result_shape);
     }
 
     tensors.insert(node.output[0].clone(), result);

@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 
-use luminal::prelude::{tracing::trace, *};
+use luminal::{
+    prelude::{tracing::trace, *},
+    shape::{Expression, flatten_strides},
+};
 use onnx_protobuf::NodeProto;
 
-use crate::util::{broadcast_to, get_int_attr, get_str_attr};
+use crate::util::{broadcast_to_expr, get_int_attr, get_str_attr};
 
 /// Handle GatherElements node: gather elements along an axis using per-element indices.
 ///
@@ -40,41 +43,56 @@ pub fn parse_expand_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
     known_values: &HashMap<String, Vec<f32>>,
+    shape_exprs: &mut HashMap<String, Vec<Expression>>,
 ) -> Result<(), String> {
     assert!(node.input.len() == 2, "Expand needs 2 inputs");
     let input = *tensors
         .get(&node.input[0])
         .ok_or_else(|| format!("Expand: missing input '{}'", node.input[0]))?;
-    let shape_vals = known_values
-        .get(&node.input[1])
-        .ok_or_else(|| format!("Expand: shape '{}' must be a known constant", node.input[1]))?;
 
-    let target_shape: Vec<usize> = shape_vals.iter().map(|&v| v as usize).collect();
+    // Try shape_exprs first (for dynamic shapes), then known_values
+    let target_exprs: Vec<Expression> = if let Some(se) = shape_exprs.get(&node.input[1]) {
+        se.clone()
+    } else if let Some(shape_vals) = known_values.get(&node.input[1]) {
+        shape_vals
+            .iter()
+            .map(|&v| Expression::from(v as usize))
+            .collect()
+    } else {
+        return Err(format!(
+            "Expand: shape '{}' must be a known constant or shape_expr",
+            node.input[1]
+        ));
+    };
 
     // ONNX Expand uses numpy broadcasting: output_dim = max(input_dim, target_dim).
-    // A target dim of 1 means "keep the input dim", not "shrink to 1".
     let input_dims = input.dims();
     let input_rank = input_dims.len();
-    let target_rank = target_shape.len();
+    let target_rank = target_exprs.len();
     let out_rank = input_rank.max(target_rank);
-    let mut broadcast_shape = vec![1usize; out_rank];
+    let mut broadcast_shape = Vec::with_capacity(out_rank);
     for i in 0..out_rank {
         let in_dim = if i + input_rank >= out_rank {
-            input_dims[i + input_rank - out_rank]
-                .to_usize()
-                .unwrap_or(1)
+            input_dims[i + input_rank - out_rank].clone()
         } else {
-            1
+            Expression::from(1usize)
         };
         let tgt_dim = if i + target_rank >= out_rank {
-            target_shape[i + target_rank - out_rank]
+            target_exprs[i + target_rank - out_rank].clone()
         } else {
-            1
+            Expression::from(1usize)
         };
-        broadcast_shape[i] = in_dim.max(tgt_dim);
+
+        let dim = match (in_dim.to_usize(), tgt_dim.to_usize()) {
+            (Some(a), Some(b)) => Expression::from(a.max(b)),
+            (Some(1), _) => tgt_dim,
+            (_, Some(1)) => in_dim,
+            _ => in_dim, // Both symbolic — assume compatible
+        };
+        broadcast_shape.push(dim);
     }
 
-    let result = broadcast_to(input, &broadcast_shape) * 1.0;
+    let result = broadcast_to_expr(input, &broadcast_shape) * 1.0;
     tensors.insert(node.output[0].clone(), result);
     Ok(())
 }
@@ -177,69 +195,106 @@ pub fn parse_reshape_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
     known_values: &mut HashMap<String, Vec<f32>>,
+    shape_exprs: &mut HashMap<String, Vec<Expression>>,
 ) -> Result<(), String> {
     trace!("Started parse: Reshape");
     assert!(
         node.input.len() == 2,
         "Reshape should have exactly 2 inputs"
     );
+
+    // Shape-only path: if input is only in shape_exprs (not tensors), propagate
+    if !tensors.contains_key(&node.input[0]) {
+        if let Some(se) = shape_exprs.get(&node.input[0]).cloned() {
+            let output_name = &node.output[0];
+            shape_exprs.insert(output_name.clone(), se);
+            trace!("Finished parse: Reshape (shape-only)");
+            return Ok(());
+        }
+    }
+
     let input = *tensors
         .get(&node.input[0])
         .ok_or_else(|| format!("Reshape: missing input tensor '{}'", node.input[0]))?;
 
-    let shape_data = known_values.get(&node.input[1]).ok_or_else(|| {
-        format!(
-            "Reshape: shape input '{}' must be a known constant",
-            node.input[1]
-        )
-    })?;
-
-    // Compute total elements for resolving -1
     let input_dims = input.dims();
-    let total_elements: usize = input_dims
-        .iter()
-        .map(|d| d.to_usize().expect("Reshape: input dims must be concrete"))
-        .product();
 
-    // Resolve target shape, handling -1 (infer) and 0 (copy from input)
-    let mut target_shape: Vec<i64> = shape_data.iter().map(|&v| v as i64).collect();
-    // First pass: resolve 0 (copy from input at same position)
-    for i in 0..target_shape.len() {
-        if target_shape[i] == 0 {
-            target_shape[i] = input_dims[i].to_usize().unwrap_or(1) as i64;
+    // Try shape_exprs first (for dynamic Reshape targets from Shape→Concat chains)
+    let final_shape: Vec<Expression> = if let Some(target_exprs) = shape_exprs.get(&node.input[1]) {
+        // Expression-based target shape — resolve 0 and -1
+        let mut result_shape: Vec<Expression> = target_exprs.clone();
+
+        // Resolve 0 (copy from input at same position)
+        for i in 0..result_shape.len() {
+            if result_shape[i].to_usize() == Some(0) && i < input_dims.len() {
+                result_shape[i] = input_dims[i].clone();
+            }
         }
-    }
-    // Second pass: resolve -1 (infer from total elements)
-    let known_product: i64 = target_shape.iter().filter(|&&d| d > 0).product();
-    for d in target_shape.iter_mut() {
-        if *d == -1 {
-            *d = total_elements as i64 / known_product;
+
+        // Resolve -1 (infer from total elements / known product)
+        let has_neg1 = result_shape
+            .iter()
+            .any(|e| e.to_usize() == Some(usize::MAX));
+        if has_neg1 {
+            // total_elements = product of input dims
+            let total_elements: Expression = input_dims.iter().cloned().product::<Expression>();
+            // known_product = product of non-(-1) dims
+            let known_product: Expression = result_shape
+                .iter()
+                .filter(|e| e.to_usize() != Some(usize::MAX))
+                .cloned()
+                .product::<Expression>();
+            for d in result_shape.iter_mut() {
+                if d.to_usize() == Some(usize::MAX) {
+                    *d = (total_elements.clone() / known_product.clone()).simplify();
+                }
+            }
         }
-    }
-    let final_shape: Vec<usize> = target_shape.iter().map(|&d| d as usize).collect();
+
+        result_shape
+    } else if let Some(shape_data) = known_values.get(&node.input[1]) {
+        // Concrete shape from known_values
+        let total_elements: usize = input_dims
+            .iter()
+            .map(|d| d.to_usize().expect("Reshape: input dims must be concrete"))
+            .product();
+
+        let mut target_shape: Vec<i64> = shape_data.iter().map(|&v| v as i64).collect();
+        for i in 0..target_shape.len() {
+            if target_shape[i] == 0 {
+                target_shape[i] = input_dims[i].to_usize().unwrap_or(1) as i64;
+            }
+        }
+        let known_product: i64 = target_shape.iter().filter(|&&d| d > 0).product();
+        for d in target_shape.iter_mut() {
+            if *d == -1 {
+                *d = total_elements as i64 / known_product;
+            }
+        }
+        target_shape
+            .iter()
+            .map(|&d| Expression::from(d as usize))
+            .collect()
+    } else {
+        return Err(format!(
+            "Reshape: shape input '{}' must be a known constant or shape_expr",
+            node.input[1]
+        ));
+    };
 
     let mut result = input;
-    // If tensor is not contiguous (e.g., has broadcast strides from Expand),
-    // materialize it before reshaping by multiplying by 1.0.
-    // This forces a contiguous copy through the binary op mechanism.
+    // If tensor is not contiguous, materialize
     if !result.shape.is_contiguous() {
         let one = result.graph().constant_float(1.0);
         let src_dims = result.dims();
-        let broadcast_shape: Vec<usize> = src_dims
-            .iter()
-            .map(|d| d.to_usize().expect("dim must be concrete"))
-            .collect();
-        let one_expanded = broadcast_to(one, &broadcast_shape);
+        let one_expanded = broadcast_to_expr(one, &src_dims);
         result *= one_expanded;
     }
     result.shape = ShapeTracker::new(final_shape.clone());
 
-    // Force materialization to create a distinct graph node for the CUDA backend.
-    // Without this, the output shares the same NodeIndex as the input tensor,
-    // and CudaRuntime::get_f32 cannot retrieve data for input-aliased outputs.
-    // (Same pattern as parse_transpose_node's `permuted * 1.0`.)
+    // Force materialization
     let one = result.graph().constant_float(1.0);
-    let one_expanded = broadcast_to(one, &final_shape);
+    let one_expanded = broadcast_to_expr(one, &final_shape);
     result *= one_expanded;
 
     let output_name = &node.output[0];
@@ -248,6 +303,10 @@ pub fn parse_reshape_node(
     // Propagate known values (reshape doesn't change data, just layout)
     if let Some(vals) = known_values.get(&node.input[0]).cloned() {
         known_values.insert(output_name.clone(), vals);
+    }
+    // Propagate shape_exprs values unchanged
+    if let Some(se) = shape_exprs.get(&node.input[0]).cloned() {
+        shape_exprs.insert(output_name.clone(), se);
     }
     trace!("Finished parse: Reshape");
     Ok(())
@@ -262,12 +321,24 @@ pub fn parse_squeeze_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
     known_values: &mut HashMap<String, Vec<f32>>,
+    shape_exprs: &mut HashMap<String, Vec<Expression>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Squeeze Node");
     assert!(
         !node.input.is_empty(),
         "Squeeze should have at least 1 input"
     );
+
+    // Shape-only path: if input is only in shape_exprs (not tensors), propagate shape_exprs
+    if !tensors.contains_key(&node.input[0]) {
+        if let Some(se) = shape_exprs.get(&node.input[0]).cloned() {
+            let output_name = &node.output[0];
+            shape_exprs.insert(output_name.clone(), se);
+            trace!("Finished parse: Squeeze Node (shape-only)");
+            return Ok(());
+        }
+    }
+
     let input = *tensors
         .get(&node.input[0])
         .ok_or_else(|| format!("Squeeze: missing input tensor '{}'", node.input[0]))?;
@@ -322,25 +393,16 @@ pub fn parse_squeeze_node(
         result = result.squeeze(axis);
     }
 
-    // Force materialization to create a distinct graph node for the CUDA backend.
-    // Without this, squeeze (a pure shape op) produces no kernels and the output
-    // cannot be retrieved from the runtime.
-    // (Same pattern as parse_transpose_node, parse_reshape_node, parse_identity.)
+    // Force materialization using Expression-aware broadcast
     let output_dims = result.dims();
-    // If squeezing produced a 0-dim scalar, represent as [1] to avoid CUDA launching
-    // kernels with grid (0, 1, 1). luminal's Expression::product() returns 0 for empty
-    // iterators, making any kernel on a 0-dim tensor invalid on CUDA.
-    let shape: Vec<usize> = if output_dims.is_empty() {
+    let dims: Vec<Expression> = if output_dims.is_empty() {
         result.shape = ShapeTracker::new(vec![1usize]);
-        vec![1usize]
+        vec![Expression::from(1usize)]
     } else {
         output_dims
-            .iter()
-            .map(|d| d.to_usize().expect("Squeeze: dim must be concrete"))
-            .collect()
     };
     let one = result.graph().constant_float(1.0);
-    let one_expanded = broadcast_to(one, &shape);
+    let one_expanded = broadcast_to_expr(one, &dims);
     result *= one_expanded;
 
     let output_name = &node.output[0];
@@ -348,6 +410,10 @@ pub fn parse_squeeze_node(
 
     if let Some(vals) = known_values.get(&node.input[0]).cloned() {
         known_values.insert(output_name.clone(), vals);
+    }
+    // Propagate shape_exprs values unchanged (Squeeze changes tensor shape, not stored values)
+    if let Some(se) = shape_exprs.get(&node.input[0]).cloned() {
+        shape_exprs.insert(output_name.clone(), se);
     }
     trace!("Finished parse: Squeeze Node");
     Ok(())
@@ -361,12 +427,24 @@ pub fn parse_unsqueeze_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
     known_values: &mut HashMap<String, Vec<f32>>,
+    shape_exprs: &mut HashMap<String, Vec<Expression>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Unsqueeze Node");
     assert!(
         node.input.len() == 2,
         "Unsqueeze should have exactly 2 inputs"
     );
+
+    // Shape-only path: if input is only in shape_exprs (not tensors), propagate
+    if !tensors.contains_key(&node.input[0]) {
+        if let Some(se) = shape_exprs.get(&node.input[0]).cloned() {
+            let output_name = &node.output[0];
+            shape_exprs.insert(output_name.clone(), se);
+            trace!("Finished parse: Unsqueeze Node (shape-only)");
+            return Ok(());
+        }
+    }
+
     let input = *tensors
         .get(&node.input[0])
         .ok_or_else(|| format!("Unsqueeze: missing input tensor '{}'", node.input[0]))?;
@@ -395,22 +473,17 @@ pub fn parse_unsqueeze_node(
         result = result.unsqueeze(axis);
     }
 
+    // Force materialization using Expression-aware broadcast
     let output_dims = result.dims();
-    // If squeezing produced a 0-dim scalar, represent as [1] to avoid CUDA launching
-    // kernels with grid (0, 1, 1). luminal's Expression::product() returns 0 for empty
-    // iterators, making any kernel on a 0-dim tensor invalid on CUDA.
-    let shape: Vec<usize> = if output_dims.is_empty() {
+    let dims: Vec<Expression> = if output_dims.is_empty() {
         result.shape = ShapeTracker::new(vec![1usize]);
-        vec![1usize]
+        vec![Expression::from(1usize)]
     } else {
         output_dims
-            .iter()
-            .map(|d| d.to_usize().expect("Squeeze: dim must be concrete"))
-            .collect()
     };
 
     let one = result.graph().constant_float(1.0);
-    let one_expanded = broadcast_to(one, &shape);
+    let one_expanded = broadcast_to_expr(one, &dims);
     result *= one_expanded;
 
     let output_name = &node.output[0];
@@ -418,6 +491,10 @@ pub fn parse_unsqueeze_node(
 
     if let Some(vals) = known_values.get(&node.input[0]).cloned() {
         known_values.insert(output_name.clone(), vals);
+    }
+    // Propagate shape_exprs values unchanged (Unsqueeze changes tensor shape, not stored values)
+    if let Some(se) = shape_exprs.get(&node.input[0]).cloned() {
+        shape_exprs.insert(output_name.clone(), se);
     }
     trace!("Finished parse: Unsqueeze Node");
     Ok(())
@@ -431,6 +508,8 @@ pub fn parse_unsqueeze_node(
 pub fn parse_concat_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
+    shape_exprs: &mut HashMap<String, Vec<Expression>>,
+    known_values: &HashMap<String, Vec<f32>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Concat Node");
     assert!(
@@ -445,6 +524,60 @@ pub fn parse_concat_node(
     );
 
     let output_name = &node.output[0];
+
+    // Check if this is a shape computation concat (not a tensor concat).
+    // At least one input must be in shape_exprs (from a Shape node chain).
+    // Other inputs can come from known_values (small initializer constants).
+    // All inputs must be small (≤ 8 elements) and rank ≤ 1.
+    let has_any_shape_expr = node.input.iter().any(|name| shape_exprs.contains_key(name));
+    let all_shape_exprs = has_any_shape_expr
+        && node.input.iter().all(|name| {
+            let has_se = shape_exprs.contains_key(name);
+            let has_kv = known_values.contains_key(name);
+            if has_se || has_kv {
+                let len = if let Some(se) = shape_exprs.get(name) {
+                    se.len()
+                } else if let Some(kv) = known_values.get(name) {
+                    kv.len()
+                } else {
+                    return false;
+                };
+                if let Some(t) = tensors.get(name) {
+                    let dims = t.dims();
+                    dims.len() <= 1 && len <= 8
+                } else {
+                    len <= 8
+                }
+            } else {
+                false
+            }
+        });
+
+    if all_shape_exprs {
+        // This is a shape concat (e.g., computing reshape target from shape fragments)
+        // Just concatenate the Expression vectors (from shape_exprs or known_values)
+        let mut result: Vec<Expression> = Vec::new();
+        for input_name in &node.input {
+            if let Some(se) = shape_exprs.get(input_name) {
+                result.extend(se.iter().cloned());
+            } else if let Some(kv) = known_values.get(input_name) {
+                result.extend(kv.iter().map(|&v| {
+                    let iv = v as i64;
+                    if iv < 0 {
+                        // Store negative values as large sentinel (usize::MAX for -1, etc.)
+                        Expression::from(usize::MAX)
+                    } else {
+                        Expression::from(v as usize)
+                    }
+                }));
+            }
+        }
+        shape_exprs.insert(output_name.clone(), result);
+        // No tensor entry needed — this is a shape-only computation
+
+        trace!("Finished parse: Concat Node (shape_exprs)");
+        return Ok(());
+    }
 
     let first = *tensors
         .get(&node.input[0])
@@ -485,6 +618,7 @@ pub fn parse_gather_node(
     cx: &mut Graph,
     weight_data: &mut Vec<(String, Vec<f32>)>,
     known_values: &mut HashMap<String, Vec<f32>>,
+    shape_exprs: &mut HashMap<String, Vec<Expression>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Gather Node");
     assert!(node.input.len() == 2, "Gather should have 2 inputs");
@@ -503,6 +637,44 @@ pub fn parse_gather_node(
     } else {
         axis_raw as usize
     };
+
+    // Shape expression gather: data is from a Shape node (shape_exprs), indices are known constants.
+    // This happens in Shape→Gather chains that extract specific dimensions.
+    if let Some(se_data) = shape_exprs.get(&node.input[0]).cloned() {
+        if let Some(idx_vals) = known_values.get(&node.input[1]) {
+            let output_name = &node.output[0];
+            let result_exprs: Vec<Expression> = idx_vals
+                .iter()
+                .map(|&idx_f| {
+                    let idx = idx_f as i64;
+                    let idx = if idx < 0 {
+                        (se_data.len() as i64 + idx) as usize
+                    } else {
+                        idx as usize
+                    };
+                    se_data[idx].clone()
+                })
+                .collect();
+            shape_exprs.insert(output_name.clone(), result_exprs.clone());
+
+            // If all concrete, also store in known_values + weight_data + tensor
+            if let Some(concrete) = result_exprs
+                .iter()
+                .map(|e| e.to_usize())
+                .collect::<Option<Vec<usize>>>()
+            {
+                let floats: Vec<f32> = concrete.iter().map(|&v| v as f32).collect();
+                let tensor = cx.named_tensor(output_name.clone(), vec![floats.len()]);
+                tensors.insert(output_name.clone(), tensor);
+                known_values.insert(output_name.clone(), floats.clone());
+                weight_data.push((output_name.clone(), floats));
+            }
+            // For symbolic results, don't create a tensor — it's shape-only
+
+            trace!("Finished parse: Gather Node (shape_exprs folded)");
+            return Ok(());
+        }
+    }
 
     // If both inputs are known, fully constant-fold
     if let (Some(vdata), Some(vidx)) = (
@@ -776,20 +948,14 @@ pub fn parse_gathernd_node(
 
     let data_shape: Vec<usize> = data_dims
         .iter()
-        .map(|d| {
-            d.to_usize()
-                .ok_or_else(|| "GatherND: data dims must be concrete".to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|d| d.to_usize().unwrap_or(1))
+        .collect();
 
     let idx_shape: Vec<usize> = indices_raw
         .dims()
         .iter()
-        .map(|d| {
-            d.to_usize()
-                .ok_or_else(|| "GatherND: index dims must be concrete".to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|d| d.to_usize().unwrap_or(1))
+        .collect();
 
     let k = idx_shape.len() - 1;
     let q = idx_shape[k];
@@ -979,8 +1145,8 @@ pub fn parse_trilu_node(
     };
 
     // Cast Bool mask to F32 and broadcast to match input shape (e.g. batch dims)
-    let target_shape: Vec<usize> = dims.iter().map(|e| e.to_usize().unwrap_or(1)).collect();
-    let mask_f32 = broadcast_to(mask.cast(DType::F32), &target_shape);
+    let target_shape: Vec<Expression> = dims;
+    let mask_f32 = broadcast_to_expr(mask.cast(DType::F32), &target_shape);
 
     let result = input * mask_f32;
     tensors.insert(node.output[0].clone(), result);
@@ -999,46 +1165,62 @@ pub fn parse_slice_node(
     node: &NodeProto,
     tensors: &mut HashMap<String, GraphTensor>,
     known_values: &mut HashMap<String, Vec<f32>>,
+    shape_exprs: &mut HashMap<String, Vec<Expression>>,
 ) -> Result<(), String> {
     trace!("Starting Parse: Slice Node");
     let data = *tensors
         .get(&node.input[0])
         .ok_or_else(|| format!("Slice: missing data '{}'", node.input[0]))?;
-    let dims: Vec<usize> = data
-        .dims()
-        .iter()
-        .map(|d| d.to_usize().expect("Slice: dim must be concrete"))
-        .collect();
-    let rank = dims.len();
+    let expr_dims = data.dims();
+    let rank = expr_dims.len();
 
-    let starts: Vec<i64> = known_values
-        .get(&node.input[1])
-        .ok_or("Slice: starts must be constant")?
-        .iter()
-        .map(|&v| v as i64)
-        .collect();
+    // Get starts/ends from known_values or shape_exprs
+    let starts: Vec<i64> = if let Some(kv) = known_values.get(&node.input[1]) {
+        kv.iter().map(|&v| v as i64).collect()
+    } else if let Some(se) = shape_exprs.get(&node.input[1]) {
+        se.iter()
+            .map(|e| e.to_usize().unwrap_or(0) as i64)
+            .collect()
+    } else {
+        return Err("Slice: starts must be constant or shape_expr".to_string());
+    };
 
-    let ends: Vec<i64> = known_values
-        .get(&node.input[2])
-        .ok_or("Slice: ends must be constant")?
-        .iter()
-        .map(|&v| v as i64)
-        .collect();
+    let ends: Vec<i64> = if let Some(kv) = known_values.get(&node.input[2]) {
+        kv.iter().map(|&v| v as i64).collect()
+    } else if let Some(se) = shape_exprs.get(&node.input[2]) {
+        se.iter()
+            .map(|e| e.to_usize().unwrap_or(i64::MAX as usize) as i64)
+            .collect()
+    } else {
+        return Err("Slice: ends must be constant or shape_expr".to_string());
+    };
 
     let axes: Vec<usize> = if node.input.len() > 3 && !node.input[3].is_empty() {
-        known_values
-            .get(&node.input[3])
-            .ok_or("Slice: axes must be constant")?
-            .iter()
-            .map(|&a| {
-                let a = a as i64;
-                if a < 0 {
-                    (a + rank as i64) as usize
-                } else {
-                    a as usize
-                }
-            })
-            .collect()
+        if let Some(kv) = known_values.get(&node.input[3]) {
+            kv.iter()
+                .map(|&a| {
+                    let a = a as i64;
+                    if a < 0 {
+                        (a + rank as i64) as usize
+                    } else {
+                        a as usize
+                    }
+                })
+                .collect()
+        } else if let Some(se) = shape_exprs.get(&node.input[3]) {
+            se.iter()
+                .map(|e| {
+                    let a = e.to_usize().unwrap_or(0) as i64;
+                    if a < 0 {
+                        (a + rank as i64) as usize
+                    } else {
+                        a as usize
+                    }
+                })
+                .collect()
+        } else {
+            (0..starts.len()).collect()
+        }
     } else {
         (0..starts.len()).collect()
     };
@@ -1057,23 +1239,101 @@ pub fn parse_slice_node(
         }
     }
 
-    // Build ranges for all axes, defaulting to full range
-    let mut ranges: Vec<(usize, usize)> = dims.iter().map(|&d| (0, d)).collect();
+    // Get ends as Expressions (prefer shape_exprs for symbolic values)
+    let end_exprs: Vec<Expression> = if let Some(se) = shape_exprs.get(&node.input[2]) {
+        se.clone()
+    } else {
+        ends.iter().map(|&e| Expression::from(e as usize)).collect()
+    };
+
+    // Build Expression-based ranges
+    let mut ranges: Vec<(Expression, Expression)> = expr_dims
+        .iter()
+        .map(|d| (Expression::from(0usize), d.clone()))
+        .collect();
+
     for (i, &ax) in axes.iter().enumerate() {
-        let dim = dims[ax] as i64;
-        let start = {
-            let s = starts[i];
-            let s = if s < 0 { s + dim } else { s };
-            s.max(0).min(dim) as usize
+        if i >= starts.len() || i >= end_exprs.len() {
+            break;
+        }
+        let dim_expr = &expr_dims[ax];
+
+        let start_expr = if starts[i] < 0 {
+            if let Some(dim_val) = dim_expr.to_usize() {
+                Expression::from((dim_val as i64 + starts[i]).max(0) as usize)
+            } else {
+                dim_expr.clone() - Expression::from((-starts[i]) as usize)
+            }
+        } else {
+            Expression::from(starts[i] as usize)
         };
-        let end = {
-            let e = ends[i];
-            let e = if e < 0 { e + dim } else { e };
-            e.max(0).min(dim) as usize
+
+        let e = &end_exprs[i];
+        let end_expr = if let Some(ev) = e.to_usize() {
+            // Detect INT64_MAX sentinel (from ONNX "to end" convention).
+            // f32 can't represent INT64_MAX exactly, so check for very large values.
+            if ev > 1_000_000_000 {
+                dim_expr.clone()
+            } else {
+                Expression::from(ev)
+            }
+        } else {
+            // Symbolic end expression — use directly
+            e.clone()
         };
-        ranges[ax] = (start, end);
+
+        ranges[ax] = (start_expr, end_expr);
     }
-    let result = data.slice(&ranges);
+
+    // Use slice() for concrete ranges, but implement directly for symbolic ranges
+    // to avoid luminal's min() clamping which creates unsimplifiable Expression chains.
+    let all_concrete = ranges
+        .iter()
+        .all(|(s, e)| s.to_usize().is_some() && e.to_usize().is_some());
+
+    let result = if all_concrete {
+        let concrete_ranges: Vec<(usize, usize)> = ranges
+            .iter()
+            .map(|(s, e)| (s.to_usize().unwrap(), e.to_usize().unwrap()))
+            .collect();
+        data.slice(&concrete_ranges)
+    } else {
+        // Direct implementation without min() clamping:
+        // ONNX guarantees start/end are within bounds, so no clamping needed.
+        let has_nonzero_start = ranges.iter().any(|(st, _)| *st != Expression::from(0usize));
+
+        if has_nonzero_start {
+            // Need iota-based gather for nonzero start
+            let dims = data.dims();
+            let mut new_dims = vec![];
+            let mut index_expressions = vec![];
+            let mut phys_size = Expression::from(1);
+            for (dim, (start, end)) in dims.into_iter().zip(ranges.iter()).rev() {
+                index_expressions.push((Expression::from('z') + start.clone()) * phys_size.clone());
+                phys_size = phys_size * dim;
+                // Direct end - start without min() clamping.
+                // .simplify() uses egglog to reduce expressions like (1+a)-1 → a.
+                let dim = match (start.to_usize(), end.to_usize()) {
+                    (Some(s), Some(e)) => Expression::from(e.saturating_sub(s)),
+                    (Some(0), _) => end.clone(),
+                    _ => (end.clone() - start.clone()).simplify(),
+                };
+                new_dims.push(dim);
+            }
+            new_dims.reverse();
+            index_expressions.reverse();
+            let index_expression = flatten_strides(&new_dims, &index_expressions);
+            let iota = data.graph().iota(index_expression, new_dims);
+            data.gather(iota)
+        } else {
+            // No start offsets — just set dims to end values directly (no min clamping)
+            let mut result = data;
+            for (sh, (_, end)) in result.shape.dims.iter_mut().zip(ranges) {
+                *sh = end;
+            }
+            result
+        }
+    };
 
     tensors.insert(node.output[0].clone(), result);
     trace!("Ending Parse: Slice Node");

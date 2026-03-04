@@ -457,8 +457,9 @@ pub fn base_expression_egglog() -> String {
     s.register(&mut p);
 
     // ---- Algebraic rewrites ----
-    // Commutativity: (MMul a b) -> (MMul b a)
+    // Commutativity
     p.add_rule(rewrite("mul-comm", mul(v("a"), v("b")), mul(v("b"), v("a"))).ruleset("expr"));
+    p.add_rule(rewrite("add-comm", add(v("a"), v("b")), add(v("b"), v("a"))).ruleset("expr"));
 
     // Constant folding: add
     p.add_rule(
@@ -510,6 +511,22 @@ pub fn base_expression_egglog() -> String {
             peq(i64(0), pmod(v("a"), v("b"))),
         ])
         .ruleset("expr"),
+    );
+
+    // Cancel common factor in division: (a*b)/(a*c) → b/c
+    p.add_rule(
+        rewrite(
+            "div-cancel-factor",
+            div(mul(v("a"), v("b")), mul(v("a"), v("c"))),
+            div(v("b"), v("c")),
+        )
+        .ruleset("expr"),
+    );
+
+    // Division self-cancel: a/a → 1
+    p.add_rule(
+        rewrite("div-self", div(v("a"), v("a")), num(i64(1)))
+            .ruleset("expr"),
     );
 
     // Constant folding: ceildiv
