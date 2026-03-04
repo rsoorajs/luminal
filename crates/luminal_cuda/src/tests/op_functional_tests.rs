@@ -537,7 +537,7 @@ fn run_embed_test(vocab_size: usize, embed_dim: usize, seq_len: usize, seed: u64
     };
 
     let mut cx = Graph::default();
-    let token_ids = cx.tensor(seq_len).as_dtype(luminal::op::DType::Int);
+    let token_ids = cx.tensor(seq_len).as_dtype(luminal::dtype::DType::Int);
     let embed_table = cx.tensor((vocab_size, embed_dim));
     let output = embed_table
         .gather(
@@ -567,7 +567,7 @@ fn run_embed_test(vocab_size: usize, embed_dim: usize, seq_len: usize, seed: u64
         }
     }
 
-    let eps = dtype_epsilon(luminal::op::DType::F32);
+    let eps = dtype_epsilon(luminal::dtype::DType::F32);
     let tol = eps * TOLERANCE_SAFETY_FACTOR;
     assert_close(&result, &expected, tol, tol);
 
