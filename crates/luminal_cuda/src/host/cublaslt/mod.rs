@@ -211,7 +211,11 @@ impl HostOp for CuBlasLt {
         // Get CUDA types based on dtype
         let (cuda_dtype, compute_type, scale_dtype) = dtype_to_cuda_types(self.dtype);
         let element_size = (self.dtype.bits() / 8) as u64;
-        assert!(element_size > 0, "cuBLAS LT does not support sub-byte dtype {}", self.dtype);
+        assert!(
+            element_size > 0,
+            "cuBLAS LT does not support sub-byte dtype {}",
+            self.dtype
+        );
 
         // Alpha/beta scale values (all dtypes use F32 scale type)
         let alpha_f32: f32 = 1.0;

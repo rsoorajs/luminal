@@ -202,7 +202,8 @@ extern \"C\" {{
     }
 
     fn bytes_loaded(&self) -> Expression {
-        (self.out_shape.iter().copied().product::<Expression>() * self.iters * self.dtype.bits()).ceil_div(8)
+        (self.out_shape.iter().copied().product::<Expression>() * self.iters * self.dtype.bits())
+            .ceil_div(8)
     }
 
     fn bytes_stored(&self) -> Expression {

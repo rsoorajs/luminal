@@ -261,7 +261,14 @@ impl GraphTensor {
             .input(rhs.id, rhs.shape)
             .finish();
         // Comparison operations always output Bool
-        GraphTensor::from_id(new_id, self.shape.contiguous().with_element_bits(DType::Bool.bits()), self.graph_ref, DType::Bool)
+        GraphTensor::from_id(
+            new_id,
+            self.shape
+                .contiguous()
+                .with_element_bits(DType::Bool.bits()),
+            self.graph_ref,
+            DType::Bool,
+        )
     }
 
     /// Greater than comparison

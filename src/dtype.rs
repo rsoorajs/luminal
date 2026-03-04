@@ -72,7 +72,12 @@ impl DType {
             DType::F32 | DType::Int => 32,
             DType::TF32 => 19,
             DType::F16 | DType::Bf16 | DType::I16 | DType::U16 => 16,
-            DType::Bool | DType::I8 | DType::U8 | DType::F8UE8M0 | DType::F8E4M3 | DType::F8E5M2 => 8,
+            DType::Bool
+            | DType::I8
+            | DType::U8
+            | DType::F8UE8M0
+            | DType::F8E4M3
+            | DType::F8E5M2 => 8,
             DType::F6E2M3 | DType::F6E3M2 => 6,
             DType::F4E2M1 | DType::I4 | DType::U4 => 4,
         }

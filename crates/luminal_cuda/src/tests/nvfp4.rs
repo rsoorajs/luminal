@@ -199,7 +199,8 @@ fn test_matmul_nvfp4_minimal() {
     let a_data: Vec<f32> = vec![1.0; m * k];
     let b_fp32: Vec<f32> = vec![1.0; n * k];
     let (packed_data, scale_data, tensor_scale) = pack_nvfp4(&b_fp32, n, k);
-    let expected = reference_nvfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n, tensor_scale);
+    let expected =
+        reference_nvfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n, tensor_scale);
 
     let mut cx = Graph::default();
     let (a, b_data, b_scales, c) = build_nvfp4_graph(&mut cx, m, k, n);
@@ -238,7 +239,8 @@ fn test_matmul_nvfp4_exact() {
 
     let (packed_data, scale_data, tensor_scale) = pack_nvfp4(&b_fp32, n, k);
     assert_eq!(tensor_scale, 1.0);
-    let expected = reference_nvfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n, tensor_scale);
+    let expected =
+        reference_nvfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n, tensor_scale);
 
     let mut cx = Graph::default();
     let (a, b_data, b_scales, c) = build_nvfp4_graph(&mut cx, m, k, n);
@@ -273,7 +275,8 @@ fn test_matmul_nvfp4_random() {
     let b_fp32: Vec<f32> = (0..n * k).map(|_| rng.random_range(-3.0..3.0f32)).collect();
 
     let (packed_data, scale_data, tensor_scale) = pack_nvfp4(&b_fp32, n, k);
-    let expected = reference_nvfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n, tensor_scale);
+    let expected =
+        reference_nvfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n, tensor_scale);
 
     let mut cx = Graph::default();
     let (a, b_data, b_scales, c) = build_nvfp4_graph(&mut cx, m, k, n);
@@ -310,7 +313,8 @@ fn test_matmul_nvfp4_m1() {
         .collect();
 
     let (packed_data, scale_data, tensor_scale) = pack_nvfp4(&b_fp32, n, k);
-    let expected = reference_nvfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n, tensor_scale);
+    let expected =
+        reference_nvfp4_matmul(&a_data, m, k, &packed_data, &scale_data, n, tensor_scale);
 
     let mut cx = Graph::default();
     let (a, b_data, b_scales, c) = build_nvfp4_graph(&mut cx, m, k, n);
