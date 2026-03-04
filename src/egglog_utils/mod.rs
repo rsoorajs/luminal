@@ -9,18 +9,28 @@ use std::hash::{Hash, Hasher};
 use std::{str, sync::Arc};
 use tracing::trace;
 
-pub const BASE: &str = include_str!("base.egg");
-pub const BASE_CLEANUP: &str = include_str!("base_cleanup.egg");
-pub const RUN_SCHEDULE: &str = include_str!("run_schedule.egg");
+pub mod api;
+pub mod base;
+
+pub const RUN_SCHEDULE: &str = "(run-schedule
+    (repeat 100
+        (saturate expr)
+        (run)
+    )
+    (saturate expr)
+    (saturate base_cleanup)
+    (saturate cleanup)
+)";
 
 fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     let ops_str = ops
         .iter()
         .map(|o| {
-            let (name, body) = o.term();
+            let s = o.sort();
             format!(
-                "({name} {})",
-                body.into_iter().map(|j| format!("{j:?}")).join(" ")
+                "({} {})",
+                s.name,
+                s.fields.iter().map(|f| &f.sort).join(" ")
             )
         })
         .collect::<Vec<_>>()
@@ -50,14 +60,17 @@ fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
         ops.iter()
             .filter(|op| op.cleanup())
             .map(|o| {
-                let (name, body) = o.term();
-                let body_terms = (0..body.len()).map(|i| (b'a' + i as u8) as char).join(" ");
+                let s = o.sort();
+                let body_terms = (0..s.fields.len())
+                    .map(|i| (b'a' + i as u8) as char)
+                    .join(" ");
                 format!(
                     "(rule
-                ((= ?m ({name} {body_terms})))
-                ((delete ({name} {body_terms})))
+                ((= ?m ({} {body_terms})))
+                ((delete ({} {body_terms})))
                 :ruleset cleanup
-            )"
+            )",
+                    s.name, s.name
                 )
             })
             .join("\n")
@@ -71,15 +84,18 @@ pub fn early_egglog(
     cleanup: bool,
 ) -> String {
     [
-        BASE.to_string(),
+        base::base_expression_egglog(),
         op_defs_string(ops),
-        ops.iter().flat_map(|o| o.early_rewrites()).join("\n"),
+        ops.iter()
+            .flat_map(|o| o.early_rewrites())
+            .map(|r| r.to_egglog_string())
+            .join("\n"),
         if cleanup {
             op_cleanups_string(ops)
         } else {
             "".to_string()
         },
-        BASE_CLEANUP.to_string(),
+        base::base_cleanup_egglog(),
         program.to_string(),
         format!(
             "(run-schedule
@@ -95,15 +111,18 @@ pub fn early_egglog(
 
 pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> String {
     [
-        BASE.to_string(),
+        base::base_expression_egglog(),
         op_defs_string(ops),
-        ops.iter().flat_map(|o| o.rewrites()).join("\n"),
+        ops.iter()
+            .flat_map(|o| o.rewrites())
+            .map(|r| r.to_egglog_string())
+            .join("\n"),
         if cleanup {
             op_cleanups_string(ops)
         } else {
             "".to_string()
         },
-        BASE_CLEANUP.to_string(),
+        base::base_cleanup_egglog(),
         program.to_string(),
         RUN_SCHEDULE.to_string(),
     ]
@@ -945,7 +964,7 @@ pub fn validate_choice_set<'a>(
         if op_name == "OutputJoin" || op_name == "CustomOpHLIR" {
             continue;
         }
-        if !ops.iter().any(|op| op.term().0 == *op_name) {
+        if !ops.iter().any(|op| op.sort().name == *op_name) {
             return Err(format!("No extractor for op {}", op_name));
         }
     }
@@ -1119,7 +1138,7 @@ pub fn egglog_to_llir<'a>(
         } else if egraph.enodes[node].0.as_str() != "OutputJoin" {
             let Some(op) = ops
                 .iter()
-                .find(|op| egraph.enodes[node].0.as_str() == op.term().0)
+                .find(|op| egraph.enodes[node].0.as_str() == op.sort().name)
             else {
                 todo!("{} extraction not implemented!", egraph.enodes[node].0);
             };

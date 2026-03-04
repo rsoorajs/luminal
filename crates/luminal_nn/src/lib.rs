@@ -12,3 +12,5 @@ mod norm;
 pub use norm::*;
 mod pooling;
 pub use pooling::*;
+mod moe;
+pub use moe::*;

@@ -1,12 +1,13 @@
 use anyhow::Result;
 use egglog::EGraph;
+use std::fmt::{Debug, Display};
 use std::string::String;
 
 use crate::prelude::petgraph::dot::{Config, Dot};
 use crate::prelude::*;
 use petgraph::Directed;
 use petgraph::prelude::StableGraph;
-use std::{fmt::Debug, io::Write};
+use std::io::Write;
 
 pub trait ToHtml {
     fn to_html(&self) -> Result<String>;
@@ -59,47 +60,94 @@ where
     }
 }
 
-#[allow(unused)]
-/// View a debug graph in the browser
+/// View a debug graph in the browser using Luminal Visualizer
 pub fn display_graph(
-    graph: &StableGraph<impl Debug, impl Debug, Directed, u32>,
+    graph: &StableGraph<impl Display + Debug, impl Display + Debug, Directed, u32>,
+) {
+    let dot_source = graph_to_dot(graph, None);
+
+    // Open in Luminal Visualizer (served from graph_viewer dev server)
+    let url = format!(
+        "http://viz.luminal.com/?dot={}",
+        urlencoding::encode(&dot_source)
+    );
+    let _ = open::that(&url);
+}
+
+/// View a debug graph in the browser using Luminal Visualizer
+pub fn display_graph_marked_nodes(
+    graph: &StableGraph<impl Display + Debug, impl Display + Debug, Directed, u32>,
+    mark_nodes: Option<Vec<NodeIndex>>,
+) {
+    let dot_source = graph_to_dot(graph, mark_nodes);
+
+    // Open in Luminal Visualizer (served from graph_viewer dev server)
+    let url = format!(
+        "http://localhost:5173/?dot={}",
+        urlencoding::encode(&dot_source)
+    );
+    let _ = open::that(&url);
+}
+
+/// View a debug graph in the browser using Luminal Visualizer
+pub fn display_graph_to_file(
+    graph: &StableGraph<impl Display + Debug, impl Display + Debug, Directed, u32>,
     mark_nodes: Option<Vec<NodeIndex>>,
     file_name: &str,
 ) {
+    let dot_source = graph_to_dot(graph, mark_nodes);
+
+    // Write the DOT source to the file
     let mut file = std::fs::File::create(file_name).unwrap();
-    file.write_all(display_graph_text(graph, mark_nodes).as_bytes())
-        .unwrap();
+    file.write_all(dot_source.as_bytes()).unwrap();
 }
 
-fn display_graph_text(
-    graph: &StableGraph<impl Debug, impl Debug, Directed, u32>,
+fn escape_dot_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn graph_to_dot(
+    graph: &StableGraph<impl Display + Debug, impl Display + Debug, Directed, u32>,
     mark_nodes: Option<Vec<NodeIndex>>,
 ) -> String {
-    let mut new_graph = StableGraph::new();
+    let mut dot = String::from("digraph {\n");
     let mut map = std::collections::HashMap::new();
-    for node in graph.node_indices() {
-        if mark_nodes
+
+    for (next_id, node) in graph.node_indices().enumerate() {
+        let weight = graph.node_weight(node).unwrap();
+        let label = escape_dot_string(&format!("{}", weight));
+        let tooltip = escape_dot_string(&format!("{:?}", weight));
+        let id = next_id;
+        map.insert(node, id);
+
+        let is_marked = mark_nodes
             .as_ref()
             .map(|m| m.contains(&node))
-            .unwrap_or(true)
-        {
-            map.insert(
-                node,
-                new_graph.add_node(format!("{:?}", graph.node_weight(node).unwrap())),
-            );
+            .unwrap_or(false);
+
+        if is_marked {
+            dot.push_str(&format!(
+                "    n{id} [label=\"{label}\", tooltip=\"{tooltip}\", style=filled, fillcolor=\"#ffeb3b\", fontcolor=\"black\", color=\"#ffd600\"];\n"
+            ));
+        } else {
+            dot.push_str(&format!(
+                "    n{id} [label=\"{label}\", tooltip=\"{tooltip}\"];\n"
+            ));
         }
     }
+
     for edge in graph.edge_indices() {
         let (src, dest) = graph.edge_endpoints(edge).unwrap();
-        if let (Some(src), Some(dest)) = (map.get(&src), map.get(&dest)) {
-            let label = format!("{:?}", graph.edge_weight(edge).unwrap());
-            new_graph.add_edge(*src, *dest, label);
+        if let (Some(src_id), Some(dest_id)) = (map.get(&src), map.get(&dest)) {
+            let weight = graph.edge_weight(edge).unwrap();
+            let label = escape_dot_string(&format!("{}", weight));
+            let tooltip = escape_dot_string(&format!("{:?}", weight));
+            dot.push_str(&format!(
+                "    n{src_id} -> n{dest_id} [label=\"{label}\", tooltip=\"{tooltip}\"];\n"
+            ));
         }
     }
-    let graph_string = crate::prelude::petgraph::dot::Dot::with_config(&new_graph, &[]).to_string();
 
-    format!(
-        "https://dreampuf.github.io/GraphvizOnline/#{}",
-        urlencoding::encode(&graph_string)
-    )
+    dot.push_str("}\n");
+    dot
 }

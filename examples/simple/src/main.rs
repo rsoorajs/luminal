@@ -8,6 +8,8 @@ fn main() {
 
     let c = a.matmul(b).output();
 
+    display_graph(&cx);
+
     // Compile
     cx.build_search_space::<NativeRuntime>();
     let mut rt = cx.search(NativeRuntime::default(), 1);

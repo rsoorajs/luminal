@@ -1,6 +1,6 @@
 use luminal::{
     graph::Graph,
-    op::{CustomOp, LLIROp},
+    op::{CustomOp, DType, LLIROp},
     prelude::GraphTensor,
     shape::{flatten_strides, Expression, ToShape},
 };
@@ -13,42 +13,33 @@ use memmap2::MmapOptions;
 use safetensors::SafeTensors;
 use std::{fmt::Debug, path::Path, sync::Arc};
 
-// Qwen3-4B hyperparams
-pub const LAYERS: usize = 36;
-pub const HIDDEN: usize = 2560;
-pub const INTERMEDIATE: usize = 9728;
+// Qwen3-30B-A3B hyperparams
+pub const LAYERS: usize = 48;
+pub const HIDDEN: usize = 2048;
+pub const MOE_INTERMEDIATE: usize = 768;
 pub const HEAD_DIM: usize = 128;
 pub const N_HEADS: usize = 32;
-pub const N_KV_HEADS: usize = 8;
-pub const KV_GROUPS: usize = N_HEADS / N_KV_HEADS; // = 4
+pub const N_KV_HEADS: usize = 4;
+pub const KV_GROUPS: usize = N_HEADS / N_KV_HEADS; // = 8
 pub const Q_DIM: usize = N_HEADS * HEAD_DIM; // = 4096
-pub const KV_DIM: usize = N_KV_HEADS * HEAD_DIM; // = 1024
+pub const KV_DIM: usize = N_KV_HEADS * HEAD_DIM; // = 512
 pub const VOCAB_SIZE: usize = 151936;
 pub const RMS_NORM_EPS: f32 = 1e-6;
+pub const NUM_EXPERTS: usize = 128;
+pub const TOP_K: usize = 8;
 
-pub struct Qwen {
+pub struct Qwen3MoE {
     pub embedding: GraphTensor,
-    layers: Vec<QwenLayer>,
+    layers: Vec<Qwen3MoELayer>,
     lm_norm: LayerNorm,
+    lm_head: GraphTensor,
 }
 
-impl Qwen {
+impl Qwen3MoE {
     pub fn init(cx: &mut Graph) -> Self {
-        let mut w = vec![];
+        let mut layers = vec![];
         for l in 0..LAYERS {
-            w.push(QwenLayer {
-                up: cx.named_tensor(
-                    format!("model.layers.{l}.mlp.up_proj.weight"),
-                    (INTERMEDIATE, HIDDEN),
-                ),
-                gate: cx.named_tensor(
-                    format!("model.layers.{l}.mlp.gate_proj.weight"),
-                    (INTERMEDIATE, HIDDEN),
-                ),
-                down: cx.named_tensor(
-                    format!("model.layers.{l}.mlp.down_proj.weight"),
-                    (HIDDEN, INTERMEDIATE),
-                ),
+            layers.push(Qwen3MoELayer {
                 q_proj: cx.named_tensor(
                     format!("model.layers.{l}.self_attn.q_proj.weight"),
                     (Q_DIM, HIDDEN),
@@ -81,6 +72,24 @@ impl Qwen {
                     RMS_NORM_EPS,
                     cx,
                 ),
+                moe: QwenMoE {
+                    router: cx.named_tensor(
+                        format!("model.layers.{l}.mlp.gate.weight"),
+                        (NUM_EXPERTS, HIDDEN),
+                    ),
+                    gate_up_weights: cx
+                        .named_tensor(
+                            format!("model.layers.{l}.mlp.gate_up_weights"),
+                            (NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN),
+                        )
+                        .as_dtype(DType::Bf16),
+                    down_weights: cx
+                        .named_tensor(
+                            format!("model.layers.{l}.mlp.down_weights"),
+                            (NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE),
+                        )
+                        .as_dtype(DType::Bf16),
+                },
             });
         }
         let lm_norm = LayerNorm::new(
@@ -93,8 +102,9 @@ impl Qwen {
         );
         Self {
             embedding: cx.named_tensor("model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN)),
-            layers: w,
+            layers,
             lm_norm,
+            lm_head: cx.named_tensor("lm_head.weight", (VOCAB_SIZE, HIDDEN)),
         }
     }
 
@@ -124,23 +134,29 @@ impl Qwen {
                 )
                 .graph_break();
         }
-        self.lm_norm.forward(x).matmul(self.embedding.t())
+        self.lm_norm.forward(x).matmul(self.lm_head.t())
     }
 }
 
-struct QwenLayer {
-    up: GraphTensor,
-    gate: GraphTensor,
-    down: GraphTensor,
+struct Qwen3MoELayer {
     q_proj: GraphTensor,
     k_proj: GraphTensor,
     v_proj: GraphTensor,
     o_proj: GraphTensor,
     attn_rms: LayerNorm,
     mlp_rms: LayerNorm,
+    moe: QwenMoE,
 }
 
-impl QwenLayer {
+/// Gated MoE module using standard graph ops (SwiGLU variant).
+/// Produces HLIR that can be matched by the GLUMoE backend HostOp.
+struct QwenMoE {
+    router: GraphTensor,          // [E, H] F32
+    gate_up_weights: GraphTensor, // [E, intermediate*2, H] BF16
+    down_weights: GraphTensor,    // [E, H, intermediate] BF16
+}
+
+impl Qwen3MoELayer {
     pub fn forward(
         &self,
         mut x: GraphTensor,
@@ -149,12 +165,12 @@ impl QwenLayer {
         q_norm_ptr: u64,
         k_norm_ptr: u64,
     ) -> GraphTensor {
+        // Attention
         let x_attn = self.attn_rms.forward(x);
         let q = x_attn.matmul(self.q_proj.t());
         let k = x_attn.matmul(self.k_proj.t());
         let v = x_attn.matmul(self.v_proj.t());
 
-        // 3 graph inputs (Q, K, V) + norm weights via payload pointers
         let attn_out = x.graph().custom_op(
             QwenAttention::new(
                 k_cache,
@@ -170,11 +186,81 @@ impl QwenLayer {
         );
         x += attn_out.matmul(self.o_proj.t());
 
+        // MoE FFN
         let x_mlp = self.mlp_rms.forward(x);
-        let mlp_out =
-            (x_mlp.matmul(self.gate.t()).swish() * x_mlp.matmul(self.up.t())).matmul(self.down.t());
+        let mlp_out = self.moe.forward(x_mlp);
         x + mlp_out
     }
+}
+
+impl QwenMoE {
+    fn forward(&self, x: GraphTensor) -> GraphTensor {
+        let n = x.dims().len(); // 2 for [s, H]
+        let e_dim = *self.router.dims().first().unwrap(); // E
+        let k_expr = Expression::from(TOP_K);
+
+        // 1. Router: softmax(x @ router^T) → [s, E]
+        let routing_weights = x.matmul(self.router.t()).softmax(n - 1);
+
+        // 2. TopK expert selection → [s, k] (Int)
+        let top_k_indices = routing_weights.topk_indexes(TOP_K, n - 1);
+
+        // 3. Gather top-k routing values → [s, k]
+        let row_offsets = x
+            .graph()
+            .iota(Expression::from('z') / k_expr * e_dim, top_k_indices.dims());
+        let routing_flat_idx =
+            (row_offsets.cast(DType::F32) + top_k_indices.cast(DType::F32)).cast(DType::Int);
+        let top_k_values = routing_weights.gather(routing_flat_idx);
+
+        // 4. Gather gate_up expert weights → [s, k, intermediate*2, H]
+        //    Transpose last two dims → [s, k, H, intermediate*2]
+        //    Batched matmul: [s,k,1,H] @ [s,k,H,intermediate*2] → [s,k,1,intermediate*2]
+        let gate_up_gathered =
+            gather_experts(x, top_k_indices, self.gate_up_weights).cast(DType::F32);
+        let x_exp = x.expand_dim(n - 1, TOP_K).unsqueeze(n); // [s, k, 1, H]
+        let gate_up_out = x_exp.matmul(gate_up_gathered.transpose(2, 3)).squeeze(n); // [s, k, intermediate*2]
+
+        // 5. SwiGLU: silu(gate) * up → [s, k, intermediate]
+        let gate = gate_up_out.slice((.., .., ..MOE_INTERMEDIATE));
+        let up = gate_up_out.slice((.., .., MOE_INTERMEDIATE..));
+        let hidden = gate.silu() * up;
+
+        // 6. Gather down expert weights → [s, k, H, intermediate]
+        //    Transpose last two dims → [s, k, intermediate, H]
+        //    Batched matmul: [s,k,1,intermediate] @ [s,k,intermediate,H] → [s,k,1,H]
+        let down_gathered = gather_experts(x, top_k_indices, self.down_weights).cast(DType::F32);
+        let hidden_exp = hidden.unsqueeze(2); // [s, k, 1, intermediate]
+        let down_out = hidden_exp.matmul(down_gathered.transpose(2, 3)).squeeze(2); // [s, k, H]
+
+        // 7. Weighted sum over k experts → [s, H]
+        let weights_exp = top_k_values.unsqueeze(top_k_values.dims().len()); // [s, k, 1]
+        (down_out * weights_exp).sum(n - 1)
+    }
+}
+
+/// Gather expert weight matrices using topk indices.
+/// weights: [E, d1, d2], top_k_indices: [s, k] → result: [s, k, d1, d2]
+fn gather_experts(
+    graph_source: GraphTensor,
+    top_k_indices: GraphTensor,
+    weights: GraphTensor,
+) -> GraphTensor {
+    let (_, d1, d2) = weights.dims3();
+    let io = d1 * d2;
+    let base = (top_k_indices * io).cast(DType::F32);
+    let within = graph_source
+        .graph()
+        .iota(Expression::from('z'), (d1, d2))
+        .cast(DType::F32);
+    let n_base = base.dims().len();
+    let exp_base = base.expand_dim(n_base, d1).expand_dim(n_base + 1, d2);
+    let mut exp_within = within;
+    for (i, dim) in base.dims().iter().enumerate() {
+        exp_within = exp_within.expand_dim(i, *dim);
+    }
+    let expert_flat_idx = (exp_base + exp_within).cast(DType::Int);
+    weights.gather(expert_flat_idx)
 }
 
 // ---------------------------------------------------------------------------
@@ -213,7 +299,6 @@ impl KVCache {
 }
 
 /// Pre-allocated GPU buffers for QK-norm weights per layer.
-/// Weights are copied here from the runtime after loading safetensors.
 #[derive(Debug, Clone)]
 pub struct NormWeightBuffers {
     pub layers: Vec<(CudaSlice<u8>, CudaSlice<u8>)>, // (q_norm, k_norm) per layer
@@ -320,11 +405,11 @@ impl BlockOp for QwenAttention {
         self.range.iter().copied().product::<Expression>() * self.head_dim
     }
 
-    fn producer_barriers_separate(&self) -> Vec<bool> {
+    fn producer_barriers_seperate(&self) -> Vec<bool> {
         vec![true; self.range.len()]
     }
 
-    fn consumer_barriers_separate(&self) -> Vec<Vec<bool>> {
+    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
         let mut q = vec![true; self.range.len()];
         q[self.range.len() - 1] = false;
         let mut k = vec![true; self.range.len()];

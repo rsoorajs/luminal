@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream};
 use luminal::prelude::*;
-use tracing_perfetto_sdk_schema::{
+use luminal_tracing::schema::{
     self as schema, TrackEvent, debug_annotation::NameField, trace_packet, track_event,
 };
 use uuid::Uuid;
@@ -19,7 +19,7 @@ pub type Ops = (hlir::Ops, other_ops::Ops);
 
 /// Build a mapping from interned string IDs to their string values for a given sequence.
 fn build_interned_strings(trace: &schema::Trace) -> std::collections::HashMap<(u32, u64), String> {
-    use tracing_perfetto_sdk_schema::trace_packet;
+    use luminal_tracing::schema::trace_packet;
     let mut interned: std::collections::HashMap<(u32, u64), String> =
         std::collections::HashMap::new();
     for packet in &trace.packet {
@@ -60,7 +60,7 @@ fn annotation_matches_id(
         return false;
     }
     match &a.value {
-        Some(tracing_perfetto_sdk_schema::debug_annotation::Value::StringValue(v)) => {
+        Some(luminal_tracing::schema::debug_annotation::Value::StringValue(v)) => {
             *v == format!("{id}")
         }
         _ => false,
@@ -72,7 +72,7 @@ pub fn record_cuda_graph_timings(
     trace: &schema::Trace,
     cuda_graph_timings: &[(CudaGraphTiming, Uuid)],
 ) -> Vec<schema::TracePacket> {
-    use tracing_perfetto_sdk_schema::{trace_packet, track_descriptor};
+    use luminal_tracing::schema::{trace_packet, track_descriptor};
 
     // Build interned string lookup table
     let interned = build_interned_strings(trace);

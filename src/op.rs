@@ -1,6 +1,6 @@
 use std::{
-    fmt::Debug,
-    sync::{Arc, Mutex},
+    fmt::{Debug, Display},
+    sync::Arc,
 };
 
 use crate::prelude::*;
@@ -131,11 +131,11 @@ impl std::fmt::Display for ExecutionStats {
 }
 
 pub trait EgglogOp: Debug {
-    fn term(&self) -> (String, Vec<OpParam>);
-    fn rewrites(&self) -> Vec<String> {
+    fn sort(&self) -> crate::egglog_utils::api::SortDef;
+    fn rewrites(&self) -> Vec<crate::egglog_utils::api::Rule> {
         vec![]
     }
-    fn early_rewrites(&self) -> Vec<String> {
+    fn early_rewrites(&self) -> Vec<crate::egglog_utils::api::Rule> {
         vec![]
     }
     fn cleanup(&self) -> bool;
@@ -160,18 +160,13 @@ pub trait CustomOp: Debug {
 /// The main HLIROp trait.
 ///
 /// Defines an HLIROp that implements a logical operation.
-pub trait HLIROp: Debug + as_any::AsAny {
+pub trait HLIROp: Debug + Display + as_any::AsAny {
     fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String;
 }
 
 impl<T: HLIROp> HLIROp for Box<T> {
     fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
         <T as HLIROp>::to_egglog(self, inputs)
-    }
-}
-impl<T: HLIROp> HLIROp for Arc<Mutex<T>> {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
-        <T as HLIROp>::to_egglog(&self.lock().unwrap(), inputs)
     }
 }
 
@@ -222,32 +217,6 @@ impl<T> DialectOp<T> {
 impl<T: Debug + 'static> DialectOpTrait for DialectOp<T> {}
 
 pub trait DialectOpTrait: AsAny + Debug {}
-
-pub enum OpParam {
-    EList,
-    Expr,
-    Input,
-    Int,
-    Float,
-    Str,
-    Dty,
-    IList,
-}
-
-impl Debug for OpParam {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OpParam::EList => write!(f, "EList"),
-            OpParam::Expr => write!(f, "Expression"),
-            OpParam::Input => write!(f, "IR"),
-            OpParam::Int => write!(f, "i64"),
-            OpParam::Str => write!(f, "String"),
-            OpParam::Dty => write!(f, "DType",),
-            OpParam::Float => write!(f, "f64"),
-            OpParam::IList => write!(f, "IList"),
-        }
-    }
-}
 
 #[macro_export]
 macro_rules! __impl_tuple_into_dyn_arcbox_concat_arity {

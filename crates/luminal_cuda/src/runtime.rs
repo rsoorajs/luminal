@@ -20,8 +20,8 @@ use luminal::prelude::{
 };
 
 use luminal_tracing::PerfettoGuard;
+use luminal_tracing::prost::Message;
 use memmap2::MmapOptions;
-use prost::Message;
 use safetensors::SafeTensors;
 use std::{
     collections::{VecDeque, hash_map::Entry},
@@ -146,7 +146,7 @@ impl CudaRuntime {
                         let dev = f32s.to_cuda_input(&self.cuda_stream);
                         self.hlir_buffers.insert(node, dev);
                     }
-                    safetensors::Dtype::U8 => {
+                    safetensors::Dtype::U8 | safetensors::Dtype::BF16 | safetensors::Dtype::F16 => {
                         let bytes = tensor.data();
                         let dev = bytes.to_cuda_input(&self.cuda_stream);
                         self.hlir_buffers.insert(node, dev);
@@ -1331,7 +1331,7 @@ impl CudaRuntime {
     }
 
     /// Record GPU timings to an existing perfetto trace file.
-    pub fn record_cuda_perfetto_trace(&mut self, perfetto_guard: PerfettoGuard) {
+    pub fn record_cuda_perfetto_trace(&mut self, mut perfetto_guard: PerfettoGuard) {
         // Flush any pending timing copies first
         self.flush_pending_timings();
 
@@ -1347,7 +1347,7 @@ impl CudaRuntime {
             .map(|(_, o)| o)
             .collect();
         let data = std::fs::read(&perfetto_guard.path).unwrap();
-        let mut trace = tracing_perfetto_sdk_schema::Trace::decode(data.as_slice()).unwrap();
+        let mut trace = luminal_tracing::schema::Trace::decode(data.as_slice()).unwrap();
         let mut extra_packets = record_block_op_timings(&trace, &ops, &self.timings);
         extra_packets.extend(record_cuda_graph_timings(&trace, &self.cuda_graph_timings));
         trace.packet.extend(extra_packets);

@@ -4,10 +4,12 @@ use crate::cudarc::driver::{CudaSlice, CudaStream};
 use luminal::{op::EgglogOp, prelude::*};
 mod cublas;
 mod cublaslt;
+pub mod moe;
 
 pub type Ops = (
     // cublas::CuBlasSgemmV2,
     cublaslt::CuBlasLt,
+    moe::GLUMoE,
 );
 
 /// Host operations that execute on the CPU but orchestrate GPU work.

@@ -1,11 +1,12 @@
 use std::sync::{Arc, OnceLock};
 
 use luminal::{
-    egglog_utils::extract_expr,
-    op::{
-        EgglogOp, LLIROp,
-        OpParam::{self, *},
+    egglog_utils::{
+        api::{Rule, SortDef, sort},
+        base::{EXPRESSION, IR, STRING},
+        extract_expr,
     },
+    op::{EgglogOp, LLIROp},
     prelude::{
         tracing::{Level, span, trace},
         *,
@@ -71,20 +72,31 @@ impl Default for CuBlasSgemmV2 {
 }
 
 impl EgglogOp for CuBlasSgemmV2 {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        (
-            "cublasSgemmV2".to_string(),
-            //    A      B      m     n      k  , A input Layout, B input Layout,
-            vec![Input, Input, Expr, Expr, Expr, Str, Str, Expr, Expr, Expr],
+    fn sort(&self) -> SortDef {
+        sort(
+            IR,
+            "cublasSgemmV2",
+            &[
+                ("a", IR),
+                ("b", IR),
+                ("m", EXPRESSION),
+                ("n", EXPRESSION),
+                ("k", EXPRESSION),
+                ("a_layout", STRING),
+                ("b_layout", STRING),
+                ("lda", EXPRESSION),
+                ("ldb", EXPRESSION),
+                ("ldc", EXPRESSION),
+            ],
         )
     }
 
-    fn rewrites(&self) -> Vec<String> {
+    fn rewrites(&self) -> Vec<Rule> {
         vec![
-            include_str!["sgemm_v2_RmRm_rewrite.egg"].to_string(), // row row
-            include_str!["sgemm_v2_RmCm_rewrite.egg"].to_string(), // row col
-            include_str!["sgemm_v2_CmRm_rewrite.egg"].to_string(), // col row
-            include_str!["sgemm_v2_CmCm_rewrite.egg"].to_string(), // col col
+            Rule::raw(include_str!["sgemm_v2_RmRm_rewrite.egg"]), // row row
+            Rule::raw(include_str!["sgemm_v2_RmCm_rewrite.egg"]), // row col
+            Rule::raw(include_str!["sgemm_v2_CmRm_rewrite.egg"]), // col row
+            Rule::raw(include_str!["sgemm_v2_CmCm_rewrite.egg"]), // col col
         ]
     }
 

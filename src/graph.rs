@@ -66,7 +66,7 @@ impl Graph {
 
     /// Create a new tensor with shape S
     pub fn tensor(&mut self, shape: impl ToShape) -> GraphTensor {
-        self.named_tensor("Tensor", shape)
+        self.named_tensor("", shape)
     }
 
     /// Create a new tensor with shape S and a name. This name will show up on the graph when displayed
@@ -202,10 +202,10 @@ impl Graph {
     pub fn build_search_space_exclude_ops<Rt: Runtime + 'static, Ex: IntoEgglogOp>(&mut self) {
         let exclude_ops = Ex::into_vec()
             .into_iter()
-            .map(|e| e.term().0)
+            .map(|e| e.sort().name)
             .collect::<FxHashSet<_>>();
         let mut ops = Rt::Ops::into_vec();
-        ops.retain(|o| !exclude_ops.contains(&o.term().0));
+        ops.retain(|o| !exclude_ops.contains(&o.sort().name));
         ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
         let cleanup_hlir = TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>();
 

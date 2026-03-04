@@ -1,6 +1,9 @@
 use candle_core::{Device, Tensor, WithDType};
 use cudarc::driver::CudaContext;
 use half::{bf16, f16};
+use luminal::egglog_utils::{
+    egglog_to_llir, extract_generation, hash_choice_set, random_initial_choice, validate_choice_set,
+};
 use luminal::prelude::*;
 use num_traits::{Num, Signed};
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -10,6 +13,9 @@ use crate::runtime::{CudaRuntime, ToCudaInput};
 
 /// Safety factor multiplied with epsilon for tolerance calculations
 pub const TOLERANCE_SAFETY_FACTOR: f32 = 2.0;
+
+/// Number of genomes to fuzz per op test invocation.
+pub const GENOME_FUZZ_COUNT: usize = 20;
 
 /// Trait for test-compatible data types that can be used in generic test functions.
 /// Bridges luminal's runtime types with candle's tensor types.
@@ -193,7 +199,7 @@ pub fn test_unary_cuda<T: TestDType>(
     let b = func(a).output();
 
     cx.build_search_space::<CudaRuntime>();
-    let mut rt = CudaRuntime::initialize(stream);
+    let mut rt = CudaRuntime::initialize(stream.clone());
 
     let input_data = generator(n_elements, seed);
     rt.set_data(a, input_data.clone());
@@ -211,6 +217,19 @@ pub fn test_unary_cuda<T: TestDType>(
     let eps = dtype_epsilon(<T as TestDType>::DTYPE);
     let tol = eps * TOLERANCE_SAFETY_FACTOR;
     T::assert_match(&result, &ref_vec, tol, tol);
+
+    // Fuzz genomes: verify multiple graph rewrites produce consistent results
+    fuzz_genomes::<T>(
+        &cx,
+        &stream,
+        |rt| rt.set_data(a, input_data.clone()),
+        b.id,
+        &ref_vec,
+        tol,
+        tol,
+        GENOME_FUZZ_COUNT,
+        seed,
+    );
 }
 
 /// Base binary test function with input generators
@@ -252,7 +271,7 @@ pub fn test_binary_cuda<T: TestDType>(
     let c = func(a, b).output();
 
     cx.build_search_space::<CudaRuntime>();
-    let mut rt = CudaRuntime::initialize(stream);
+    let mut rt = CudaRuntime::initialize(stream.clone());
 
     let a_data = a_generator(a_elements, seed);
     let b_data = b_generator(b_elements, seed.wrapping_add(1));
@@ -271,6 +290,22 @@ pub fn test_binary_cuda<T: TestDType>(
     let ref_vec = T::candle_to_vec(&ref_c);
 
     T::assert_match(&result, &ref_vec, rtol, atol);
+
+    // Fuzz genomes: verify multiple graph rewrites produce consistent results
+    fuzz_genomes::<T>(
+        &cx,
+        &stream,
+        |rt| {
+            rt.set_data(a, a_data.clone());
+            rt.set_data(b, b_data.clone());
+        },
+        c.id,
+        &ref_vec,
+        rtol,
+        atol,
+        GENOME_FUZZ_COUNT,
+        seed,
+    );
 }
 
 /// Test mod operation with element-wise reference using Rust's % operator
@@ -303,7 +338,7 @@ pub fn test_mod(
     let c = func(a, b).output();
 
     cx.build_search_space::<CudaRuntime>();
-    let mut rt = CudaRuntime::initialize(stream);
+    let mut rt = CudaRuntime::initialize(stream.clone());
 
     let a_data = random_f32_vec(a_elements, seed, -0.5, 0.5);
     // Generate divisor values away from zero (0.1 to 0.5) to avoid division issues
@@ -326,6 +361,22 @@ pub fn test_mod(
     let rtol = eps * TOLERANCE_SAFETY_FACTOR;
     let atol = eps * TOLERANCE_SAFETY_FACTOR;
     assert_close(&result, &expected, rtol, atol);
+
+    // Fuzz genomes: verify multiple graph rewrites produce consistent results
+    fuzz_genomes::<f32>(
+        &cx,
+        &stream,
+        |rt| {
+            rt.set_data(a, a_data.clone());
+            rt.set_data(b, b_data.clone());
+        },
+        c.id,
+        &expected,
+        rtol,
+        atol,
+        GENOME_FUZZ_COUNT,
+        seed,
+    );
 }
 
 /// Generate a slice range for an axis of given size.
@@ -349,4 +400,95 @@ pub fn gen_slice_range(
         size
     };
     (start, end)
+}
+
+/// Fuzz test multiple genomes from the e-graph search space.
+///
+/// After a graph has been built and compared against a reference, this function
+/// extracts random genomes via mutation and verifies they all produce results
+/// matching the expected reference output. This catches bugs where graph rewrites
+/// produce incorrect computation.
+///
+/// `setup_inputs` is called for each genome's fresh runtime to load input data.
+pub fn fuzz_genomes<T: TestDType>(
+    cx: &Graph,
+    stream: &Arc<cudarc::driver::CudaStream>,
+    setup_inputs: impl Fn(&mut CudaRuntime),
+    output_id: NodeIndex,
+    expected: &[T],
+    rtol: f32,
+    atol: f32,
+    num_genomes: usize,
+    seed: u64,
+) where
+    Vec<T>: ToCudaInput,
+{
+    let Some(egraph) = cx.egraph() else {
+        return;
+    };
+    let Some(ops) = cx.egglog_ops() else {
+        return;
+    };
+
+    // Check if there are alternative genomes to explore
+    let mutable_eclasses: usize = egraph
+        .eclasses
+        .iter()
+        .filter(|(_, (label, enodes))| {
+            (label.contains("IR") || label.contains("IList")) && enodes.len() > 1
+        })
+        .count();
+    if mutable_eclasses == 0 {
+        return; // Only one valid graph, nothing to fuzz
+    }
+
+    // Use a different seed offset to avoid correlating with the search seed
+    let mut rng = StdRng::seed_from_u64(seed.wrapping_add(7777));
+    let mut prev_selected: FxHashSet<u64> = FxHashSet::default();
+
+    let initial = random_initial_choice(egraph, &mut rng);
+    prev_selected.insert(hash_choice_set(&initial));
+
+    let mut base = initial;
+    let mut tested = 0;
+
+    for _ in 0..100 {
+        let offspring = extract_generation(egraph, &base, 10, 2, &mut prev_selected, &mut rng);
+
+        if offspring.is_empty() {
+            break;
+        }
+
+        for genome in offspring {
+            if validate_choice_set(egraph, &genome, ops).is_err() {
+                continue;
+            }
+
+            let mut list_cache = FxHashMap::default();
+            let mut expr_cache = FxHashMap::default();
+            let llir_graph = egglog_to_llir(
+                egraph,
+                genome.clone(),
+                ops,
+                &cx.custom_ops,
+                &mut list_cache,
+                &mut expr_cache,
+                None,
+            );
+
+            let mut rt = CudaRuntime::initialize(stream.clone());
+            rt.load_llir(&llir_graph);
+            setup_inputs(&mut rt);
+            rt.execute(&cx.dyn_map);
+            let result = T::get_from_runtime(&rt, output_id);
+            T::assert_match(&result, expected, rtol, atol);
+
+            tested += 1;
+            base = genome;
+
+            if tested >= num_genomes {
+                return;
+            }
+        }
+    }
 }

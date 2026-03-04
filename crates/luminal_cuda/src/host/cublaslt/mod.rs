@@ -2,11 +2,12 @@ use std::sync::{Arc, OnceLock};
 
 use luminal::{
     dtype::DType,
-    egglog_utils::{extract_dtype, extract_expr},
-    op::{
-        EgglogOp, LLIROp,
-        OpParam::{self, *},
+    egglog_utils::{
+        api::{Rule, SortDef, sort},
+        base::{DTYPE, EXPRESSION, IR, STRING},
+        extract_dtype, extract_expr,
     },
+    op::{EgglogOp, LLIROp},
     prelude::{
         tracing::{Level, span, trace},
         *,
@@ -67,22 +68,32 @@ impl Default for CuBlasLt {
 }
 
 impl EgglogOp for CuBlasLt {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        (
-            "cublaslt".to_string(),
-            //    A      B      m     n      k  , A input Layout, B input Layout, lda, ldb, ldc, dtype
-            vec![
-                Input, Input, Expr, Expr, Expr, Str, Str, Expr, Expr, Expr, Dty,
+    fn sort(&self) -> SortDef {
+        sort(
+            IR,
+            "cublaslt",
+            &[
+                ("a", IR),
+                ("b", IR),
+                ("m", EXPRESSION),
+                ("n", EXPRESSION),
+                ("k", EXPRESSION),
+                ("a_layout", STRING),
+                ("b_layout", STRING),
+                ("lda", EXPRESSION),
+                ("ldb", EXPRESSION),
+                ("ldc", EXPRESSION),
+                ("dtype", DTYPE),
             ],
         )
     }
 
-    fn rewrites(&self) -> Vec<String> {
+    fn rewrites(&self) -> Vec<Rule> {
         vec![
-            include_str!["cublaslt_RmRm_rewrite.egg"].to_string(), // row row
-            include_str!["cublaslt_RmCm_rewrite.egg"].to_string(), // row col
-            include_str!["cublaslt_CmRm_rewrite.egg"].to_string(), // col row
-            include_str!["cublaslt_CmCm_rewrite.egg"].to_string(), // col col
+            Rule::raw(include_str!["cublaslt_RmRm_rewrite.egg"]), // row row
+            Rule::raw(include_str!["cublaslt_RmCm_rewrite.egg"]), // row col
+            Rule::raw(include_str!["cublaslt_CmRm_rewrite.egg"]), // col row
+            Rule::raw(include_str!["cublaslt_CmCm_rewrite.egg"]), // col col
         ]
     }
 

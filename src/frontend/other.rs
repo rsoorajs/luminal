@@ -58,8 +58,8 @@ impl Graph {
     /// Same API as https://pytorch.org/docs/stable/generated/torch.tril
     pub fn tril(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
         let size = size.into();
-        let horizontal = self.arange(size).expand_dim(0, size);
-        let vertical = self.arange(size).expand_dim(1, size);
+        let horizontal = self.arange(size).expand_dim(0, size).cast(DType::F32);
+        let vertical = self.arange(size).expand_dim(1, size).cast(DType::F32);
         (horizontal - (diagonal as f32 + 1.)).lt(vertical)
     }
 
@@ -68,8 +68,8 @@ impl Graph {
     /// Same API as https://pytorch.org/docs/stable/generated/torch.triu
     pub fn triu(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
         let size = size.into();
-        let horizontal = self.arange(size).expand_dim(0, size);
-        let vertical = self.arange(size).expand_dim(1, size);
+        let horizontal = self.arange(size).expand_dim(0, size).cast(DType::F32);
+        let vertical = self.arange(size).expand_dim(1, size).cast(DType::F32);
         (horizontal - (diagonal as f32 - 1.)).gt(vertical)
     }
 

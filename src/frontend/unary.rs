@@ -253,13 +253,60 @@ impl GraphTensor {
     pub fn argsort(self, axis: usize, descending: bool) -> GraphTensor {
         // Compare all elements with all other elements by making an axis
         let ax_size = self.dims()[axis];
-        // Materialize expanded tensors to avoid stride issues with sum reduction
         let a = self.expand_dim(axis + 1, ax_size) + 0.0;
-        let b = self.expand_dim(axis, ax_size) + 1e-9; // eps for stable sort
-        // lt/gt return Bool, cast to F32 for sum
+        let b = self.expand_dim(axis, ax_size) + 1e-9;
         let cmp = if descending { a.gt(b) } else { a.lt(b) };
-        // Adding 0 forces materialization before sum, avoiding stride issues
         let ind = (cmp.cast(DType::F32) + 0.0).sum(axis).cast(DType::Int);
+        ind.inverse_permutation(axis)
+    }
+
+    /// Stable argsort: like `argsort`, but breaks ties by original index
+    /// (lower index first). Guarantees unique ranks even when values are equal.
+    pub fn stable_argsort(self, axis: usize, descending: bool) -> GraphTensor {
+        let ax_size = self.dims()[axis];
+        let dims = self.dims();
+        let n = dims.len();
+
+        // Expanded shape: original dims with ax_size inserted at axis
+        let mut exp_dims = dims.clone();
+        exp_dims.insert(axis, ax_size);
+
+        // Pairwise value tensors (* 1.0 forces materialization to avoid stride issues)
+        let a_val = self.expand_dim(axis + 1, ax_size) * 1.0;
+        let b_val = self.expand_dim(axis, ax_size) * 1.0;
+
+        // Index tensors for tiebreaking
+        let mut iota_a = self.graph().arange(ax_size).cast(DType::F32);
+        for (i, &dim) in exp_dims.iter().enumerate().take(axis) {
+            iota_a = iota_a.expand_dim(i, dim);
+        }
+        iota_a = iota_a.expand_dim(axis + 1, ax_size);
+        for (i, &dim) in exp_dims.iter().enumerate().take(n + 1).skip(axis + 2) {
+            iota_a = iota_a.expand_dim(i, dim);
+        }
+        let mut iota_b = self.graph().arange(ax_size).cast(DType::F32);
+        for (i, &dim) in exp_dims.iter().enumerate().take(axis + 1) {
+            iota_b = iota_b.expand_dim(i, dim);
+        }
+        for (i, &dim) in exp_dims.iter().enumerate().take(n + 1).skip(axis + 2) {
+            iota_b = iota_b.expand_dim(i, dim);
+        }
+
+        // Lexicographic comparison with stable tiebreaking (lower index first):
+        // ascending:  rank[j] = count of i where (x[i] < x[j]) || (x[i]==x[j] && i < j)
+        // descending: rank[j] = count of i where (x[i] > x[j]) || (x[i]==x[j] && i < j)
+        let primary = if descending {
+            a_val.gt(b_val)
+        } else {
+            a_val.lt(b_val)
+        };
+        let idx_cmp = iota_a.lt(iota_b);
+        let not_lt = 1.0 - a_val.lt(b_val).cast(DType::F32);
+        let not_gt = 1.0 - a_val.gt(b_val).cast(DType::F32);
+        let val_eq = not_lt * not_gt;
+        let cmp = primary.cast(DType::F32) + val_eq * idx_cmp.cast(DType::F32);
+
+        let ind = (cmp * 1.0).sum(axis).cast(DType::Int);
         ind.inverse_permutation(axis)
     }
 

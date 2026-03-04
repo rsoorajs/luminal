@@ -1,8 +1,11 @@
 use std::fmt::Debug;
 
-use luminal::op::{
-    EgglogOp,
-    OpParam::{self, *},
+use luminal::{
+    egglog_utils::{
+        api::{Rule, SortDef},
+        base::OP_SORTS,
+    },
+    op::EgglogOp,
 };
 
 pub type Ops = (Exp, Sigmoid);
@@ -10,16 +13,16 @@ pub type Ops = (Exp, Sigmoid);
 #[derive(Debug, Default)]
 pub struct Exp;
 impl EgglogOp for Exp {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        ("Exp".to_string(), vec![EList, Input, EList, EList])
+    fn sort(&self) -> SortDef {
+        OP_SORTS.unary("Exp")
     }
 
     fn cleanup(&self) -> bool {
         true
     }
 
-    fn rewrites(&self) -> Vec<String> {
-        vec![
+    fn rewrites(&self) -> Vec<Rule> {
+        vec![Rule::raw(
             "(rule
             (
                 (= ?exp_const (Constant 1.442695))
@@ -32,25 +35,24 @@ impl EgglogOp for Exp {
                 (union ?exp2 ?exp)
                 (set (dtype ?exp) ?dt)
             )
-        )"
-            .to_string(),
-        ]
+        )",
+        )]
     }
 }
 
 #[derive(Default, Debug, Clone)]
 pub struct Sigmoid;
 impl EgglogOp for Sigmoid {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        ("Sigmoid".to_string(), vec![EList, Input, EList, EList])
+    fn sort(&self) -> SortDef {
+        OP_SORTS.unary("Sigmoid")
     }
 
     fn cleanup(&self) -> bool {
         true
     }
 
-    fn rewrites(&self) -> Vec<String> {
-        vec!["(rule
+    fn rewrites(&self) -> Vec<Rule> {
+        vec![Rule::raw("(rule
             (
                 (= ?neg_input (Mul ?input_range ?input ?input_stride (Constant -1.0) ?const_stride ?intermediate_stride))
                 (= ?exp (Exp ?input_range ?neg_input ?intermediate_stride ?exp_stride))
@@ -64,6 +66,6 @@ impl EgglogOp for Sigmoid {
                 (set (dtype ?sig) ?dt)
             )
             :name \"sigmoid\"
-        )".to_string()]
+        )")]
     }
 }

@@ -11,8 +11,11 @@ use cudarc::{
 };
 use itertools::Itertools;
 use luminal::{
-    egglog_utils::{extract_dtype, extract_expr, extract_expr_list},
-    op::OpParam::*,
+    egglog_utils::{
+        api::{Rule, SortDef, sort},
+        base::{DTYPE, ELIST, EXPRESSION, IR},
+        extract_dtype, extract_expr, extract_expr_list,
+    },
     op::*,
     prelude::*,
 };
@@ -30,15 +33,24 @@ pub struct KernelMeanReduce {
     dtype: DType,
 }
 impl EgglogOp for KernelMeanReduce {
-    fn term(&self) -> (String, Vec<OpParam>) {
-        (
-            "KernelMean".to_string(),
-            vec![EList, Expr, Input, EList, Expr, EList, Dty],
+    fn sort(&self) -> SortDef {
+        sort(
+            IR,
+            "KernelMean",
+            &[
+                ("shape", ELIST),
+                ("iters", EXPRESSION),
+                ("inp", IR),
+                ("strides", ELIST),
+                ("iter_stride", EXPRESSION),
+                ("out_strides", ELIST),
+                ("dtype", DTYPE),
+            ],
         )
     }
 
-    fn rewrites(&self) -> Vec<String> {
-        vec!["
+    fn rewrites(&self) -> Vec<Rule> {
+        vec![Rule::raw("
 (rule
     (
         (= ?sum (Sum ?out_shape ?iters ?inp ?in_stride ?iter_stride ?sum_out_stride))
@@ -53,7 +65,7 @@ impl EgglogOp for KernelMeanReduce {
     )
     :name \"kernel mean reduce\"
 )
-".to_string()]
+")]
     }
 
     fn cleanup(&self) -> bool {
@@ -166,10 +178,14 @@ extern \"C\" {{
     }}
 }}",
             dtype = dtype,
-            in_index = flatten_mul_strides(&self.out_shape, &self.in_stride).to_kernel(),
-            out_index = flatten_mul_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            in_index = flatten_strides(&self.out_shape, &self.in_stride).to_kernel(),
+            out_index = flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
             iters = self.iters.to_kernel(),
-            iter_stride = self.iter_stride.to_kernel(),
+            iter_stride = self
+                .iter_stride
+                .substitute('z', Expression::from(1))
+                .simplify()
+                .to_kernel(),
         );
 
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {

@@ -19,6 +19,7 @@ pub mod prelude {
     pub use crate::hlir::NativeRuntime;
     pub use crate::op::Runtime;
     pub use crate::shape::*;
+    pub use crate::visualization::{display_graph, display_graph_to_file};
     pub use anyhow;
     pub use egglog;
     pub use egglog::ast as egglog_ast;

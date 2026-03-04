@@ -11,9 +11,9 @@ use crate::runtime::CudaRuntime;
 
 #[allow(unused_imports)]
 use super::utilities::{
-    TOLERANCE_SAFETY_FACTOR, assert_close, dtype_epsilon, gen_slice_range, get_cuda_stream,
-    gpu_supports_dtype, random_f32_vec, random_i32_vec, test_binary_cuda, test_mod,
-    test_unary_cuda, to_candle_dtype,
+    GENOME_FUZZ_COUNT, TOLERANCE_SAFETY_FACTOR, assert_close, dtype_epsilon, fuzz_genomes,
+    gen_slice_range, get_cuda_stream, gpu_supports_dtype, random_f32_vec, random_i32_vec,
+    test_binary_cuda, test_mod, test_unary_cuda, to_candle_dtype,
 };
 
 proptest! {
@@ -176,8 +176,8 @@ fn run_argsort_test(rows: usize, cols: usize, seed: u64) {
 
     let mut cx = Graph::default();
     let input = cx.tensor((rows, cols));
-    let sorted_dim0 = input.argsort(0, true).output(); // descend
-    let sorted_dim1 = input.argsort(1, false).output(); // ascend
+    let sorted_dim0 = input.stable_argsort(0, true).output(); // descend
+    let sorted_dim1 = input.stable_argsort(1, false).output(); // ascend
 
     // random and unique data using seed
     let data: Vec<f32> = random_f32_vec(total, seed, 0.0, 1.0);
@@ -527,5 +527,77 @@ proptest! {
     #[test]
     fn fuzz_test_cuda_genomes(seed in any::<u64>()) {
         fuzz_test_cuda_genomes_impl(seed);
+    }
+}
+
+fn run_embed_test(vocab_size: usize, embed_dim: usize, seq_len: usize, seed: u64) {
+    let Some(stream) = get_cuda_stream() else {
+        println!("CUDA not available, skipping test");
+        return;
+    };
+
+    let mut cx = Graph::default();
+    let token_ids = cx.tensor(seq_len).as_dtype(luminal::op::DType::Int);
+    let embed_table = cx.tensor((vocab_size, embed_dim));
+    let output = embed_table
+        .gather(
+            (token_ids * embed_dim).expand_dim(1, embed_dim)
+                + cx.arange(embed_dim).expand_dim(0, seq_len),
+        )
+        .output();
+
+    cx.build_search_space::<CudaRuntime>();
+    let mut rt = CudaRuntime::initialize(stream.clone());
+
+    let token_data: Vec<i32> = random_i32_vec(seq_len, seed, 0, vocab_size as i32 - 1);
+    let embed_data: Vec<f32> = random_f32_vec(vocab_size * embed_dim, seed, -0.5, 0.5);
+
+    rt.set_data(token_ids, token_data.clone());
+    rt.set_data(embed_table, embed_data.clone());
+    rt = cx.search(rt, 5);
+    rt.execute(&cx.dyn_map);
+
+    let result = rt.get_f32(output);
+
+    let mut expected = vec![0.0f32; seq_len * embed_dim];
+    for i in 0..seq_len {
+        let tid = token_data[i] as usize;
+        for j in 0..embed_dim {
+            expected[i * embed_dim + j] = embed_data[tid * embed_dim + j];
+        }
+    }
+
+    let eps = dtype_epsilon(luminal::op::DType::F32);
+    let tol = eps * TOLERANCE_SAFETY_FACTOR;
+    assert_close(&result, &expected, tol, tol);
+
+    // Fuzz genomes: verify multiple graph rewrites produce consistent results
+    fuzz_genomes::<f32>(
+        &cx,
+        &stream,
+        |rt| {
+            rt.set_data(token_ids, token_data.clone());
+            rt.set_data(embed_table, embed_data.clone());
+        },
+        output.id,
+        &expected,
+        tol,
+        tol,
+        GENOME_FUZZ_COUNT,
+        seed,
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(5))]
+
+    #[test]
+    fn test_embed_proptest(
+        vocab_size in 10usize..200,
+        embed_dim in 8usize..128,
+        seq_len in 1usize..32,
+        seed in any::<u64>(),
+    ) {
+        run_embed_test(vocab_size, embed_dim, seq_len, seed);
     }
 }

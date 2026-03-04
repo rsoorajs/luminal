@@ -11,17 +11,11 @@ impl Add for GraphTensor {
     type Output = GraphTensor;
 
     fn add(self, rhs: GraphTensor) -> Self::Output {
-        // assert_eq!(
-        //     self.dims()
-        //         .into_iter()
-        //         .map(|i| i.simplify())
-        //         .collect::<Vec<_>>(),
-        //     rhs.dims()
-        //         .into_iter()
-        //         .map(|i| i.simplify())
-        //         .collect::<Vec<_>>(),
-        //     "Dims must match to add tensors."
-        // );
+        assert_eq!(
+            self.dtype, rhs.dtype,
+            "Dtypes must match to add tensors. Got {:?} and {:?}",
+            self.dtype, rhs.dtype
+        );
         let new_id = self
             .graph()
             .add_op(crate::hlir::Add::default())
@@ -78,11 +72,11 @@ impl Mul for GraphTensor {
     type Output = GraphTensor;
 
     fn mul(self, rhs: GraphTensor) -> Self::Output {
-        // assert_eq!(
-        //     self.dims(),
-        //     rhs.dims(),
-        //     "Dims must match to multiply tensors."
-        // );
+        assert_eq!(
+            self.dtype, rhs.dtype,
+            "Dtypes must match to multiply tensors. Got {:?} and {:?}",
+            self.dtype, rhs.dtype
+        );
         let new_id = self
             .graph()
             .add_op(crate::hlir::Mul::default())
@@ -142,6 +136,11 @@ impl Rem<GraphTensor> for GraphTensor {
 
     fn rem(self, rhs: GraphTensor) -> Self::Output {
         assert_eq!(self.dims(), rhs.dims(), "Dims must match to mod tensors.");
+        assert_eq!(
+            self.dtype, rhs.dtype,
+            "Dtypes must match to mod tensors. Got {:?} and {:?}",
+            self.dtype, rhs.dtype
+        );
         let new_id = self
             .graph()
             .add_op(Mod::default())
@@ -165,7 +164,11 @@ impl Add<f32> for GraphTensor {
     type Output = GraphTensor;
 
     fn add(self, rhs: f32) -> Self::Output {
-        self + self.graph().constant_float(rhs).expand_rhs(self.shape)
+        self + self
+            .graph()
+            .constant_float(rhs)
+            .cast(self.dtype)
+            .expand_rhs(self.shape)
     }
 }
 
@@ -173,7 +176,11 @@ impl<S: Into<Expression>> Add<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn add(self, rhs: S) -> Self::Output {
-        self + self.graph().constant(rhs).expand_rhs(self.shape)
+        self + self
+            .graph()
+            .constant(rhs)
+            .cast(self.dtype)
+            .expand_rhs(self.shape)
     }
 }
 
@@ -181,7 +188,11 @@ impl Sub<f32> for GraphTensor {
     type Output = GraphTensor;
 
     fn sub(self, rhs: f32) -> Self::Output {
-        self - self.graph().constant_float(rhs).expand_rhs(self.shape)
+        self - self
+            .graph()
+            .constant_float(rhs)
+            .cast(self.dtype)
+            .expand_rhs(self.shape)
     }
 }
 
@@ -189,7 +200,11 @@ impl<S: Into<Expression>> Sub<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn sub(self, rhs: S) -> Self::Output {
-        self - self.graph().constant(rhs).expand_rhs(self.shape)
+        self - self
+            .graph()
+            .constant(rhs)
+            .cast(self.dtype)
+            .expand_rhs(self.shape)
     }
 }
 
@@ -197,7 +212,11 @@ impl Mul<f32> for GraphTensor {
     type Output = GraphTensor;
 
     fn mul(self, rhs: f32) -> Self::Output {
-        self * self.graph().constant_float(rhs).expand_rhs(self.shape)
+        self * self
+            .graph()
+            .constant_float(rhs)
+            .cast(self.dtype)
+            .expand_rhs(self.shape)
     }
 }
 
@@ -205,7 +224,11 @@ impl<S: Into<Expression>> Mul<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn mul(self, rhs: S) -> Self::Output {
-        self * self.graph().constant(rhs).expand_rhs(self.shape)
+        self * self
+            .graph()
+            .constant(rhs)
+            .cast(self.dtype)
+            .expand_rhs(self.shape)
     }
 }
 
@@ -217,6 +240,7 @@ impl Div<f32> for GraphTensor {
         self * self
             .graph()
             .constant_float(rhs.recip())
+            .cast(self.dtype)
             .expand_rhs(self.shape)
     }
 }
@@ -237,7 +261,11 @@ impl Rem<f32> for GraphTensor {
     type Output = GraphTensor;
 
     fn rem(self, rhs: f32) -> Self::Output {
-        self % self.graph().constant_float(rhs).expand_rhs(self.shape)
+        self % self
+            .graph()
+            .constant_float(rhs)
+            .cast(self.dtype)
+            .expand_rhs(self.shape)
     }
 }
 
@@ -245,7 +273,11 @@ impl<S: Into<Expression>> Rem<S> for GraphTensor {
     type Output = GraphTensor;
 
     fn rem(self, rhs: S) -> Self::Output {
-        self % self.graph().constant(rhs).expand_rhs(self.shape)
+        self % self
+            .graph()
+            .constant(rhs)
+            .cast(self.dtype)
+            .expand_rhs(self.shape)
     }
 }
 
@@ -254,6 +286,11 @@ impl GraphTensor {
     /// Less than comparison
     pub fn lt(self, rhs: GraphTensor) -> GraphTensor {
         assert_eq!(self.dims(), rhs.dims(), "Dims must match to lt tensors.");
+        assert_eq!(
+            self.dtype, rhs.dtype,
+            "Dtypes must match to compare tensors. Got {:?} and {:?}",
+            self.dtype, rhs.dtype
+        );
         let new_id = self
             .graph()
             .add_op(LessThan::default())
@@ -309,8 +346,7 @@ impl GraphTensor {
 
     /// Take the elementwise maximum of two tensors
     pub fn maximum(self, rhs: GraphTensor) -> GraphTensor {
-        // Cast Bool to F32 for arithmetic
-        (self.lt(rhs).cast(DType::F32) * rhs) + (rhs.le(self).cast(DType::F32) * self)
+        (self.lt(rhs).cast(self.dtype) * rhs) + (rhs.le(self).cast(self.dtype) * self)
     }
 
     /// Take the elementwise maximum of a tensor and a float
