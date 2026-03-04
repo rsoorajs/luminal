@@ -135,7 +135,9 @@ pub fn gpu_supports_dtype(dtype: luminal::dtype::DType) -> bool {
     };
     match dtype {
         luminal::dtype::DType::Bf16 => major >= 8, // Ampere (sm_80+)
-        luminal::dtype::DType::NvFp4 | luminal::dtype::DType::Mxfp4 => major >= 10, // Blackwell (sm_100+)
+        luminal::dtype::DType::F4E2M1
+        | luminal::dtype::DType::F8E4M3
+        | luminal::dtype::DType::F8UE8M0 => major >= 10, // Blackwell (sm_100+)
         _ => true,
     }
 }
@@ -148,7 +150,7 @@ pub fn dtype_epsilon(dtype: luminal::dtype::DType) -> f32 {
         luminal::dtype::DType::Bf16 => 7.81e-3, // 2^-7
         luminal::dtype::DType::Int => 0.0,
         luminal::dtype::DType::Bool => 0.0,
-        luminal::dtype::DType::NvFp4 | luminal::dtype::DType::Mxfp4 => todo!(),
+        other => todo!("dtype_epsilon not implemented for {other}"),
     }
 }
 
@@ -160,7 +162,7 @@ pub fn to_candle_dtype(dtype: luminal::dtype::DType) -> candle_core::DType {
         luminal::dtype::DType::Bf16 => candle_core::DType::BF16,
         luminal::dtype::DType::Int => candle_core::DType::I32,
         luminal::dtype::DType::Bool => candle_core::DType::U8,
-        luminal::dtype::DType::NvFp4 | luminal::dtype::DType::Mxfp4 => todo!(),
+        other => todo!("candle dtype mapping not implemented for {other}"),
     }
 }
 

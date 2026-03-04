@@ -163,7 +163,7 @@ impl Graph {
         for input in inputs.to_ids() {
             add = add.input(input, ShapeTracker::new(()));
         }
-        GraphTensor::from_id(add.finish(), ShapeTracker::new(shape), self, dtype)
+        GraphTensor::from_id(add.finish(), ShapeTracker::new_with_element_bits(shape, dtype.bits()), self, dtype)
     }
 
     #[tracing::instrument(skip_all)]

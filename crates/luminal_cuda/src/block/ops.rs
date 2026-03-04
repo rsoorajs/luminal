@@ -1957,19 +1957,19 @@ impl BlockOp for RowEmbed {
     }
 }
 
-/// TileMatmulNvFp4: Matrix multiplication with NvFp4-quantized B (weight) matrix.
+/// TileMatmulNvFp4: Matrix multiplication with NvFp4-style quantized B (weight) matrix.
 ///
-/// Computes C = A * dequant(B) where:
+/// Computes C = A * dequant(B_data, B_scales) where:
 /// - A is FP32 activations [M, K] (row-major, k-contiguous)
-/// - B is a single NvFp4 buffer laid out as: [packed_data | block_scales]
-///   packed_data: N * K/2 bytes (FP4 E2M1, 2 values per byte, k-contiguous per column)
-///   block_scales: N * ceil(K/16) bytes (FP8 E4M3, 1 scale per 16 elements)
+/// - B_data is F4E2M1 packed weights: N * K/2 bytes (2 values per byte, k-contiguous per column)
+/// - B_scales is F8E4M3 block scales: N * K/16 bytes (1 scale per 16 elements per column)
 /// - C is FP32 output [M, N]
 ///
-/// 2 inputs: source_ptrs[0]=A (float*), source_ptrs[1]=B (uint8*, NvFp4 buffer)
+/// 3 inputs: source_ptrs[0]=A (float*), source_ptrs[1]=B_data (uint8*), source_ptrs[2]=B_scales (uint8*)
 /// Tensor scale embedded in payload.
 ///
-/// No K-splitting: each SM handles complete dot products for its assigned output tiles.
+/// Matched from explicit dequant pattern:
+///   Sum(Mul(A, Mul(Cast(B_data, F4E2M1→F32), Cast(B_scales, F8E4M3→F32))))
 #[derive(Debug, Default)]
 pub struct TileMatmulNvFp4 {
     sm_count: Expression,
@@ -1995,7 +1995,8 @@ impl EgglogOp for TileMatmulNvFp4 {
                 Expr,  // total_k
                 Input, // a (FP32 activations)
                 Expr,  // a_m_stride
-                Input, // b (NvFp4 buffer: packed_data + block_scales)
+                Input, // b_data (F4E2M1 packed weights)
+                Input, // b_scales (F8E4M3 block scales)
                 Expr,  // out_m_stride
                 Expr,  // out_n_stride
                 Float, // tensor_scale
@@ -2005,16 +2006,32 @@ impl EgglogOp for TileMatmulNvFp4 {
 
     fn rewrites(&self) -> Vec<String> {
         vec![
-            // Match Mul -> Sum pattern where B input has NvFp4 dtype
+            // Match explicit dequant pattern: Sum(Mul(A, Mul(Cast(B_data), Cast(B_scales))))
+            // where B_data is F4E2M1 and B_scales is F8E4M3.
+            //
+            // The graph is constructed as:
+            //   b_f32 = b_data.cast(F32)           → Cast(b_data, size, F32)
+            //   scales_f32 = b_scales.cast(F32)     → Cast(b_scales, size, F32)
+            //   b_dequant = b_f32 * scales_f32      → Mul(dq_shape, b_f32, ..., scales_f32, ..., ...)
+            //   c = a.matmul(b_dequant.t())         → Mul(mm_shape, a, ..., b_dequant, ...) → Sum(...)
             format!(
                 "
         (rule
             (
-                ; Match Mul node
+                ; Match outer matmul: Mul -> Sum
                 (= ?mul (Mul ?mul_shape ?a ?a_stride ?b ?b_stride ?mul_out_stride))
-
-                ; Match Sum that reduces the Mul (k dimension)
                 (= ?sum (Sum ?out_shape ?k ?mul ?sum_in_stride ?k_stride ?sum_out_stride))
+
+                ; ?b is the dequant Mul: Mul(Cast(b_data), Cast(b_scales))
+                (= ?b (Mul ?dq_shape ?b_data_cast ?bdc_stride ?b_scales_cast ?bsc_stride ?dq_out_stride))
+
+                ; b_data_cast is Cast(b_data, F4E2M1 → F32)
+                (= ?b_data_cast (Cast ?b_data ?data_size (F32)))
+                (= (F4E2M1) (dtype ?b_data))
+
+                ; b_scales_cast is Cast(b_scales, F8E4M3 → F32)
+                (= ?b_scales_cast (Cast ?b_scales ?scales_size (F32)))
+                (= (F8E4M3) (dtype ?b_scales))
 
                 ; Get dimensions from output shape
                 (= ?m (nth_from_end ?out_shape 1))
@@ -2030,20 +2047,11 @@ impl EgglogOp for TileMatmulNvFp4 {
                 (= ?a_m_stride (nth_from_end ?a_stride 2))
                 (= ?a_k_stride (nth_from_end ?a_stride 0))
 
-                ; Get B strides
-                (= ?b_k_stride (nth_from_end ?b_stride 0))
-
                 ; Assert contiguous k stride on output
                 (= ?k_stride (MNum 1))
 
                 ; Assert A has contiguous k (row-major A)
                 (= ?a_k_stride (MNum 1))
-
-                ; Assert B has contiguous k
-                (= ?b_k_stride (MNum 1))
-
-                ; B must be NvFp4
-                (= (NvFp4) (dtype ?b))
             )
             (
                 ; Compute tiled dimensions
@@ -2055,7 +2063,8 @@ impl EgglogOp for TileMatmulNvFp4 {
                     ?out_shape
                     ?tiled_m ?tiled_n ?k
                     ?a ?a_m_stride
-                    ?b
+                    ?b_data
+                    ?b_scales
                     ?sum_out_m_stride ?sum_out_n_stride
                     1.0))
                 (union ?sum ?tm)
@@ -2080,7 +2089,7 @@ impl EgglogOp for TileMatmulNvFp4 {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        let tensor_scale: f64 = egraph.enodes[children[10]].0.parse().unwrap();
+        let tensor_scale: f64 = egraph.enodes[children[11]].0.parse().unwrap();
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
                 sm_count: extract_expr(egraph, children[0], expr_cache).unwrap(),
@@ -2091,12 +2100,13 @@ impl EgglogOp for TileMatmulNvFp4 {
                 total_k: extract_expr(egraph, children[4], expr_cache).unwrap(),
                 // children[5] = a input (source)
                 a_m_stride: extract_expr(egraph, children[6], expr_cache).unwrap(),
-                // children[7] = b input (NvFp4 buffer)
-                out_m_stride: extract_expr(egraph, children[8], expr_cache).unwrap(),
-                out_n_stride: extract_expr(egraph, children[9], expr_cache).unwrap(),
+                // children[7] = b_data input (F4E2M1 packed weights)
+                // children[8] = b_scales input (F8E4M3 block scales)
+                out_m_stride: extract_expr(egraph, children[9], expr_cache).unwrap(),
+                out_n_stride: extract_expr(egraph, children[10], expr_cache).unwrap(),
                 tensor_scale: tensor_scale as f32,
             })),
-            vec![children[5], children[7]], // a, b
+            vec![children[5], children[7], children[8]], // a, b_data, b_scales
         )
     }
 }
@@ -2119,8 +2129,8 @@ impl BlockOp for TileMatmulNvFp4 {
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
-        // 2 inputs: A (FP32), B (NvFp4 buffer)
-        vec![vec![false], vec![false]]
+        // 3 inputs: A (FP32), B_data (F4E2M1), B_scales (F8E4M3)
+        vec![vec![false], vec![false], vec![false]]
     }
 
     fn bytes_stored(&self) -> Expression {
@@ -2141,19 +2151,20 @@ impl BlockOp for TileMatmulNvFp4 {
         let n = self.untiled_range[1];
         let k = self.total_k;
         // A: M*K*4 bytes (FP32)
-        // B: N * (K/2 + K/16) bytes (packed FP4 + block scales)
+        // B_data: N * K/2 bytes (packed FP4)
+        // B_scales: N * K/16 bytes (block scales)
         m * k * 4 + n * k / 2 + n * k / 16
     }
 
     fn cuda_function(&self) -> String {
         format!(
             r#"
-        // TileMatmulNvFp4: FP32 activations x NvFp4 weights -> FP32 output
-        // Dequantizes NvFp4 weights inline during matmul.
+        // TileMatmulNvFp4: FP32 activations x NvFp4-style weights -> FP32 output
+        // Dequantizes F4E2M1 weights inline during matmul using F8E4M3 block scales.
         //
-        // Buffer layout for B (per column, K elements):
-        //   [packed_data: K/2 bytes][block_scales: K/16 bytes]
-        // Columns are laid out contiguously: column n starts at offset n * (K/2 + K/16)
+        // source_ptrs[0] = A (float*, FP32 activations)
+        // source_ptrs[1] = B_data (uint8*, F4E2M1 packed weights, N columns of K/2 bytes each)
+        // source_ptrs[2] = B_scales (uint8*, F8E4M3 block scales, N columns of K/16 bytes each)
 
         // FP4 E2M1 lookup table (16 entries) + FP8 E4M3 lookup table (256 entries)
         __shared__ float fp4_lut[16];
@@ -2193,7 +2204,8 @@ impl BlockOp for TileMatmulNvFp4 {
         const int N = eval_expression(payload.untiled_range[1], 0);
 
         const float* a_base = source_ptrs[0];
-        const unsigned char* b_base = (const unsigned char*)source_ptrs[1];
+        const unsigned char* b_data_base = (const unsigned char*)source_ptrs[1];
+        const unsigned char* b_scales_base = (const unsigned char*)source_ptrs[2];
         float* c_base = out_ptr;
 
         const int a_m_stride = eval_expression(payload.a_m_stride, 0);
@@ -2201,10 +2213,9 @@ impl BlockOp for TileMatmulNvFp4 {
         const int c_n_stride = eval_expression(payload.c_n_stride, 0);
         const float tensor_scale = payload.tensor_scale;
 
-        // Per-column byte layout: K/2 bytes packed data, then K/16 bytes scales
+        // Per-column byte counts (separate buffers)
         const int packed_per_col = total_k / 2;
         const int scales_per_col = total_k / 16;
-        const int col_stride = packed_per_col + scales_per_col; // bytes per column in B
 
         constexpr int TILE_SIZE = {ts};
         const int threads = blockDim.x;
@@ -2222,7 +2233,6 @@ impl BlockOp for TileMatmulNvFp4 {
 
             const float* a = a_base;
             const int K = total_k;
-            const int half_K = K / 2;
 
             // Each warp handles 4 columns simultaneously, reusing activation values
             constexpr int COLS_PER_WARP = 4;
@@ -2231,18 +2241,16 @@ impl BlockOp for TileMatmulNvFp4 {
                 float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
                 const int valid_cols = min(COLS_PER_WARP, col_end - col_base);
 
-                // Pre-compute column data pointers
+                // Pre-compute column data pointers (separate buffers)
                 const unsigned char* packed[COLS_PER_WARP];
                 const unsigned char* scales[COLS_PER_WARP];
                 #pragma unroll
                 for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
-                    const unsigned char* col_data = b_base + (col_base + ci) * col_stride;
-                    packed[ci] = col_data;
-                    scales[ci] = col_data + packed_per_col;
+                    packed[ci] = b_data_base + (col_base + ci) * packed_per_col;
+                    scales[ci] = b_scales_base + (col_base + ci) * scales_per_col;
                 }}
 
-                // Each lane processes 8 elements (one packed byte = 2 FP4 values, repeated 4x per block)
-                // Lane processes K elements in blocks of 16, strided by warp width
+                // Each lane processes K elements in blocks of 16, strided by warp width
                 for (int block_start = lane * 16; block_start < K; block_start += 32 * 16) {{
                     // Load block scales for all columns from LUT (no branches)
                     const int scale_idx = block_start / 16;
@@ -2319,9 +2327,8 @@ impl BlockOp for TileMatmulNvFp4 {
 
                 const float* a_row = a_base + (global_m0 + ty) * a_m_stride;
                 const int col = global_n0 + tx;
-                const unsigned char* col_data = b_base + col * col_stride;
-                const unsigned char* packed = col_data;
-                const unsigned char* scales = col_data + packed_per_col;
+                const unsigned char* packed = b_data_base + col * packed_per_col;
+                const unsigned char* scales = b_scales_base + col * scales_per_col;
                 float* c_out = c_base + (global_m0 + ty) * c_m_stride + col * c_n_stride;
 
                 float acc = 0.0f;
@@ -2360,19 +2367,19 @@ impl BlockOp for TileMatmulNvFp4 {
     }
 }
 
-/// TileMatmulMxfp4: Matrix multiplication with MXFP4-quantized B (weight) matrix.
+/// TileMatmulMxfp4: Matrix multiplication with MXFP4-style quantized B (weight) matrix.
 ///
-/// Computes C = A * dequant(B) where:
+/// Computes C = A * dequant(B_data, B_scales) where:
 /// - A is FP32 activations [M, K] (row-major, k-contiguous)
-/// - B is a single MXFP4 buffer laid out as: [packed_data | block_scales]
-///   packed_data: N * K/2 bytes (FP4 E2M1, 2 values per byte, k-contiguous per column)
-///   block_scales: N * ceil(K/32) bytes (E8M0, 1 scale per 32 elements)
+/// - B_data is F4E2M1 packed weights: N * K/2 bytes (2 values per byte, k-contiguous per column)
+/// - B_scales is F8UE8M0 block scales: N * K/32 bytes (1 scale per 32 elements per column)
 /// - C is FP32 output [M, N]
 ///
-/// 2 inputs: source_ptrs[0]=A (float*), source_ptrs[1]=B (uint8*, MXFP4 buffer)
+/// 3 inputs: source_ptrs[0]=A (float*), source_ptrs[1]=B_data (uint8*), source_ptrs[2]=B_scales (uint8*)
 /// No tensor-level scale (unlike NvFp4).
 ///
-/// No K-splitting: each SM handles complete dot products for its assigned output tiles.
+/// Matched from explicit dequant pattern:
+///   Sum(Mul(A, Mul(Cast(B_data, F4E2M1→F32), Cast(B_scales, F8UE8M0→F32))))
 #[derive(Debug, Default)]
 pub struct TileMatmulMxfp4 {
     sm_count: Expression,
@@ -2397,7 +2404,8 @@ impl EgglogOp for TileMatmulMxfp4 {
                 Expr,  // total_k
                 Input, // a (FP32 activations)
                 Expr,  // a_m_stride
-                Input, // b (Mxfp4 buffer: packed_data + block_scales)
+                Input, // b_data (F4E2M1 packed weights)
+                Input, // b_scales (F8UE8M0 block scales)
                 Expr,  // out_m_stride
                 Expr,  // out_n_stride
             ],
@@ -2406,16 +2414,26 @@ impl EgglogOp for TileMatmulMxfp4 {
 
     fn rewrites(&self) -> Vec<String> {
         vec![
-            // Match Mul -> Sum pattern where B input has Mxfp4 dtype
+            // Match explicit dequant pattern: Sum(Mul(A, Mul(Cast(B_data), Cast(B_scales))))
+            // where B_data is F4E2M1 and B_scales is F8UE8M0.
             format!(
                 "
         (rule
             (
-                ; Match Mul node
+                ; Match outer matmul: Mul -> Sum
                 (= ?mul (Mul ?mul_shape ?a ?a_stride ?b ?b_stride ?mul_out_stride))
-
-                ; Match Sum that reduces the Mul (k dimension)
                 (= ?sum (Sum ?out_shape ?k ?mul ?sum_in_stride ?k_stride ?sum_out_stride))
+
+                ; ?b is the dequant Mul: Mul(Cast(b_data), Cast(b_scales))
+                (= ?b (Mul ?dq_shape ?b_data_cast ?bdc_stride ?b_scales_cast ?bsc_stride ?dq_out_stride))
+
+                ; b_data_cast is Cast(b_data, F4E2M1 → F32)
+                (= ?b_data_cast (Cast ?b_data ?data_size (F32)))
+                (= (F4E2M1) (dtype ?b_data))
+
+                ; b_scales_cast is Cast(b_scales, F8UE8M0 → F32)
+                (= ?b_scales_cast (Cast ?b_scales ?scales_size (F32)))
+                (= (F8UE8M0) (dtype ?b_scales))
 
                 ; Get dimensions from output shape
                 (= ?m (nth_from_end ?out_shape 1))
@@ -2431,20 +2449,11 @@ impl EgglogOp for TileMatmulMxfp4 {
                 (= ?a_m_stride (nth_from_end ?a_stride 2))
                 (= ?a_k_stride (nth_from_end ?a_stride 0))
 
-                ; Get B strides
-                (= ?b_k_stride (nth_from_end ?b_stride 0))
-
                 ; Assert contiguous k stride on output
                 (= ?k_stride (MNum 1))
 
                 ; Assert A has contiguous k (row-major A)
                 (= ?a_k_stride (MNum 1))
-
-                ; Assert B has contiguous k
-                (= ?b_k_stride (MNum 1))
-
-                ; B must be Mxfp4
-                (= (Mxfp4) (dtype ?b))
             )
             (
                 ; Compute tiled dimensions
@@ -2456,7 +2465,8 @@ impl EgglogOp for TileMatmulMxfp4 {
                     ?out_shape
                     ?tiled_m ?tiled_n ?k
                     ?a ?a_m_stride
-                    ?b
+                    ?b_data
+                    ?b_scales
                     ?sum_out_m_stride ?sum_out_n_stride))
                 (union ?sum ?tm)
                 (set (dtype ?tm) (F32))
@@ -2490,11 +2500,12 @@ impl EgglogOp for TileMatmulMxfp4 {
                 total_k: extract_expr(egraph, children[4], expr_cache).unwrap(),
                 // children[5] = a input (source)
                 a_m_stride: extract_expr(egraph, children[6], expr_cache).unwrap(),
-                // children[7] = b input (Mxfp4 buffer)
-                out_m_stride: extract_expr(egraph, children[8], expr_cache).unwrap(),
-                out_n_stride: extract_expr(egraph, children[9], expr_cache).unwrap(),
+                // children[7] = b_data input (F4E2M1 packed weights)
+                // children[8] = b_scales input (F8UE8M0 block scales)
+                out_m_stride: extract_expr(egraph, children[9], expr_cache).unwrap(),
+                out_n_stride: extract_expr(egraph, children[10], expr_cache).unwrap(),
             })),
-            vec![children[5], children[7]], // a, b
+            vec![children[5], children[7], children[8]], // a, b_data, b_scales
         )
     }
 }
@@ -2517,8 +2528,8 @@ impl BlockOp for TileMatmulMxfp4 {
     }
 
     fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
-        // 2 inputs: A (FP32), B (Mxfp4 buffer)
-        vec![vec![false], vec![false]]
+        // 3 inputs: A (FP32), B_data (F4E2M1), B_scales (F8UE8M0)
+        vec![vec![false], vec![false], vec![false]]
     }
 
     fn bytes_stored(&self) -> Expression {
@@ -2549,9 +2560,9 @@ impl BlockOp for TileMatmulMxfp4 {
         // TileMatmulMxfp4: FP32 activations x MXFP4 weights -> FP32 output
         // Dequantizes MXFP4 weights inline during matmul.
         //
-        // Buffer layout for B (per column, K elements):
-        //   [packed_data: K/2 bytes][block_scales: K/32 bytes]
-        // Columns are laid out contiguously: column n starts at offset n * (K/2 + K/32)
+        // Separate buffers:
+        //   source_ptrs[1] = B_data (F4E2M1 packed weights): N * K/2 bytes
+        //   source_ptrs[2] = B_scales (F8UE8M0 block scales): N * K/32 bytes
         //
         // E8M0 scale format: scale = 2^(byte - 127), 0xFF = NaN (treated as 0)
 
@@ -2576,17 +2587,17 @@ impl BlockOp for TileMatmulMxfp4 {
         const int N = eval_expression(payload.untiled_range[1], 0);
 
         const float* a_base = source_ptrs[0];
-        const unsigned char* b_base = (const unsigned char*)source_ptrs[1];
+        const unsigned char* b_data_base = (const unsigned char*)source_ptrs[1];
+        const unsigned char* b_scales_base = (const unsigned char*)source_ptrs[2];
         float* c_base = out_ptr;
 
         const int a_m_stride = eval_expression(payload.a_m_stride, 0);
         const int c_m_stride = eval_expression(payload.c_m_stride, 0);
         const int c_n_stride = eval_expression(payload.c_n_stride, 0);
 
-        // Per-column byte layout: K/2 bytes packed data, then K/32 bytes scales
+        // Per-column byte counts (separate buffers)
         const int packed_per_col = total_k / 2;
         const int scales_per_col = total_k / 32;
-        const int col_stride = packed_per_col + scales_per_col; // bytes per column in B
 
         // E8M0 decode helper: 2^(byte - 127)
         auto e8m0_decode = [](unsigned char s) -> float {{
@@ -2618,14 +2629,13 @@ impl BlockOp for TileMatmulMxfp4 {
                 float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
                 const int valid_cols = min(COLS_PER_WARP, col_end - col_base);
 
-                // Pre-compute column data pointers
+                // Pre-compute column data pointers (separate buffers)
                 const unsigned char* packed[COLS_PER_WARP];
                 const unsigned char* scales[COLS_PER_WARP];
                 #pragma unroll
                 for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
-                    const unsigned char* col_data = b_base + (col_base + ci) * col_stride;
-                    packed[ci] = col_data;
-                    scales[ci] = col_data + packed_per_col;
+                    packed[ci] = b_data_base + (col_base + ci) * packed_per_col;
+                    scales[ci] = b_scales_base + (col_base + ci) * scales_per_col;
                 }}
 
                 // Each lane processes elements in blocks of 32, strided by warp width
@@ -2705,9 +2715,8 @@ impl BlockOp for TileMatmulMxfp4 {
 
                 const float* a_row = a_base + (global_m0 + ty) * a_m_stride;
                 const int col = global_n0 + tx;
-                const unsigned char* col_data = b_base + col * col_stride;
-                const unsigned char* packed = col_data;
-                const unsigned char* scales = col_data + packed_per_col;
+                const unsigned char* packed = b_data_base + col * packed_per_col;
+                const unsigned char* scales = b_scales_base + col * scales_per_col;
                 float* c_out = c_base + (global_m0 + ty) * c_m_stride + col * c_n_stride;
 
                 float acc = 0.0f;

@@ -93,7 +93,7 @@ impl GraphTensor {
 
             // Sum Reduce
             let mut r = mul.sum(3);
-            r.shape = ShapeTracker::new((a, b, c, d, f));
+            r.shape = ShapeTracker::new_with_element_bits((a, b, c, d, f), r.dtype.bits());
             r
         } else {
             panic!(

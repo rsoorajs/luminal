@@ -93,12 +93,15 @@ impl GraphTensor {
             .add_op(Cast(self.shape.n_physical_elements(), dtype))
             .input(self.id, self.shape)
             .finish();
-        GraphTensor::from_id(id, self.shape, self.graph_ref, dtype)
+        let mut shape = self.shape;
+        shape.element_stride_bits = dtype.bits();
+        GraphTensor::from_id(id, shape, self.graph_ref, dtype)
     }
 
     /// Sets this tensor's dtype without doing a cast
     pub fn as_dtype(mut self, dtype: DType) -> GraphTensor {
         self.dtype = dtype;
+        self.shape.element_stride_bits = dtype.bits();
         if let Some(gmem) = self.graph().try_get_op_mut::<Input>(self.id) {
             gmem.dtype = dtype;
         }

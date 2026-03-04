@@ -157,7 +157,7 @@ fn llama_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> Grap
     // Combine back into output
     let mut s = x0_out.concat_along(x1_out, 3);
     let (n_heads, seq_dim, _) = input.dims3();
-    s.shape = ShapeTracker::new((n_heads, seq_dim, HEAD_DIM));
+    s.shape = ShapeTracker::new_with_element_bits((n_heads, seq_dim, HEAD_DIM), s.dtype.bits());
     s = s.transpose(0, 1) * 1.0;
     s.shape = orig_shape;
     s

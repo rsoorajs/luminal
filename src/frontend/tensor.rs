@@ -68,6 +68,11 @@ impl GraphTensor {
         *self
     }
 
+    /// Required bytes to store this tensor's physical elements. Rounds up to nearest byte.
+    pub fn required_total_bytes(&self) -> Expression {
+        self.shape.required_total_bytes()
+    }
+
     pub fn dims(&self) -> Vec<Expression> {
         self.shape.dims.to_vec()
     }

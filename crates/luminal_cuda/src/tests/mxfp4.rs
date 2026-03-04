@@ -129,6 +129,12 @@ fn reference_mxfp4_matmul(
 
 /// Build the explicit dequant graph pattern for MXFP4:
 ///   b_data.cast(F32) * b_scales.cast(F32) → matmul with A
+///
+/// Uses a 3D broadcast pattern so that the Mul has matching shapes on both
+/// inputs, making the graph semantically valid for direct element-wise execution:
+///   data  (n, k) -> split_dims -> (n, k/32, 32)  strides (k, 32, 1)
+///   scales(n, k/32) -> unsqueeze+expand -> (n, k/32, 32)  strides (k/32, 1, 0)
+///   dequant = data * scales in 3D, then merge_dims back to (n, k)
 fn build_mxfp4_graph(
     cx: &mut Graph,
     m: usize,
@@ -139,8 +145,19 @@ fn build_mxfp4_graph(
     let b_data = cx.tensor((n, k)).as_dtype(DType::F4E2M1);
     let b_scales = cx.tensor((n, k / 32)).as_dtype(DType::F8UE8M0);
 
-    // Explicit dequant: Cast + Mul
-    let dequant = b_data.cast(DType::F32) * b_scales.cast(DType::F32);
+    // Cast to F32
+    let b_data_f32 = b_data.cast(DType::F32); // (n, k)
+    let b_scales_f32 = b_scales.cast(DType::F32); // (n, k/32)
+
+    // Reshape data: (n, k) -> (n, k/32, 32)
+    let b_data_3d = b_data_f32.split_dims(1, 32); // strides (k, 32, 1)
+
+    // Broadcast scales: (n, k/32) -> (n, k/32, 1) -> (n, k/32, 32)
+    let mut b_scales_3d = b_scales_f32.unsqueeze(2); // strides (k/32, 1, 0)
+    b_scales_3d.shape.expand((n, k / 32, 32)); // dim 2: 1 -> 32, stride stays 0
+
+    // Valid element-wise multiply in 3D, then merge back to 2D
+    let dequant = (b_data_3d * b_scales_3d).merge_dims(1, 2); // (n, k)
     let c = a.matmul(dequant.t()).output();
 
     (a, b_data, b_scales, c)
