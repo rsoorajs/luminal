@@ -78,7 +78,7 @@ pub fn prepare_cuda(context: &mut Graph) -> Result<(CudaRuntime, Arc<CudaStream>
 /// Finalize CUDA runtime: run search with data already set.
 #[cfg(feature = "cuda")]
 pub fn finalize_cuda(context: &mut Graph, rt: CudaRuntime) -> RuntimeBackend {
-    let optimized_rt = context.search(rt, 5);
+    let optimized_rt = context.search(rt, 10);
     RuntimeBackend::Cuda(Box::new(optimized_rt))
 }
 
@@ -86,6 +86,6 @@ pub fn finalize_cuda(context: &mut Graph, rt: CudaRuntime) -> RuntimeBackend {
 /// NativeRuntime validates Input nodes, so we must search first, then set data.
 pub fn initialize_native(context: &mut Graph) -> Result<RuntimeBackend, String> {
     context.build_search_space::<NativeRuntime>();
-    let rt = context.search(NativeRuntime::default(), 1);
+    let rt = context.search(NativeRuntime::default(), 10);
     Ok(RuntimeBackend::Native(rt))
 }

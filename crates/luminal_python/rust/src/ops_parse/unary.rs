@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 
-use luminal::prelude::{tracing::trace, *};
+use luminal::{
+    prelude::{tracing::trace, *},
+    shape::Expression,
+};
 use onnx_protobuf::NodeProto;
 
-use crate::util::{broadcast_to, get_float_attr, get_int_attr};
+use crate::util::{broadcast_to_expr, get_float_attr, get_int_attr};
 
 /// Handle Softmax node: output = softmax(input[0], axis)
 ///
@@ -189,6 +192,7 @@ pub fn parse_cast_node(
     tensors: &mut HashMap<String, GraphTensor>,
     weight_data: &mut Vec<(String, Vec<f32>)>,
     known_values: &mut HashMap<String, Vec<f32>>,
+    shape_exprs: &mut HashMap<String, Vec<Expression>>,
 ) -> Result<(), String> {
     trace!("Starting parse: Cast Node");
     assert!(node.input.len() == 1, "Cast should have exactly 1 input");
@@ -211,34 +215,16 @@ pub fn parse_cast_node(
     let cast_result = input.cast(dtype);
     let output_name = &node.output[0];
 
-    // Use the *1.0 workaround when:
-    // 1. cast() was a no-op (input already has target dtype — same node returned):
-    //    multiply to force materialization while preserving the original dtype.
-    // 2. source dtype is Int (e.g., ONNX INT32/INT64 → F32):
-    //    the CUDA backend lacks a Cast(Int→F32) kernel; since all runtime data is
-    //    already stored as F32 (Python converts inputs via .float()), this cast is
-    //    semantically a no-op and *1.0 produces a CUDA-executable Mul node instead.
-    //    IMPORTANT: put the F32 constant on the LEFT so the result dtype is F32
-    //    (GraphTensor Mul uses the left operand's dtype).
+    // Use the *1.0 workaround for no-op cast or Int→F32 cast
     let result = if cast_result.id == input.id {
-        // No-op cast: materialize while preserving original dtype
         let src_dims = input.dims();
-        let shape: Vec<usize> = src_dims
-            .iter()
-            .map(|d| d.to_usize().expect("cast no-op: dim must be concrete"))
-            .collect();
         let one = input.graph().constant_float(1.0);
-        let one_expanded = broadcast_to(one, &shape);
+        let one_expanded = broadcast_to_expr(one, &src_dims);
         input * one_expanded
     } else if input.dtype == DType::Int {
-        // Int → non-Int: put F32 constant on left so result dtype is F32
         let src_dims = input.dims();
-        let shape: Vec<usize> = src_dims
-            .iter()
-            .map(|d| d.to_usize().expect("cast no-op: dim must be concrete"))
-            .collect();
         let one = input.graph().constant_float(1.0);
-        let one_expanded = broadcast_to(one, &shape);
+        let one_expanded = broadcast_to_expr(one, &src_dims);
         one_expanded * input
     } else {
         cast_result
@@ -249,19 +235,20 @@ pub fn parse_cast_node(
     // Propagate known values (cast is a no-op for our f32 storage)
     if let Some(vals) = known_values.get(&node.input[0]).cloned() {
         let folded = if to == 9 {
-            // Bool cast: non-zero → 1.0, zero → 0.0
             vals.iter()
                 .map(|&v| if v != 0.0 { 1.0 } else { 0.0 })
                 .collect()
         } else if to == 6 || to == 7 {
-            // Int cast: truncate
             vals.iter().map(|&v| (v as i64) as f32).collect()
         } else {
             vals
         };
         known_values.insert(output_name.clone(), folded.clone());
-        // Register constant-folded result for CUDA initialization
         weight_data.push((output_name.clone(), folded));
+    }
+    // Propagate shape_exprs
+    if let Some(se) = shape_exprs.get(&node.input[0]).cloned() {
+        shape_exprs.insert(output_name.clone(), se);
     }
 
     trace!("Finished parse: Cast Node");
@@ -357,16 +344,16 @@ pub fn parse_layernorm_node(
 
     let mut result = input.layer_norm(axes, epsilon);
 
-    // Apply scale (broadcast to input shape)
-    let input_shape: Vec<usize> = input.dims().iter().map(|d| d.to_usize().unwrap()).collect();
-    result = result * broadcast_to(scale, &input_shape);
+    // Apply scale (broadcast to input shape using Expression-aware broadcast)
+    let input_shape = input.dims();
+    result = result * broadcast_to_expr(scale, &input_shape);
 
     // Apply optional bias
     if node.input.len() > 2 && !node.input[2].is_empty() {
         let bias = *tensors
             .get(&node.input[2])
             .ok_or_else(|| format!("LayerNorm: missing bias '{}'", node.input[2]))?;
-        result = result + broadcast_to(bias, &input_shape);
+        result = result + broadcast_to_expr(bias, &input_shape);
     }
 
     tensors.insert(node.output[0].clone(), result);

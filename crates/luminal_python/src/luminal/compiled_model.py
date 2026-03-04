@@ -1,8 +1,7 @@
 """CompiledModel wrapper for the Rust OnnxGraphResult."""
 
-from typing import List, Set
+from typing import List
 
-import numpy as np
 import torch
 
 
@@ -19,6 +18,19 @@ class CompiledModel:
         self._input_names = graph_result.input_names
         self._output_names = graph_result.output_names
         self._output_shapes = graph_result.output_shapes
+        self._has_dynamic_dims = graph_result.has_dynamic_dims
+
+    def set_dim(self, param_name: str, value: int) -> None:
+        """Set a dynamic dimension value by its ONNX param name."""
+        self._graph.set_dim(param_name, value)
+
+    @property
+    def has_dynamic_dims(self) -> bool:
+        return self._has_dynamic_dims
+
+    @property
+    def dim_params(self) -> List[str]:
+        return self._graph.dim_params
 
     def __call__(self, *inputs: torch.Tensor) -> List[torch.Tensor]:
         """Execute the compiled model with PyTorch tensor inputs.
@@ -46,9 +58,15 @@ class CompiledModel:
         # Run the graph
         self._graph.run()
 
+        # Get output shapes — resolve dynamically if needed
+        if self._has_dynamic_dims:
+            output_shapes = self._graph.resolve_output_shapes()
+        else:
+            output_shapes = self._output_shapes
+
         # Get outputs and convert back to PyTorch tensors on the same device as inputs
         outputs = []
-        for name, shape in zip(self._output_names, self._output_shapes):
+        for name, shape in zip(self._output_names, output_shapes):
             data = self._graph.get_output(name)
             tensor = (
                 torch.tensor(data, dtype=torch.float32)

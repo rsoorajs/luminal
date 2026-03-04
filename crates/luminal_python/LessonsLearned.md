@@ -264,3 +264,76 @@ ONNX tensors arrive as F32 from the Python bridge. Any `indices * stride` or
 `indices * 1` will produce `Mul(F32, Int)` which breaks HLIR dtype propagation on CUDA.
 The pattern `let indices = indices.cast(DType::Int);` at the top of any index-consuming
 function is defensive and free (no-op when already Int).
+
+---
+
+## 2026-03-04 — Dynamic Shapes: Empty Buffer for BOOL Scalar Initializer
+
+### What the symptom was
+
+`test_hf_llama_decode_loop_dynamic` panicked at `bin_fn: a index 0 out of bounds (a.len=0), shape=[1, 1, 4, 4], strides=[0, 0, 0, 0]`. An Input node labeled `"new_ones"` had an empty buffer at runtime.
+
+### What the actual root cause was
+
+Two issues combined:
+
+1. **`load_tensor_floats` didn't handle ONNX data_type=9 (BOOL)**. The `new_ones` initializer was a BOOL scalar (1 byte in `raw_data`). `load_tensor_floats` fell through to the fallback case, which tried `chunks_exact(4)` on 1 byte → produced 0 chunks → returned empty vec `[]`. The buffer was set with empty data.
+
+2. **Scalar initializers with empty `dims` created 0-dimensional tensors**. ONNX represents scalars with `dims=[]`. The initializer loop computed `shape = init.dims.iter().map(|&d| d as usize).collect()` → empty vec `[]`, then called `named_tensor(name, [])` which created a tensor with 0 dimensions instead of the intended scalar `[1]`.
+
+### Why it was hard to find
+
+1. **Misdiagnosed as ConstantOfShape issue**: The original plan targeted `ConstantOfShape` with dynamic shapes. The shape `[1,1,4,4]` with strides `[0,0,0,0]` looked like a broadcast from a constant fill. But `parse_constant_of_shape` was never called — the `new_ones` tensor came from an ONNX initializer, not a computation node.
+
+2. **The BOOL data type is unusual**: Most ONNX tensors are FLOAT, INT32, or INT64. BOOL initializers only appear in specific patterns (like `torch.ones()` in attention mask computation). `load_initializer_as_f32` already handled BOOL, but its sibling `load_tensor_floats` didn't.
+
+3. **Empty vec is valid data**: `set_data(node_id, [])` doesn't panic — it silently sets an empty buffer. The error only manifests later when a downstream op tries to read index 0.
+
+### The fix
+
+1. Added `data_type=9` (BOOL) handling to `load_tensor_floats` in `util.rs` — same logic as `load_initializer_as_f32`: 1 byte per element, non-zero → 1.0, zero → 0.0.
+
+2. In `compiled_graph.rs`, initializer tensor creation: if `shape.is_empty()`, set `shape = vec![1]` (scalar representation in luminal).
+
+### General principle
+
+**Keep data loading functions in sync.** `load_tensor_floats` and `load_initializer_as_f32` serve the same purpose (loading ONNX TensorProto data as f32) but had different data type coverage. When adding a new data type to one, check and update the other. Better yet, refactor them into a single function.
+
+**ONNX scalars have `dims=[]`, luminal scalars have shape `[1]`.** Always convert empty dims to `[1]` when creating luminal tensors from ONNX data.
+
+---
+
+## 2026-03-04 — Where Node Missing Broadcast: KernelMul flatten_strides Panic on CUDA
+
+### What the symptom was
+
+`test_hf_llama3_1b_decode_loop_dynamic` panicked at `flatten_strides` with `left: 4, right: 1` during
+CUDA `KernelMul::compile`. The `KernelMul` had `out_shape=[1, 1, a, a]` but `b_stride=[z]` (1D).
+
+### What the actual root cause was
+
+`parse_where_node` called `x.cond(condition, y)` without broadcasting the inputs to matching ranks.
+The ONNX Where op for the attention mask had condition=[1,1,a,a] (4D), x=[1] (scalar), y=[1] (scalar).
+Luminal's `cond` doesn't auto-broadcast — it passes the shape trackers directly to the HLIR node.
+The resulting Mul had input A with 4D strides and input B with 1D strides.
+
+### Why it was hard to find
+
+1. **Only triggered by 1B model**: The tiny model's Where inputs all had matching ranks (no scalars).
+2. **CUDA-only**: The native runtime's `bin_fn` uses `StridedIterator` which handles mismatched
+   strides more gracefully. CUDA's `KernelMul::compile` calls `flatten_strides` which asserts
+   `range.len() == strides.len()`.
+3. **Delayed crash**: The mismatch was created during ONNX parsing but only manifested during
+   CUDA kernel compilation (graph search phase).
+
+### The fix
+
+Added numpy-style broadcasting to `parse_where_node`: compute the broadcast shape across all 3
+inputs, then `broadcast_to_expr` each to the common shape before calling `cond`.
+
+### General principle
+
+**ONNX binary/ternary ops all use numpy broadcasting.** When parsing ONNX ops that take multiple
+tensor inputs (Where, Add, Mul, etc.), always broadcast all inputs to a common shape BEFORE
+calling the luminal graph operation. Luminal graph ops do NOT auto-broadcast — they expect inputs
+with matching shape tracker dimensions.

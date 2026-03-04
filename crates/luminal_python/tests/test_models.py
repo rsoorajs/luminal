@@ -1666,3 +1666,138 @@ class ScatterNDTestModel(torch.nn.Module):
         result = x.clone()
         result[indices] = updates
         return result
+
+
+# ========== Llama3 Component Test Models ==========
+
+
+class RMSNormModel(torch.nn.Module):
+    """Tests RMS normalization: x * rsqrt(mean(x^2) + eps) * weight.
+
+    ONNX ops: Pow, ReduceMean, Add, Sqrt, Reciprocal, Mul.
+    Input: (1, 4, 32) -> Output: (1, 4, 32).
+    """
+
+    def __init__(self, hidden_size: int = 32, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.eps = eps
+        self.weight = torch.nn.Parameter(torch.ones(hidden_size))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        variance = x.pow(2).mean(-1, keepdim=True)
+        x_normed = x * torch.rsqrt(variance + self.eps)
+        return self.weight * x_normed
+
+
+class RotaryEmbeddingModel(torch.nn.Module):
+    """Tests rotary position embeddings (RoPE) using rotate-half approach.
+
+    Precomputes cos/sin caches as buffers; at runtime: slice, split halves, rotate.
+    ONNX ops: Slice, Unsqueeze, Mul, Sub, Add, Concat.
+    Input: (1, 4, 4, 8) [batch, seq, heads, head_dim] -> Output: same shape.
+    """
+
+    def __init__(self, head_dim: int = 8, max_seq_len: int = 16) -> None:
+        super().__init__()
+        inv_freq = 1.0 / (
+            10000 ** (torch.arange(0, head_dim, 2).float() / head_dim)
+        )
+        t = torch.arange(max_seq_len).float()
+        freqs = torch.outer(t, inv_freq)
+        emb = torch.cat([freqs, freqs], dim=-1)
+        self.register_buffer("cos_cached", emb.cos().unsqueeze(0).unsqueeze(2))
+        self.register_buffer("sin_cached", emb.sin().unsqueeze(0).unsqueeze(2))
+
+    def _rotate_half(self, x: torch.Tensor) -> torch.Tensor:
+        half = x.shape[-1] // 2
+        x1 = x[..., :half]
+        x2 = x[..., half:]
+        return torch.cat((-x2, x1), dim=-1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        seq_len = x.shape[1]
+        cos = self.cos_cached[:, :seq_len, :, :]
+        sin = self.sin_cached[:, :seq_len, :, :]
+        return (x * cos) + (self._rotate_half(x) * sin)
+
+
+class SwiGLUMLPModel(torch.nn.Module):
+    """Tests SwiGLU MLP: down_proj(silu(gate_proj(x)) * up_proj(x)).
+
+    silu(x) = x * sigmoid(x), decomposes to Sigmoid+Mul in ONNX.
+    Input: (1, 4, 32) -> Output: (1, 4, 32).
+    """
+
+    def __init__(self, hidden_size: int = 32, intermediate_size: int = 64) -> None:
+        super().__init__()
+        self.gate_proj = torch.nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.up_proj = torch.nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = torch.nn.Linear(intermediate_size, hidden_size, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = torch.nn.functional.silu(self.gate_proj(x))
+        up = self.up_proj(x)
+        return self.down_proj(gate * up)
+
+
+class CausalSelfAttentionModel(torch.nn.Module):
+    """Tests multi-head causal self-attention with additive mask.
+
+    Q/K/V projections -> reshape to heads -> scaled dot-product with causal mask -> output proj.
+    Uses additive mask: scores + triu(ones, diag=1) * -1e9.
+    Input: (1, 4, 32) -> Output: (1, 4, 32).
+    """
+
+    def __init__(
+        self, hidden_size: int = 32, num_heads: int = 4, head_dim: int = 8
+    ) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.q_proj = torch.nn.Linear(hidden_size, num_heads * head_dim, bias=False)
+        self.k_proj = torch.nn.Linear(hidden_size, num_heads * head_dim, bias=False)
+        self.v_proj = torch.nn.Linear(hidden_size, num_heads * head_dim, bias=False)
+        self.o_proj = torch.nn.Linear(num_heads * head_dim, hidden_size, bias=False)
+        self.scale = head_dim**-0.5
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, seq_len, _ = x.shape
+        q = self.q_proj(x).view(batch, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(batch, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(batch, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1) * -1e9
+        scores = scores + mask
+        attn = torch.softmax(scores, dim=-1)
+        out = torch.matmul(attn, v)
+        out = out.transpose(1, 2).contiguous().view(batch, seq_len, -1)
+        return self.o_proj(out)
+
+
+class LlamaTransformerBlockModel(torch.nn.Module):
+    """Tests a full Llama-style transformer block.
+
+    RMSNorm -> RoPE + CausalAttn -> Residual -> RMSNorm -> SwiGLU MLP -> Residual.
+    Input: (1, 4, 32) -> Output: (1, 4, 32).
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 32,
+        num_heads: int = 4,
+        head_dim: int = 8,
+        intermediate_size: int = 64,
+        eps: float = 1e-6,
+        max_seq_len: int = 16,
+    ) -> None:
+        super().__init__()
+        self.input_norm = RMSNormModel(hidden_size, eps)
+        self.attn = CausalSelfAttentionModel(hidden_size, num_heads, head_dim)
+        self.post_attn_norm = RMSNormModel(hidden_size, eps)
+        self.mlp = SwiGLUMLPModel(hidden_size, intermediate_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = x + self.attn(self.input_norm(x))
+        out = h + self.mlp(self.post_attn_norm(h))
+        return out
