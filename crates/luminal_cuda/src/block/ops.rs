@@ -109,11 +109,11 @@ impl BlockOp for RowAdd {
         self.range.iter().copied().product::<Expression>().max(1) * self.row_width
     }
 
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
+    fn producer_barriers_separate(&self) -> Vec<bool> {
         vec![true; self.range.len()]
     }
 
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+    fn consumer_barriers_separate(&self) -> Vec<Vec<bool>> {
         vec![vec![true; self.range.len()], vec![true; self.range.len()]]
     }
 
@@ -272,14 +272,14 @@ impl BlockOp for RowSwishMul {
         self.range.iter().copied().product::<Expression>().max(1) * self.row_width
     }
 
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
+    fn producer_barriers_separate(&self) -> Vec<bool> {
         // Batch dims separate, SM dim shared (all SMs contribute to same output)
         let mut barriers = vec![true; self.range.len()];
         barriers.push(false); // SM dimension - shared barrier
         barriers
     }
 
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+    fn consumer_barriers_separate(&self) -> Vec<Vec<bool>> {
         let launch_len = self.launch_range().len();
         vec![vec![true; launch_len], vec![true; launch_len]]
     }
@@ -485,11 +485,11 @@ impl BlockOp for RowRMSNorm {
         self.range.iter().copied().product::<Expression>() * self.row_width
     }
 
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
+    fn producer_barriers_separate(&self) -> Vec<bool> {
         vec![true; self.range.len()]
     }
 
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+    fn consumer_barriers_separate(&self) -> Vec<Vec<bool>> {
         vec![vec![true; self.range.len()], vec![true; self.range.len()]]
     }
 
@@ -882,11 +882,11 @@ impl BlockOp for RowRope {
         self.range.iter().copied().product::<Expression>() * self.row_width
     }
 
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
+    fn producer_barriers_separate(&self) -> Vec<bool> {
         vec![true; self.range.len()]
     }
 
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+    fn consumer_barriers_separate(&self) -> Vec<Vec<bool>> {
         vec![vec![true; self.range.len()], vec![true; self.range.len()]]
     }
 
@@ -1130,7 +1130,7 @@ impl BlockOp for TileMatmulSplitK {
         self.untiled_range.iter().copied().product::<Expression>()
     }
 
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
+    fn producer_barriers_separate(&self) -> Vec<bool> {
         // All dimensions are separable except k_chunks (at index 0)
         // since multiple k_chunks write to the same output tile via atomicAdd
         // Range layout: [k_chunks, batch..., tiled_m, tiled_n]
@@ -1139,7 +1139,7 @@ impl BlockOp for TileMatmulSplitK {
         sep
     }
 
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+    fn consumer_barriers_separate(&self) -> Vec<Vec<bool>> {
         // Range layout: [k_chunks, batch..., tiled_m, tiled_n]
         // For input A: all dims except n (at index len-1)
         let mut a = vec![true; self.range.len()];
@@ -1521,12 +1521,12 @@ impl BlockOp for TileMatmulFullSplit {
         self.untiled_range.iter().copied().product::<Expression>()
     }
 
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
+    fn producer_barriers_separate(&self) -> Vec<bool> {
         // Each SM processes exclusive output tiles, so barriers are separable
         vec![false]
     }
 
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+    fn consumer_barriers_separate(&self) -> Vec<Vec<bool>> {
         vec![vec![false], vec![false]]
     }
 
@@ -1895,11 +1895,11 @@ impl BlockOp for RowEmbed {
         self.range.iter().copied().product::<Expression>().max(1) * self.embed_dim
     }
 
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
+    fn producer_barriers_separate(&self) -> Vec<bool> {
         vec![true; self.range.len()]
     }
 
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+    fn consumer_barriers_separate(&self) -> Vec<Vec<bool>> {
         vec![vec![true; self.range.len()], vec![true; self.range.len()]]
     }
 
@@ -2124,11 +2124,11 @@ impl BlockOp for TileMatmulNvFp4 {
         self.untiled_range.iter().copied().product::<Expression>()
     }
 
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
+    fn producer_barriers_separate(&self) -> Vec<bool> {
         vec![false]
     }
 
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+    fn consumer_barriers_separate(&self) -> Vec<Vec<bool>> {
         // 3 inputs: A (FP32), B_data (F4E2M1), B_scales (F8E4M3)
         vec![vec![false], vec![false], vec![false]]
     }
@@ -2523,11 +2523,11 @@ impl BlockOp for TileMatmulMxfp4 {
         self.untiled_range.iter().copied().product::<Expression>()
     }
 
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
+    fn producer_barriers_separate(&self) -> Vec<bool> {
         vec![false]
     }
 
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+    fn consumer_barriers_separate(&self) -> Vec<Vec<bool>> {
         // 3 inputs: A (FP32), B_data (F4E2M1), B_scales (F8UE8M0)
         vec![vec![false], vec![false], vec![false]]
     }
