@@ -214,23 +214,12 @@ extern \"C\" {{
     }
 
     fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_loaded(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.out_shape.iter().copied().product::<Expression>() * self.iters * elem_size
+        (self.out_shape.iter().copied().product::<Expression>() * self.iters * self.dtype.bits())
+            .ceil_div(8)
     }
 
     fn bytes_stored(&self) -> Expression {

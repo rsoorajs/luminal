@@ -447,6 +447,7 @@ impl NativeOp for Cast {
                 NativeData::Int(i) => i.iter().map(|i| *i != 0).collect(),
                 NativeData::Bool(b) => b.clone(),
             }),
+            other => unimplemented!("Cast to {other} is not yet supported in native interpreter"),
         }
     }
 }

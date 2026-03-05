@@ -1,12 +1,13 @@
 use std::sync::{Arc, OnceLock};
 
 use luminal::{
+    dtype::DType,
     egglog_utils::{
         api::{Rule, SortDef, sort},
         base::{DTYPE, EXPRESSION, IR, STRING},
         extract_dtype, extract_expr,
     },
-    op::{DType, EgglogOp, LLIROp},
+    op::{EgglogOp, LLIROp},
     prelude::{
         tracing::{Level, span, trace},
         *,
@@ -151,6 +152,12 @@ impl EgglogOp for CuBlasLt {
 /// Returns (matrix_dtype, compute_type, scale_dtype)
 fn dtype_to_cuda_types(dtype: DType) -> (cudaDataType, cublasComputeType_t, cudaDataType) {
     match dtype {
+        // F64: matrix=f64, compute=f64, scale=f64
+        DType::F64 => (
+            cudaDataType::CUDA_R_64F,
+            cublasComputeType_t::CUBLAS_COMPUTE_64F,
+            cudaDataType::CUDA_R_64F,
+        ),
         // F32: matrix=f32, compute=f32, scale=f32
         DType::F32 => (
             cudaDataType::CUDA_R_32F,
@@ -169,8 +176,27 @@ fn dtype_to_cuda_types(dtype: DType) -> (cudaDataType, cublasComputeType_t, cuda
             cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_16BF,
             cudaDataType::CUDA_R_32F,
         ),
+        // TF32: stored as f32, use fast TF32 tensor core path
+        DType::TF32 => (
+            cudaDataType::CUDA_R_32F,
+            cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+            cudaDataType::CUDA_R_32F,
+        ),
+        // FP8 E4M3: matrix=fp8_e4m3, compute=f32, scale=f32
+        DType::F8E4M3 => (
+            cudaDataType::CUDA_R_8F_E4M3,
+            cublasComputeType_t::CUBLAS_COMPUTE_32F,
+            cudaDataType::CUDA_R_32F,
+        ),
+        // FP8 E5M2: matrix=fp8_e5m2, compute=f32, scale=f32
+        DType::F8E5M2 => (
+            cudaDataType::CUDA_R_8F_E5M2,
+            cublasComputeType_t::CUBLAS_COMPUTE_32F,
+            cudaDataType::CUDA_R_32F,
+        ),
         DType::Int => panic!("cuBLAS LT does not support integer matmul"),
         DType::Bool => panic!("cuBLAS LT does not support bool matmul"),
+        other => todo!("cuBLAS LT matmul not yet implemented for {other}"),
     }
 }
 
@@ -195,11 +221,12 @@ impl HostOp for CuBlasLt {
 
         // Get CUDA types based on dtype
         let (cuda_dtype, compute_type, scale_dtype) = dtype_to_cuda_types(self.dtype);
-        let element_size = match self.dtype {
-            DType::F32 => 4u64,
-            DType::F16 | DType::Bf16 => 2u64,
-            DType::Int | DType::Bool => panic!("cuBLAS LT does not support integer/bool matmul"),
-        };
+        let element_size = (self.dtype.bits() / 8) as u64;
+        assert!(
+            element_size > 0,
+            "cuBLAS LT does not support sub-byte dtype {}",
+            self.dtype
+        );
 
         // Alpha/beta scale values (all dtypes use F32 scale type)
         let alpha_f32: f32 = 1.0;
@@ -360,12 +387,6 @@ impl HostOp for CuBlasLt {
     }
 
     fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 }

@@ -422,8 +422,8 @@ mod tests {
     /// This helps identify the exact pattern for the GLUMoE backend HostOp.
     #[test]
     fn dump_glu_moe_egglog() {
+        use luminal::dtype::DType;
         use luminal::egglog_utils::hlir_to_egglog;
-        use luminal::op::DType;
 
         let n_experts = 4;
         let hidden = 8;

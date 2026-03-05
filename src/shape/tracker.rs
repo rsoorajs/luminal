@@ -10,6 +10,9 @@ use crate::prelude::*;
 pub struct ShapeTracker {
     pub dims: ArrayVec<[Expression; 10]>,
     pub strides: ArrayVec<[Expression; 10]>,
+    /// Bits per element in memory storage. Controls byte-size computation.
+    /// Defaults to 32 (F32). Set from dtype.bits() at tensor creation.
+    pub element_stride_bits: usize,
 }
 
 impl Display for ShapeTracker {
@@ -24,11 +27,12 @@ impl Display for ShapeTracker {
 }
 
 impl ShapeTracker {
-    /// Make a new row-major shape tracker
+    /// Make a new row-major shape tracker. Defaults element_stride_bits to 32 (F32).
     pub fn new(dims: impl ToShape) -> ShapeTracker {
         let mut s = Self {
             dims: Default::default(),
             strides: Default::default(),
+            element_stride_bits: 32,
         };
         let mut stride = expr('z');
         for d in dims.to_shape().into_iter().rev() {
@@ -39,11 +43,25 @@ impl ShapeTracker {
         s
     }
 
+    /// Make a new row-major shape tracker with explicit element stride in bits.
+    pub fn new_with_element_bits(dims: impl ToShape, element_bits: usize) -> ShapeTracker {
+        let mut s = Self::new(dims);
+        s.element_stride_bits = element_bits;
+        s
+    }
+
+    /// Set element stride bits. Chainable builder.
+    pub fn with_element_bits(mut self, bits: usize) -> Self {
+        self.element_stride_bits = bits;
+        self
+    }
+
     /// Make a new shape tracker with fake dimensions
     pub fn fake(dims: impl ToShape) -> Self {
         let mut s = Self {
             dims: Default::default(),
             strides: Default::default(),
+            element_stride_bits: 32,
         };
         for d in dims.to_shape().into_iter() {
             s.dims.push(d);
@@ -64,6 +82,7 @@ impl ShapeTracker {
         let mut s = Self {
             dims: Default::default(),
             strides: Default::default(),
+            element_stride_bits: 32,
         };
         for (dim, stride) in dims.into_iter().zip(strides) {
             s.dims.push(dim);
@@ -229,13 +248,19 @@ impl ShapeTracker {
         self.len() - 1
     }
 
-    /// Create a contiguous version
+    /// Required bytes to store this tensor's physical elements. Rounds up to nearest byte.
+    pub fn required_total_bytes(&self) -> Expression {
+        (self.n_physical_elements() * self.element_stride_bits).ceil_div(8)
+    }
+
+    /// Create a contiguous version, preserving element_stride_bits
     pub fn contiguous(self) -> Self {
-        Self::new(
+        Self::new_with_element_bits(
             self.dims
                 .into_iter()
                 .map(|i| i.simplify())
                 .collect::<Vec<_>>(),
+            self.element_stride_bits,
         )
     }
 
@@ -251,16 +276,23 @@ impl ShapeTracker {
         }
     }
 
-    /// Merge two dimensions together
-    pub fn merge_dims(&mut self, _axis1: usize, _axis2: usize) {
-        todo!("Need CuTE-style nested dims for this!");
-        // let inner_stride = self.strides.remove(axis2);
-        // let inner_dim = self.dims.remove(axis2);
-        // self.dims[axis1] *= inner_dim;
-        // self.strides[axis1] = (self.strides[axis1]
-        //     .substitute('z', expr('z') / inner_dim)
-        //     + inner_stride.substitute('z', expr('z') % inner_dim))
-        // .simplify();
+    /// Merge two adjacent contiguous dimensions together (inverse of split_dims)
+    pub fn merge_dims(&mut self, axis1: usize, axis2: usize) {
+        assert_eq!(axis2, axis1 + 1, "Can only merge adjacent dims");
+        assert!(
+            self.strides[axis1] == self.dims[axis2] * self.strides[axis2],
+            "Can only merge contiguous adjacent dims (stride[{}]={} != dim[{}]={} * stride[{}]={})",
+            axis1,
+            self.strides[axis1],
+            axis2,
+            self.dims[axis2],
+            axis2,
+            self.strides[axis2]
+        );
+        self.dims[axis1] = self.dims[axis1] * self.dims[axis2];
+        self.strides[axis1] = self.strides[axis2];
+        self.dims.remove(axis2);
+        self.strides.remove(axis2);
     }
 
     /// Split a dim into 2 dims, new dim is placed directly after original dim

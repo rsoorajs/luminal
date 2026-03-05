@@ -130,9 +130,10 @@ pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool)
 }
 
 use crate::{
+    dtype::DType,
     graph::{Graph, LLIRGraph, SubgraphDescriptor},
     hlir::{Input, Output},
-    op::{CustomOp, DType, EgglogOp},
+    op::{CustomOp, EgglogOp},
     prelude::FxHashMap,
     shape::Expression,
 };
@@ -758,6 +759,9 @@ pub fn extract_dtype<'a>(egraph: &'a SerializedEGraph, node: &'a NodeId) -> DTyp
         "Bf16" => DType::Bf16,
         "Int" => DType::Int,
         "Bool" => DType::Bool,
+        "F4E2M1" => DType::F4E2M1,
+        "F8E4M3" => DType::F8E4M3,
+        "F8UE8M0" => DType::F8UE8M0,
         other => panic!("unknown dtype {other}"),
     }
 }

@@ -298,7 +298,14 @@ impl GraphTensor {
             .input(rhs.id, rhs.shape)
             .finish();
         // Comparison operations always output Bool
-        GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, DType::Bool)
+        GraphTensor::from_id(
+            new_id,
+            self.shape
+                .contiguous()
+                .with_element_bits(DType::Bool.bits()),
+            self.graph_ref,
+            DType::Bool,
+        )
     }
 
     /// Greater than comparison
@@ -543,7 +550,7 @@ pub(super) mod tests {
             test_binary(
                 size,
                 size,
-                |a, b| a.lt(b).cast(crate::op::DType::F32),
+                |a, b| a.lt(b).cast(crate::dtype::DType::F32),
                 |a, b| a.lt(&b).unwrap().to_dtype(DType::F32).unwrap(),
             );
         }
@@ -556,7 +563,7 @@ pub(super) mod tests {
             test_binary(
                 size,
                 size,
-                |a, b| a.gt(b).cast(crate::op::DType::F32),
+                |a, b| a.gt(b).cast(crate::dtype::DType::F32),
                 |a, b| a.gt(&b).unwrap().to_dtype(DType::F32).unwrap(),
             );
         }
@@ -569,7 +576,7 @@ pub(super) mod tests {
             test_binary(
                 size,
                 size,
-                |a, b| a.le(b).cast(crate::op::DType::F32),
+                |a, b| a.le(b).cast(crate::dtype::DType::F32),
                 |a, b| a.le(&b).unwrap().to_dtype(DType::F32).unwrap(),
             );
         }
@@ -582,7 +589,7 @@ pub(super) mod tests {
             test_binary(
                 size,
                 size,
-                |a, b| a.ge(b).cast(crate::op::DType::F32),
+                |a, b| a.ge(b).cast(crate::dtype::DType::F32),
                 |a, b| a.ge(&b).unwrap().to_dtype(DType::F32).unwrap(),
             );
         }
@@ -593,7 +600,7 @@ pub(super) mod tests {
         test_binary(
             27,
             27,
-            |a, b| a.ne(b).cast(crate::op::DType::F32),
+            |a, b| a.ne(b).cast(crate::dtype::DType::F32),
             |a, b| a.ne(&b).unwrap().to_dtype(DType::F32).unwrap(),
         );
     }
@@ -603,7 +610,7 @@ pub(super) mod tests {
         test_binary(
             27,
             27,
-            |a, b| a.eq(b).cast(crate::op::DType::F32),
+            |a, b| a.eq(b).cast(crate::dtype::DType::F32),
             |a, b| a.eq(&b).unwrap().to_dtype(DType::F32).unwrap(),
         );
     }
@@ -671,7 +678,7 @@ pub(super) mod tests {
                 // gt() returns Bool, cast to F32 for cond which expects F32
                 let cond = a
                     .gt(b.graph().constant_float(0.0).expand_rhs(a.shape))
-                    .cast(crate::op::DType::F32);
+                    .cast(crate::dtype::DType::F32);
                 a.cond(cond, b)
             },
             |a, b| {

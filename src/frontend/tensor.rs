@@ -1,5 +1,4 @@
 use crate::hlir::*;
-use crate::op::*;
 use crate::prelude::*;
 use std::fmt::Debug;
 
@@ -67,6 +66,11 @@ impl GraphTensor {
             .input(self.id, self.shape)
             .finish();
         *self
+    }
+
+    /// Required bytes to store this tensor's physical elements. Rounds up to nearest byte.
+    pub fn required_total_bytes(&self) -> Expression {
+        self.shape.required_total_bytes()
     }
 
     pub fn dims(&self) -> Vec<Expression> {

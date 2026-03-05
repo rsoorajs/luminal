@@ -1,6 +1,12 @@
 {
     "name": "Luminal",
     "image": "ghcr.io/luminal-ai/luminal-docker:latest",
+    "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+},
+"remoteEnv": {
+        "GH_TOKEN": "${localEnv:GH_TOKEN}"
+},
     "runArgs": [
         "--gpus=all"
     ],

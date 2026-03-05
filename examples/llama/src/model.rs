@@ -1,6 +1,7 @@
 use luminal::{
+    dtype::DType,
     graph::Graph,
-    op::{CustomOp, DType, LLIROp},
+    op::{CustomOp, LLIROp},
     prelude::{F32Pow, GraphTensor},
     shape::{flatten_strides, Expression, ShapeTracker, ToShape},
 };
@@ -156,7 +157,7 @@ fn llama_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> Grap
     // Combine back into output
     let mut s = x0_out.concat_along(x1_out, 3);
     let (n_heads, seq_dim, _) = input.dims3();
-    s.shape = ShapeTracker::new((n_heads, seq_dim, HEAD_DIM));
+    s.shape = ShapeTracker::new_with_element_bits((n_heads, seq_dim, HEAD_DIM), s.dtype.bits());
     s = s.transpose(0, 1) * 1.0;
     s.shape = orig_shape;
     s
@@ -274,11 +275,11 @@ impl BlockOp for LlamaAttention {
         self.range.iter().copied().product::<Expression>() * self.head_dim
     }
 
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
+    fn producer_barriers_separate(&self) -> Vec<bool> {
         vec![true; self.range.len()]
     }
 
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+    fn consumer_barriers_separate(&self) -> Vec<Vec<bool>> {
         let mut q = vec![true; self.range.len()];
         q[self.range.len() - 1] = false;
         let mut k = vec![true; self.range.len()];

@@ -157,38 +157,6 @@ pub trait CustomOp: Debug {
     fn to_llir_op(&self) -> LLIROp;
 }
 
-/// Supported dtypes
-#[derive(Clone, Copy, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
-pub enum DType {
-    /// 32-bit float (8e23m)
-    #[default]
-    F32,
-    /// 16-bit float (5e10m)
-    F16,
-    /// 16-bit float (8e7m)
-    Bf16,
-    /// 32-bit integer
-    Int,
-    /// Boolean (stored as u8, 0 or 1)
-    Bool,
-}
-
-impl Display for DType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-
-impl DType {
-    pub fn sizeof(&self) -> usize {
-        match self {
-            DType::F32 | DType::Int => 4,
-            DType::Bf16 | DType::F16 => 2,
-            DType::Bool => 1,
-        }
-    }
-}
-
 /// The main HLIROp trait.
 ///
 /// Defines an HLIROp that implements a logical operation.

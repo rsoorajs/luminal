@@ -379,7 +379,6 @@ impl GraphTensor {
 mod tests {
     use crate::{
         frontend::{binary::tests::test_binary, unary::tests::test_unary},
-        op::DType,
         prelude::*,
     };
     use candle_core::{IndexOp, Tensor};

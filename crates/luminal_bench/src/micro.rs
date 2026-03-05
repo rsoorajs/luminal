@@ -253,7 +253,7 @@ impl BenchmarkPattern for GatherBench {
 
         let data = cx.tensor(size.value);
         // Indices must be integer type for gather operation
-        let indices = cx.tensor(num_indices).as_dtype(luminal::op::DType::Int);
+        let indices = cx.tensor(num_indices).as_dtype(luminal::dtype::DType::Int);
         let _ = data.gather(indices).output();
     }
 }
@@ -275,8 +275,8 @@ impl BenchmarkPattern for CastBench {
         let a = cx.tensor(size.value);
         // Cast to f16 then back to f32 to measure round-trip cost
         let _ = a
-            .cast(luminal::op::DType::F16)
-            .cast(luminal::op::DType::F32)
+            .cast(luminal::dtype::DType::F16)
+            .cast(luminal::dtype::DType::F32)
             .output();
     }
 }

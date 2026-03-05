@@ -21,24 +21,47 @@ use luminal::{
 pub fn dtype_includes(dtypes: &[DType]) -> String {
     let needs_fp16 = dtypes.iter().any(|d| matches!(d, DType::F16));
     let needs_bf16 = dtypes.iter().any(|d| matches!(d, DType::Bf16));
-    format!(
-        "{}{}",
-        if needs_fp16 {
-            "#include <cuda_fp16.h>\n"
-        } else {
-            ""
-        },
-        if needs_bf16 {
-            "#include <cuda_bf16.h>\n"
-        } else {
-            ""
-        },
-    )
+    let needs_fp8 = dtypes
+        .iter()
+        .any(|d| matches!(d, DType::F8E4M3 | DType::F8E5M2 | DType::F8UE8M0));
+    let needs_fp6 = dtypes
+        .iter()
+        .any(|d| matches!(d, DType::F6E2M3 | DType::F6E3M2));
+    let needs_fp4 = dtypes.iter().any(|d| matches!(d, DType::F4E2M1));
+    let mut s = String::new();
+    if needs_fp16 {
+        s.push_str("#include <cuda_fp16.h>\n");
+    }
+    if needs_bf16 {
+        s.push_str("#include <cuda_bf16.h>\n");
+    }
+    if needs_fp8 {
+        s.push_str("#include <cuda_fp8.h>\n");
+    }
+    if needs_fp6 {
+        s.push_str("#include <cuda_fp6.h>\n");
+    }
+    if needs_fp4 {
+        s.push_str("#include <cuda_fp4.h>\n");
+    }
+    s
 }
 
-/// Compiles a CUDA kernel with proper include paths for f16/bf16 types
+/// Compiles a CUDA kernel with proper include paths for special types
 pub fn compile_kernel(kernel: &str, dtypes: &[DType]) -> cudarc::nvrtc::Ptx {
-    let needs_special_types = dtypes.iter().any(|d| matches!(d, DType::F16 | DType::Bf16));
+    let needs_special_types = dtypes.iter().any(|d| {
+        matches!(
+            d,
+            DType::F16
+                | DType::Bf16
+                | DType::F8E4M3
+                | DType::F8E5M2
+                | DType::F8UE8M0
+                | DType::F6E2M3
+                | DType::F6E3M2
+                | DType::F4E2M1
+        )
+    });
 
     if needs_special_types {
         compile_ptx_with_opts(
@@ -265,23 +288,12 @@ extern \"C\" {{
     }
 
     fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_loaded(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.out_shape.iter().copied().product::<Expression>() * self.iters * elem_size
+        (self.out_shape.iter().copied().product::<Expression>() * self.iters * self.dtype.bits())
+            .ceil_div(8)
     }
 
     fn bytes_stored(&self) -> Expression {
@@ -442,23 +454,12 @@ extern \"C\" {{
     }
 
     fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_loaded(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.out_shape.iter().copied().product::<Expression>() * self.iters * elem_size
+        (self.out_shape.iter().copied().product::<Expression>() * self.iters * self.dtype.bits())
+            .ceil_div(8)
     }
 
     fn bytes_stored(&self) -> Expression {
@@ -600,29 +601,12 @@ extern \"C\" {{
     }
 
     fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_loaded(&self) -> Expression {
-        let a_elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        let b_elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * a_elem_size + self.output_size() * b_elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
+            + (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_stored(&self) -> Expression {
@@ -762,29 +746,12 @@ extern \"C\" {{
     }
 
     fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_loaded(&self) -> Expression {
-        let a_elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        let b_elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * a_elem_size + self.output_size() * b_elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
+            + (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_stored(&self) -> Expression {
@@ -954,24 +921,12 @@ extern \"C\" {{
     }
 
     fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_loaded(&self) -> Expression {
-        let data_elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
         // Data + indices (indices are always int32)
-        self.output_size() * data_elem_size + self.output_size() * 4
+        (self.output_size() * self.dtype.bits()).ceil_div(8) + self.output_size() * 4
     }
 
     fn bytes_stored(&self) -> Expression {
@@ -1232,13 +1187,7 @@ extern \"C\" {{
     }
 
     fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_loaded(&self) -> Expression {
@@ -1376,13 +1325,7 @@ extern \"C\" {{
     }
 
     fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_loaded(&self) -> Expression {
@@ -1520,13 +1463,7 @@ extern \"C\" {{
     }
 
     fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_loaded(&self) -> Expression {
@@ -1664,13 +1601,7 @@ extern \"C\" {{
     }
 
     fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_loaded(&self) -> Expression {
@@ -1808,13 +1739,7 @@ extern \"C\" {{
     }
 
     fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_loaded(&self) -> Expression {
@@ -1957,13 +1882,7 @@ extern \"C\" {{
     }
 
     fn output_bytes(&self) -> Expression {
-        let elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_loaded(&self) -> Expression {
@@ -2121,19 +2040,8 @@ extern \"C\" {{
     }
 
     fn bytes_loaded(&self) -> Expression {
-        let a_elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        let b_elem_size: Expression = match self.dtype {
-            DType::F32 | DType::Int => 4,
-            DType::F16 | DType::Bf16 => 2,
-            DType::Bool => 1,
-        }
-        .into();
-        self.output_size() * a_elem_size + self.output_size() * b_elem_size
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
+            + (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
 
     fn bytes_stored(&self) -> Expression {
@@ -2330,19 +2238,43 @@ impl KernelOp for KernelCast {
         Expression,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
-        let in_dtype = cuda_dtype(self.in_dtype);
         let out_dtype = cuda_dtype(self.out_dtype);
         let includes = dtype_includes(&[self.in_dtype, self.out_dtype]);
 
-        let kernel = format!(
-            "{includes}
+        let kernel = if self.in_dtype.bits() < 8 {
+            // Sub-byte packed types: multiple values packed per byte.
+            // Extract the correct bits using bit-level addressing.
+            let bits = self.in_dtype.bits();
+            let in_cuda_type = cuda_dtype(self.in_dtype);
+            let mask = (1u32 << bits) - 1;
+            format!(
+                "{includes}
+extern \"C\" {{
+    __global__ void cast_k({out_dtype} *out, const unsigned char *in_raw) {{
+        long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+        long long bit_offset = idx * {bits};
+        long long byte_idx = bit_offset >> 3;
+        int bit_pos = (int)(bit_offset & 7);
+        unsigned short raw = (unsigned short)in_raw[byte_idx];
+        if (bit_pos + {bits} > 8) raw |= ((unsigned short)in_raw[byte_idx + 1]) << 8;
+        {in_cuda_type} val;
+        val.__x = (unsigned char)((raw >> bit_pos) & {mask}u);
+        out[idx] = ({out_dtype})val;
+    }}
+}}"
+            )
+        } else {
+            let in_dtype = cuda_dtype(self.in_dtype);
+            format!(
+                "{includes}
 extern \"C\" {{
     __global__ void cast_k({out_dtype} *out, const {in_dtype} *in) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
         out[const_z] = ({out_dtype})in[const_z];
     }}
 }}"
-        );
+            )
+        };
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
@@ -2368,11 +2300,11 @@ extern \"C\" {{
     }
 
     fn output_bytes(&self) -> Expression {
-        self.size * self.out_dtype.sizeof()
+        (self.size * self.out_dtype.bits()).ceil_div(8)
     }
 
     fn bytes_loaded(&self) -> Expression {
-        self.size * self.in_dtype.sizeof()
+        (self.size * self.in_dtype.bits()).ceil_div(8)
     }
 
     fn bytes_stored(&self) -> Expression {

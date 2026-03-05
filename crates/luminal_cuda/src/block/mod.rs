@@ -53,8 +53,8 @@ pub trait BlockOp: Debug + as_any::AsAny {
     fn output_bytes(&self) -> Expression {
         self.output_size() * 4
     }
-    fn producer_barriers_seperate(&self) -> Vec<bool>;
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>>;
+    fn producer_barriers_separate(&self) -> Vec<bool>;
+    fn consumer_barriers_separate(&self) -> Vec<Vec<bool>>;
     /// C function body
     fn cuda_function(&self) -> String {
         "".to_string()
@@ -266,7 +266,7 @@ fn get_barrier_strides(
             .collect_vec();
         let prod_op = graph[*node].to_dialect::<dyn BlockOp>().unwrap();
         let prod_range = prod_op.launch_range();
-        let prod_shared = prod_op.producer_barriers_seperate();
+        let prod_shared = prod_op.producer_barriers_separate();
         let cons_range: Vec<Vec<Expression>> = consumers
             .iter()
             .map(|(n, _)| {
@@ -286,7 +286,7 @@ fn get_barrier_strides(
                     graph[*n]
                         .to_dialect::<dyn BlockOp>()
                         .unwrap()
-                        .consumer_barriers_seperate()
+                        .consumer_barriers_separate()
                         .remove(*i)
                 })
                 .collect(),
