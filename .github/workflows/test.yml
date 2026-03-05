@@ -13,12 +13,14 @@ jobs:
     core_unit_test:
         name: Core Unit Tests
         runs-on: ubuntu-latest
+        container:
+            image: ghcr.io/luminal-ai/luminal-docker:cpu
         timeout-minutes: 20
 
         steps:
             - uses: actions/checkout@v6
             - name: Run tests
-              run: rustup update; cargo test --workspace --exclude luminal_cuda --exclude luminal_metal --exclude luminal_bench --verbose
+              run: cargo test --workspace --exclude luminal_cuda --exclude luminal_metal --exclude luminal_bench --verbose
 
     clippy:
         name: Clippy
@@ -43,7 +45,7 @@ jobs:
         name: Cuda Unit Tests
         runs-on: cuda_t4_runner
         container:
-            image: ghcr.io/luminal-ai/luminal-docker:latest
+            image: ghcr.io/luminal-ai/luminal-docker:cuda
             options: --gpus all
         timeout-minutes: 30
 

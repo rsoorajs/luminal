@@ -1,9 +1,17 @@
 {
-    "name": "Luminal",
-    "image": "ghcr.io/luminal-ai/luminal-docker:latest",
-    "runArgs": [
-        "--gpus=all"
-    ],
+    "name": "Luminal (CPU)",
+    "image": "ghcr.io/luminal-ai/luminal-docker:cpu",
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {
+            "installZsh": false,
+            "installOhMyZsh": false,
+            "username": "luminal",
+            "userUid": "1000",
+            "userGid": "1000",
+            "configureZshAsDefaultShell": false
+        }
+    },
+    "remoteUser": "luminal",
     "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder}",
     "customizations": {
         "vscode": {
