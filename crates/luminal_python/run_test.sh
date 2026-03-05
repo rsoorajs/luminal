@@ -14,7 +14,9 @@ uv run maturin develop --manifest-path rust/Cargo.toml
 
 # Run pytest
 echo "Step 3: Running pytest..."
-uv run pytest tests/test_hlir_ops.py -v
+# it is best not to add the full model tests, they end up running billion parameter models
+# on the CPU and it takes far to long
+uv run pytest tests/test_hlir_ops.py tests/test_unary.py -v
 
 echo ""
 echo "=== Tests Complete ==="
