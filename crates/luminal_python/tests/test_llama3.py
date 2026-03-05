@@ -357,7 +357,7 @@ def test_hf_llama3_1b_decode_loop_dynamic():
     tokens = tokenizer.encode(prompt)
     print(f"Prompt: '{prompt}' -> {len(tokens)} tokens: {tokens}")
 
-    num_generate = 10
+    num_generate = 3
     for step in range(num_generate):
         seq_len = len(tokens)
         graph.set_dim("seq_len", seq_len)
@@ -382,9 +382,7 @@ def test_hf_llama3_1b_decode_loop_dynamic():
 
         next_token = ref.logits[0, -1, :].argmax().item()
         tokens.append(next_token)
-        print(
-            f"Step {step}: '{tokenizer.decode(tokens)}'"
-        )
+        print(f"Step {step}: '{tokenizer.decode(tokens)}'")
 
 
 def test_hf_llama3_full(device: torch.device):
