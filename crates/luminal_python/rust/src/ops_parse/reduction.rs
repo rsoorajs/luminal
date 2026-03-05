@@ -34,16 +34,12 @@ pub fn parse_topk_node(
 
     let largest = get_int_attr(node, "largest", 1) != 0;
 
-    // Compute top-k indices (axis-local, Int dtype)
-    let indices = if largest {
-        x.topk_indexes(k, axis)
-    } else {
-        // smallest-first: sort ascending, take first k
-        x.argsort(axis, false).slice_along(..k, axis)
-    };
-
-    // Gather values at those positions
-    let values = x.gather_elements(indices, axis);
+    // Compute full argsort, then gather all sorted values, then slice both to top-k.
+    // This avoids passing a non-contiguous sliced index tensor into gather_elements,
+    // which triggers a CUDA kernel bug when data and index sizes differ along the axis.
+    let full_argsort = x.argsort(axis, largest);
+    let indices = full_argsort.slice_along(..k, axis);
+    let values = x.gather_elements(full_argsort, axis).slice_along(..k, axis);
 
     // ONNX output[0] = values, output[1] = indices
     if !node.output[0].is_empty() {

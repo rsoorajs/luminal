@@ -65,6 +65,7 @@ from test_models import (
     GatherConstantFoldModel,
     # GatherElements model
     GatherElementsTestModel,
+    GatherElementsLargeTestModel,
     GatherEmbeddingModel,
     GatherNegativeIndicesModel,
     # Gemm model
@@ -1820,6 +1821,14 @@ def test_gather_elements(device: torch.device):
     model: torch.nn.Module = GatherElementsTestModel().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
     x: torch.Tensor = torch.rand((2, 3), device=device)
+    assert torch.allclose(model_compiled(x), model(x))
+
+
+def test_gather_elements_large(device: torch.device):
+    """Tests GatherElements on 4x8 data with 4x3 indices (different axis sizes)."""
+    model: torch.nn.Module = GatherElementsLargeTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.rand((4, 8), device=device)
     assert torch.allclose(model_compiled(x), model(x))
 
 

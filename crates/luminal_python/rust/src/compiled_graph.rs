@@ -41,7 +41,6 @@ impl OnnxGraphResult {
         model_directory: &Path,
         backend: &str,
     ) -> Result<OnnxGraphResult, String> {
-        eprintln!("Starting parse");
         let _span = span!(Level::TRACE, "Onnx Graphing Parsing").entered();
         let onnx_graph = &model.graph;
         let mut context = Graph::new();
@@ -69,7 +68,7 @@ impl OnnxGraphResult {
             .filter(|inp| !initializer_names.contains(inp.name.as_str()))
             .map(|inp| inp.name.clone())
             .collect();
-        eprintln!("Filling in input");
+
         // Create "holding" tensors for the input
         // this way they can be considered in the graph computation, and later as we do mutiple runs we can target them and swap out the values
         // in them and not need to recompile the network
@@ -94,7 +93,7 @@ impl OnnxGraphResult {
             trace!("Input {} added to tensors", input.name.clone());
             tensors.insert(input.name.clone(), tensor);
         }
-        eprintln!("Filling in initializer");
+
         for init in &onnx_graph.initializer {
             if !tensors.contains_key(&init.name) {
                 let mut shape: Vec<usize> = init.dims.iter().map(|&d| d as usize).collect();
@@ -133,7 +132,7 @@ impl OnnxGraphResult {
         // Shape expressions map for propagating symbolic shape values through
         // Shape→Gather→Unsqueeze→Concat chains in dynamic ONNX graphs
         let mut shape_exprs: HashMap<String, Vec<Expression>> = HashMap::new();
-        eprintln!("Processing nodes");
+
         // Process computation nodes (Constant nodes add to weight_data)
         process_onnx_nodes(
             &onnx_graph.node,
@@ -272,7 +271,6 @@ impl OnnxGraphResult {
         context: &mut Graph,
         input_tensor_names: &HashSet<String>,
     ) -> Result<RuntimeBackend, String> {
-        eprintln!("Creating cuda backend");
         let compute_n_elements = |name: &str| -> usize {
             if let Some(vi) = onnx_graph.input.iter().find(|i| i.name == name) {
                 let shape = get_shape_for_onnx_value(vi);
@@ -285,7 +283,7 @@ impl OnnxGraphResult {
                 0
             }
         };
-        eprintln!("Prepare cuda backend");
+
         // CUDA: Two-phase - set data BEFORE search for profiling
         let (mut cuda_rt, _stream) = prepare_cuda(context)?;
 
@@ -299,7 +297,7 @@ impl OnnxGraphResult {
                 cuda_rt.set_data(gt.id, vec![0.0f32; n_elements]);
             }
         }
-        eprintln!("Overriding initizlizers");
+
         // Overwrite with real initializer data (for accurate profiling)
         // Batch load reads each external file only once
         let init_data = load_all_tensor_floats(&onnx_graph.initializer, model_directory);
@@ -331,7 +329,7 @@ impl OnnxGraphResult {
                 cuda_rt.set_data(gt.id, floats.clone());
             }
         }
-        eprintln!("Finalzie cuda backend");
+
         // Now finalize (search with profiling, data is available)
         let cuda_rt = finalize_cuda(context, cuda_rt);
 
