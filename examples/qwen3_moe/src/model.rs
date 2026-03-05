@@ -1,7 +1,7 @@
 use luminal::{
     graph::Graph,
-    op::{CustomOp, DType, LLIROp},
-    prelude::GraphTensor,
+    op::{CustomOp, LLIROp},
+    prelude::{DType, GraphTensor},
     shape::{flatten_strides, Expression, ToShape},
 };
 use luminal_cuda::{
@@ -405,11 +405,11 @@ impl BlockOp for QwenAttention {
         self.range.iter().copied().product::<Expression>() * self.head_dim
     }
 
-    fn producer_barriers_seperate(&self) -> Vec<bool> {
+    fn producer_barriers_separate(&self) -> Vec<bool> {
         vec![true; self.range.len()]
     }
 
-    fn consumer_barriers_seperate(&self) -> Vec<Vec<bool>> {
+    fn consumer_barriers_separate(&self) -> Vec<Vec<bool>> {
         let mut q = vec![true; self.range.len()];
         q[self.range.len() - 1] = false;
         let mut k = vec![true; self.range.len()];
