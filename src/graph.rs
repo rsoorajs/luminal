@@ -10,7 +10,6 @@ use crate::{hlir::CustomOpHLIR, op::*, prelude::*};
 use colored::Colorize;
 use itertools::Itertools;
 use petgraph::{Direction, algo::toposort, stable_graph::StableGraph, visit::EdgeRef};
-use rand::{Rng, SeedableRng, rngs::StdRng};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     any::TypeId,
@@ -283,7 +282,18 @@ impl Graph {
     const TRIALS_PER_PROFILE: usize = 10;
 
     #[tracing::instrument(skip_all)]
-    pub fn search<R: Runtime>(&mut self, mut runtime: R, limit: usize) -> R {
+    pub fn search<R: Runtime>(&mut self, runtime: R, limit: usize) -> R {
+        let mut rng = rand::rng();
+        self.search_rng(runtime, limit, &mut rng)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn search_rng<R: Runtime, G: rand::Rng>(
+        &mut self,
+        mut runtime: R,
+        limit: usize,
+        rng: &mut G,
+    ) -> R {
         let n_chunks = self.subgraph_descriptors.len();
         let n_groups = self.chunk_groups.len();
         let multi_chunk = n_chunks > 1;
@@ -303,15 +313,6 @@ impl Graph {
         }
 
         // Search each group's representative.
-        // Optional deterministic seed for reproducible search runs.
-        let search_seed = std::env::var("LUMINAL_SEARCH_SEED")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok());
-        let fallback_seed = rand::rng().random::<u64>();
-        let mut rng = StdRng::seed_from_u64(search_seed.unwrap_or(fallback_seed));
-        let print_signature = std::env::var("LUMINAL_SEARCH_SIGNATURE")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-            .unwrap_or(false);
         let mut group_best_llirs: Vec<Option<LLIRGraph>> = (0..n_groups).map(|_| None).collect();
         let mut group_best_genomes: Vec<Option<crate::egglog_utils::EGraphChoiceSet>> =
             (0..n_groups).map(|_| None).collect();
@@ -345,7 +346,7 @@ impl Graph {
             // Clear intermediate buffers from previous group's profiling
             runtime.clear_intermediate_buffers();
 
-            let mut best_genome = random_initial_choice(egraph, &mut rng);
+            let mut best_genome = random_initial_choice(egraph, rng);
             prev_selected.insert(hash_choice_set(&best_genome));
 
             let mut best_graph = egglog_to_llir(
@@ -404,7 +405,7 @@ impl Graph {
                     (limit - n_graphs).min(Self::DEFAULT_GENERATION_SIZE),
                     Self::MUTATIONS_PER_OFFSPRING,
                     &mut prev_selected,
-                    &mut rng,
+                    rng,
                 );
                 if offspring.is_empty() {
                     break;
@@ -514,23 +515,6 @@ impl Graph {
                 print!("\r\x1b[2K");
             }
             std::io::stdout().flush().unwrap();
-        }
-
-        if print_signature {
-            if let Some(seed) = search_seed {
-                println!("   {:>6}  seed={seed}", "Sig".cyan().bold());
-            }
-            for (group_idx, group) in self.chunk_groups.iter().enumerate() {
-                if let Some(genome) = group_best_genomes[group_idx].as_ref() {
-                    let choice_hash = hash_choice_set(genome);
-                    println!(
-                        "   {:>6}  group={group_idx} rep={} members={} choice_hash={choice_hash:016x}",
-                        "Sig".cyan().bold(),
-                        group.representative,
-                        group.members.iter().join(",")
-                    );
-                }
-            }
         }
 
         // Build per-chunk LLIRs: representative uses searched LLIR,
