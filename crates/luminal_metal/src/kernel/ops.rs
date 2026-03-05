@@ -806,8 +806,9 @@ impl MetalKernelOp for MetalSumReduce {
 
         let in_idx = lower_expression_for_metal(&in_index, "gid");
         let out_idx = lower_expression_for_metal(&out_index, "gid");
-        let iters = lower_dynamic_consts(self.iters.to_kernel());
-        let iter_stride = lower_dynamic_consts(self.iter_stride.to_kernel());
+        let iters = lower_expression_for_metal(&self.iters, "gid");
+        // iter_stride is an offset expression over the reduction-loop variable, not a scalar stride.
+        let iter_offset = lower_expression_for_metal(&self.iter_stride, "i");
 
         let source = format!(
             r#"
@@ -832,12 +833,12 @@ impl MetalKernelOp for MetalSumReduce {
 
                 int in_start = {in_idx};
                 int iters = {iters};
-                int iter_stride_val = {iter_stride};
+                (void)dyn;
 
                 // Each thread accumulates multiple elements
                 float sum = 0.0f;
                 for (int i = tid; i < iters; i += THREADS_PER_GROUP) {{
-                    sum += in[in_start + i * iter_stride_val];
+                    sum += in[in_start + {iter_offset}];
                 }}
 
                 // Warp-level reduction using simd_sum
@@ -959,8 +960,9 @@ impl MetalKernelOp for MetalMaxReduce {
 
         let in_idx = lower_expression_for_metal(&in_index, "gid");
         let out_idx = lower_expression_for_metal(&out_index, "gid");
-        let iters = lower_dynamic_consts(self.iters.to_kernel());
-        let iter_stride = lower_dynamic_consts(self.iter_stride.to_kernel());
+        let iters = lower_expression_for_metal(&self.iters, "gid");
+        // iter_stride is an offset expression over the reduction-loop variable, not a scalar stride.
+        let iter_offset = lower_expression_for_metal(&self.iter_stride, "i");
 
         let source = format!(
             r#"
@@ -986,12 +988,12 @@ impl MetalKernelOp for MetalMaxReduce {
 
                 int in_start = {in_idx};
                 int iters = {iters};
-                int iter_stride_val = {iter_stride};
+                (void)dyn;
 
                 // Each thread finds max of multiple elements
                 float max_val = NEG_INF_F;
                 for (int i = tid; i < iters; i += THREADS_PER_GROUP) {{
-                    max_val = fmax(max_val, in[in_start + i * iter_stride_val]);
+                    max_val = fmax(max_val, in[in_start + {iter_offset}]);
                 }}
 
                 // Warp-level reduction using simd_max
