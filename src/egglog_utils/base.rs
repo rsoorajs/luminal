@@ -158,7 +158,7 @@ pub fn expr_to_term(expr: &shape::Expression) -> Term {
     let mut stack = Vec::new();
     for term in expr.terms.read().iter() {
         let t = match term {
-            shape::Term::Num(n) => num(i64(*n as i64)),
+            shape::Term::Num(n) => num(i64(*n)),
             shape::Term::Var(c) => mvar(str(&c.to_string())),
             op => {
                 let a = stack.pop().unwrap();

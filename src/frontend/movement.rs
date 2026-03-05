@@ -141,7 +141,7 @@ impl GraphTensor {
         // Axis contribution: flat_idx = indices * stride[axis]
         let s = self
             .graph()
-            .constant(strides[axis] as i32)
+            .constant(strides[axis])
             .expand_rhs(idx_normalized.shape);
         let mut flat_idx = idx_normalized * s;
 
@@ -169,7 +169,7 @@ impl GraphTensor {
 
             let s = self
                 .graph()
-                .constant(strides[d] as i32)
+                .constant(strides[d])
                 .expand_rhs(ar_shaped.shape);
             flat_idx = flat_idx + (ar_shaped * s);
         }
@@ -233,7 +233,7 @@ impl GraphTensor {
         // Compute flat destination index (same logic as gather_elements)
         let s = self
             .graph()
-            .constant(strides[axis] as i32)
+            .constant(strides[axis])
             .expand_rhs(idx_normalized.shape);
         let mut flat_dest = idx_normalized * s;
 
@@ -254,7 +254,7 @@ impl GraphTensor {
 
             let s = self
                 .graph()
-                .constant(strides[d] as i32)
+                .constant(strides[d])
                 .expand_rhs(ar_shaped.shape);
             flat_dest = flat_dest + (ar_shaped * s);
         }
@@ -366,8 +366,7 @@ impl GraphTensor {
             let idx_k = indices_flat.slice_along(k_dim..k_dim + 1, indices_flat.dims().len() - 1);
             let idx_k = idx_k.squeeze(idx_k.dims().len() - 1);
 
-            let stride_val = data_strides[k_dim] as i32;
-            let stride_tensor = self.graph().constant(stride_val).expand_rhs(idx_k.shape);
+            let stride_tensor = self.graph().constant(data_strides[k_dim]).expand_rhs(idx_k.shape);
             let contribution = idx_k * stride_tensor;
 
             flat_base = Some(match flat_base {
@@ -406,7 +405,7 @@ impl GraphTensor {
 
                 let stride_tensor = self
                     .graph()
-                    .constant(data_strides[d] as i32)
+                    .constant(data_strides[d])
                     .expand_rhs(ar_flat.shape);
                 base_expanded = base_expanded + (ar_flat * stride_tensor);
             }
@@ -612,7 +611,7 @@ impl GraphTensor {
     /// assert_eq!(b.dims(), vec![Expression::from(5), Expression::from(6)]);
     /// ```
     pub fn slice_along(self, slice: impl SliceRange, axis: usize) -> GraphTensor {
-        let mut s = vec![(Expression::from(0), Expression::from(i32::MAX)); axis + 1];
+        let mut s = vec![(Expression::from(0), Expression::from(i64::MAX)); axis + 1];
         s[axis] = slice.bounds();
         self.slice(s)
     }
