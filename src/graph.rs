@@ -282,7 +282,18 @@ impl Graph {
     const TRIALS_PER_PROFILE: usize = 10;
 
     #[tracing::instrument(skip_all)]
-    pub fn search<R: Runtime>(&mut self, mut runtime: R, limit: usize) -> R {
+    pub fn search<R: Runtime>(&mut self, runtime: R, limit: usize) -> R {
+        let mut rng = rand::rng();
+        self.search_rng(runtime, limit, &mut rng)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn search_rng<R: Runtime, G: rand::Rng>(
+        &mut self,
+        mut runtime: R,
+        limit: usize,
+        rng: &mut G,
+    ) -> R {
         let n_chunks = self.subgraph_descriptors.len();
         let n_groups = self.chunk_groups.len();
         let multi_chunk = n_chunks > 1;
@@ -301,8 +312,7 @@ impl Graph {
             }
         }
 
-        // Search each group's representative
-        let mut rng = rand::rng();
+        // Search each group's representative.
         let mut group_best_llirs: Vec<Option<LLIRGraph>> = (0..n_groups).map(|_| None).collect();
         let mut group_best_genomes: Vec<Option<crate::egglog_utils::EGraphChoiceSet>> =
             (0..n_groups).map(|_| None).collect();
@@ -336,7 +346,7 @@ impl Graph {
             // Clear intermediate buffers from previous group's profiling
             runtime.clear_intermediate_buffers();
 
-            let mut best_genome = random_initial_choice(egraph, &mut rng);
+            let mut best_genome = random_initial_choice(egraph, rng);
             prev_selected.insert(hash_choice_set(&best_genome));
 
             let mut best_graph = egglog_to_llir(
@@ -395,7 +405,7 @@ impl Graph {
                     (limit - n_graphs).min(Self::DEFAULT_GENERATION_SIZE),
                     Self::MUTATIONS_PER_OFFSPRING,
                     &mut prev_selected,
-                    &mut rng,
+                    rng,
                 );
                 if offspring.is_empty() {
                     break;

@@ -265,7 +265,6 @@ impl GraphTensor {
     pub fn stable_argsort(self, axis: usize, descending: bool) -> GraphTensor {
         let ax_size = self.dims()[axis];
         let dims = self.dims();
-        let n = dims.len();
 
         // Expanded shape: original dims with ax_size inserted at axis
         let mut exp_dims = dims.clone();
@@ -277,19 +276,19 @@ impl GraphTensor {
 
         // Index tensors for tiebreaking
         let mut iota_a = self.graph().arange(ax_size).cast(DType::F32);
-        for (i, &dim) in exp_dims.iter().enumerate().take(axis) {
-            iota_a = iota_a.expand_dim(i, dim);
+        for (i, dim) in exp_dims.iter().take(axis).enumerate() {
+            iota_a = iota_a.expand_dim(i, *dim);
         }
         iota_a = iota_a.expand_dim(axis + 1, ax_size);
-        for (i, &dim) in exp_dims.iter().enumerate().take(n + 1).skip(axis + 2) {
-            iota_a = iota_a.expand_dim(i, dim);
+        for (i, dim) in exp_dims.iter().enumerate().skip(axis + 2) {
+            iota_a = iota_a.expand_dim(i, *dim);
         }
         let mut iota_b = self.graph().arange(ax_size).cast(DType::F32);
-        for (i, &dim) in exp_dims.iter().enumerate().take(axis + 1) {
-            iota_b = iota_b.expand_dim(i, dim);
+        for (i, dim) in exp_dims.iter().take(axis + 1).enumerate() {
+            iota_b = iota_b.expand_dim(i, *dim);
         }
-        for (i, &dim) in exp_dims.iter().enumerate().take(n + 1).skip(axis + 2) {
-            iota_b = iota_b.expand_dim(i, dim);
+        for (i, dim) in exp_dims.iter().enumerate().skip(axis + 2) {
+            iota_b = iota_b.expand_dim(i, *dim);
         }
 
         // Lexicographic comparison with stable tiebreaking (lower index first):
