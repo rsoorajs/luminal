@@ -1516,6 +1516,16 @@ class GatherElementsTestModel(torch.nn.Module):
         return torch.gather(x, 1, idx)
 
 
+class GatherElementsLargeTestModel(torch.nn.Module):
+    """Tests GatherElements on 4x8 data with 4x3 indices along axis=1."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        idx = torch.tensor(
+            [[2, 7, 0], [5, 6, 3], [4, 0, 5], [1, 5, 6]], device=x.device
+        )
+        return torch.gather(x, 1, idx)
+
+
 # ========== Expand Node Test Models ==========
 
 

@@ -222,10 +222,7 @@ pub fn parse_cast_node(
         let one_expanded = broadcast_to_expr(one, &src_dims);
         input * one_expanded
     } else if input.dtype == DType::Int {
-        let src_dims = input.dims();
-        let one = input.graph().constant_float(1.0);
-        let one_expanded = broadcast_to_expr(one, &src_dims);
-        one_expanded * input
+        cast_result  // input.cast(DType::F32) produces a real Cast op; don't use *1.0 which creates mixed-dtype Mul
     } else {
         cast_result
     };

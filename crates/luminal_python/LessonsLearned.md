@@ -337,3 +337,31 @@ inputs, then `broadcast_to_expr` each to the common shape before calling `cond`.
 tensor inputs (Where, Add, Mul, etc.), always broadcast all inputs to a common shape BEFORE
 calling the luminal graph operation. Luminal graph ops do NOT auto-broadcast — they expect inputs
 with matching shape tracker dimensions.
+
+---
+
+## Bug: TopK values wrong on CUDA (gather_elements with sliced non-contiguous indices)
+
+1. **Symptom**: `test_topk_values` failed on CUDA — rows 0-1 were correct but rows 2+ returned
+   the value at column 0 of each row (all three top-k positions got the same value).
+   Native backend was fine.
+
+2. **Root cause**: `gather_elements` was called with a non-contiguous index tensor produced by
+   `argsort(axis=1) → slice_along(..k, axis=1)`. The slice creates a ShapeTracker view of the
+   [4,8] argsort buffer with dims [4,3] and strides [8,1]. When this flowed through the
+   gather_elements Int arithmetic chain (cast, multiply, add) and into the final Gather CUDA
+   kernel, the non-contiguous strides caused incorrect index reads for later rows.
+
+3. **Why it was hard to find**: `test_topk_indices` passed (it only tests argsort+slice, not
+   the downstream gather_elements). A standalone `test_gather_elements` with constant indices
+   also passed because constant indices are contiguous. The bug only manifested when runtime-
+   computed non-contiguous indices were used with data of a different size along the gather axis.
+
+4. **Fix**: In `parse_topk_node`, compute `gather_elements(x, full_argsort, axis)` with the
+   full [4,8] argsort result (same size as data), then slice the gathered values to [4,3].
+   This ensures gather_elements always operates on same-sized contiguous tensors.
+
+5. **General principle**: When building graph operations that chain shape-tracker views
+   (slice, transpose, etc.) into downstream HLIR ops on CUDA, prefer operating on full
+   contiguous tensors first and slicing the result afterward. Non-contiguous views flowing
+   through multiple CUDA kernels can trigger stride-related bugs in the egglog-compiled code.

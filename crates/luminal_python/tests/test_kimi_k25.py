@@ -27,9 +27,7 @@ def _get_deepseek_v3_classes():
 
     from transformers import AutoConfig
 
-    config = AutoConfig.from_pretrained(
-        "moonshotai/Kimi-K2.5", trust_remote_code=True
-    )
+    config = AutoConfig.from_pretrained("moonshotai/Kimi-K2.5", trust_remote_code=True)
     tc = config.text_config
     DeepseekV3Config = type(tc)
     pkg = DeepseekV3Config.__module__.rsplit(".", 1)[0]
