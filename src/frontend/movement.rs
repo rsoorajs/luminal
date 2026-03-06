@@ -103,12 +103,13 @@ impl GraphTensor {
             DType::Int,
             "Gather indexes must have an integer dtype!"
         );
-        let id = self
-            .graph()
-            .add_op(Gather::default())
-            .input(indexes.id, indexes.shape)
-            .input(self.id, self.shape)
-            .finish();
+        let id = self.graph().add_op(
+            Gather {
+                input_shapes: vec![indexes.shape, self.shape],
+                ..Default::default()
+            },
+            &[indexes.id, self.id],
+        );
         GraphTensor::from_id(id, indexes.shape.contiguous(), self.graph_ref, self.dtype)
     }
 

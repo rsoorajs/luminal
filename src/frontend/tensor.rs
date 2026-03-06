@@ -59,12 +59,12 @@ impl GraphTensor {
 
     /// Mark this tensor as an output
     pub fn output(&self) -> GraphTensor {
-        self.graph()
-            .add_op(Output {
+        self.graph().add_op(
+            Output {
                 node: self.id.index(),
-            })
-            .input(self.id, self.shape)
-            .finish();
+            },
+            &[self.id],
+        );
         *self
     }
 
@@ -315,18 +315,6 @@ impl ToIds for () {
 impl<T: ToIds> ToIds for FxHashMap<String, T> {
     fn to_ids(&self) -> Vec<NodeIndex> {
         self.values().flat_map(|i| i.to_ids()).collect()
-    }
-}
-
-impl ToIds for (NodeIndex, ShapeTracker) {
-    fn to_ids(&self) -> Vec<NodeIndex> {
-        vec![self.0]
-    }
-}
-
-impl ToIdsMut for (NodeIndex, ShapeTracker) {
-    fn to_ids_mut(&mut self) -> Vec<&mut NodeIndex> {
-        vec![&mut self.0]
     }
 }
 
