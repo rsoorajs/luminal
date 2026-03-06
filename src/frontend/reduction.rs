@@ -9,7 +9,11 @@ impl GraphTensor {
         let mut axes = axes.to_axes();
         for dim in 0..axes.len() {
             id = self.graph().add_op(
-                SumReduce { dim: axes[dim], input_shape: shape, ..Default::default() },
+                SumReduce {
+                    dim: axes[dim],
+                    input_shape: shape,
+                    ..Default::default()
+                },
                 &[id],
             );
             shape.remove_dim(axes[dim]);
@@ -31,7 +35,11 @@ impl GraphTensor {
         let mut axes = axes.to_axes();
         for dim in 0..axes.len() {
             id = self.graph().add_op(
-                MaxReduce { dim: axes[dim], input_shape: shape, ..Default::default() },
+                MaxReduce {
+                    dim: axes[dim],
+                    input_shape: shape,
+                    ..Default::default()
+                },
                 &[id],
             );
             shape.remove_dim(axes[dim]);

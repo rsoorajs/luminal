@@ -593,7 +593,6 @@ impl DerefMut for Graph {
     }
 }
 
-
 /// Describes a tensor value crossing a graph break boundary into a chunk.
 #[derive(Debug, Clone)]
 pub struct BoundaryInput {
@@ -750,9 +749,7 @@ pub fn split_at_graph_breaks(graph: &Graph) -> Vec<SubgraphDescriptor> {
             if bi + 1 == chunk_idx {
                 // This break feeds into this chunk
                 // Get shape from the GraphBreak op itself
-                let shape = graph
-                    .get_op::<crate::hlir::GraphBreak>(brk)
-                    .input_shape;
+                let shape = graph.get_op::<crate::hlir::GraphBreak>(brk).input_shape;
                 // Get dtype from the predecessor
                 let pred = graph
                     .graph

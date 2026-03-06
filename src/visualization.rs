@@ -61,9 +61,7 @@ where
 }
 
 /// View a debug graph in the browser using Luminal Visualizer
-pub fn display_graph<E>(
-    graph: &StableGraph<impl Display + Debug, E, Directed, u32>,
-) {
+pub fn display_graph<E>(graph: &StableGraph<impl Display + Debug, E, Directed, u32>) {
     let dot_source = graph_to_dot(graph, None);
 
     // Open in Luminal Visualizer (served from graph_viewer dev server)
@@ -139,9 +137,7 @@ fn graph_to_dot<E>(
     for edge in graph.edge_indices() {
         let (src, dest) = graph.edge_endpoints(edge).unwrap();
         if let (Some(src_id), Some(dest_id)) = (map.get(&src), map.get(&dest)) {
-            dot.push_str(&format!(
-                "    n{src_id} -> n{dest_id};\n"
-            ));
+            dot.push_str(&format!("    n{src_id} -> n{dest_id};\n"));
         }
     }
 

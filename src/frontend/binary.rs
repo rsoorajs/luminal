@@ -17,7 +17,10 @@ impl Add for GraphTensor {
             self.dtype, rhs.dtype
         );
         let new_id = self.graph().add_op(
-            crate::hlir::Add { input_shapes: vec![self.shape, rhs.shape], ..Default::default() },
+            crate::hlir::Add {
+                input_shapes: vec![self.shape, rhs.shape],
+                ..Default::default()
+            },
             &[self.id, rhs.id],
         );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
@@ -76,7 +79,10 @@ impl Mul for GraphTensor {
             self.dtype, rhs.dtype
         );
         let new_id = self.graph().add_op(
-            crate::hlir::Mul { input_shapes: vec![self.shape, rhs.shape], ..Default::default() },
+            crate::hlir::Mul {
+                input_shapes: vec![self.shape, rhs.shape],
+                ..Default::default()
+            },
             &[self.id, rhs.id],
         );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
@@ -138,7 +144,10 @@ impl Rem<GraphTensor> for GraphTensor {
             self.dtype, rhs.dtype
         );
         let new_id = self.graph().add_op(
-            Mod { input_shapes: vec![self.shape, rhs.shape], ..Default::default() },
+            Mod {
+                input_shapes: vec![self.shape, rhs.shape],
+                ..Default::default()
+            },
             &[self.id, rhs.id],
         );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
@@ -286,7 +295,10 @@ impl GraphTensor {
             self.dtype, rhs.dtype
         );
         let new_id = self.graph().add_op(
-            LessThan { input_shapes: vec![self.shape, rhs.shape], ..Default::default() },
+            LessThan {
+                input_shapes: vec![self.shape, rhs.shape],
+                ..Default::default()
+            },
             &[self.id, rhs.id],
         );
         // Comparison operations always output Bool

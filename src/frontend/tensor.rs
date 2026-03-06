@@ -59,8 +59,12 @@ impl GraphTensor {
 
     /// Mark this tensor as an output
     pub fn output(&self) -> GraphTensor {
-        self.graph()
-            .add_op(Output { node: self.id.index() }, &[self.id]);
+        self.graph().add_op(
+            Output {
+                node: self.id.index(),
+            },
+            &[self.id],
+        );
         *self
     }
 
@@ -306,7 +310,6 @@ impl<T: ToIds> ToIds for FxHashMap<String, T> {
         self.values().flat_map(|i| i.to_ids()).collect()
     }
 }
-
 
 macro_rules! tuple_impls {
     ([$($name:ident),+] , [$($idx:tt),+]) => {

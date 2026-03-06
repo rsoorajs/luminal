@@ -90,10 +90,9 @@ impl GraphTensor {
         if self.dtype == dtype {
             return self;
         }
-        let id = self.graph().add_op(
-            Cast(self.shape.n_physical_elements(), dtype),
-            &[self.id],
-        );
+        let id = self
+            .graph()
+            .add_op(Cast(self.shape.n_physical_elements(), dtype), &[self.id]);
         let mut shape = self.shape;
         shape.element_stride_bits = dtype.bits();
         GraphTensor::from_id(id, shape, self.graph_ref, dtype)

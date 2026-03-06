@@ -15,7 +15,10 @@ impl GraphTensor {
     /// Base 2 log
     pub fn log2(self) -> GraphTensor {
         let new_id = self.graph().add_op(
-            crate::hlir::Log2 { input_shape: self.shape, ..Default::default() },
+            crate::hlir::Log2 {
+                input_shape: self.shape,
+                ..Default::default()
+            },
             &[self.id],
         );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
@@ -24,7 +27,10 @@ impl GraphTensor {
     /// Base 2 exp
     pub fn exp2(self) -> GraphTensor {
         let new_id = self.graph().add_op(
-            crate::hlir::Exp2 { input_shape: self.shape, ..Default::default() },
+            crate::hlir::Exp2 {
+                input_shape: self.shape,
+                ..Default::default()
+            },
             &[self.id],
         );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
@@ -43,7 +49,10 @@ impl GraphTensor {
     /// Take the reciprocal of each element
     pub fn reciprocal(self) -> GraphTensor {
         let new_id = self.graph().add_op(
-            crate::hlir::Recip { input_shape: self.shape, ..Default::default() },
+            crate::hlir::Recip {
+                input_shape: self.shape,
+                ..Default::default()
+            },
             &[self.id],
         );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
@@ -52,7 +61,10 @@ impl GraphTensor {
     /// The sin(x) function
     pub fn sin(self) -> GraphTensor {
         let new_id = self.graph().add_op(
-            crate::hlir::Sin { input_shape: self.shape, ..Default::default() },
+            crate::hlir::Sin {
+                input_shape: self.shape,
+                ..Default::default()
+            },
             &[self.id],
         );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
@@ -71,7 +83,10 @@ impl GraphTensor {
     /// The square root function
     pub fn sqrt(self) -> GraphTensor {
         let new_id = self.graph().add_op(
-            crate::hlir::Sqrt { input_shape: self.shape, ..Default::default() },
+            crate::hlir::Sqrt {
+                input_shape: self.shape,
+                ..Default::default()
+            },
             &[self.id],
         );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)
@@ -79,7 +94,9 @@ impl GraphTensor {
 
     pub fn graph_break(self) -> GraphTensor {
         let new_id = self.graph().add_op(
-            crate::hlir::GraphBreak { input_shape: self.shape },
+            crate::hlir::GraphBreak {
+                input_shape: self.shape,
+            },
             &[self.id],
         );
         GraphTensor::from_id(new_id, self.shape.contiguous(), self.graph_ref, self.dtype)

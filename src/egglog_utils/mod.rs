@@ -460,9 +460,10 @@ pub fn hlir_subgraph_to_egglog(graph: &Graph, subgraph: &SubgraphDescriptor) -> 
             .get_sources(n)
             .into_iter()
             .map(|src| {
-                let name = names.get(&src).cloned().unwrap_or_else(|| {
-                    panic!("Missing egglog name for node {:?}", src)
-                });
+                let name = names
+                    .get(&src)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("Missing egglog name for node {:?}", src));
                 (src, name)
             })
             .collect_vec();
