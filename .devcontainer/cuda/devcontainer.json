@@ -8,13 +8,13 @@
         "ghcr.io/devcontainers/features/common-utils:2": {
             "installZsh": false,
             "installOhMyZsh": false,
-            "username": "luminal",
+            "username": "ubuntu",
             "userUid": "1000",
             "userGid": "1000",
             "configureZshAsDefaultShell": false
         }
     },
-    "remoteUser": "luminal",
+    "remoteUser": "ubuntu",
     "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder}",
     "customizations": {
         "vscode": {
