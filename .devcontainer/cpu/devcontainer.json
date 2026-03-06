@@ -1,6 +1,7 @@
 {
     "name": "Luminal (CPU)",
     "image": "ghcr.io/luminal-ai/luminal-docker:cpu",
+    "containerUser": "ubuntu",
     "features": {
         "ghcr.io/devcontainers/features/common-utils:2": {
             "installZsh": false,

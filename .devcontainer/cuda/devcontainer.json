@@ -4,6 +4,7 @@
     "runArgs": [
         "--gpus=all"
     ],
+    "containerUser": "ubuntu",
     "features": {
         "ghcr.io/devcontainers/features/common-utils:2": {
             "installZsh": false,
