@@ -14,3 +14,5 @@ mod pooling;
 pub use pooling::*;
 mod moe;
 pub use moe::*;
+mod attention;
+pub use attention::*;

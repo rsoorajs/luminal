@@ -157,7 +157,7 @@ fn llama_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> Grap
     // Combine back into output
     let mut s = x0_out.concat_along(x1_out, 3);
     let (n_heads, seq_dim, _) = input.dims3();
-    s.shape = ShapeTracker::new_with_element_bits((n_heads, seq_dim, HEAD_DIM), s.dtype.bits());
+    s.shape = ShapeTracker::new((n_heads, seq_dim, HEAD_DIM));
     s = s.transpose(0, 1) * 1.0;
     s.shape = orig_shape;
     s
@@ -204,10 +204,10 @@ impl KVCache {
                 .map(|_| {
                     (
                         stream
-                            .alloc_zeros(KV_GROUPS * HEAD_DIM * capacity * size_of::<f32>())
+                            .alloc_zeros((HIDDEN / KV_GROUPS) * capacity * size_of::<f32>())
                             .unwrap(),
                         stream
-                            .alloc_zeros(KV_GROUPS * HEAD_DIM * capacity * size_of::<f32>())
+                            .alloc_zeros((HIDDEN / KV_GROUPS) * capacity * size_of::<f32>())
                             .unwrap(),
                     )
                 })
@@ -240,15 +240,16 @@ pub struct LlamaAttention {
 
 impl LlamaAttention {
     fn new(k_cache: u64, v_cache: u64, seq: Expression, prev_seq: Expression) -> Self {
+        let z = Expression::from('z');
         Self {
             range: (HIDDEN / HEAD_DIM / KV_GROUPS, KV_GROUPS, seq).to_shape(),
             head_dim: HEAD_DIM.into(),
             cur_seq: seq,
             kv_row_stride: (HIDDEN / KV_GROUPS).into(),
-            q_stride: (HEAD_DIM * KV_GROUPS, HEAD_DIM, HIDDEN).to_shape(),
-            k_stride: (HEAD_DIM, 0, 0).to_shape(),
-            v_stride: (HEAD_DIM, 0, 0).to_shape(),
-            o_stride: (HEAD_DIM * KV_GROUPS, HEAD_DIM, HIDDEN).to_shape(),
+            q_stride: vec![z * (HEAD_DIM * KV_GROUPS), z * HEAD_DIM, z * HIDDEN],
+            k_stride: vec![z * HEAD_DIM, 0.into(), 0.into()],
+            v_stride: vec![z * HEAD_DIM, 0.into(), 0.into()],
+            o_stride: vec![z * (HEAD_DIM * KV_GROUPS), z * HEAD_DIM, z * HIDDEN],
             prev_seq,
             k_cache,
             v_cache,
@@ -290,12 +291,13 @@ impl BlockOp for LlamaAttention {
     }
 
     fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
+        let z = Expression::from('z');
         let mut q_pos_stride = vec![0.into(); self.range.len()];
-        q_pos_stride[self.range.len() - 1] = 1.into();
+        q_pos_stride[self.range.len() - 1] = z;
         let mut group_pos_stride = vec![0.into(); self.range.len()];
-        group_pos_stride[self.range.len() - 2] = 1.into();
+        group_pos_stride[self.range.len() - 2] = z;
         let mut head_pos_stride = vec![0.into(); self.range.len()];
-        head_pos_stride[self.range.len() - 3] = 1.into();
+        head_pos_stride[self.range.len() - 3] = z;
         payload
             .expr("head_size", self.head_dim)
             .expr("cur_seq", self.cur_seq)

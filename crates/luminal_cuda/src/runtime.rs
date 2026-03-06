@@ -237,7 +237,16 @@ impl CudaRuntime {
 
     #[tracing::instrument(skip_all)]
     fn allocate_intermediate_buffers(&mut self, dyn_dims: &FxHashMap<char, usize>) {
+        // Free old buffers before allocating new ones to avoid peak memory doubling
+        self.buffers.clear();
+        self.cached_buffer_ptrs.clear();
+        self.cuda_stream.synchronize().unwrap();
+
         self.intermediate_buffer_dims.clear();
+        let mut total_alloc: usize = 0;
+        let mut max_alloc: usize = 0;
+        let mut max_alloc_node = NodeIndex::new(0);
+        let mut alloc_count: usize = 0;
         for node in self.llir_graph.node_indices().collect_vec() {
             if self.llir_graph[node].to_op::<Input>().is_some() {
                 continue;
@@ -245,9 +254,14 @@ impl CudaRuntime {
             if let Some(op) = self.llir_graph[node].to_dialect::<dyn BlockOp>() {
                 let out_bytes = op.output_bytes();
                 let exec_size = out_bytes.exec(dyn_dims).unwrap();
-                // Skip allocation for ops with zero output size
                 if exec_size == 0 {
                     continue;
+                }
+                total_alloc += exec_size;
+                alloc_count += 1;
+                if exec_size > max_alloc {
+                    max_alloc = exec_size;
+                    max_alloc_node = node;
                 }
                 self.intermediate_buffer_dims
                     .extend(op.output_bytes().dyn_vars());
@@ -265,14 +279,29 @@ impl CudaRuntime {
                 if exec_bytes == 0 {
                     continue;
                 }
+                total_alloc += exec_bytes;
+                alloc_count += 1;
+                if exec_bytes > max_alloc {
+                    max_alloc = exec_bytes;
+                    max_alloc_node = node;
+                }
                 self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
                 self.buffers
                     .insert(node, self.cuda_stream.alloc_zeros(exec_bytes).unwrap());
                 let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
                 self.cached_buffer_ptrs.insert(node, ptr);
             } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
-                let out_bytes = op.output_bytes().exec(dyn_dims).unwrap();
+                let out_bytes_expr = op.output_bytes();
+                self.intermediate_buffer_dims
+                    .extend(out_bytes_expr.dyn_vars());
+                let out_bytes = out_bytes_expr.exec(dyn_dims).unwrap();
                 if out_bytes > 0 {
+                    total_alloc += out_bytes;
+                    alloc_count += 1;
+                    if out_bytes > max_alloc {
+                        max_alloc = out_bytes;
+                        max_alloc_node = node;
+                    }
                     self.buffers
                         .insert(node, self.cuda_stream.alloc_zeros(out_bytes).unwrap());
                     let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
@@ -280,6 +309,14 @@ impl CudaRuntime {
                 }
             }
         }
+        tracing::debug!(
+            "[ALLOC] dyn_dims={:?} total={:.1}MB ({} buffers, max={:.1}MB node={:?})",
+            dyn_dims,
+            total_alloc as f64 / 1e6,
+            alloc_count,
+            max_alloc as f64 / 1e6,
+            max_alloc_node,
+        );
     }
 
     /// Pre-allocate buffers with the given dynamic dimension values.
@@ -563,12 +600,12 @@ impl Runtime for CudaRuntime {
         self.hlir_to_llir.clear();
         self.llir_to_hlir.clear();
         self.changed_hlir.clear();
-        for (hlir_node, llir_node) in self
+        let input_nodes: Vec<_> = self
             .llir_graph
             .node_indices()
             .filter_map(|n| self.llir_graph[n].to_op::<Input>().map(|op| (op.node, n)))
-            .collect_vec()
-        {
+            .collect_vec();
+        for (hlir_node, llir_node) in input_nodes {
             self.llir_to_hlir
                 .insert(llir_node, NodeIndex::new(hlir_node));
             self.hlir_to_llir
@@ -594,10 +631,18 @@ impl Runtime for CudaRuntime {
         self.changed_hlir.insert(id);
     }
 
+    fn has_hlir_buffer(&self, node_index: usize) -> bool {
+        self.hlir_buffers.contains_key(&NodeIndex::new(node_index))
+    }
+
     fn clear_intermediate_buffers(&mut self) {
         self.cuda_stream.synchronize().unwrap();
         self.buffers.clear();
         self.cached_buffer_ptrs.clear();
+    }
+
+    fn intermediate_buffer_bytes(&self) -> usize {
+        self.buffers.values().map(|b| b.len()).sum()
     }
 
     #[tracing::instrument(skip_all)]
@@ -705,7 +750,10 @@ impl Runtime for CudaRuntime {
                 let Some(&llir_node) = self.hlir_to_llir.get(&hlir_node) else {
                     continue;
                 };
-                let ptr = match &self.hlir_buffers[&hlir_node] {
+                let Some(input) = self.hlir_buffers.get(&hlir_node) else {
+                    continue;
+                };
+                let ptr = match input {
                     CudaInput::Buffer(buf) => buf.device_ptr(&self.cuda_stream).0,
                     CudaInput::Ptr(p) => *p,
                 };
@@ -729,13 +777,13 @@ impl Runtime for CudaRuntime {
             if let Some(buf) = self.buffers.get(&exec_op.output) {
                 buffer_map.insert(exec_op.output, buf);
             }
-            // Add input buffers
+            // Add input buffers (prefer HLIR weight buffers over intermediate placeholders)
             for inp in exec_op.inputs.iter() {
-                if let Some(buf) = self.buffers.get(inp) {
-                    buffer_map.insert(*inp, buf);
-                } else if let Some(hlir_node) = self.llir_to_hlir.get(inp)
+                if let Some(hlir_node) = self.llir_to_hlir.get(inp)
                     && let Some(CudaInput::Buffer(buf)) = self.hlir_buffers.get(hlir_node)
                 {
+                    buffer_map.insert(*inp, buf);
+                } else if let Some(buf) = self.buffers.get(inp) {
                     buffer_map.insert(*inp, buf);
                 }
             }

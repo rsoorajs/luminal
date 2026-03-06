@@ -3,6 +3,66 @@ use itertools::Itertools;
 use crate::prelude::*;
 use std::ops::{Add, Mul, Neg};
 
+/// Scatter `arange(ax_size)` into rank positions to convert per-element ranks
+/// into sort indices. Handles multi-dim by computing flat scatter offsets.
+fn scatter_ranks_to_sort_indices(
+    ranks: GraphTensor,
+    dims: Vec<Expression>,
+    axis: usize,
+    g: &mut Graph,
+) -> GraphTensor {
+    let ax_size = dims[axis];
+    let ndim = dims.len();
+
+    // Values: [0, 1, ..., ax_size-1] along axis, expanded to full shape
+    let mut values = g.arange(ax_size);
+    let mut zeros = g.iota(Expression::from(0usize), ax_size);
+    for (i, &dim) in dims.iter().enumerate() {
+        if i != axis {
+            values = values.expand_dim(i, dim);
+            zeros = zeros.expand_dim(i, dim);
+        }
+    }
+
+    if ndim == 1 {
+        return values.scatter(ranks, zeros);
+    }
+
+    // Multi-dim: ranks are per-axis (0..ax_size) but scatter uses flat indices.
+    // Compute: adjusted = base_offset + ranks * axis_stride
+    let mut strides = vec![Expression::from(1usize); ndim];
+    for d in (0..ndim.saturating_sub(1)).rev() {
+        strides[d] = (strides[d + 1] * dims[d + 1]).simplify();
+    }
+    let axis_stride = strides[axis];
+    let ranks_scaled = ranks * axis_stride;
+
+    let mut base_offset: Option<GraphTensor> = None;
+    for d in 0..ndim {
+        if d == axis {
+            continue;
+        }
+        let expr = Expression::from('z') * strides[d];
+        let mut component = g.iota(expr, dims[d]);
+        for (i, &dim) in dims.iter().enumerate() {
+            if i != d {
+                component = component.expand_dim(i, dim);
+            }
+        }
+        base_offset = Some(match base_offset {
+            None => component,
+            Some(acc) => acc + component,
+        });
+    }
+
+    let adjusted = match base_offset {
+        None => ranks_scaled,
+        Some(base) => base + ranks_scaled,
+    };
+
+    values.scatter(adjusted, zeros)
+}
+
 impl Neg for GraphTensor {
     type Output = GraphTensor;
 
@@ -256,8 +316,10 @@ impl GraphTensor {
         let a = self.expand_dim(axis + 1, ax_size) + 0.0;
         let b = self.expand_dim(axis, ax_size) + 1e-9;
         let cmp = if descending { a.gt(b) } else { a.lt(b) };
-        let ind = (cmp.cast(DType::F32) + 0.0).sum(axis).cast(DType::Int);
-        ind.inverse_permutation(axis)
+        // ind[j] = rank of element j (how many elements are smaller/larger)
+        let ranks = (cmp.cast(DType::F32) + 0.0).sum(axis).cast(DType::Int);
+        // Scatter original indices into rank positions to get sort indices
+        scatter_ranks_to_sort_indices(ranks, self.dims(), axis, self.graph())
     }
 
     /// Stable argsort: like `argsort`, but breaks ties by original index
@@ -305,8 +367,9 @@ impl GraphTensor {
         let val_eq = not_lt * not_gt;
         let cmp = primary.cast(DType::F32) + val_eq * idx_cmp.cast(DType::F32);
 
-        let ind = (cmp * 1.0).sum(axis).cast(DType::Int);
-        ind.inverse_permutation(axis)
+        // Scatter original indices into rank positions to get sort indices
+        let ranks = (cmp * 1.0).sum(axis).cast(DType::Int);
+        scatter_ranks_to_sort_indices(ranks, dims, axis, self.graph())
     }
 
     /// Sort the tensor along a certian axis

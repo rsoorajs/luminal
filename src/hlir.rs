@@ -44,7 +44,7 @@ fn dtype_fixed_rule(sort: &SortDef, dtype_sort: &SortDef) -> Rule {
 }
 use num_traits::Float;
 use petgraph::{Direction, algo::toposort, prelude::StableGraph, visit::EdgeRef};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::info_span;
 
 pub type HLIROps = (
@@ -64,6 +64,7 @@ pub type HLIROps = (
     Mod,
     LessThan,
     Gather,
+    Scatter,
     SumReduce,
     MaxReduce,
 );
@@ -1245,6 +1246,117 @@ impl NativeOp for Gather {
     }
 }
 
+// Scatter Op (inverse of Gather)
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Scatter {
+    dest_shape: Vec<Expression>,
+    dest_strides: Vec<Expression>,
+    index_shape: Vec<Expression>,
+    index_strides: Vec<Expression>,
+    src_strides: Vec<Expression>,
+}
+impl Display for Scatter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Scatter")
+    }
+}
+impl HLIROp for Scatter {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+        format!(
+            "(Scatter {} {} {} {} {} {} {} {})",
+            inputs[0].1,
+            elist_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&inputs[0].2.strides),
+            inputs[1].1,
+            elist_to_egglog(&inputs[1].2.dims),
+            elist_to_egglog(&inputs[1].2.strides),
+            inputs[2].1,
+            elist_to_egglog(&inputs[2].2.strides),
+        )
+    }
+}
+
+impl EgglogOp for Scatter {
+    fn sort(&self) -> SortDef {
+        sort(
+            IR,
+            "Scatter",
+            &[
+                ("dest", IR),
+                ("dest_shape", ELIST),
+                ("dest_strides", ELIST),
+                ("indexes", IR),
+                ("index_shape", ELIST),
+                ("index_strides", ELIST),
+                ("src", IR),
+                ("src_strides", ELIST),
+            ],
+        )
+    }
+    fn cleanup(&self) -> bool {
+        true
+    }
+    fn rewrites(&self) -> Vec<Rule> {
+        vec![dtype_propagation_rule(&self.sort(), "src")]
+    }
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        (
+            LLIROp::new::<dyn NativeOp>(Box::new(Self {
+                dest_shape: extract_expr_list(egraph, children[1], list_cache, expr_cache).unwrap(),
+                dest_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache)
+                    .unwrap(),
+                index_shape: extract_expr_list(egraph, children[4], list_cache, expr_cache)
+                    .unwrap(),
+                index_strides: extract_expr_list(egraph, children[5], list_cache, expr_cache)
+                    .unwrap(),
+                src_strides: extract_expr_list(egraph, children[7], list_cache, expr_cache)
+                    .unwrap(),
+            })),
+            vec![children[0], children[3], children[6]],
+        )
+    }
+}
+impl NativeOp for Scatter {
+    fn execute(&self, inputs: Vec<&NativeData>, dyn_map: &FxHashMap<char, usize>) -> NativeData {
+        let (dest, indexes, src) = (inputs[0], inputs[1], inputs[2]);
+        let dest_ind =
+            StridedIterator::new(&self.dest_shape, &self.dest_strides, dyn_map).collect_vec();
+        let index_ind = StridedIterator::new(&self.index_shape, &self.index_strides, dyn_map);
+        let src_ind =
+            StridedIterator::new(&self.index_shape, &self.src_strides, dyn_map).collect_vec();
+        let NativeData::Int(indexes) = indexes else {
+            panic!("indexes must be int!")
+        };
+        macro_rules! scatter_impl {
+            ($variant:ident, $dest_data:expr, $src_data:expr) => {{
+                let mut output: Vec<_> = dest_ind.iter().map(|&i| $dest_data[i]).collect();
+                for (src_idx, flat_i) in index_ind.enumerate() {
+                    let idx = indexes[flat_i] as usize;
+                    if idx < output.len() {
+                        output[idx] = $src_data[src_ind[src_idx]];
+                    }
+                }
+                NativeData::$variant(output)
+            }};
+        }
+        match (dest, src) {
+            (NativeData::F32(d), NativeData::F32(s)) => scatter_impl!(F32, d, s),
+            (NativeData::F16(d), NativeData::F16(s)) => scatter_impl!(F16, d, s),
+            (NativeData::Bf16(d), NativeData::Bf16(s)) => scatter_impl!(Bf16, d, s),
+            (NativeData::Int(d), NativeData::Int(s)) => scatter_impl!(Int, d, s),
+            (NativeData::Bool(d), NativeData::Bool(s)) => scatter_impl!(Bool, d, s),
+            _ => panic!("dest and src must have the same dtype!"),
+        }
+    }
+}
+
 // Reduce Ops (A -> B (different shape))
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -1475,7 +1587,7 @@ pub trait NativeOp: Debug + AsAny + Send + Sync {
     fn execute(&self, inputs: Vec<&NativeData>, dyn_map: &FxHashMap<char, usize>) -> NativeData;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum NativeData {
     F32(Vec<f32>),
     F16(Vec<f16>),
@@ -1660,9 +1772,21 @@ impl Runtime for NativeRuntime {
 
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
         for node in toposort(&self.graph, None).unwrap() {
-            if (**self.graph[node]).as_any().is::<Input>()
-                || (**self.graph[node]).as_any().is::<Output>()
-            {
+            if (**self.graph[node]).as_any().is::<Input>() {
+                continue;
+            }
+
+            if (**self.graph[node]).as_any().is::<Output>() {
+                // Copy source buffer into Output node's own slot
+                let source = self
+                    .graph
+                    .edges_directed(node, Direction::Incoming)
+                    .sorted_by_key(|e| e.id())
+                    .next()
+                    .unwrap()
+                    .source();
+                let data = self.buffers[&source].clone();
+                self.buffers.insert(node, data);
                 continue;
             }
 
@@ -1677,6 +1801,14 @@ impl Runtime for NativeRuntime {
             let output = self.graph[node].execute(inputs, dyn_map);
             self.buffers.insert(node, output);
         }
+
+        // Consume all non-Output buffers (inputs + intermediates)
+        let output_nodes: FxHashSet<NodeIndex> = self
+            .graph
+            .node_indices()
+            .filter(|n| (**self.graph[*n]).as_any().is::<Output>())
+            .collect();
+        self.buffers.retain(|k, _| output_nodes.contains(k));
     }
 }
 
@@ -1695,12 +1827,7 @@ impl NativeRuntime {
                 }
             })
             .unwrap();
-        let data_id = self
-            .graph
-            .neighbors_directed(output_id, Direction::Incoming)
-            .next()
-            .unwrap();
-        let NativeData::F32(f) = self.buffers.get(&data_id).unwrap() else {
+        let NativeData::F32(f) = self.buffers.get(&output_id).unwrap() else {
             panic!()
         };
         f

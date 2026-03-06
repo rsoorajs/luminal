@@ -5,7 +5,7 @@ use luminal::{
         base::{dtype, DTYPE, ELIST, EXPRESSION, F64, IR, OP_SORTS, SORTS},
         SerializedEGraph,
     },
-    hlir::{Add, Cast, Constant, Gather, Iota, LessThan, MaxReduce, Mod, Mul, SumReduce},
+    hlir::{Add, Cast, Constant, Gather, Iota, LessThan, MaxReduce, Mod, Mul, Scatter, SumReduce},
     op::*,
     prelude::*,
     shape::flatten_strides,
@@ -31,6 +31,7 @@ pub type MetalOps = (
     MetalConstant,
     MetalIota,
     MetalGather,
+    MetalScatter,
     // Type conversion
     MetalCast,
 );
@@ -1417,6 +1418,276 @@ impl MetalKernelOp for MetalGather {
 
     fn flops(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {
         // Gather is memory-bound, no significant FLOPs
+        0
+    }
+}
+
+// MetalScatter: inverse of gather - out = copy(dest); out[indexes[i]] = src[i]
+// Uses two sequential dispatches: copy then scatter. Metal guarantees order within an encoder.
+#[derive(Debug, Clone)]
+pub struct MetalScatter {
+    dest_shape: Vec<Expression>,
+    dest_strides: Vec<Expression>,
+    index_shape: Vec<Expression>,
+    index_strides: Vec<Expression>,
+    src_strides: Vec<Expression>,
+    out_strides: Vec<Expression>,
+    copy_pipeline: std::sync::OnceLock<ComputePipelineState>,
+}
+
+impl Default for MetalScatter {
+    fn default() -> Self {
+        Self {
+            dest_shape: Vec::new(),
+            dest_strides: Vec::new(),
+            index_shape: Vec::new(),
+            index_strides: Vec::new(),
+            src_strides: Vec::new(),
+            out_strides: Vec::new(),
+            copy_pipeline: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl EgglogOp for MetalScatter {
+    fn sort(&self) -> SortDef {
+        sort(
+            IR,
+            "MetalScatter",
+            &[
+                ("dest_shape", ELIST),
+                ("dest_strides", ELIST),
+                ("dest", IR),
+                ("indexes", IR),
+                ("index_shape", ELIST),
+                ("index_strides", ELIST),
+                ("src", IR),
+                ("src_strides", ELIST),
+                ("out_strides", ELIST),
+            ],
+        )
+    }
+
+    fn rewrites(&self) -> Vec<Rule> {
+        let (scatter_args, scatter_match) = Scatter::default().sort().new_call();
+        let out_strides = SORTS
+            .row_major
+            .call([("list".to_string(), scatter_args["dest_shape"].clone())]);
+        let dt = v("?__dt");
+        let metal_args = [
+            ("dest_shape".to_string(), scatter_args["dest_shape"].clone()),
+            (
+                "dest_strides".to_string(),
+                scatter_args["dest_strides"].clone(),
+            ),
+            ("dest".to_string(), scatter_args["dest"].clone()),
+            ("indexes".to_string(), scatter_args["indexes"].clone()),
+            (
+                "index_shape".to_string(),
+                scatter_args["index_shape"].clone(),
+            ),
+            (
+                "index_strides".to_string(),
+                scatter_args["index_strides"].clone(),
+            ),
+            ("src".to_string(), scatter_args["src"].clone()),
+            (
+                "src_strides".to_string(),
+                scatter_args["src_strides"].clone(),
+            ),
+            ("out_strides".to_string(), out_strides),
+        ];
+        let metal_op = self.sort().call(metal_args);
+        vec![rule([
+            union(scatter_match, metal_op.clone()),
+            set(dtype(metal_op), dt.clone()),
+        ])
+        .fact(eq(dt, dtype(scatter_args["src"].clone())))]
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        use luminal::egglog_utils::extract_expr_list;
+        (
+            LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
+                dest_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
+                dest_strides: extract_expr_list(egraph, children[1], list_cache, expr_cache)
+                    .unwrap(),
+                index_shape: extract_expr_list(egraph, children[4], list_cache, expr_cache)
+                    .unwrap(),
+                index_strides: extract_expr_list(egraph, children[5], list_cache, expr_cache)
+                    .unwrap(),
+                src_strides: extract_expr_list(egraph, children[7], list_cache, expr_cache)
+                    .unwrap(),
+                out_strides: extract_expr_list(egraph, children[8], list_cache, expr_cache)
+                    .unwrap(),
+                copy_pipeline: std::sync::OnceLock::new(),
+            })),
+            vec![children[2], children[3], children[6]], // dest, indexes, src
+        )
+    }
+}
+
+impl MetalKernelOp for MetalScatter {
+    fn compile(&self, device: &Device) -> ComputePipelineState {
+        // Compile the copy kernel and store it
+        let dest_idx = lower_expression_for_metal(
+            &flatten_strides(&self.dest_shape, &self.dest_strides),
+            "idx",
+        );
+        let out_copy_idx = lower_expression_for_metal(
+            &flatten_strides(&self.dest_shape, &self.out_strides),
+            "idx",
+        );
+        let copy_source = format!(
+            r#"
+            #include <metal_stdlib>
+            using namespace metal;
+            kernel void copy_kernel(
+                device float *out [[buffer(0)]],
+                const device float *dest [[buffer(1)]],
+                device uint &n_elements [[buffer(2)]],
+                constant int *dyn [[buffer({dyn_buffer_index})]],
+                uint idx [[thread_position_in_grid]]
+            ) {{
+                if (idx < n_elements) {{
+                    out[{out_copy_idx}] = dest[{dest_idx}];
+                }}
+            }}
+            "#,
+            dyn_buffer_index = DYN_BUFFER_INDEX
+        );
+        let _ = self
+            .copy_pipeline
+            .set(compile_shader(device, &copy_source, "copy_kernel"));
+
+        // Compile the scatter kernel (returned as the main pipeline)
+        let index_idx = lower_expression_for_metal(
+            &flatten_strides(&self.index_shape, &self.index_strides),
+            "idx",
+        );
+        let src_idx = lower_expression_for_metal(
+            &flatten_strides(&self.index_shape, &self.src_strides),
+            "idx",
+        );
+        let scatter_source = format!(
+            r#"
+            #include <metal_stdlib>
+            using namespace metal;
+            kernel void scatter_kernel(
+                device float *out [[buffer(0)]],
+                const device int *indexes [[buffer(1)]],
+                const device float *src [[buffer(2)]],
+                device uint &n_elements [[buffer(3)]],
+                constant int *dyn [[buffer({dyn_buffer_index})]],
+                uint idx [[thread_position_in_grid]]
+            ) {{
+                if (idx < n_elements) {{
+                    int scatter_idx = indexes[{index_idx}];
+                    out[scatter_idx] = src[{src_idx}];
+                }}
+            }}
+            "#,
+            dyn_buffer_index = DYN_BUFFER_INDEX
+        );
+        compile_shader(device, &scatter_source, "scatter_kernel")
+    }
+
+    fn output_size(&self) -> Expression {
+        self.dest_shape
+            .iter()
+            .cloned()
+            .product::<Expression>()
+            .max(Expression::from(1))
+    }
+
+    fn encode(
+        &self,
+        encoder: &ComputeCommandEncoderRef,
+        pipeline: &ComputePipelineState,
+        inputs: &[&Buffer],
+        output: &Buffer,
+        dyn_map: &FxHashMap<char, usize>,
+    ) {
+        let n_dest = self
+            .dest_shape
+            .iter()
+            .cloned()
+            .product::<Expression>()
+            .exec(dyn_map)
+            .unwrap() as u32;
+        let n_src = self
+            .index_shape
+            .iter()
+            .cloned()
+            .product::<Expression>()
+            .exec(dyn_map)
+            .unwrap() as u32;
+
+        // Dispatch 1: copy dest → output
+        let copy_pipeline = self
+            .copy_pipeline
+            .get()
+            .expect("copy pipeline not compiled");
+        encoder.set_compute_pipeline_state(copy_pipeline);
+        encoder.set_buffer(0, Some(output), 0);
+        encoder.set_buffer(1, Some(inputs[0]), 0); // dest
+        encoder.set_bytes(
+            2,
+            std::mem::size_of::<u32>() as u64,
+            &n_dest as *const u32 as *const _,
+        );
+        let thread_group_size = MTLSize::new(256, 1, 1);
+        encoder.dispatch_thread_groups(
+            MTLSize::new((n_dest as u64).div_ceil(256), 1, 1),
+            thread_group_size,
+        );
+
+        // Dispatch 2: scatter src → output[indexes[i]]
+        encoder.set_compute_pipeline_state(pipeline);
+        encoder.set_buffer(0, Some(output), 0);
+        encoder.set_buffer(1, Some(inputs[1]), 0); // indexes
+        encoder.set_buffer(2, Some(inputs[2]), 0); // src
+        encoder.set_bytes(
+            3,
+            std::mem::size_of::<u32>() as u64,
+            &n_src as *const u32 as *const _,
+        );
+        encoder.dispatch_thread_groups(
+            MTLSize::new((n_src as u64).div_ceil(256), 1, 1),
+            thread_group_size,
+        );
+    }
+
+    fn bytes_loaded(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let n_dest = self.output_size().exec(dyn_map).unwrap_or(0);
+        let n_src = self
+            .index_shape
+            .iter()
+            .cloned()
+            .product::<Expression>()
+            .exec(dyn_map)
+            .unwrap_or(0);
+        n_dest * std::mem::size_of::<f32>()
+            + n_src * std::mem::size_of::<i32>()
+            + n_src * std::mem::size_of::<f32>()
+    }
+
+    fn bytes_stored(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let n = self.output_size().exec(dyn_map).unwrap_or(0);
+        n * std::mem::size_of::<f32>()
+    }
+
+    fn flops(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {
         0
     }
 }

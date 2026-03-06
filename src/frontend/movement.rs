@@ -1,6 +1,9 @@
 use itertools::Itertools;
 
-use crate::{hlir::Gather, prelude::*};
+use crate::{
+    hlir::{Gather, Scatter},
+    prelude::*,
+};
 
 impl GraphTensor {
     /// Swap dimensions of the tensor
@@ -109,44 +112,22 @@ impl GraphTensor {
         GraphTensor::from_id(id, indexes.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
-    /// Given a tensor of non-repeating indexes along a dimension, generate an inverse permutation
-    /// x = [3, 2, 4, 1, 5, 0]
-    /// inv_perm(x) = [5, 3, 1, 0, 2, 4]
-    #[allow(clippy::needless_range_loop)]
-    pub fn inverse_permutation(self, axis: usize) -> GraphTensor {
-        // TODO: this is super inefficient because it requires materializing a large (n^2) one-hot tensor
-        assert_eq!(self.dtype, DType::Int);
-        let dims = self.dims();
-        let ax_size = dims[axis];
-        let mut dims2 = dims.clone();
-        dims2.insert(axis, ax_size);
-        // candidate: varies along candidate dim (axis), broadcast elsewhere.
-        let mut candidate = self.graph().arange(ax_size);
-        for i in 0..axis {
-            candidate = candidate.expand_dim(i, dims2[i]);
-        }
-        for i in axis + 1..dims2.len() {
-            candidate = candidate.expand_dim(i, dims2[i]);
-        }
-        // position: varies along position dim (axis+1), broadcast elsewhere.
-        let mut position = self.graph().arange(ax_size);
-        for i in 0..(axis + 1) {
-            position = position.expand_dim(i, dims2[i]);
-        }
-        for i in (axis + 2)..dims2.len() {
-            position = position.expand_dim(i, dims2[i]);
-        }
-        // one_hot[candidate, ..., position, ...] = (self[position, ...] == candidate)
-        // eq() returns F32 (0.0 or 1.0)
-        let one_hot = self
-            .expand_dim(axis, ax_size)
-            .eq(candidate)
-            .cast(DType::F32);
-        // inv[candidate, ...] = Σ_pos one_hot * position
-        // Cast position to F32 for multiplication, then result back to Int
-        // Adding 0.0 forces materialization before sum, avoiding stride issues
-        let product = one_hot * position.cast(DType::F32) + 0.0;
-        product.sum(axis + 1).cast(DType::Int)
+    /// Scatter self (src) into dest at flat 1D positions given by indexes.
+    /// output = copy(dest); output[indexes[i]] = src[i]
+    pub fn scatter(self, indexes: GraphTensor, dest: GraphTensor) -> GraphTensor {
+        assert_eq!(
+            indexes.dtype,
+            DType::Int,
+            "Scatter indexes must have an integer dtype!"
+        );
+        let id = self
+            .graph()
+            .add_op(Scatter::default())
+            .input(dest.id, dest.shape)
+            .input(indexes.id, indexes.shape)
+            .input(self.id, self.shape)
+            .finish();
+        GraphTensor::from_id(id, dest.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
     /// Extracts sliding local windows from an input tensor.
@@ -670,13 +651,16 @@ mod tests {
     }
 
     #[test]
-    fn test_gather_and_inverse_permutation() {
+    fn test_gather_and_scatter_inverse() {
         let mut cx = Graph::new();
         let data = cx.tensor((2, 3));
         let indexes = cx.tensor(4).as_dtype(DType::Int);
         let gathered = data.gather(indexes).output();
+        // Inverse permutation via scatter: scatter arange at perm positions into zeros
         let perm = cx.tensor(6).as_dtype(DType::Int);
-        let inv = perm.inverse_permutation(0).cast(DType::F32).output();
+        let values = cx.arange(6);
+        let zeros = cx.iota(Expression::from(0usize), 6);
+        let inv = values.scatter(perm, zeros).cast(DType::F32).output();
         cx.build_search_space::<NativeRuntime>();
         let mut rt = cx.search(NativeRuntime::default(), 1);
         rt.set_data(data.id, vec![0., 1., 2., 3., 4., 5.]);
@@ -685,6 +669,54 @@ mod tests {
         rt.execute(&cx.dyn_map);
         assert_eq!(*rt.get_f32(gathered.id), vec![5., 0., 3., 2.]);
         assert_eq!(*rt.get_f32(inv.id), vec![5., 3., 1., 0., 2., 4.]);
+    }
+
+    #[test]
+    fn test_scatter_basic() {
+        let mut cx = Graph::new();
+        let src = cx.tensor(3);
+        let indexes = cx.tensor(3).as_dtype(DType::Int);
+        let dest = cx.tensor(5);
+        let result = src.scatter(indexes, dest).output();
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
+        rt.set_data(src.id, vec![10., 20., 30.]);
+        rt.set_data(indexes.id, vec![1, 3, 4]);
+        rt.set_data(dest.id, vec![0., 0., 0., 0., 0.]);
+        rt.execute(&cx.dyn_map);
+        assert_eq!(*rt.get_f32(result.id), vec![0., 10., 0., 20., 30.]);
+    }
+
+    #[test]
+    fn test_scatter_into_nonzero_dest() {
+        let mut cx = Graph::new();
+        let src = cx.tensor(1);
+        let indexes = cx.tensor(1).as_dtype(DType::Int);
+        let dest = cx.tensor(5);
+        let result = src.scatter(indexes, dest).output();
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
+        rt.set_data(src.id, vec![99.]);
+        rt.set_data(indexes.id, vec![2]);
+        rt.set_data(dest.id, vec![1., 2., 3., 4., 5.]);
+        rt.execute(&cx.dyn_map);
+        assert_eq!(*rt.get_f32(result.id), vec![1., 2., 99., 4., 5.]);
+    }
+
+    #[test]
+    fn test_scatter_all_positions() {
+        let mut cx = Graph::new();
+        let src = cx.tensor(4);
+        let indexes = cx.tensor(4).as_dtype(DType::Int);
+        let dest = cx.tensor(4);
+        let result = src.scatter(indexes, dest).output();
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
+        rt.set_data(src.id, vec![40., 30., 20., 10.]);
+        rt.set_data(indexes.id, vec![3, 2, 1, 0]);
+        rt.set_data(dest.id, vec![1., 2., 3., 4.]);
+        rt.execute(&cx.dyn_map);
+        assert_eq!(*rt.get_f32(result.id), vec![10., 20., 30., 40.]);
     }
 
     //     // #[test]

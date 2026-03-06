@@ -209,7 +209,7 @@ impl GemmaLayer {
         // Pre-feedforward norm + MLP + post-feedforward norm + residual
         let x_ff = self.pre_feedforward_layernorm.forward(x);
         let mlp_out =
-            (x_ff.matmul(self.gate.t()).swish() * x_ff.matmul(self.up.t())).matmul(self.down.t());
+            (x_ff.matmul(self.gate.t()).gelu() * x_ff.matmul(self.up.t())).matmul(self.down.t());
         let mlp_normed = self.post_feedforward_layernorm.forward(mlp_out);
         x + mlp_normed
     }
@@ -269,6 +269,7 @@ pub struct GemmaAttention {
     v_cache: u64,
     sliding_window: usize,
     rope_theta: f32,
+    rope_scaling_factor: f32,
 }
 
 impl GemmaAttention {
@@ -281,20 +282,23 @@ impl GemmaAttention {
         rope_theta: f32,
     ) -> Self {
         let sliding_window = if is_local { SLIDING_WINDOW_SIZE } else { 0 };
+        let rope_scaling_factor = if is_local { 1.0 } else { 8.0 };
+        let z = Expression::from('z');
         Self {
             range: (N_KV_HEADS, KV_GROUPS, seq).to_shape(),
             head_dim: HEAD_DIM.into(),
             cur_seq: seq,
             kv_row_stride: KV_DIM.into(),
-            q_stride: (HEAD_DIM * KV_GROUPS, HEAD_DIM, Q_DIM).to_shape(),
-            k_stride: (HEAD_DIM, 0, 0).to_shape(),
-            v_stride: (HEAD_DIM, 0, 0).to_shape(),
-            o_stride: (HEAD_DIM * KV_GROUPS, HEAD_DIM, Q_DIM).to_shape(),
+            q_stride: vec![z * (HEAD_DIM * KV_GROUPS), z * HEAD_DIM, z * Q_DIM],
+            k_stride: vec![z * HEAD_DIM, 0.into(), 0.into()],
+            v_stride: vec![z * HEAD_DIM, 0.into(), 0.into()],
+            o_stride: vec![z * (HEAD_DIM * KV_GROUPS), z * HEAD_DIM, z * Q_DIM],
             prev_seq,
             k_cache,
             v_cache,
             sliding_window,
             rope_theta,
+            rope_scaling_factor,
         }
     }
 }
@@ -335,12 +339,13 @@ impl BlockOp for GemmaAttention {
     }
 
     fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
+        let z = Expression::from('z');
         let mut q_pos_stride = vec![0.into(); self.range.len()];
-        q_pos_stride[self.range.len() - 1] = 1.into();
+        q_pos_stride[self.range.len() - 1] = z;
         let mut group_pos_stride = vec![0.into(); self.range.len()];
-        group_pos_stride[self.range.len() - 2] = 1.into();
+        group_pos_stride[self.range.len() - 2] = z;
         let mut head_pos_stride = vec![0.into(); self.range.len()];
-        head_pos_stride[self.range.len() - 3] = 1.into();
+        head_pos_stride[self.range.len() - 3] = z;
         payload
             .expr("head_size", self.head_dim)
             .expr("cur_seq", self.cur_seq)
@@ -363,6 +368,7 @@ impl BlockOp for GemmaAttention {
             )
             .int("sliding_window", self.sliding_window as i32)
             .float("rope_theta", self.rope_theta)
+            .float("rope_scaling_factor", self.rope_scaling_factor)
     }
 
     fn cuda_function(&self) -> String {
@@ -411,6 +417,7 @@ impl BlockOp for GemmaAttention {
             const int prev          = eval_expression(payload.prev_seq, 0);
             const int sliding_window = payload.sliding_window;
             const float rope_base   = payload.rope_theta;
+            const float rope_scale  = payload.rope_scaling_factor;
 
             const float* __restrict__ K_cur = k_base;
             const float* __restrict__ V_cur = v_base;
@@ -453,7 +460,7 @@ impl BlockOp for GemmaAttention {
                 int pos = prev + q_pos_local;
                 for (int i = t; i < half; i += blockDim.x) {
                     float freq = powf(rope_base, -2.0f * (float)i / (float)d);
-                    float theta = (float)pos * freq;
+                    float theta = (float)pos / rope_scale * freq;
                     float cos_t, sin_t;
                     __sincosf(theta, &sin_t, &cos_t);
                     float x0 = q_buf[i];
@@ -499,7 +506,7 @@ impl BlockOp for GemmaAttention {
                     int k_pos = prev + r;
                     for (int i = t; i < half; i += blockDim.x) {
                         float freq = powf(rope_base, -2.0f * (float)i / (float)d);
-                        float theta = (float)k_pos * freq;
+                        float theta = (float)k_pos / rope_scale * freq;
                         float cos_t, sin_t;
                         __sincosf(theta, &sin_t, &cos_t);
                         float kx0 = k_buf[i];
@@ -560,7 +567,7 @@ impl BlockOp for GemmaAttention {
                     // K: Split-half RoPE
                     for (int i = t; i < half; i += blockDim.x) {
                         float freq = powf(rope_base, -2.0f * (float)i / (float)d);
-                        float theta = (float)r * freq;
+                        float theta = (float)r / rope_scale * freq;
                         float cos_t, sin_t;
                         __sincosf(theta, &sin_t, &cos_t);
                         float kx0 = k_buf[i];

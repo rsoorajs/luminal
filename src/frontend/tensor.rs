@@ -73,6 +73,13 @@ impl GraphTensor {
         self.shape.required_total_bytes()
     }
 
+    /// Mark this tensor to be passed through execution so its data can be
+    /// retrieved afterward and re-fed as input on the next cycle.
+    /// Semantically identical to `.output()`.
+    pub fn passthrough(&self) -> GraphTensor {
+        self.output()
+    }
+
     pub fn dims(&self) -> Vec<Expression> {
         self.shape.dims.to_vec()
     }

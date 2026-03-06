@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::{cuda_dtype, kernel::KernelOp};
+use crate::{
+    cuda_dtype,
+    kernel::{CudaFunctionExt, KernelOp},
+};
 use cudarc::{
     driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream},
     nvrtc::{CompileOptions, compile_ptx, compile_ptx_with_opts},
@@ -12,7 +15,7 @@ use luminal::{
         base::{DTYPE, ELIST, EXPRESSION, F64, IR, OP_SORTS, SORTS, dtype},
         extract_dtype, extract_expr, extract_expr_list,
     },
-    hlir::{Add, Exp2, LessThan, Log2, MaxReduce, Mod, Mul, Recip, Sin, Sqrt, SumReduce},
+    hlir::{Add, Exp2, LessThan, Log2, MaxReduce, Mod, Mul, Recip, Scatter, Sin, Sqrt, SumReduce},
     op::*,
     prelude::*,
 };
@@ -87,6 +90,7 @@ pub type Ops = (
     KernelLessThan,
     KernelIota,
     KernelGather,
+    KernelScatter,
     KernelSumReduce,
     KernelMaxReduce,
     KernelExp2,
@@ -561,18 +565,25 @@ impl KernelOp for KernelAdd {
         } else {
             ", const int* dyn_dims"
         };
+        let n_elements = self
+            .out_shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let out_idx = flatten_strides(&self.out_shape, &self.out_stride).to_kernel();
+        let a_idx = flatten_strides(&self.out_shape, &self.a_stride).to_kernel();
+        let b_idx = flatten_strides(&self.out_shape, &self.b_stride).to_kernel();
         let kernel = format!(
             "{includes}
 {dyn_defines}
 extern \"C\" {{
     __global__ void add_k({dtype} *C, const {dtype} *A, const {dtype} *B{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-        C[{}] = A[{}] + B[{}];
+        if (const_z >= {n_elements}) return;
+        C[{out_idx}] = A[{a_idx}] + B[{b_idx}];
     }}
-}}",
-            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.a_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.b_stride).to_kernel()
+}}"
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -707,18 +718,25 @@ impl KernelOp for KernelMul {
         } else {
             ", const int* dyn_dims"
         };
+        let n_elements = self
+            .out_shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let out_idx = flatten_strides(&self.out_shape, &self.out_stride).to_kernel();
+        let a_idx = flatten_strides(&self.out_shape, &self.a_stride).to_kernel();
+        let b_idx = flatten_strides(&self.out_shape, &self.b_stride).to_kernel();
         let kernel = format!(
             "{includes}
 {dyn_defines}
 extern \"C\" {{
     __global__ void mul_k({dtype} *C, const {dtype} *A, const {dtype} *B{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-        C[{}] = A[{}] * B[{}];
+        if (const_z >= {n_elements}) return;
+        C[{out_idx}] = A[{a_idx}] * B[{b_idx}];
     }}
-}}",
-            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.a_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.b_stride).to_kernel(),
+}}"
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -881,20 +899,27 @@ impl KernelOp for KernelGather {
         } else {
             ", const int* dyn_dims"
         };
+        let n_elements = self
+            .out_shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let out_idx = flatten_strides(&self.out_shape, &self.out_stride).to_kernel();
+        let idx_idx = flatten_strides(&self.out_shape, &self.index_stride).to_kernel();
+        let data_idx = flatten_strides(&self.data_shape, &self.data_stride).to_kernel();
         let kernel = format!(
             "{includes}
 {dyn_defines}
 extern \"C\" {{
     __global__ void gather({dtype} *C, const int *indexes, const {dtype} *data{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-        {dtype}* out = C + {};
-        const_z = indexes[{}];
-        *out = data[{}];
+        if (const_z >= {n_elements}) return;
+        {dtype}* out = C + {out_idx};
+        const_z = indexes[{idx_idx}];
+        *out = data[{data_idx}];
     }}
-}}",
-            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.index_stride).to_kernel(),
-            flatten_strides(&self.data_shape, &self.data_stride).to_kernel()
+}}"
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -939,6 +964,357 @@ extern \"C\" {{
 
     fn kernel_name(&self) -> &'static str {
         "Gather"
+    }
+}
+
+// KernelScatter: inverse of gather - out = copy(dest); out[indexes[i]] = src[i]
+// Two-phase: copy kernel runs via pre_launch (stream-level), scatter runs in CUDA graph.
+#[derive(Debug, Clone)]
+pub struct KernelScatter {
+    dest_shape: Vec<Expression>,
+    dest_strides: Vec<Expression>,
+    index_shape: Vec<Expression>,
+    index_strides: Vec<Expression>,
+    src_strides: Vec<Expression>,
+    out_strides: Vec<Expression>,
+    dtype: DType,
+    copy_func: std::sync::OnceLock<(CudaFunction, Arc<CudaModule>, String)>,
+}
+
+impl Default for KernelScatter {
+    fn default() -> Self {
+        Self {
+            dest_shape: Vec::new(),
+            dest_strides: Vec::new(),
+            index_shape: Vec::new(),
+            index_strides: Vec::new(),
+            src_strides: Vec::new(),
+            out_strides: Vec::new(),
+            dtype: DType::F32,
+            copy_func: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl EgglogOp for KernelScatter {
+    fn sort(&self) -> SortDef {
+        sort(
+            IR,
+            "KernelScatter",
+            &[
+                ("dest_shape", ELIST),
+                ("dest_strides", ELIST),
+                ("dest", IR),
+                ("indexes", IR),
+                ("index_shape", ELIST),
+                ("index_strides", ELIST),
+                ("src", IR),
+                ("src_strides", ELIST),
+                ("out_strides", ELIST),
+                ("dtype", DTYPE),
+            ],
+        )
+    }
+
+    fn rewrites(&self) -> Vec<Rule> {
+        let (scatter_args, scatter_match) = luminal::hlir::Scatter::default().sort().new_call();
+        let out_strides = SORTS
+            .row_major
+            .call(("list".to_string(), scatter_args["dest_shape"].clone()));
+        let dt = v("?__dt");
+        let kernel_args = [
+            ("dest_shape".to_string(), scatter_args["dest_shape"].clone()),
+            (
+                "dest_strides".to_string(),
+                scatter_args["dest_strides"].clone(),
+            ),
+            ("dest".to_string(), scatter_args["dest"].clone()),
+            ("indexes".to_string(), scatter_args["indexes"].clone()),
+            (
+                "index_shape".to_string(),
+                scatter_args["index_shape"].clone(),
+            ),
+            (
+                "index_strides".to_string(),
+                scatter_args["index_strides"].clone(),
+            ),
+            ("src".to_string(), scatter_args["src"].clone()),
+            (
+                "src_strides".to_string(),
+                scatter_args["src_strides"].clone(),
+            ),
+            ("out_strides".to_string(), out_strides),
+            ("dtype".to_string(), dt.clone()),
+        ];
+        vec![
+            rule(union(scatter_match, self.sort().call(kernel_args)))
+                .fact(eq(dt, dtype(scatter_args["src"].clone()))),
+        ]
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn extract<'a>(
+        &self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        (
+            LLIROp::new::<dyn KernelOp>(Box::new(Self {
+                dest_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
+                dest_strides: extract_expr_list(egraph, children[1], list_cache, expr_cache)
+                    .unwrap(),
+                index_shape: extract_expr_list(egraph, children[4], list_cache, expr_cache)
+                    .unwrap(),
+                index_strides: extract_expr_list(egraph, children[5], list_cache, expr_cache)
+                    .unwrap(),
+                src_strides: extract_expr_list(egraph, children[7], list_cache, expr_cache)
+                    .unwrap(),
+                out_strides: extract_expr_list(egraph, children[8], list_cache, expr_cache)
+                    .unwrap(),
+                dtype: extract_dtype(egraph, children[9]),
+                copy_func: std::sync::OnceLock::new(),
+            })),
+            vec![children[2], children[3], children[6]], // dest, indexes, src
+        )
+    }
+}
+
+impl KernelOp for KernelScatter {
+    fn compile(
+        &self,
+        stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
+    ) -> (
+        CudaFunction,
+        Arc<CudaModule>,
+        String,
+        (Expression, Expression, Expression),
+        (Expression, Expression, Expression),
+        Expression,
+        FxHashMap<char, CudaSlice<u8>>,
+    ) {
+        let all_vars: FxHashSet<char> = self
+            .dest_shape
+            .iter()
+            .flat_map(|e| e.dyn_vars())
+            .chain(self.dest_strides.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.index_shape.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.index_strides.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.src_strides.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.out_strides.iter().flat_map(|e| e.dyn_vars()))
+            .collect();
+        let dtype = cuda_dtype(self.dtype);
+        let includes = dtype_includes(&[self.dtype]);
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&all_vars);
+        let dyn_dims_param = if all_vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
+
+        // Compile copy kernel: copies dest → output (one thread per dest element)
+        let n_dest = self
+            .dest_shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let copy_out_idx = flatten_strides(&self.dest_shape, &self.out_strides).to_kernel();
+        let copy_in_idx = flatten_strides(&self.dest_shape, &self.dest_strides).to_kernel();
+        let copy_kernel = format!(
+            "{includes}
+{dyn_defines}
+extern \"C\" {{
+    __global__ void scatter_copy({dtype} *out, const {dtype} *dest{dyn_dims_param}) {{
+        long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+        if (const_z >= {n_dest}) return;
+        out[{copy_out_idx}] = dest[{copy_in_idx}];
+    }}
+}}"
+        );
+        // Compile and store the copy function
+        let (copy_module, copy_func) = if let Some((module, func)) = compile_cache.get(&copy_kernel)
+        {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_kernel(&copy_kernel, &[self.dtype]);
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("scatter_copy").unwrap();
+            compile_cache.insert(copy_kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
+        let _ = self.copy_func.set((copy_func, copy_module, copy_kernel));
+
+        // Compile scatter kernel: writes src[i] → output[indexes[i]] (one thread per src element)
+        let n_src_elements = self
+            .index_shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let n_dest_elements = self
+            .dest_shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let scatter_idx_idx = flatten_strides(&self.index_shape, &self.index_strides).to_kernel();
+        let scatter_src_idx = flatten_strides(&self.index_shape, &self.src_strides).to_kernel();
+        let scatter_kernel = format!(
+            "{includes}
+{dyn_defines}
+extern \"C\" {{
+    __global__ void scatter({dtype} *out, const int *indexes, const {dtype} *src{dyn_dims_param}) {{
+        long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+        if (const_z >= {n_src_elements}) return;
+        int idx = indexes[{scatter_idx_idx}];
+        if (idx >= 0 && idx < {n_dest_elements}) {{
+            out[idx] = src[{scatter_src_idx}];
+        }}
+    }}
+}}"
+        );
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&scatter_kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_kernel(&scatter_kernel, &[self.dtype]);
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("scatter").unwrap();
+            compile_cache.insert(scatter_kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
+        let n_src: Expression = self.index_shape.iter().copied().product();
+        (
+            func,
+            module,
+            scatter_kernel,
+            (n_src, 1.into(), 1.into()),
+            (1.into(), 1.into(), 1.into()),
+            0.into(),
+            FxHashMap::default(),
+        )
+    }
+
+    fn output_size(&self) -> Expression {
+        self.dest_shape.iter().copied().product()
+    }
+
+    fn output_bytes(&self) -> Expression {
+        let elem_size: Expression = match self.dtype {
+            DType::F64 => 8,
+            DType::F32 | DType::Int => 4,
+            DType::F16 | DType::Bf16 | DType::I16 | DType::U16 => 2,
+            DType::Bool
+            | DType::I8
+            | DType::U8
+            | DType::F8UE8M0
+            | DType::F8E4M3
+            | DType::F8E5M2 => 1,
+            other => panic!("Unsupported dtype for scatter output_bytes: {other:?}"),
+        }
+        .into();
+        self.output_size() * elem_size
+    }
+
+    fn build_params(
+        &self,
+        _stream: &Arc<CudaStream>,
+        output_ptr: u64,
+        input_ptrs: &[u64],
+        _internal_bufs: &[CudaSlice<u8>],
+        dyn_dims_ptr: u64,
+    ) -> Vec<u64> {
+        // scatter kernel: (out, indexes, src [, dyn_dims])
+        // input_ptrs: [dest, indexes, src]
+        let mut params = vec![output_ptr, input_ptrs[1], input_ptrs[2]];
+        if dyn_dims_ptr != 0 {
+            params.push(dyn_dims_ptr);
+        }
+        params
+    }
+
+    fn pre_launch(
+        &self,
+        stream: &Arc<CudaStream>,
+        output_ptr: u64,
+        input_ptrs: &[u64],
+        dyn_dims_ptr: u64,
+        dyn_map: &FxHashMap<char, usize>,
+    ) -> anyhow::Result<()> {
+        let (copy_func, _copy_module, _) = self.copy_func.get().expect("copy kernel not compiled");
+        let n_dest = self
+            .dest_shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .exec(dyn_map)
+            .unwrap() as u32;
+        let dest_ptr = input_ptrs[0]; // dest is input 0
+
+        let has_dyn = dyn_dims_ptr != 0;
+        let mut param_values: Vec<u64> = vec![output_ptr, dest_ptr];
+        if has_dyn {
+            param_values.push(dyn_dims_ptr);
+        }
+        let mut param_ptrs: Vec<*mut std::ffi::c_void> = param_values
+            .iter()
+            .map(|v| v as *const u64 as *mut std::ffi::c_void)
+            .collect();
+
+        let cu_func = unsafe { copy_func.raw_function() };
+        unsafe {
+            cudarc::driver::sys::cuLaunchKernel(
+                cu_func,
+                n_dest,
+                1,
+                1,
+                1,
+                1,
+                1,
+                0,
+                stream.cu_stream() as *mut _,
+                param_ptrs.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+            .result()?;
+        }
+        Ok(())
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        let data_elem_size: Expression = match self.dtype {
+            DType::F64 => 8,
+            DType::F32 | DType::Int => 4,
+            DType::F16 | DType::Bf16 | DType::I16 | DType::U16 => 2,
+            DType::Bool
+            | DType::I8
+            | DType::U8
+            | DType::F8UE8M0
+            | DType::F8E4M3
+            | DType::F8E5M2 => 1,
+            other => panic!("Unsupported dtype for scatter bytes_loaded: {other:?}"),
+        }
+        .into();
+        let n_src: Expression = self.index_shape.iter().copied().product();
+        // dest (copy) + indices + src
+        self.output_size() * data_elem_size + n_src * 4 + n_src * data_elem_size
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        self.output_bytes()
+    }
+
+    fn flops(&self) -> Expression {
+        0.into()
+    }
+
+    fn kernel_name(&self) -> &'static str {
+        "Scatter"
     }
 }
 
@@ -1149,17 +1525,24 @@ impl KernelOp for KernelExp2 {
         } else {
             ", const int* dyn_dims"
         };
+        let n_elements = self
+            .shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let out_idx = flatten_strides(&self.shape, &self.out_strides).to_kernel();
+        let in_idx = flatten_strides(&self.shape, &self.in_strides).to_kernel();
         let kernel = format!(
             "{includes}
 {dyn_defines}
 extern \"C\" {{
     __global__ void exp2_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-        out[{}] = exp2f(in[{}]);
+        if (const_z >= {n_elements}) return;
+        out[{out_idx}] = exp2f(in[{in_idx}]);
     }}
-}}",
-            flatten_strides(&self.shape, &self.out_strides).to_kernel(),
-            flatten_strides(&self.shape, &self.in_strides).to_kernel()
+}}"
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -1287,17 +1670,24 @@ impl KernelOp for KernelLog2 {
         } else {
             ", const int* dyn_dims"
         };
+        let n_elements = self
+            .shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let out_idx = flatten_strides(&self.shape, &self.out_strides).to_kernel();
+        let in_idx = flatten_strides(&self.shape, &self.in_strides).to_kernel();
         let kernel = format!(
             "{includes}
 {dyn_defines}
 extern \"C\" {{
     __global__ void log2_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-        out[{}] = log2f(in[{}]);
+        if (const_z >= {n_elements}) return;
+        out[{out_idx}] = log2f(in[{in_idx}]);
     }}
-}}",
-            flatten_strides(&self.shape, &self.out_strides).to_kernel(),
-            flatten_strides(&self.shape, &self.in_strides).to_kernel()
+}}"
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -1425,17 +1815,24 @@ impl KernelOp for KernelSin {
         } else {
             ", const int* dyn_dims"
         };
+        let n_elements = self
+            .shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let out_idx = flatten_strides(&self.shape, &self.out_strides).to_kernel();
+        let in_idx = flatten_strides(&self.shape, &self.in_strides).to_kernel();
         let kernel = format!(
             "{includes}
 {dyn_defines}
 extern \"C\" {{
     __global__ void sin_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-        out[{}] = sinf(in[{}]);
+        if (const_z >= {n_elements}) return;
+        out[{out_idx}] = sinf(in[{in_idx}]);
     }}
-}}",
-            flatten_strides(&self.shape, &self.out_strides).to_kernel(),
-            flatten_strides(&self.shape, &self.in_strides).to_kernel()
+}}"
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -1563,17 +1960,24 @@ impl KernelOp for KernelRecip {
         } else {
             ", const int* dyn_dims"
         };
+        let n_elements = self
+            .shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let out_idx = flatten_strides(&self.shape, &self.out_strides).to_kernel();
+        let in_idx = flatten_strides(&self.shape, &self.in_strides).to_kernel();
         let kernel = format!(
             "{includes}
 {dyn_defines}
 extern \"C\" {{
     __global__ void recip_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-        out[{}] = 1.0f / in[{}];
+        if (const_z >= {n_elements}) return;
+        out[{out_idx}] = 1.0f / in[{in_idx}];
     }}
-}}",
-            flatten_strides(&self.shape, &self.out_strides).to_kernel(),
-            flatten_strides(&self.shape, &self.in_strides).to_kernel()
+}}"
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -1701,17 +2105,24 @@ impl KernelOp for KernelSqrt {
         } else {
             ", const int* dyn_dims"
         };
+        let n_elements = self
+            .shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let out_idx = flatten_strides(&self.shape, &self.out_strides).to_kernel();
+        let in_idx = flatten_strides(&self.shape, &self.in_strides).to_kernel();
         let kernel = format!(
             "{includes}
 {dyn_defines}
 extern \"C\" {{
     __global__ void sqrt_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-        out[{}] = sqrtf(in[{}]);
+        if (const_z >= {n_elements}) return;
+        out[{out_idx}] = sqrtf(in[{in_idx}]);
     }}
-}}",
-            flatten_strides(&self.shape, &self.out_strides).to_kernel(),
-            flatten_strides(&self.shape, &self.in_strides).to_kernel()
+}}"
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -1843,18 +2254,25 @@ impl KernelOp for KernelMod {
         } else {
             ", const int* dyn_dims"
         };
+        let n_elements = self
+            .out_shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let out_idx = flatten_strides(&self.out_shape, &self.out_stride).to_kernel();
+        let a_idx = flatten_strides(&self.out_shape, &self.a_stride).to_kernel();
+        let b_idx = flatten_strides(&self.out_shape, &self.b_stride).to_kernel();
         let kernel = format!(
             "{includes}
 {dyn_defines}
 extern \"C\" {{
     __global__ void mod_k({dtype} *C, const {dtype} *A, const {dtype} *B{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-        C[{}] = fmodf(A[{}], B[{}]);
+        if (const_z >= {n_elements}) return;
+        C[{out_idx}] = fmodf(A[{a_idx}], B[{b_idx}]);
     }}
-}}",
-            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.a_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.b_stride).to_kernel()
+}}"
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -1996,18 +2414,25 @@ impl KernelOp for KernelLessThan {
         } else {
             ", const int* dyn_dims"
         };
+        let n_elements = self
+            .out_shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let out_idx = flatten_strides(&self.out_shape, &self.out_stride).to_kernel();
+        let a_idx = flatten_strides(&self.out_shape, &self.a_stride).to_kernel();
+        let b_idx = flatten_strides(&self.out_shape, &self.b_stride).to_kernel();
         let kernel = format!(
             "{includes}
 {dyn_defines}
 extern \"C\" {{
     __global__ void less_than_k(unsigned char *C, const {dtype} *A, const {dtype} *B{dyn_dims_param}) {{
         long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-        C[{}] = A[{}] < B[{}] ? 1 : 0;
+        if (const_z >= {n_elements}) return;
+        C[{out_idx}] = A[{a_idx}] < B[{b_idx}] ? 1 : 0;
     }}
-}}",
-            flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.a_stride).to_kernel(),
-            flatten_strides(&self.out_shape, &self.b_stride).to_kernel()
+}}"
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())

@@ -308,12 +308,14 @@ impl Graph {
         // Allocate dummy buffers for boundary inputs so groups can be profiled
         for desc in &self.subgraph_descriptors {
             for bi in &desc.boundary_inputs {
-                let n_elements = bi
-                    .shape
-                    .n_elements()
-                    .exec(&self.dyn_map)
-                    .expect("Failed to resolve boundary input shape");
-                runtime.allocate_dummy_input(bi.break_node.index(), n_elements);
+                if !runtime.has_hlir_buffer(bi.break_node.index()) {
+                    let n_elements = bi
+                        .shape
+                        .n_elements()
+                        .exec(&self.dyn_map)
+                        .expect("Failed to resolve boundary input shape");
+                    runtime.allocate_dummy_input(bi.break_node.index(), n_elements);
+                }
             }
         }
 
@@ -365,6 +367,8 @@ impl Graph {
             );
             let (mut best_metric, display) =
                 runtime.profile(&best_graph, &self.dyn_map, Self::TRIALS_PER_PROFILE);
+            let mut best_memory = runtime.intermediate_buffer_bytes();
+            let mut lowest_memory = best_memory;
 
             let mut n_graphs = 1;
 
@@ -461,9 +465,23 @@ impl Graph {
                         }
                     };
 
-                    let new_best = best_metric.gt(&new_metric);
+                    let new_memory = runtime.intermediate_buffer_bytes();
+                    if new_memory < lowest_memory {
+                        lowest_memory = new_memory;
+                    }
+                    let memory_threshold = (lowest_memory as f64 * 1.1) as usize;
+                    let new_in_budget = new_memory <= memory_threshold;
+                    let best_in_budget = best_memory <= memory_threshold;
+                    // A graph is "new best" if:
+                    // 1. New is in budget but current best is not, OR
+                    // 2. Both in budget and new is faster, OR
+                    // 3. Neither in budget and new uses less memory
+                    let new_best = new_in_budget
+                        && (!best_in_budget || best_metric.gt(&new_metric))
+                        || !best_in_budget && new_memory < best_memory;
                     if new_best {
                         best_metric = new_metric;
+                        best_memory = new_memory;
                         best_graph = llir_graph;
                         best_genome = genome;
                     }

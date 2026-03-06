@@ -14,6 +14,16 @@ use luminal::{
 use crate::block::{BlockOp, CStruct};
 use luminal::shape::flatten_strides;
 
+/// Substitute z (element stride variable) with 1 for F32 block ops.
+/// The shape system uses `z` as a base element stride to support sub-byte types,
+/// but block ops operate on F32 where z=1.
+fn resolve_z(e: Expression) -> Expression {
+    e.substitute('z', Expression::from(1))
+}
+fn resolve_z_vec(v: &[Expression]) -> Vec<Expression> {
+    v.iter().map(|e| resolve_z(*e)).collect()
+}
+
 pub type Ops = (
     RowAdd,
     RowSwishMul,
@@ -58,10 +68,10 @@ impl EgglogOp for RowAdd {
                 (= ?row_width (nth_from_end ?shape 0))
                 (= (MNum ?row_width_num) ?row_width)
                 (<= ?row_width_num 4096) ; currently load full row to sram, should instead load chunks in up to capacity and stream rest in
-                ; assert the row is contiguous
-                (= (MNum 1) (nth_from_end ?a_stride 0))
-                (= (MNum 1) (nth_from_end ?b_stride 0))
-                (= (MNum 1) (nth_from_end ?out_stride 0))
+                ; assert the row is contiguous (MIter is the element stride variable z, = 1 for f32)
+                (= (MIter) (nth_from_end ?a_stride 0))
+                (= (MIter) (nth_from_end ?b_stride 0))
+                (= (MIter) (nth_from_end ?out_stride 0))
                 ;(= (F32) (dtype ?a))
                 ;(= (F32) (dtype ?b))
             )
@@ -1058,13 +1068,13 @@ impl EgglogOp for TileMatmulSplitK {
                 (= ?b_k_stride (nth_from_end ?b_stride 0))
 
                 ; Assert contiguous k stride on output (required for reduction)
-                (= ?k_stride (MNum 1))
+                (= ?k_stride (MIter))
 
                 ; Assert A has contiguous k (row-major A)
-                (= ?a_k_stride (MNum 1))
+                (= ?a_k_stride (MIter))
 
                 ; Assert B has contiguous k (col-major B / transposed)
-                (= ?b_k_stride (MNum 1))
+                (= ?b_k_stride (MIter))
               
                 ; Only match F32 inputs (BlockOp matmul is F32-only)
                 (= (F32) (dtype ?a))
@@ -1219,13 +1229,13 @@ impl BlockOp for TileMatmulSplitK {
         // Range layout: [k_chunks, batch..., tiled_m, tiled_n]
         // k_chunk is at index 0
         let mut k_chunk_stride = vec![0.into(); self.range.len()];
-        k_chunk_stride[0] = 1.into();
+        k_chunk_stride[0] = Expression::from('z');
         // m_pos (tiled_m) is at index len-2
         let mut m_pos_stride = vec![0.into(); self.range.len()];
-        m_pos_stride[self.range.len() - 2] = 1.into();
+        m_pos_stride[self.range.len() - 2] = Expression::from('z');
         // n_pos (tiled_n) is at index len-1
         let mut n_pos_stride = vec![0.into(); self.range.len()];
-        n_pos_stride[self.range.len() - 1] = 1.into();
+        n_pos_stride[self.range.len() - 1] = Expression::from('z');
         payload
             .expr_arr("untiled_range", &self.untiled_range)
             .expr("a", flatten_strides(&self.range, &self.a_stride))
@@ -1449,13 +1459,13 @@ impl EgglogOp for TileMatmulFullSplit {
                 (= ?b_k_stride (nth_from_end ?b_stride 0))
 
                 ; Assert contiguous k stride on output (required for reduction)
-                (= ?k_stride (MNum 1))
+                (= ?k_stride (MIter))
 
                 ; Assert A has contiguous k (row-major A)
-                (= ?a_k_stride (MNum 1))
+                (= ?a_k_stride (MIter))
 
                 ; Assert B has contiguous k (col-major B / transposed)
-                (= ?b_k_stride (MNum 1))
+                (= ?b_k_stride (MIter))
 
                 (= (F32) (dtype ?a))
                 (= (F32) (dtype ?b))
@@ -1492,8 +1502,8 @@ impl EgglogOp for TileMatmulFullSplit {
                     (MNum {sm_count})
                     ?out_shape
                     ?tiled_m ?tiled_n ?k
-                    ?a ?tiled_a_stride ?a_m_stride (MNum 1)
-                    ?b ?tiled_b_stride ?b_n_stride (MNum 1)
+                    ?a ?tiled_a_stride ?a_m_stride (MIter)
+                    ?b ?tiled_b_stride ?b_n_stride (MIter)
                     ?tiled_out_stride ?sum_out_m_stride ?sum_out_n_stride))
                 (union ?sum ?tm)
                 (set (dtype ?tm) (F32))
@@ -1777,23 +1787,23 @@ impl BlockOp for TileMatmulFullSplit {
 
     fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
         payload
-            .expr_arr("untiled_range", &self.untiled_range)
-            .expr("m_tiles", self.m_tiles)
-            .expr("n_tiles", self.n_tiles)
-            .expr("total_k", self.total_k)
-            .expr("sm_count", self.sm_count)
+            .expr_arr("untiled_range", &resolve_z_vec(&self.untiled_range))
+            .expr("m_tiles", resolve_z(self.m_tiles))
+            .expr("n_tiles", resolve_z(self.n_tiles))
+            .expr("total_k", resolve_z(self.total_k))
+            .expr("sm_count", resolve_z(self.sm_count))
             .expr("a", flatten_strides(&[self.sm_count], &[0.into()]))
-            .expr("a_m_stride", self.a_m_stride)
-            .expr("a_k_stride", self.a_k_stride)
-            .expr("a_width", self.a_m_stride) // a_width = a_m_stride for row-major
+            .expr("a_m_stride", resolve_z(self.a_m_stride))
+            .expr("a_k_stride", resolve_z(self.a_k_stride))
+            .expr("a_width", resolve_z(self.a_m_stride))
             .expr("b", flatten_strides(&[self.sm_count], &[0.into()]))
-            .expr("b_n_stride", self.b_n_stride)
-            .expr("b_k_stride", self.b_k_stride)
-            .expr("b_width", self.b_n_stride) // b_width = b_n_stride for col-major
+            .expr("b_n_stride", resolve_z(self.b_n_stride))
+            .expr("b_k_stride", resolve_z(self.b_k_stride))
+            .expr("b_width", resolve_z(self.b_n_stride))
             .expr("c", flatten_strides(&[self.sm_count], &[0.into()]))
-            .expr("c_m_stride", self.out_m_stride)
-            .expr("c_n_stride", self.out_n_stride)
-            .expr("c_width", self.out_m_stride) // c_width = c_m_stride
+            .expr("c_m_stride", resolve_z(self.out_m_stride))
+            .expr("c_n_stride", resolve_z(self.out_n_stride))
+            .expr("c_width", resolve_z(self.out_m_stride))
     }
 }
 

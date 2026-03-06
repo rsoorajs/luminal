@@ -18,7 +18,7 @@ const REPO_ID: &str = "NousResearch/Meta-Llama-3-8B-Instruct";
 fn main() {
     let max_seq_len = 4096;
     let gen_tokens = 10;
-    let search_graphs = 500; // the number of graphs we want to search during compilation
+    let search_graphs = 50; // the number of graphs we want to search during compilation
     let prompt = "Hello, how are you";
 
     // Tracing
@@ -73,12 +73,10 @@ fn main() {
     runtime = cx.search(runtime, search_graphs);
     kv_cache.reset();
 
-    print!("{prompt}");
-    std::io::stdout().flush().unwrap();
-
     // Decode loop
     let mut prev_seq = 0;
     let mut fwd_durations = vec![];
+    let mut generated_tokens = vec![];
     for i in 0..gen_tokens {
         let start = std::time::Instant::now();
         let _span = if i == 0 {
@@ -112,11 +110,19 @@ fn main() {
         let _sample_span = span!(Level::INFO, "sample_full").entered();
         sentence = vec![*sample(&logits_data, VOCAB_SIZE).last().unwrap()];
         prev_seq += seq_len;
-        print!("{}", tokenizer.decode(&sentence, true).unwrap());
-        std::io::stdout().flush().unwrap();
+        generated_tokens.push(tokenizer.decode(&sentence, true).unwrap());
         fwd_durations.push(start.elapsed());
     }
-    println!();
+
+    // Print generated text
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    write!(out, "{prompt}").unwrap();
+    for t in &generated_tokens {
+        write!(out, "{t}").unwrap();
+    }
+    writeln!(out).unwrap();
+    out.flush().unwrap();
 
     // Report benchmarks
     println!("  TTFT: {:.2} ms", fwd_durations[0].as_secs_f64() * 1e3);
@@ -127,8 +133,6 @@ fn main() {
             .as_secs_f64()
             * 1_000.
     );
-    runtime.print_execution_stats();
-
     // println!("Dumping device execution trace to perfetto...");
     // runtime.record_cuda_perfetto_trace(perfetto_guard);
 }

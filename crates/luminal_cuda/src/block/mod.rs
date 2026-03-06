@@ -42,6 +42,7 @@ pub const N_TIMING_SLOTS: usize = 1000;
 #[allow(unused_variables)]
 pub trait BlockOp: Debug + as_any::AsAny {
     fn op_name(&self) -> &'static str;
+    /// Specify how many instances of this op should be launched
     fn launch_range(&self) -> Vec<Expression> {
         unimplemented!()
     }
