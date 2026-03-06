@@ -383,12 +383,7 @@ mod tests {
         // out = [0.5, 0.5] @ [[10,20],[30,40]] = [20, 30]
         let expected = vec![20.0, 30.0];
         for (a, b) in out.iter().zip(&expected) {
-            assert!(
-                (a - b).abs() < 0.1,
-                "Expected {:?}, got {:?}",
-                expected,
-                &*out
-            );
+            assert!((a - b).abs() < 0.1, "Expected {expected:?}, got {out:?}");
         }
     }
 
