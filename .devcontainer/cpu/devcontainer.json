@@ -12,7 +12,7 @@
         }
     },
     "remoteUser": "ubuntu",
-    "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder}",
+    "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && if [ -f .env ]; then . .env; if [ -n \"$GH_TOKEN\" ]; then echo \"$GH_TOKEN\" | gh auth login --with-token 2>/dev/null; fi; fi",
     "customizations": {
         "vscode": {
             "extensions": [
