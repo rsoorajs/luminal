@@ -5,7 +5,7 @@ impl Graph {
     /// A scalar expression constant
     pub fn constant(&mut self, i: impl Into<Expression>) -> GraphTensor {
         GraphTensor::from_id(
-            self.add_op(Iota(i.into(), 1.into())).finish(),
+            self.add_op(Iota(i.into(), 1.into()), &[]),
             ShapeTracker::new(()),
             self,
             DType::Int,
@@ -15,7 +15,7 @@ impl Graph {
     /// A scalar float constant
     pub fn constant_float(&mut self, i: f32) -> GraphTensor {
         GraphTensor::from_id(
-            self.add_op(Constant(i)).finish(),
+            self.add_op(Constant(i), &[]),
             ShapeTracker::new(()),
             self,
             DType::F32,
@@ -26,11 +26,13 @@ impl Graph {
     pub fn iota(&mut self, i: impl Into<Expression>, shape: impl ToShape) -> GraphTensor {
         let sh = shape.to_shape();
         GraphTensor::from_id(
-            self.add_op(Iota(
-                i.into().simplify(),
-                sh.iter().copied().product::<Expression>().simplify(),
-            ))
-            .finish(),
+            self.add_op(
+                Iota(
+                    i.into().simplify(),
+                    sh.iter().copied().product::<Expression>().simplify(),
+                ),
+                &[],
+            ),
             ShapeTracker::new(sh),
             self,
             DType::Int,
@@ -88,11 +90,10 @@ impl GraphTensor {
         if self.dtype == dtype {
             return self;
         }
-        let id = self
-            .graph()
-            .add_op(Cast(self.shape.n_physical_elements(), dtype))
-            .input(self.id, self.shape)
-            .finish();
+        let id = self.graph().add_op(
+            Cast(self.shape.n_physical_elements(), dtype),
+            &[self.id],
+        );
         let mut shape = self.shape;
         shape.element_stride_bits = dtype.bits();
         GraphTensor::from_id(id, shape, self.graph_ref, dtype)

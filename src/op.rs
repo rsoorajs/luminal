@@ -161,11 +161,11 @@ pub trait CustomOp: Debug {
 ///
 /// Defines an HLIROp that implements a logical operation.
 pub trait HLIROp: Debug + Display + as_any::AsAny {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String;
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String;
 }
 
 impl<T: HLIROp> HLIROp for Box<T> {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
         <T as HLIROp>::to_egglog(self, inputs)
     }
 }

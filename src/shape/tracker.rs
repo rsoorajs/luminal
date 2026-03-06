@@ -6,7 +6,7 @@ use tinyvec::ArrayVec;
 
 use crate::prelude::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct ShapeTracker {
     pub dims: ArrayVec<[Expression; 10]>,
     pub strides: ArrayVec<[Expression; 10]>,

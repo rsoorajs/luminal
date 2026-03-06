@@ -1,7 +1,7 @@
 use colored::Colorize;
 use egglog::{ast::Span, prelude::RustSpan, var};
 use itertools::Itertools;
-use petgraph::{Direction, graph::NodeIndex, visit::EdgeRef};
+use petgraph::{Direction, graph::NodeIndex};
 use rand::Rng;
 use rustc_hash::FxHashSet;
 use std::collections::hash_map::DefaultHasher;
@@ -372,16 +372,10 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
 
     let mut curr_id = 0;
     for n in topo_order {
-        let sources = graph
+        let sources: Vec<(NodeIndex, String)> = graph
             .get_sources(n)
             .into_iter()
-            .zip(
-                graph
-                    .edges_directed(n, Direction::Incoming)
-                    .sorted_by_key(|e| e.id())
-                    .map(|e| names[&e.source()].clone()),
-            )
-            .map(|((n, sh), name)| (n, name, sh))
+            .map(|src| (src, names[&src].clone()))
             .collect_vec();
         let code = graph[n].to_egglog(&sources);
         out.push_str(&format!("(let t{curr_id} {code})\n"));
@@ -462,21 +456,15 @@ pub fn hlir_subgraph_to_egglog(graph: &Graph, subgraph: &SubgraphDescriptor) -> 
 
     // Convert each node in topological order to egglog
     for n in topo_order {
-        let sources = graph
+        let sources: Vec<(NodeIndex, String)> = graph
             .get_sources(n)
             .into_iter()
-            .zip(
-                graph
-                    .graph
-                    .edges_directed(n, Direction::Incoming)
-                    .sorted_by_key(|e| e.id())
-                    .map(|e| {
-                        names.get(&e.source()).cloned().unwrap_or_else(|| {
-                            panic!("Missing egglog name for node {:?}", e.source())
-                        })
-                    }),
-            )
-            .map(|((n, sh), name)| (n, name, sh))
+            .map(|src| {
+                let name = names.get(&src).cloned().unwrap_or_else(|| {
+                    panic!("Missing egglog name for node {:?}", src)
+                });
+                (src, name)
+            })
             .collect_vec();
         let code = graph.graph[n].to_egglog(&sources);
         out.push_str(&format!("(let t{curr_id} {code})\n"));

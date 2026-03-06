@@ -8,14 +8,10 @@ impl GraphTensor {
         // Sum reduce each dimension
         let mut axes = axes.to_axes();
         for dim in 0..axes.len() {
-            id = self
-                .graph()
-                .add_op(SumReduce {
-                    dim: axes[dim],
-                    ..Default::default()
-                })
-                .input(id, shape)
-                .finish();
+            id = self.graph().add_op(
+                SumReduce { dim: axes[dim], input_shape: shape, ..Default::default() },
+                &[id],
+            );
             shape.remove_dim(axes[dim]);
             shape = shape.contiguous();
             let axis = axes[dim];
@@ -34,14 +30,10 @@ impl GraphTensor {
         // Max reduce each dimension
         let mut axes = axes.to_axes();
         for dim in 0..axes.len() {
-            id = self
-                .graph()
-                .add_op(MaxReduce {
-                    dim: axes[dim],
-                    ..Default::default()
-                })
-                .input(id, shape)
-                .finish();
+            id = self.graph().add_op(
+                MaxReduce { dim: axes[dim], input_shape: shape, ..Default::default() },
+                &[id],
+            );
             shape.remove_dim(axes[dim]);
             shape = shape.contiguous();
             let axis = axes[dim];

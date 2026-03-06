@@ -21,7 +21,7 @@ use std::{
 use tracing;
 
 pub type LLIRGraph = StableGraph<LLIROp, ()>;
-pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ShapeTracker>;
+pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ()>;
 
 /// A group of structurally identical chunks that share the same e-graph.
 #[derive(Debug, Clone)]
@@ -86,11 +86,11 @@ impl Graph {
     }
 
     /// Get the sources of a node given it's id
-    pub fn get_sources(&self, node_id: NodeIndex) -> Vec<(NodeIndex, ShapeTracker)> {
+    pub fn get_sources(&self, node_id: NodeIndex) -> Vec<NodeIndex> {
         self.graph
             .edges_directed(node_id, Direction::Incoming)
             .sorted_by_key(|e| e.id())
-            .map(|e| (e.source(), *e.weight()))
+            .map(|e| e.source())
             .collect()
     }
 
@@ -104,32 +104,24 @@ impl Graph {
             .collect()
     }
 
-    /// Add op on the graph, and get back a NewOp
+    /// Add an op to the graph with the given input edges. Returns the new node's index.
     ///
     /// ```rust
     /// # use luminal::prelude::*;
     /// # let mut cx = Graph::new();
     /// let a = cx.tensor(3);
-    /// let b_id = cx
-    ///     .add_op(luminal::hlir::Mul::default())
-    ///     .input(a.id, a.shape)
-    ///     .finish();
+    /// let b_id = cx.add_op(
+    ///     luminal::hlir::Mul { input_shapes: vec![a.shape, a.shape], ..Default::default() },
+    ///     &[a.id],
+    /// );
     /// let b = GraphTensor::from_id(b_id, a.shape, a.graph(), a.dtype);
     /// ```
-    pub fn add_op<O: HLIROp + 'static>(&mut self, op: O) -> NewOp<'_> {
-        NewOp {
-            new_op_id: self.graph.add_node(Box::new(op)),
-            graph_ref: self,
-            num_srcs: 0,
+    pub fn add_op<O: HLIROp + 'static>(&mut self, op: O, inputs: &[NodeIndex]) -> NodeIndex {
+        let id = self.graph.add_node(Box::new(op));
+        for &src in inputs {
+            self.graph.add_edge(src, id, ());
         }
-    }
-    /// Add op on the graph, and get back a NewOp. Just like add_op, except a boxed op is expected.
-    pub fn add_boxed_op(&mut self, op: Box<dyn HLIROp + 'static>) -> NewOp<'_> {
-        NewOp {
-            new_op_id: self.graph.add_node(op),
-            graph_ref: self,
-            num_srcs: 0,
-        }
+        id
     }
 
     pub fn try_get_op<T: HLIROp + 'static>(&self, node: NodeIndex) -> Option<&T> {
@@ -156,15 +148,16 @@ impl Graph {
         dtype: DType,
     ) -> GraphTensor {
         self.custom_ops.push(Box::new(op));
-        let mut add = self.add_op(CustomOpHLIR {
-            id: self.custom_ops.len() - 1,
-            dtype,
-        });
-        for input in inputs.to_ids() {
-            add = add.input(input, ShapeTracker::new(()));
-        }
+        let input_ids = inputs.to_ids();
+        let id = self.add_op(
+            CustomOpHLIR {
+                id: self.custom_ops.len() - 1,
+                dtype,
+            },
+            &input_ids,
+        );
         GraphTensor::from_id(
-            add.finish(),
+            id,
             ShapeTracker::new_with_element_bits(shape, dtype.bits()),
             self,
             dtype,
@@ -600,23 +593,6 @@ impl DerefMut for Graph {
     }
 }
 
-pub struct NewOp<'a> {
-    new_op_id: NodeIndex,
-    graph_ref: &'a mut Graph,
-    num_srcs: u8,
-}
-
-impl NewOp<'_> {
-    pub fn finish(self) -> NodeIndex {
-        self.new_op_id
-    }
-
-    pub fn input(mut self, id: NodeIndex, shape: ShapeTracker) -> Self {
-        self.graph_ref.graph.add_edge(id, self.new_op_id, shape);
-        self.num_srcs += 1;
-        self
-    }
-}
 
 /// Describes a tensor value crossing a graph break boundary into a chunk.
 #[derive(Debug, Clone)]
@@ -773,15 +749,16 @@ pub fn split_at_graph_breaks(graph: &Graph) -> Vec<SubgraphDescriptor> {
             let bi = break_index[&brk];
             if bi + 1 == chunk_idx {
                 // This break feeds into this chunk
-                // Get shape/dtype from the incoming edge of the GraphBreak
-                let edge = graph
+                // Get shape from the GraphBreak op itself
+                let shape = graph
+                    .get_op::<crate::hlir::GraphBreak>(brk)
+                    .input_shape;
+                // Get dtype from the predecessor
+                let pred = graph
                     .graph
-                    .edges_directed(brk, Direction::Incoming)
+                    .neighbors_directed(brk, Direction::Incoming)
                     .next()
                     .expect("GraphBreak must have exactly one input");
-                let shape = *edge.weight();
-                // Get dtype from the predecessor
-                let pred = edge.source();
                 let dtype = if let Some(inp) = graph.try_get_op::<crate::hlir::Input>(pred) {
                     inp.dtype
                 } else {
