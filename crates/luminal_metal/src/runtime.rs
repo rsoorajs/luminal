@@ -1,6 +1,6 @@
 #![allow(unexpected_cfgs)]
 
-use crate::kernel::{MetalKernelOp, DYN_BUFFER_INDEX, DYN_SLOT_COUNT};
+use crate::kernel::{MetalKernelOp, DYN_SLOT_COUNT};
 use itertools::Itertools;
 use luminal::{
     graph::LLIRGraph,
@@ -161,7 +161,6 @@ impl Runtime for MetalRuntime {
         self.update_dyn_buffer(dyn_map);
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_buffer(DYN_BUFFER_INDEX, Some(&self.dyn_buffer), 0);
 
         for node in topo_order {
             if self.llir_graph[node].to_op::<Input>().is_some()
@@ -199,6 +198,11 @@ impl Runtime for MetalRuntime {
                     .buffers
                     .get(&node)
                     .expect("Output buffer not allocated!");
+
+                // Bind dyn dims right after the output slot:
+                // [inputs..., output, dyn, bytes...]
+                let dyn_idx = input_buffers.len() as u64 + 1;
+                encoder.set_buffer(dyn_idx, Some(&self.dyn_buffer), 0);
 
                 kernel_op.encode(encoder, pipeline, &input_buffers, output_buffer, dyn_map);
             }
@@ -289,7 +293,6 @@ impl MetalRuntime {
         self.update_dyn_buffer(dyn_map);
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_buffer(DYN_BUFFER_INDEX, Some(&self.dyn_buffer), 0);
 
         for node in topo_order {
             if self.llir_graph[node].to_op::<Input>().is_some()
@@ -327,6 +330,9 @@ impl MetalRuntime {
                     .buffers
                     .get(&node)
                     .expect("Output buffer not allocated!");
+
+                let dyn_idx = input_buffers.len() as u64 + 1;
+                encoder.set_buffer(dyn_idx, Some(&self.dyn_buffer), 0);
 
                 kernel_op.encode(encoder, pipeline, &input_buffers, output_buffer, dyn_map);
             }

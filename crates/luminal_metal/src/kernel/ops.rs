@@ -1,4 +1,4 @@
-use super::{MetalKernelOp, DYN_BUFFER_INDEX};
+use super::MetalKernelOp;
 use luminal::{
     egglog_utils::{
         api::{app, eq, rule, sort, union, v, Rule, SortDef},
@@ -205,8 +205,8 @@ macro_rules! metal_unary_op {
                     kernel void mkernel(
                         device float *inp [[buffer(0)]],
                         device float *out [[buffer(1)]],
-                        device uint &n_elements [[buffer(2)]],
                         constant int *dyn [[buffer({dyn_buffer_index})]],
+                        device uint &n_elements [[buffer({n_elements_index})]],
                         uint idx [[thread_position_in_grid]]
                     ) {{
                         if (idx < n_elements) {{
@@ -217,7 +217,8 @@ macro_rules! metal_unary_op {
                     metal_op = $metal_op,
                     inp_idx = inp_idx,
                     out_idx = out_idx,
-                    dyn_buffer_index = DYN_BUFFER_INDEX
+                    dyn_buffer_index = 2u64,
+                    n_elements_index = 3u64,
                 );
                 compile_shader(device, &source, "mkernel")
             }
@@ -244,7 +245,7 @@ macro_rules! metal_unary_op {
                 encoder.set_buffer(0, Some(inputs[0]), 0);
                 encoder.set_buffer(1, Some(output), 0);
                 encoder.set_bytes(
-                    2,
+                    3,
                     std::mem::size_of::<u32>() as u64,
                     &n_elements as *const u32 as *const _,
                 );
@@ -342,8 +343,8 @@ impl MetalKernelOp for MetalAdd {
                 device float *a [[buffer(0)]],
                 device float *b [[buffer(1)]],
                 device float *out [[buffer(2)]],
-                device uint &n_elements [[buffer(3)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
+                device uint &n_elements [[buffer({n_elements_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
@@ -351,7 +352,8 @@ impl MetalKernelOp for MetalAdd {
                 }}
             }}
             "#,
-            dyn_buffer_index = DYN_BUFFER_INDEX
+            dyn_buffer_index = 3u64,
+            n_elements_index = 4u64,
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -379,7 +381,7 @@ impl MetalKernelOp for MetalAdd {
         encoder.set_buffer(1, Some(inputs[1]), 0);
         encoder.set_buffer(2, Some(output), 0);
         encoder.set_bytes(
-            3,
+            4,
             std::mem::size_of::<u32>() as u64,
             &n_elements as *const u32 as *const _,
         );
@@ -459,8 +461,8 @@ impl MetalKernelOp for MetalMul {
                 device float *a [[buffer(0)]],
                 device float *b [[buffer(1)]],
                 device float *out [[buffer(2)]],
-                device uint &n_elements [[buffer(3)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
+                device uint &n_elements [[buffer({n_elements_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
@@ -468,7 +470,8 @@ impl MetalKernelOp for MetalMul {
                 }}
             }}
             "#,
-            dyn_buffer_index = DYN_BUFFER_INDEX
+            dyn_buffer_index = 3u64,
+            n_elements_index = 4u64,
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -496,7 +499,7 @@ impl MetalKernelOp for MetalMul {
         encoder.set_buffer(1, Some(inputs[1]), 0);
         encoder.set_buffer(2, Some(output), 0);
         encoder.set_bytes(
-            3,
+            4,
             std::mem::size_of::<u32>() as u64,
             &n_elements as *const u32 as *const _,
         );
@@ -577,8 +580,8 @@ impl MetalKernelOp for MetalMod {
                 device float *a [[buffer(0)]],
                 device float *b [[buffer(1)]],
                 device float *out [[buffer(2)]],
-                device uint &n_elements [[buffer(3)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
+                device uint &n_elements [[buffer({n_elements_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
@@ -586,7 +589,8 @@ impl MetalKernelOp for MetalMod {
                 }}
             }}
             "#,
-            dyn_buffer_index = DYN_BUFFER_INDEX
+            dyn_buffer_index = 3u64,
+            n_elements_index = 4u64,
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -614,7 +618,7 @@ impl MetalKernelOp for MetalMod {
         encoder.set_buffer(1, Some(inputs[1]), 0);
         encoder.set_buffer(2, Some(output), 0);
         encoder.set_bytes(
-            3,
+            4,
             std::mem::size_of::<u32>() as u64,
             &n_elements as *const u32 as *const _,
         );
@@ -695,8 +699,8 @@ impl MetalKernelOp for MetalLessThan {
                 device float *a [[buffer(0)]],
                 device float *b [[buffer(1)]],
                 device float *out [[buffer(2)]],
-                device uint &n_elements [[buffer(3)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
+                device uint &n_elements [[buffer({n_elements_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
@@ -704,7 +708,8 @@ impl MetalKernelOp for MetalLessThan {
                 }}
             }}
             "#,
-            dyn_buffer_index = DYN_BUFFER_INDEX
+            dyn_buffer_index = 3u64,
+            n_elements_index = 4u64,
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -732,7 +737,7 @@ impl MetalKernelOp for MetalLessThan {
         encoder.set_buffer(1, Some(inputs[1]), 0);
         encoder.set_buffer(2, Some(output), 0);
         encoder.set_bytes(
-            3,
+            4,
             std::mem::size_of::<u32>() as u64,
             &n_elements as *const u32 as *const _,
         );
@@ -818,10 +823,10 @@ impl MetalKernelOp for MetalSumReduce {
             #define THREADS_PER_GROUP 256
 
             kernel void mkernel(
-                device float *out [[buffer(0)]],
-                const device float *in [[buffer(1)]],
-                device uint &n_outputs [[buffer(2)]],
+                const device float *in [[buffer(0)]],
+                device float *out [[buffer(1)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
+                device uint &n_outputs [[buffer({n_outputs_index})]],
                 uint gid [[threadgroup_position_in_grid]],
                 uint tid [[thread_index_in_threadgroup]],
                 uint simd_lane [[thread_index_in_simdgroup]],
@@ -862,7 +867,8 @@ impl MetalKernelOp for MetalSumReduce {
                 }}
             }}
             "#,
-            dyn_buffer_index = DYN_BUFFER_INDEX
+            dyn_buffer_index = 2u64,
+            n_outputs_index = 3u64,
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -886,10 +892,10 @@ impl MetalKernelOp for MetalSumReduce {
         let n_outputs = self.output_size().exec(dyn_map).unwrap() as u32;
 
         encoder.set_compute_pipeline_state(pipeline);
-        encoder.set_buffer(0, Some(output), 0);
-        encoder.set_buffer(1, Some(inputs[0]), 0);
+        encoder.set_buffer(0, Some(inputs[0]), 0);
+        encoder.set_buffer(1, Some(output), 0);
         encoder.set_bytes(
-            2,
+            3,
             std::mem::size_of::<u32>() as u64,
             &n_outputs as *const u32 as *const _,
         );
@@ -973,10 +979,10 @@ impl MetalKernelOp for MetalMaxReduce {
             #define NEG_INF_F (-INFINITY)
 
             kernel void mkernel(
-                device float *out [[buffer(0)]],
-                const device float *in [[buffer(1)]],
-                device uint &n_outputs [[buffer(2)]],
+                const device float *in [[buffer(0)]],
+                device float *out [[buffer(1)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
+                device uint &n_outputs [[buffer({n_outputs_index})]],
                 uint gid [[threadgroup_position_in_grid]],
                 uint tid [[thread_index_in_threadgroup]],
                 uint simd_lane [[thread_index_in_simdgroup]],
@@ -1017,7 +1023,8 @@ impl MetalKernelOp for MetalMaxReduce {
                 }}
             }}
             "#,
-            dyn_buffer_index = DYN_BUFFER_INDEX
+            dyn_buffer_index = 2u64,
+            n_outputs_index = 3u64,
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -1041,10 +1048,10 @@ impl MetalKernelOp for MetalMaxReduce {
         let n_outputs = self.output_size().exec(dyn_map).unwrap() as u32;
 
         encoder.set_compute_pipeline_state(pipeline);
-        encoder.set_buffer(0, Some(output), 0);
-        encoder.set_buffer(1, Some(inputs[0]), 0);
+        encoder.set_buffer(0, Some(inputs[0]), 0);
+        encoder.set_buffer(1, Some(output), 0);
         encoder.set_bytes(
-            2,
+            3,
             std::mem::size_of::<u32>() as u64,
             &n_outputs as *const u32 as *const _,
         );
@@ -1129,7 +1136,7 @@ impl MetalKernelOp for MetalConstant {
             }}
             "#,
             value = value_str,
-            dyn_buffer_index = DYN_BUFFER_INDEX
+            dyn_buffer_index = 1u64,
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -1212,8 +1219,8 @@ impl MetalKernelOp for MetalIota {
 
             kernel void mkernel(
                 device int *out [[buffer(0)]],
-                device uint &n_elements [[buffer(1)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
+                device uint &n_elements [[buffer({n_elements_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
@@ -1222,7 +1229,8 @@ impl MetalKernelOp for MetalIota {
             }}
             "#,
             expr = expr_code,
-            dyn_buffer_index = DYN_BUFFER_INDEX
+            dyn_buffer_index = 1u64,
+            n_elements_index = 2u64,
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -1244,7 +1252,7 @@ impl MetalKernelOp for MetalIota {
         encoder.set_compute_pipeline_state(pipeline);
         encoder.set_buffer(0, Some(output), 0);
         encoder.set_bytes(
-            1,
+            2,
             std::mem::size_of::<u32>() as u64,
             &n_elements as *const u32 as *const _,
         );
@@ -1351,11 +1359,11 @@ impl MetalKernelOp for MetalGather {
             using namespace metal;
 
             kernel void mkernel(
-                device float *out [[buffer(0)]],
-                const device int *indexes [[buffer(1)]],
-                const device float *data [[buffer(2)]],
-                device uint &n_elements [[buffer(3)]],
+                const device int *indexes [[buffer(0)]],
+                const device float *data [[buffer(1)]],
+                device float *out [[buffer(2)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
+                device uint &n_elements [[buffer({n_elements_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
@@ -1364,7 +1372,8 @@ impl MetalKernelOp for MetalGather {
                 }}
             }}
             "#,
-            dyn_buffer_index = DYN_BUFFER_INDEX
+            dyn_buffer_index = 3u64,
+            n_elements_index = 4u64,
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -1388,11 +1397,11 @@ impl MetalKernelOp for MetalGather {
         let n_elements = self.output_size().exec(dyn_map).unwrap() as u32;
 
         encoder.set_compute_pipeline_state(pipeline);
-        encoder.set_buffer(0, Some(output), 0);
-        encoder.set_buffer(1, Some(inputs[0]), 0); // indexes
-        encoder.set_buffer(2, Some(inputs[1]), 0); // data
+        encoder.set_buffer(0, Some(inputs[0]), 0); // indexes
+        encoder.set_buffer(1, Some(inputs[1]), 0); // data
+        encoder.set_buffer(2, Some(output), 0);
         encoder.set_bytes(
-            3,
+            4,
             std::mem::size_of::<u32>() as u64,
             &n_elements as *const u32 as *const _,
         );
@@ -1484,8 +1493,8 @@ impl MetalKernelOp for MetalCast {
             kernel void mkernel(
                 device float *inp [[buffer(0)]],
                 device float *out [[buffer(1)]],
-                device uint &n_elements [[buffer(2)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
+                device uint &n_elements [[buffer({n_elements_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
@@ -1493,7 +1502,8 @@ impl MetalKernelOp for MetalCast {
                 }}
             }}
             "#,
-            dyn_buffer_index = DYN_BUFFER_INDEX
+            dyn_buffer_index = 2u64,
+            n_elements_index = 3u64,
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -1516,7 +1526,7 @@ impl MetalKernelOp for MetalCast {
         encoder.set_buffer(0, Some(inputs[0]), 0);
         encoder.set_buffer(1, Some(output), 0);
         encoder.set_bytes(
-            2,
+            3,
             std::mem::size_of::<u32>() as u64,
             &n_elements as *const u32 as *const _,
         );
