@@ -357,3 +357,77 @@ pub fn parse_layernorm_node(
     trace!("Finished parse: LayerNormalization Node");
     Ok(())
 }
+
+/// Handle GroupNormalization node (opset 18).
+///
+/// Inputs: X [N, C, spatial...], scale [num_groups], bias [num_groups]
+/// Attributes: num_groups (required), epsilon (default 1e-5)
+///
+/// Normalizes over channels-per-group and spatial dims, then applies per-group scale/bias.
+/// Decomposed into: reshape [N, G, C/G, spatial...] -> layer_norm over [C/G, spatial...] ->
+/// reshape back to [N, C, spatial...] -> scale + bias (broadcast).
+pub fn parse_group_norm_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+) -> Result<(), String> {
+    trace!("Starting parse: GroupNormalization Node");
+
+    assert!(
+        node.input.len() >= 3,
+        "GroupNormalization needs 3 inputs (X, scale, bias), got {}",
+        node.input.len()
+    );
+
+    let x = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("GroupNorm: missing input X '{}'", node.input[0]))?;
+    let scale = *tensors
+        .get(&node.input[1])
+        .ok_or_else(|| format!("GroupNorm: missing scale '{}'", node.input[1]))?;
+    let bias = *tensors
+        .get(&node.input[2])
+        .ok_or_else(|| format!("GroupNorm: missing bias '{}'", node.input[2]))?;
+
+    let x_dims = x.dims();
+    let ndim = x_dims.len();
+    assert!(ndim >= 3, "GroupNorm: input must be at least 3D [N, C, spatial...], got {ndim}D");
+
+    let num_groups = get_int_attr(node, "num_groups", 1) as usize;
+    let epsilon = get_float_attr(node, "epsilon", 1e-5);
+
+    let n = x_dims[0].to_usize().expect("GroupNorm: batch must be concrete");
+    let c = x_dims[1].to_usize().expect("GroupNorm: channels must be concrete");
+    assert_eq!(c % num_groups, 0, "GroupNorm: channels {c} must be divisible by num_groups {num_groups}");
+    let cpg = c / num_groups; // channels per group
+
+    // Reshape X from [N, C, spatial...] to [N, G, C/G, spatial...]
+    // Use *1.0 + ShapeTracker to reshape
+    let spatial_dims: Vec<Expression> = x_dims[2..].to_vec();
+    let mut reshaped = x * 1.0;
+    let mut new_shape = vec![n, num_groups, cpg];
+    for d in &spatial_dims {
+        new_shape.push(d.to_usize().expect("GroupNorm: spatial dims must be concrete"));
+    }
+    reshaped.shape = ShapeTracker::new(new_shape.clone());
+
+    // Normalize over axes [2, 3, ..., ndim] (C/G + spatial dims)
+    let norm_axes: Vec<usize> = (2..new_shape.len()).collect();
+    let mut normed = reshaped.layer_norm(norm_axes, epsilon);
+
+    // Reshape back to [N, C, spatial...]
+    let mut orig_shape = vec![n, c];
+    for d in &spatial_dims {
+        orig_shape.push(d.to_usize().unwrap());
+    }
+    normed = normed * 1.0;
+    normed.shape = ShapeTracker::new(orig_shape.clone());
+
+    // Apply scale and bias (both shape [C], broadcast to [N, C, spatial...])
+    let target_shape: Vec<Expression> = orig_shape.iter().map(|&d| Expression::from(d)).collect();
+    let result = normed * broadcast_to_expr(scale, &target_shape)
+        + broadcast_to_expr(bias, &target_shape);
+
+    tensors.insert(node.output[0].clone(), result);
+    trace!("Finished parse: GroupNormalization Node");
+    Ok(())
+}

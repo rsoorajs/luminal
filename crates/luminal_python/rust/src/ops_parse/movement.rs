@@ -1584,3 +1584,233 @@ pub fn parse_scatter_nd_node(
     tensors.insert(node.output[0].clone(), result);
     Ok(())
 }
+
+/// Handle Pad node: pad a tensor along specified dimensions.
+///
+/// ONNX Pad has inputs: data, pads, [constant_value], [axes]
+/// pads is a 1-D tensor of shape [2*num_axes]: [begin_0, begin_1, ..., end_0, end_1, ...]
+pub fn parse_pad_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: Pad Node");
+
+    assert!(
+        node.input.len() >= 2,
+        "Pad needs at least 2 inputs (data, pads), got {}",
+        node.input.len()
+    );
+
+    let data = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Pad: missing data '{}'", node.input[0]))?;
+
+    let pads_data = known_values
+        .get(&node.input[1])
+        .ok_or_else(|| format!("Pad: pads '{}' must be a known constant", node.input[1]))?;
+
+    let constant_value = if node.input.len() > 2 && !node.input[2].is_empty() {
+        if let Some(cv) = known_values.get(&node.input[2]) {
+            cv[0]
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    let mode = get_str_attr(node, "mode", "constant");
+    assert_eq!(
+        mode, "constant",
+        "Pad: only 'constant' mode is supported, got '{mode}'"
+    );
+
+    let ndim = data.dims().len();
+    let pads: Vec<usize> = pads_data.iter().map(|&v| v as usize).collect();
+
+    // If axes input is provided, only pad those axes; otherwise pad all
+    let axes: Vec<usize> = if node.input.len() > 3 && !node.input[3].is_empty() {
+        if let Some(axes_data) = known_values.get(&node.input[3]) {
+            axes_data
+                .iter()
+                .map(|&v| {
+                    let a = v as i64;
+                    if a < 0 { (ndim as i64 + a) as usize } else { a as usize }
+                })
+                .collect()
+        } else {
+            (0..ndim).collect()
+        }
+    } else {
+        (0..ndim).collect()
+    };
+
+    let num_axes = axes.len();
+    assert_eq!(
+        pads.len(),
+        2 * num_axes,
+        "Pad: pads length {} must be 2 * num_axes {}",
+        pads.len(),
+        num_axes
+    );
+
+    let mut padding: Vec<(Expression, Expression)> = vec![(0.into(), 0.into()); ndim];
+    for (i, &axis) in axes.iter().enumerate() {
+        padding[axis] = (
+            Expression::from(pads[i]),
+            Expression::from(pads[num_axes + i]),
+        );
+    }
+
+    let result = data.pad(padding, constant_value) * 1.0;
+    tensors.insert(node.output[0].clone(), result);
+
+    trace!("Finished parse: Pad Node");
+    Ok(())
+}
+
+/// Handle Resize node: nearest-neighbor upsampling by integer scale factors.
+///
+/// ONNX Resize inputs: X, [roi], [scales], [sizes]
+/// Only nearest-neighbor mode with integer scale factors is supported.
+/// Implements upsampling via unsqueeze + expand + merge for each spatial dim.
+pub fn parse_resize_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: Resize Node");
+
+    let x = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Resize: missing input X '{}'", node.input[0]))?;
+
+    let x_dims = x.dims();
+    let ndim = x_dims.len();
+
+    let mode = get_str_attr(node, "mode", "nearest");
+    assert!(
+        mode == "nearest" || mode == "nearest-exact",
+        "Resize: only 'nearest' mode is supported, got '{mode}'"
+    );
+
+    // Determine target sizes from either 'scales' (input[2]) or 'sizes' (input[3])
+    let target_sizes: Vec<usize> = if node.input.len() > 3
+        && !node.input[3].is_empty()
+        && known_values.contains_key(&node.input[3])
+    {
+        // Use sizes directly
+        let sizes_data = known_values.get(&node.input[3]).unwrap();
+        sizes_data.iter().map(|&v| v as usize).collect()
+    } else if node.input.len() > 2
+        && !node.input[2].is_empty()
+        && known_values.contains_key(&node.input[2])
+    {
+        // Use scales: target = floor(input_dim * scale)
+        let scales_data = known_values.get(&node.input[2]).unwrap();
+        x_dims
+            .iter()
+            .zip(scales_data.iter())
+            .map(|(dim, &scale)| {
+                let d = dim.to_usize().expect("Resize: dims must be concrete");
+                (d as f32 * scale) as usize
+            })
+            .collect()
+    } else {
+        return Err("Resize: must provide either 'scales' or 'sizes' input".to_string());
+    };
+
+    assert_eq!(
+        target_sizes.len(),
+        ndim,
+        "Resize: target sizes length {} must match input rank {}",
+        target_sizes.len(),
+        ndim
+    );
+
+    // For each dimension, compute integer scale factor (target / input).
+    // Use unsqueeze + expand + merge pattern for upsampling.
+    let mut result = x;
+
+    for dim_idx in 0..ndim {
+        let actual_axis = dim_idx;
+        let input_size = x_dims[dim_idx]
+            .to_usize()
+            .expect("Resize: dims must be concrete");
+        let target = target_sizes[dim_idx];
+
+        if target == input_size {
+            continue; // no resize needed
+        }
+
+        assert!(
+            target >= input_size && target % input_size == 0,
+            "Resize: only integer upsampling is supported (dim {dim_idx}: {input_size} -> {target})"
+        );
+
+        let scale = target / input_size;
+        // Insert a new dimension after current axis, expand it to scale, then merge
+        result = result.expand_dim(actual_axis + 1, scale);
+        result = result.merge_dims(actual_axis, actual_axis + 1);
+        // No net change to current_axis_offset since we added 1 and merged 1
+    }
+
+    let result = result * 1.0;
+    tensors.insert(node.output[0].clone(), result);
+
+    trace!("Finished parse: Resize Node");
+    Ok(())
+}
+
+/// Handle Tile node: repeat a tensor along each dimension.
+///
+/// ONNX Tile inputs: input, repeats (1-D tensor of repeat counts per dim).
+/// Implemented via expand_dim + merge_dims for each dimension with repeat > 1.
+pub fn parse_tile_node(
+    node: &NodeProto,
+    tensors: &mut HashMap<String, GraphTensor>,
+    known_values: &HashMap<String, Vec<f32>>,
+) -> Result<(), String> {
+    trace!("Starting parse: Tile Node");
+
+    assert!(
+        node.input.len() == 2,
+        "Tile needs 2 inputs (input, repeats), got {}",
+        node.input.len()
+    );
+
+    let data = *tensors
+        .get(&node.input[0])
+        .ok_or_else(|| format!("Tile: missing input '{}'", node.input[0]))?;
+
+    let repeats_data = known_values
+        .get(&node.input[1])
+        .ok_or_else(|| format!("Tile: repeats '{}' must be a known constant", node.input[1]))?;
+
+    let repeats: Vec<usize> = repeats_data.iter().map(|&v| v as usize).collect();
+    let ndim = data.dims().len();
+    assert_eq!(
+        repeats.len(),
+        ndim,
+        "Tile: repeats length {} must match input rank {}",
+        repeats.len(),
+        ndim
+    );
+
+    let mut result = data;
+    for dim in 0..ndim {
+        let r = repeats[dim];
+        if r > 1 {
+            // Insert a new dim before the axis, expand to r, merge
+            result = result.expand_dim(dim, r);
+            result = result.merge_dims(dim, dim + 1);
+        }
+    }
+
+    let result = result * 1.0;
+    tensors.insert(node.output[0].clone(), result);
+
+    trace!("Finished parse: Tile Node");
+    Ok(())
+}

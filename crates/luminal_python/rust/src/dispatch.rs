@@ -224,6 +224,20 @@ pub fn process_onnx_nodes(
             "OneHot" => parse_onehot_node(node, tensors, known_values)?,
             "Range" => parse_range_node(node, tensors, cx, weight_data, known_values, shape_exprs)?,
             "CumSum" => parse_cumsum_node(node, tensors, known_values)?,
+            "Gelu" => parse_unary_op(node, tensors, "Gelu", |a| a.gelu())?,
+            "Conv" => parse_conv_node(node, tensors)?,
+            "Pad" => parse_pad_node(node, tensors, known_values)?,
+            "Resize" => parse_resize_node(node, tensors, known_values)?,
+            "Tile" => parse_tile_node(node, tensors, known_values)?,
+            "ReduceL2" => parse_reduce_op(
+                node,
+                tensors,
+                known_values,
+                "ReduceL2",
+                |t, axes| (t * t).sum(axes).sqrt(),
+                |flat, _n| (flat * flat).sum(1).sqrt(),
+            )?,
+            "GroupNormalization" => parse_group_norm_node(node, tensors)?,
             _ => {
                 panic!("Missing Node {}", node.op_type)
             }

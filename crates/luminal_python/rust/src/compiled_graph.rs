@@ -4,6 +4,7 @@ use luminal::{
         *,
     },
     shape::Expression,
+    visualization::ToDot,
 };
 use onnx_protobuf::{GraphProto, ModelProto};
 use pyo3::prelude::*;
@@ -465,6 +466,13 @@ impl OnnxGraphResult {
     /// Execute the graph.
     fn run(&mut self) {
         self.runtime.execute(&self.context.dyn_map);
+    }
+
+    /// Return the HLIR graph as a DOT string for visualization.
+    fn to_dot(&self) -> PyResult<String> {
+        self.context.graph.to_dot().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("DOT generation failed: {e}"))
+        })
     }
 
     /// Get output tensor data by name.
