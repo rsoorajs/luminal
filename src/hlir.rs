@@ -1272,11 +1272,11 @@ impl NativeOp for Gather {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scatter {
-    dest_shape: Vec<Expression>,
-    dest_strides: Vec<Expression>,
-    index_shape: Vec<Expression>,
-    index_strides: Vec<Expression>,
-    src_strides: Vec<Expression>,
+    pub dest_shape: Vec<Expression>,
+    pub dest_strides: Vec<Expression>,
+    pub index_shape: Vec<Expression>,
+    pub index_strides: Vec<Expression>,
+    pub src_strides: Vec<Expression>,
 }
 impl Display for Scatter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1284,17 +1284,17 @@ impl Display for Scatter {
     }
 }
 impl HLIROp for Scatter {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
         format!(
             "(Scatter {} {} {} {} {} {} {} {})",
             inputs[0].1,
-            elist_to_egglog(&inputs[0].2.dims),
-            elist_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&self.dest_shape),
+            elist_to_egglog(&self.dest_strides),
             inputs[1].1,
-            elist_to_egglog(&inputs[1].2.dims),
-            elist_to_egglog(&inputs[1].2.strides),
+            elist_to_egglog(&self.index_shape),
+            elist_to_egglog(&self.index_strides),
             inputs[2].1,
-            elist_to_egglog(&inputs[2].2.strides),
+            elist_to_egglog(&self.src_strides),
         )
     }
 }

@@ -121,13 +121,16 @@ impl GraphTensor {
             DType::Int,
             "Scatter indexes must have an integer dtype!"
         );
-        let id = self
-            .graph()
-            .add_op(Scatter::default())
-            .input(dest.id, dest.shape)
-            .input(indexes.id, indexes.shape)
-            .input(self.id, self.shape)
-            .finish();
+        let id = self.graph().add_op(
+            Scatter {
+                dest_shape: dest.shape.dims.to_vec(),
+                dest_strides: dest.shape.strides.to_vec(),
+                index_shape: indexes.shape.dims.to_vec(),
+                index_strides: indexes.shape.strides.to_vec(),
+                src_strides: self.shape.strides.to_vec(),
+            },
+            &[dest.id, indexes.id, self.id],
+        );
         GraphTensor::from_id(id, dest.shape.contiguous(), self.graph_ref, self.dtype)
     }
 
