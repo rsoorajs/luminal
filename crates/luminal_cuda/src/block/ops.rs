@@ -72,8 +72,9 @@ impl EgglogOp for RowAdd {
                 (= (MIter) (nth_from_end ?a_stride 0))
                 (= (MIter) (nth_from_end ?b_stride 0))
                 (= (MIter) (nth_from_end ?out_stride 0))
-                ;(= (F32) (dtype ?a))
-                ;(= (F32) (dtype ?b))
+                ; only match F32 inputs — int adds (e.g. gather index computation) must not be reinterpreted as float
+                (= (F32) (dtype ?a))
+                (= (F32) (dtype ?b))
             )
             (
                 (let ?new_shape (RemoveNthFromEnd ?shape 0))

@@ -432,6 +432,15 @@ impl ToCudaInput for Vec<u8> {
     }
 }
 
+fn format_duration_precise(d: &std::time::Duration) -> String {
+    let us = d.as_micros();
+    if us >= 1000 {
+        format!("{} ms {} µs", us / 1000, us % 1000)
+    } else {
+        format!("{} µs", us)
+    }
+}
+
 impl Runtime for CudaRuntime {
     type Ops = (
         crate::logical::Ops,
@@ -506,9 +515,7 @@ impl Runtime for CudaRuntime {
     #[tracing::instrument(skip_all)]
     fn load_llir(&mut self, llir_graph: &LLIRGraph) {
         // Sync before clearing old data to ensure all operations complete
-        self.cuda_stream
-            .synchronize()
-            .expect("Failed to sync at start of load_llir");
+        let _ = self.cuda_stream.synchronize();
 
         // exec_graph entries are ExecutableHostOp which are dropped automatically
 
@@ -521,15 +528,16 @@ impl Runtime for CudaRuntime {
         self.exec_graph.clear();
 
         // Sync after clearing all buffers to ensure CUDA resources are freed
-        self.cuda_stream
-            .synchronize()
-            .expect("Failed to sync after clearing buffers");
+        if let Err(e) = self.cuda_stream.synchronize() {
+            // Context may be corrupted from a previous CUDA error — try to recover
+            let _ = self.cuda_stream.context().bind_to_thread();
+            if self.cuda_stream.synchronize().is_err() {
+                panic!("CUDA context unrecoverable after sync error: {e}");
+            }
+        }
 
         // Rebind CUDA context to thread after cleanup to ensure valid state
-        self.cuda_stream
-            .context()
-            .bind_to_thread()
-            .expect("Failed to bind CUDA context after cleanup");
+        let _ = self.cuda_stream.context().bind_to_thread();
 
         let mut exec_graph = StableGraph::default();
         let mut node_to_exec = FxHashMap::default();
@@ -636,7 +644,7 @@ impl Runtime for CudaRuntime {
     }
 
     fn clear_intermediate_buffers(&mut self) {
-        self.cuda_stream.synchronize().unwrap();
+        let _ = self.cuda_stream.synchronize();
         self.buffers.clear();
         self.cached_buffer_ptrs.clear();
     }
@@ -700,7 +708,7 @@ impl Runtime for CudaRuntime {
         let mbu = peak_bw.map(|p| aggregate_bw / p as f64);
         let mfu = peak_tf.map(|p| aggregate_tf / p as f64);
 
-        let duration_str = pretty_duration::pretty_duration(&duration, None);
+        let duration_str = format_duration_precise(&duration);
         let mbu_str = mbu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
         let mfu_str = mfu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
         let display = format!(
@@ -815,8 +823,18 @@ impl Runtime for CudaRuntime {
                     &buffer_map,
                     dyn_map,
                 )
-                .unwrap();
-            self.cuda_stream.synchronize().unwrap();
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "CUDA execute error in {:?}: {e}",
+                        exec_op.internal.stats_name().unwrap_or("unknown")
+                    );
+                });
+            self.cuda_stream.synchronize().unwrap_or_else(|e| {
+                panic!(
+                    "CUDA sync error after {:?}: {e}",
+                    exec_op.internal.stats_name().unwrap_or("unknown")
+                );
+            });
         }
         self.last_total_time_us = total_start.elapsed().as_secs_f64() * 1_000_000.0;
 

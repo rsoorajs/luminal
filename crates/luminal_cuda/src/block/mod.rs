@@ -1135,6 +1135,16 @@ impl crate::kernel::KernelOp for MegakernelOp {
                 buffer_array[buffer_idx as usize] = ptr;
             }
         }
+        // Validate: check for NULL buffer pointers that will cause CUDA_ERROR_ILLEGAL_ADDRESS
+        for (node, &buffer_idx) in &self.node_to_buffer_index {
+            assert!(
+                buffer_array[buffer_idx as usize] != 0,
+                "MegakernelOp: NULL buffer at index {buffer_idx} for node {node:?} \
+                 ({} available, {} needed)",
+                all_buffer_ptrs.len(),
+                self.node_to_buffer_index.len(),
+            );
+        }
 
         let mut buffers_view = internal_bufs[6].as_view_mut();
         let mut buffers_typed = unsafe {

@@ -3,7 +3,7 @@ use luminal::{
     graph::Graph,
     op::{CustomOp, LLIROp},
     prelude::{F32Pow, GraphTensor},
-    shape::{flatten_strides, Expression, ShapeTracker, ToShape},
+    shape::{flatten_strides, Expression, ToShape},
 };
 use luminal_cuda::{
     block::{cstruct::CStruct, BlockOp},
@@ -143,21 +143,19 @@ fn llama_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> Grap
         .expand_dim(1, 1)
         .matmul(inv_freqs.expand_dim(0, 1));
 
-    // Split input into evens and odds
-    let split = input.split_dims(2, 2);
-    let x0 = split.slice((.., .., .., ..1));
-    let x1 = split.slice((.., .., .., 1..));
+    // Split into first half and second half (Llama "half" rotation convention)
+    let x0 = input.slice((.., .., ..HEAD_DIM / 2));
+    let x1 = input.slice((.., .., HEAD_DIM / 2..));
 
     // Apply sin and cos embeddings
-    let x0_out = x0 * emb.cos().expand_dim(0, x0.dims()[0]).expand_dim(3, 1)
-        - x1 * emb.sin().expand_dim(0, x1.dims()[0]).expand_dim(3, 1);
-    let x1_out = x0 * emb.sin().expand_dim(0, x0.dims()[0]).expand_dim(3, 1)
-        + x1 * emb.cos().expand_dim(0, x1.dims()[0]).expand_dim(3, 1);
+    let cos = emb.cos().expand_dim(0, x0.dims()[0]);
+    let sin = emb.sin().expand_dim(0, x0.dims()[0]);
+    let x0_out = x0 * cos - x1 * sin;
+    let x1_out = x1 * cos + x0 * sin;
 
     // Combine back into output
-    let mut s = x0_out.concat_along(x1_out, 3);
-    let (n_heads, seq_dim, _) = input.dims3();
-    s.shape = ShapeTracker::new((n_heads, seq_dim, HEAD_DIM));
+    let mut s = x0_out.concat_along(x1_out, 2);
+    let (_n_heads, _seq_dim, _) = input.dims3();
     s = s.transpose(0, 1) * 1.0;
     s.shape = orig_shape;
     s

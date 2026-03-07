@@ -346,24 +346,50 @@ impl Graph {
             // Clear intermediate buffers from previous group's profiling
             runtime.clear_intermediate_buffers();
 
-            let mut best_genome = random_initial_choice(egraph, rng);
-            prev_selected.insert(hash_choice_set(&best_genome));
+            // Find a viable initial genome (may need multiple attempts if some panic)
+            let (mut best_genome, mut best_graph, mut best_metric, display, mut n_graphs);
+            let mut init_attempts = 0;
+            loop {
+                init_attempts += 1;
+                if init_attempts > 100 {
+                    panic!(
+                        "Failed to find a viable initial genome for group {group_idx} after 100 attempts"
+                    );
+                }
+                let genome = random_initial_choice(egraph, rng);
+                prev_selected.insert(hash_choice_set(&genome));
 
-            let mut best_graph = egglog_to_llir(
-                egraph,
-                best_genome.clone(),
-                ops,
-                &self.custom_ops,
-                &mut list_cache,
-                &mut expr_cache,
-                None,
-            );
-            let (mut best_metric, display) =
-                runtime.profile(&best_graph, &self.dyn_map, Self::TRIALS_PER_PROFILE);
-            let mut best_memory = runtime.intermediate_buffer_bytes();
-            let mut lowest_memory = best_memory;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let graph = egglog_to_llir(
+                        egraph,
+                        genome.clone(),
+                        ops,
+                        &self.custom_ops,
+                        &mut list_cache,
+                        &mut expr_cache,
+                        None,
+                    );
+                    runtime.clear_intermediate_buffers();
+                    let profile = runtime.profile(&graph, &self.dyn_map, Self::TRIALS_PER_PROFILE);
+                    (graph, profile)
+                }));
 
-            let mut n_graphs = 1;
+                match result {
+                    Ok((graph, (metric, disp))) => {
+                        best_genome = genome;
+                        best_graph = graph;
+                        best_metric = metric;
+                        display = disp;
+                        n_graphs = 1;
+                        break;
+                    }
+                    Err(_) => {
+                        list_cache.clear();
+                        expr_cache.clear();
+                        continue;
+                    }
+                }
+            }
 
             // Print initial result and progress
             {
@@ -418,24 +444,29 @@ impl Graph {
                     list_cache.clear();
                     expr_cache.clear();
 
-                    let llir_graph = egglog_to_llir(
-                        egraph,
-                        genome.clone(),
-                        ops,
-                        &self.custom_ops,
-                        &mut list_cache,
-                        &mut expr_cache,
-                        None,
-                    );
-
-                    // Use catch_unwind to handle CUDA errors from invalid LLIR
-                    runtime.clear_intermediate_buffers();
+                    // Wrap LLIR extraction + profiling in catch_unwind to handle
+                    // panics from invalid genomes, expression simplification, or CUDA errors
                     let profile_result =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            runtime.profile(&llir_graph, &self.dyn_map, Self::TRIALS_PER_PROFILE)
+                            let llir_graph = egglog_to_llir(
+                                egraph,
+                                genome.clone(),
+                                ops,
+                                &self.custom_ops,
+                                &mut list_cache,
+                                &mut expr_cache,
+                                None,
+                            );
+                            runtime.clear_intermediate_buffers();
+                            let result = runtime.profile(
+                                &llir_graph,
+                                &self.dyn_map,
+                                Self::TRIALS_PER_PROFILE,
+                            );
+                            (result, llir_graph)
                         }));
 
-                    let (new_metric, display_metric) = match profile_result {
+                    let ((new_metric, display_metric), llir_graph) = match profile_result {
                         Ok(result) => result,
                         Err(_) => {
                             if multi_chunk {
@@ -458,25 +489,11 @@ impl Graph {
                         }
                     };
 
-                    let new_memory = runtime.intermediate_buffer_bytes();
-                    if new_memory < lowest_memory {
-                        lowest_memory = new_memory;
-                    }
-                    let memory_threshold = (lowest_memory as f64 * 1.1) as usize;
-                    let new_in_budget = new_memory <= memory_threshold;
-                    let best_in_budget = best_memory <= memory_threshold;
-                    // A graph is "new best" if:
-                    // 1. New is in budget but current best is not, OR
-                    // 2. Both in budget and new is faster, OR
-                    // 3. Neither in budget and new uses less memory
-                    let new_best = new_in_budget
-                        && (!best_in_budget || best_metric.gt(&new_metric))
-                        || !best_in_budget && new_memory < best_memory;
+                    let new_best = best_metric.gt(&new_metric);
                     if new_best {
                         best_metric = new_metric;
-                        best_memory = new_memory;
                         best_graph = llir_graph;
-                        best_genome = genome;
+                        best_genome = genome.clone();
                     }
 
                     if new_best {
