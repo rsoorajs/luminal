@@ -38,7 +38,7 @@ pub struct GemmaRMSNorm {
 impl GemmaRMSNorm {
     pub fn new(dim: usize, weight_name: &str, epsilon: f32, cx: &mut Graph) -> Self {
         Self {
-            weight: cx.named_tensor(weight_name, dim),
+            weight: cx.named_tensor(weight_name, dim).persist(),
             epsilon,
         }
     }
@@ -64,43 +64,70 @@ impl Gemma {
         let mut w = vec![];
         for l in 0..LAYERS {
             let is_local = (l + 1) % SLIDING_WINDOW_PATTERN != 0;
-            w.push(GemmaLayer {
-                up: cx.named_tensor(
+            let up = cx
+                .named_tensor(
                     format!("model.layers.{l}.mlp.up_proj.weight"),
                     (INTERMEDIATE, HIDDEN),
-                ),
-                gate: cx.named_tensor(
+                )
+                .persist();
+            let gate = cx
+                .named_tensor(
                     format!("model.layers.{l}.mlp.gate_proj.weight"),
                     (INTERMEDIATE, HIDDEN),
-                ),
-                down: cx.named_tensor(
+                )
+                .persist();
+            let down = cx
+                .named_tensor(
                     format!("model.layers.{l}.mlp.down_proj.weight"),
                     (HIDDEN, INTERMEDIATE),
-                ),
-                q_proj: cx.named_tensor(
+                )
+                .persist();
+            let q_proj = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.q_proj.weight"),
                     (Q_DIM, HIDDEN),
-                ),
-                k_proj: cx.named_tensor(
+                )
+                .persist();
+            let k_proj = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.k_proj.weight"),
                     (KV_DIM, HIDDEN),
-                ),
-                v_proj: cx.named_tensor(
+                )
+                .persist();
+            let v_proj = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.v_proj.weight"),
                     (KV_DIM, HIDDEN),
-                ),
-                o_proj: cx.named_tensor(
+                )
+                .persist();
+            let o_proj = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.o_proj.weight"),
                     (HIDDEN, Q_DIM),
-                ),
-                q_norm: cx.named_tensor(
+                )
+                .persist();
+            let q_norm = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.q_norm.weight"),
                     HEAD_DIM,
-                ),
-                k_norm: cx.named_tensor(
+                )
+                .persist();
+            let k_norm = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.k_norm.weight"),
                     HEAD_DIM,
-                ),
+                )
+                .persist();
+            w.push(GemmaLayer {
+                up,
+                gate,
+                down,
+                q_proj,
+                k_proj,
+                v_proj,
+                o_proj,
+                q_norm,
+                k_norm,
                 input_layernorm: GemmaRMSNorm::new(
                     HIDDEN,
                     &format!("model.layers.{l}.input_layernorm.weight"),
@@ -134,9 +161,15 @@ impl Gemma {
             });
         }
         let lm_norm = GemmaRMSNorm::new(HIDDEN, "model.norm.weight", RMS_NORM_EPS, cx);
+        let embedding = cx
+            .named_tensor("model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN))
+            .persist();
+        let lm_head = cx
+            .named_tensor("lm_head.weight", (VOCAB_SIZE, HIDDEN))
+            .persist();
         Self {
-            embedding: cx.named_tensor("model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN)),
-            lm_head: cx.named_tensor("lm_head.weight", (VOCAB_SIZE, HIDDEN)),
+            embedding,
+            lm_head,
             layers: w,
             lm_norm,
         }

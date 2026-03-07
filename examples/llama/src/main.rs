@@ -148,18 +148,11 @@ fn main() {
         }
 
         generated_tokens.push(tokenizer.decode(&sentence, true).unwrap());
+        print!("{}", tokenizer.decode(&sentence, true).unwrap());
+        std::io::stdout().flush().unwrap();
         fwd_durations.push(start.elapsed());
     }
-
-    // Print generated text
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    writeln!(out, "{prompt}").unwrap();
-    for t in &generated_tokens {
-        write!(out, "{t}").unwrap();
-    }
-    writeln!(out).unwrap();
-    out.flush().unwrap();
+    println!();
 
     // Report benchmarks
     println!("  TTFT: {:.2} ms", fwd_durations[0].as_secs_f64() * 1e3);

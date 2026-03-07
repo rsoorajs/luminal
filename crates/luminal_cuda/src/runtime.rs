@@ -113,6 +113,8 @@ pub struct CudaRuntime {
     pub last_total_time_us: f64,
     kernel_cache: FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     num_sms: usize,
+    /// When true, execute() skips input buffer consumption (used during search/profile)
+    profiling: bool,
 }
 
 impl CudaRuntime {
@@ -178,6 +180,7 @@ impl CudaRuntime {
                 }
             })
             .expect("Cannot find output tensor!");
+        // Output nodes don't own buffers — they just point to their input
         let data_id = self
             .llir_graph
             .neighbors_directed(output_id, Direction::Incoming)
@@ -185,13 +188,32 @@ impl CudaRuntime {
             .unwrap();
 
         let _span = span!(Level::TRACE, "dtoh").entered();
-        self.cuda_stream
-            .clone_dtoh(
-                self.buffers
-                    .get(&data_id)
-                    .expect("Cannot find tensor in runtime!"),
-            )
-            .unwrap()
+        // If predecessor is an Input node, data lives in hlir_buffers
+        if let Some(hlir_node) = self.llir_to_hlir.get(&data_id) {
+            match self
+                .hlir_buffers
+                .get(hlir_node)
+                .expect("Cannot find input tensor in runtime!")
+            {
+                CudaInput::Buffer(buf) => self.cuda_stream.clone_dtoh(buf).unwrap(),
+                CudaInput::Ptr(p) => {
+                    // Raw pointer — need size from cached_buffer_ptrs or error
+                    panic!(
+                        "Cannot read raw pointer input (ptr=0x{:x}) — use Buffer variant",
+                        p
+                    );
+                }
+            }
+        } else {
+            // Predecessor is a computation node — data is in intermediate buffers
+            self.cuda_stream
+                .clone_dtoh(
+                    self.buffers
+                        .get(&data_id)
+                        .expect("Cannot find tensor in runtime!"),
+                )
+                .unwrap()
+        }
     }
 
     pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
@@ -509,6 +531,7 @@ impl Runtime for CudaRuntime {
             last_kernel_stats: vec![],
             last_total_time_us: 0.0,
             kernel_cache: FxHashMap::default(),
+            profiling: false,
         }
     }
 
@@ -662,8 +685,10 @@ impl Runtime for CudaRuntime {
     ) -> (Self::ProfileMetric, String) {
         self.buffers.clear();
         self.load_llir(llir_graph);
+        self.profiling = true;
         let start = std::time::Instant::now();
         self.execute(dyn_map);
+        self.profiling = false;
         let duration = start.elapsed();
 
         // Flush pending timing data so it's available for stats
@@ -859,6 +884,39 @@ impl Runtime for CudaRuntime {
         self.cuda_stream
             .synchronize()
             .expect("Final sync failed in execute");
+
+        // Consume input buffers: inputs are always consumed after execute, UNLESS
+        // they are directly followed by an Output node (which preserves them for retrieval
+        // and reuse across runs). This means weight tensors must have .persist() to survive.
+        // Skip consumption during profiling/search to preserve inputs across profile iterations.
+        if self.profiling {
+            return;
+        }
+        let inputs_with_outputs: FxHashSet<NodeIndex> = self
+            .llir_graph
+            .node_indices()
+            .filter(|n| self.llir_graph[*n].to_op::<Output>().is_some())
+            .filter_map(|output_node| {
+                self.llir_graph
+                    .neighbors_directed(output_node, Direction::Incoming)
+                    .next()
+                    .and_then(|pred| self.llir_to_hlir.get(&pred).copied())
+            })
+            .collect();
+
+        let to_consume: Vec<NodeIndex> = self
+            .hlir_buffers
+            .keys()
+            .filter(|hlir_node| !inputs_with_outputs.contains(hlir_node))
+            .copied()
+            .collect();
+
+        for hlir_node in to_consume {
+            self.hlir_buffers.remove(&hlir_node);
+            if let Some(llir_node) = self.hlir_to_llir.get(&hlir_node) {
+                self.cached_buffer_ptrs.remove(llir_node);
+            }
+        }
     }
 }
 
