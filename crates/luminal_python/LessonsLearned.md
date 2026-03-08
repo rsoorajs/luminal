@@ -366,6 +366,7 @@ with matching shape tracker dimensions.
    contiguous tensors first and slicing the result afterward. Non-contiguous views flowing
    through multiple CUDA kernels can trigger stride-related bugs in the egglog-compiled code.
 
+
 ---
 
 ## 2026-03-07 — Non-deterministic CUDA_ERROR_ILLEGAL_ADDRESS: Multiple Missing Rank Constraints
