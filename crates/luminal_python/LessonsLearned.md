@@ -365,3 +365,71 @@ with matching shape tracker dimensions.
    (slice, transpose, etc.) into downstream HLIR ops on CUDA, prefer operating on full
    contiguous tensors first and slicing the result afterward. Non-contiguous views flowing
    through multiple CUDA kernels can trigger stride-related bugs in the egglog-compiled code.
+
+---
+
+## 2026-03-07 — Non-deterministic CUDA_ERROR_ILLEGAL_ADDRESS: Multiple Missing Rank Constraints
+
+### What the symptom was
+
+`test_hf_llama_tiny` on CUDA failed ~70% of runs with `CUDA_ERROR_ILLEGAL_ADDRESS`. Failures
+were non-deterministic due to egglog's `FxHashMap` iteration order in `random_initial_choice()`.
+
+### What the actual root cause was
+
+**Multiple** matmul egglog rules lacked `(= (len ?out_shape) 2)` constraints:
+
+1. `TileMatmulSplitK` in `block/ops.rs` (disabled via comment but rule still registered)
+2. `TileMatmulFullSplit` in `block/ops.rs`
+3. All 4 `sgemm_v2_*.egg` rules in `host/cublas/`
+
+The `cublaslt_*.egg` rules already had the constraint. When egglog picked TileMatmul or sgemm
+for a 3D+ batched matmul, the generated CUDA kernels accessed out-of-bounds memory.
+
+Additionally, `KernelEmbed` in `kernel/hlir.rs` had an output indexing bug:
+`out[out_offset * embed_dim + embed_idx]` should be `out[out_offset + embed_idx]` because
+`out_offset` already includes the embed_dim factor from `flatten_strides`.
+
+**Most critically**, the KernelEmbed and RowEmbed "with cast" egglog rules passed the
+**pre-cast** float token_ids (`?token_ids`) to the embed kernel instead of the **post-cast**
+int token_ids (`?token_ids_cast`). The CUDA kernel reads token_ids as `const int*`, so float
+data gets reinterpreted as enormous garbage integers, causing out-of-bounds embed table access.
+
+### Why it was hard to find
+
+1. **Multiple independent bug sources**: The ~70% failure rate was caused by three separate bugs
+   (matmul rank, embed output indexing, embed pre-cast input). Each fix only reduced the rate
+   partially, making it seem like each fix was insufficient.
+2. **CudaGraph wrapping**: The crash occurred inside `CudaGraphOp::execute_internal` which
+   batches multiple kernels via CUDA graphs. The error just said "CudaGraph" — it
+   didn't identify which kernel crashed. Adding per-kernel debug launches was essential.
+3. **Cascading failures**: When the Megakernel (containing RowEmbed with the pre-cast bug)
+   corrupted the embed output, the NEXT CudaGraph group's kernels crashed reading the garbage.
+   This made the Megakernel appear to be the victim, not the source.
+4. **The pre-cast bug only crashes SOMETIMES**: Egglog's random choice determines whether
+   KernelEmbed/RowEmbed is selected (crash) or the generic Gather path is used (works).
+   Float token_id 1.0 (= 0x3F800000 = 1065353216 as int) produces an astronomically large
+   embed table index, causing ILLEGAL_ADDRESS.
+
+### The fix
+
+- Added `(= (len ?out_shape) 2)` to TileMatmulSplitK, TileMatmulFullSplit, and all 4 sgemm_v2 rules
+- Fixed KernelEmbed output indexing: `out[out_offset + embed_idx]`
+- **Fixed KernelEmbed/RowEmbed "with cast" rules**: Changed input from `?token_ids` to
+  `?token_ids_cast` — using the post-Cast int tensor instead of the pre-Cast float tensor
+
+### Results
+
+Failure rate: ~70% → 0% (20/20 passing). All three bugs needed to be fixed together.
+
+### General principle
+
+**When an egglog rule matches a sub-expression chain (like Cast→Mul→Add), be precise about
+which intermediate result becomes each input.** The "with cast" embed rules matched
+`Cast(?token_ids, ...)` to verify the Cast existed, but then passed `?token_ids` (the Cast
+INPUT) instead of `?token_ids_cast` (the Cast OUTPUT) to the embed kernel. The kernel expects
+int data, so the pre-cast float data was reinterpreted as garbage ints.
+
+**Always search for sibling implementations**: KernelEmbed (in `kernel/hlir.rs`) and RowEmbed
+(in `block/ops.rs`) had the SAME bug in their "with cast" rules. Fixing one without the other
+only reduces the failure rate — both must be fixed.
