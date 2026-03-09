@@ -1,8 +1,10 @@
 {
     "name": "Luminal (CUDA)",
     "image": "ghcr.io/luminal-ai/luminal-docker:cuda",
+    "initializeCommand": "touch .env",
     "runArgs": [
-        "--gpus=all"
+        "--gpus=all",
+        "--env-file", ".env"
     ],
     "containerUser": "ubuntu",
     "features": {
@@ -16,7 +18,7 @@
         }
     },
     "remoteUser": "ubuntu",
-    "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && if [ -f .env ]; then . .env; if [ -n \"$GH_TOKEN\" ]; then echo \"$GH_TOKEN\" | gh auth login --with-token 2>/dev/null; fi; fi",
+    "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && gh auth setup-git",
     "customizations": {
         "vscode": {
             "extensions": [

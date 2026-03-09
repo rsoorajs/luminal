@@ -1,0 +1,28 @@
+name: Modal Llama
+
+on:
+    push:
+        branches: ["main"]
+    pull_request:
+        branches: ["main"]
+    workflow_dispatch:
+
+jobs:
+    cuda_llama_modal:
+        name: Cuda Llama (Modal A100)
+        runs-on: ubuntu-latest
+        timeout-minutes: 70
+
+        steps:
+            - uses: actions/checkout@v6
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+            - name: Install Modal
+              run: pip install modal
+            - name: Run Llama on Modal A100
+              env:
+                  MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+                  MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+              run: modal run ci/modal_llama.py

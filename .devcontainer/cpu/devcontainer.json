@@ -1,6 +1,10 @@
 {
     "name": "Luminal (CPU)",
     "image": "ghcr.io/luminal-ai/luminal-docker:cpu",
+    "initializeCommand": "touch .env",
+    "runArgs": [
+        "--env-file", ".env"
+    ],
     "containerUser": "ubuntu",
     "features": {
         "ghcr.io/devcontainers/features/common-utils:2": {
@@ -13,7 +17,7 @@
         }
     },
     "remoteUser": "ubuntu",
-    "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && if [ -f .env ]; then . .env; if [ -n \"$GH_TOKEN\" ]; then echo \"$GH_TOKEN\" | gh auth login --with-token 2>/dev/null; fi; fi",
+    "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && gh auth setup-git",
     "customizations": {
         "vscode": {
             "extensions": [
