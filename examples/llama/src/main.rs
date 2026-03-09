@@ -6,6 +6,7 @@ use luminal::prelude::*;
 use luminal_cuda::{cudarc::driver::CudaContext, runtime::CudaRuntime};
 use luminal_tracing::*;
 use model::*;
+use rustc_hash::FxHashSet;
 use std::{io::Write, time::Duration};
 use tokenizers::Tokenizer;
 use tracing::{span, Level};
@@ -17,9 +18,9 @@ const REPO_ID: &str = "NousResearch/Meta-Llama-3-8B-Instruct";
 
 fn main() {
     let max_seq_len = 4096;
-    let gen_tokens = 10;
-    let search_graphs = 500; // the number of graphs we want to search during compilation
-    let prompt = "Hello, how are you";
+    let gen_tokens = 500;
+    let search_graphs = 50;
+    let prompt = "Explain what a neural network is in a paragraph.";
 
     // Tracing
     // let (perfetto_layer, perfetto_guard) = perfetto_layer("trace.pftrace");
@@ -40,9 +41,16 @@ fn main() {
     let model_dir = prepare_hf_model(REPO_ID).expect("Failed to prepare model");
     println!("Using model directory: {}", model_dir.display());
 
-    // Tokenize prompt
+    // Tokenize prompt with Llama 3 Instruct chat template
     let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
-    let mut sentence = tokenizer.encode(prompt, true).unwrap().get_ids().to_vec();
+    let chat_prompt = format!(
+        "<|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+    );
+    let mut sentence = tokenizer
+        .encode(chat_prompt.as_str(), true)
+        .unwrap()
+        .get_ids()
+        .to_vec();
 
     // Allocate kv cache
     let mut kv_cache = KVCache::new(&stream, max_seq_len);
@@ -73,12 +81,16 @@ fn main() {
     runtime = cx.search(runtime, search_graphs);
     kv_cache.reset();
 
-    print!("{prompt}");
-    std::io::stdout().flush().unwrap();
+    // Llama 3 special token IDs
+    const EOS_TOKEN: u32 = 128009; // <|eot_id|>
+    const STOP_TOKEN: u32 = 128001; // <|end_of_text|>
 
     // Decode loop
     let mut prev_seq = 0;
     let mut fwd_durations = vec![];
+    let mut generated_tokens = vec![];
+    let mut seen_tokens = FxHashSet::default();
+    let repetition_penalty: f32 = 1.05;
     for i in 0..gen_tokens {
         let start = std::time::Instant::now();
         let _span = if i == 0 {
@@ -108,10 +120,34 @@ fn main() {
         runtime.execute(&cx.dyn_map);
         let logits_data = runtime.get_f32(logits);
 
-        // Sample next token
+        // Sample next token with repetition penalty
         let _sample_span = span!(Level::INFO, "sample_full").entered();
-        sentence = vec![*sample(&logits_data, VOCAB_SIZE).last().unwrap()];
+        let mut last_row = logits_data[logits_data.len() - VOCAB_SIZE..].to_vec();
+        for &tok in &seen_tokens {
+            let logit = &mut last_row[tok as usize];
+            if *logit > 0.0 {
+                *logit /= repetition_penalty;
+            } else {
+                *logit *= repetition_penalty;
+            }
+        }
+        let next_token = last_row
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .unwrap()
+            .0 as u32;
+        sentence = vec![next_token];
+        seen_tokens.insert(next_token);
         prev_seq += seq_len;
+
+        // Stop on special tokens
+        if sentence[0] == EOS_TOKEN || sentence[0] == STOP_TOKEN {
+            fwd_durations.push(start.elapsed());
+            break;
+        }
+
+        generated_tokens.push(tokenizer.decode(&sentence, true).unwrap());
         print!("{}", tokenizer.decode(&sentence, true).unwrap());
         std::io::stdout().flush().unwrap();
         fwd_durations.push(start.elapsed());
@@ -127,22 +163,6 @@ fn main() {
             .as_secs_f64()
             * 1_000.
     );
-    runtime.print_execution_stats();
-
     // println!("Dumping device execution trace to perfetto...");
     // runtime.record_cuda_perfetto_trace(perfetto_guard);
-}
-
-#[tracing::instrument(skip_all)]
-fn sample(logits: &[f32], vocab_size: usize) -> Vec<u32> {
-    logits
-        .chunks_exact(vocab_size)
-        .map(|row| {
-            row.iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.total_cmp(b))
-                .unwrap()
-                .0 as u32
-        })
-        .collect()
 }

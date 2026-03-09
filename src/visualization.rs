@@ -61,9 +61,7 @@ where
 }
 
 /// View a debug graph in the browser using Luminal Visualizer
-pub fn display_graph(
-    graph: &StableGraph<impl Display + Debug, impl Display + Debug, Directed, u32>,
-) {
+pub fn display_graph<E>(graph: &StableGraph<impl Display + Debug, E, Directed, u32>) {
     let dot_source = graph_to_dot(graph, None);
 
     // Open in Luminal Visualizer (served from graph_viewer dev server)
@@ -75,8 +73,8 @@ pub fn display_graph(
 }
 
 /// View a debug graph in the browser using Luminal Visualizer
-pub fn display_graph_marked_nodes(
-    graph: &StableGraph<impl Display + Debug, impl Display + Debug, Directed, u32>,
+pub fn display_graph_marked_nodes<E>(
+    graph: &StableGraph<impl Display + Debug, E, Directed, u32>,
     mark_nodes: Option<Vec<NodeIndex>>,
 ) {
     let dot_source = graph_to_dot(graph, mark_nodes);
@@ -90,8 +88,8 @@ pub fn display_graph_marked_nodes(
 }
 
 /// View a debug graph in the browser using Luminal Visualizer
-pub fn display_graph_to_file(
-    graph: &StableGraph<impl Display + Debug, impl Display + Debug, Directed, u32>,
+pub fn display_graph_to_file<E>(
+    graph: &StableGraph<impl Display + Debug, E, Directed, u32>,
     mark_nodes: Option<Vec<NodeIndex>>,
     file_name: &str,
 ) {
@@ -106,8 +104,8 @@ fn escape_dot_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn graph_to_dot(
-    graph: &StableGraph<impl Display + Debug, impl Display + Debug, Directed, u32>,
+fn graph_to_dot<E>(
+    graph: &StableGraph<impl Display + Debug, E, Directed, u32>,
     mark_nodes: Option<Vec<NodeIndex>>,
 ) -> String {
     let mut dot = String::from("digraph {\n");
@@ -139,12 +137,7 @@ fn graph_to_dot(
     for edge in graph.edge_indices() {
         let (src, dest) = graph.edge_endpoints(edge).unwrap();
         if let (Some(src_id), Some(dest_id)) = (map.get(&src), map.get(&dest)) {
-            let weight = graph.edge_weight(edge).unwrap();
-            let label = escape_dot_string(&format!("{}", weight));
-            let tooltip = escape_dot_string(&format!("{:?}", weight));
-            dot.push_str(&format!(
-                "    n{src_id} -> n{dest_id} [label=\"{label}\", tooltip=\"{tooltip}\"];\n"
-            ));
+            dot.push_str(&format!("    n{src_id} -> n{dest_id};\n"));
         }
     }
 

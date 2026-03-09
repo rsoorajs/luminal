@@ -489,8 +489,8 @@ mod tests {
         };
         let size = 1024;
         let mut cx = Graph::default();
-        let a = cx.tensor(size);
-        let b = cx.tensor(size);
+        let a = cx.tensor(size).persist();
+        let b = cx.tensor(size).persist();
         let c = ((a + b) * a + b).output();
         cx.build_search_space_exclude_ops::<CudaRuntime, crate::block::Ops>();
         let mut rt = CudaRuntime::initialize(stream);
@@ -520,8 +520,8 @@ mod tests {
         };
         let size = 2048;
         let mut cx = Graph::default();
-        let a = cx.tensor(size);
-        let b = cx.tensor(size);
+        let a = cx.tensor(size).persist();
+        let b = cx.tensor(size).persist();
         let c = (a + b + a + b).output();
         cx.build_search_space_exclude_ops::<CudaRuntime, crate::block::Ops>();
         let mut rt = CudaRuntime::initialize(stream);
@@ -623,8 +623,8 @@ mod tests {
         };
         let size = 4096;
         let mut cx = Graph::default();
-        let a = cx.tensor(size);
-        let b = cx.tensor(size);
+        let a = cx.tensor(size).persist();
+        let b = cx.tensor(size).persist();
         let mut result = a + b;
         for _ in 0..5 {
             result += a;

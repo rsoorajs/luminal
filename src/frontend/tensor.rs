@@ -59,18 +59,26 @@ impl GraphTensor {
 
     /// Mark this tensor as an output
     pub fn output(&self) -> GraphTensor {
-        self.graph()
-            .add_op(Output {
+        self.graph().add_op(
+            Output {
                 node: self.id.index(),
-            })
-            .input(self.id, self.shape)
-            .finish();
+            },
+            &[self.id],
+        );
         *self
     }
 
     /// Required bytes to store this tensor's physical elements. Rounds up to nearest byte.
     pub fn required_total_bytes(&self) -> Expression {
         self.shape.required_total_bytes()
+    }
+
+    /// Mark this tensor to persist across executions. Creates an Output node
+    /// so the buffer is not consumed after execute(), but returns the original
+    /// Input node's GraphTensor (not the Output node).
+    pub fn persist(&self) -> GraphTensor {
+        self.output();
+        *self
     }
 
     pub fn dims(&self) -> Vec<Expression> {
@@ -308,18 +316,6 @@ impl ToIds for () {
 impl<T: ToIds> ToIds for FxHashMap<String, T> {
     fn to_ids(&self) -> Vec<NodeIndex> {
         self.values().flat_map(|i| i.to_ids()).collect()
-    }
-}
-
-impl ToIds for (NodeIndex, ShapeTracker) {
-    fn to_ids(&self) -> Vec<NodeIndex> {
-        vec![self.0]
-    }
-}
-
-impl ToIdsMut for (NodeIndex, ShapeTracker) {
-    fn to_ids_mut(&mut self) -> Vec<&mut NodeIndex> {
-        vec![&mut self.0]
     }
 }
 

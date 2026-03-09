@@ -1047,7 +1047,7 @@ fn egglog_simplify(e: Expression) -> Expression {
     program.push_str(&format!("(let expr_root {expr})\n"));
     program.push_str(
         "(run-schedule
-            (saturate expr)
+            (repeat 5 expr)
             (saturate base_cleanup)
             (saturate cleanup)
         )",
@@ -1060,12 +1060,12 @@ fn egglog_simplify(e: Expression) -> Expression {
     egraph.run_program(commands).unwrap();
     let (sort, value) = egraph.eval_expr(&var!("expr_root")).unwrap();
     let serialized = SerializedEGraph::new(&egraph, vec![(sort, value)]);
-    let simplified = extract_expr(
-        &serialized,
-        &serialized.eclasses[serialized.roots.first().unwrap()].1[0],
-        &mut FxHashMap::default(),
-    )
-    .unwrap_or(e);
+    let simplified = serialized.eclasses[serialized.roots.first().unwrap()]
+        .1
+        .iter()
+        .map(|root| extract_expr(&serialized, root, &mut FxHashMap::default()).unwrap_or(e))
+        .min_by_key(|e| e.len())
+        .unwrap();
     cache.lock().unwrap().push(e, simplified);
     simplified
 }
@@ -1084,6 +1084,11 @@ mod tests {
         // Evaluation after simplification
         let n = (x + (256 - (x % 256))).simplify();
         assert_eq!(n.exec(&[('x', 767)].into_iter().collect()).unwrap(), 768);
+    }
+
+    #[test]
+    fn test_merge_dim_simplifications() {
+        assert!((((expr('z') / 3) * 3) + (expr('z') % 3)).simplify().len() == 1);
     }
 
     #[test]

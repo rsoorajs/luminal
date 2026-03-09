@@ -25,8 +25,16 @@ pub trait Runtime {
     /// `node_index` is the HLIR node index used in the Input op's `node` field.
     /// `num_elements` is the number of f32 elements to allocate.
     fn allocate_dummy_input(&mut self, _node_index: usize, _num_elements: usize) {}
+    /// Check if an HLIR buffer already exists for a given node index.
+    fn has_hlir_buffer(&self, _node_index: usize) -> bool {
+        false
+    }
     /// Clear intermediate buffers to prepare for loading a different chunk's LLIR.
     fn clear_intermediate_buffers(&mut self) {}
+    /// Total bytes of intermediate buffers currently allocated.
+    fn intermediate_buffer_bytes(&self) -> usize {
+        0
+    }
 }
 
 /// Optional runtime instrumentation for collecting execution statistics.
@@ -161,11 +169,11 @@ pub trait CustomOp: Debug {
 ///
 /// Defines an HLIROp that implements a logical operation.
 pub trait HLIROp: Debug + Display + as_any::AsAny {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String;
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String;
 }
 
 impl<T: HLIROp> HLIROp for Box<T> {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
         <T as HLIROp>::to_egglog(self, inputs)
     }
 }

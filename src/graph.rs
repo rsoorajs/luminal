@@ -21,7 +21,7 @@ use std::{
 use tracing;
 
 pub type LLIRGraph = StableGraph<LLIROp, ()>;
-pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ShapeTracker>;
+pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ()>;
 
 /// A group of structurally identical chunks that share the same e-graph.
 #[derive(Debug, Clone)]
@@ -86,11 +86,11 @@ impl Graph {
     }
 
     /// Get the sources of a node given it's id
-    pub fn get_sources(&self, node_id: NodeIndex) -> Vec<(NodeIndex, ShapeTracker)> {
+    pub fn get_sources(&self, node_id: NodeIndex) -> Vec<NodeIndex> {
         self.graph
             .edges_directed(node_id, Direction::Incoming)
             .sorted_by_key(|e| e.id())
-            .map(|e| (e.source(), *e.weight()))
+            .map(|e| e.source())
             .collect()
     }
 
@@ -104,32 +104,24 @@ impl Graph {
             .collect()
     }
 
-    /// Add op on the graph, and get back a NewOp
+    /// Add an op to the graph with the given input edges. Returns the new node's index.
     ///
     /// ```rust
     /// # use luminal::prelude::*;
     /// # let mut cx = Graph::new();
     /// let a = cx.tensor(3);
-    /// let b_id = cx
-    ///     .add_op(luminal::hlir::Mul::default())
-    ///     .input(a.id, a.shape)
-    ///     .finish();
+    /// let b_id = cx.add_op(
+    ///     luminal::hlir::Mul { input_shapes: vec![a.shape, a.shape], ..Default::default() },
+    ///     &[a.id],
+    /// );
     /// let b = GraphTensor::from_id(b_id, a.shape, a.graph(), a.dtype);
     /// ```
-    pub fn add_op<O: HLIROp + 'static>(&mut self, op: O) -> NewOp<'_> {
-        NewOp {
-            new_op_id: self.graph.add_node(Box::new(op)),
-            graph_ref: self,
-            num_srcs: 0,
+    pub fn add_op<O: HLIROp + 'static>(&mut self, op: O, inputs: &[NodeIndex]) -> NodeIndex {
+        let id = self.graph.add_node(Box::new(op));
+        for &src in inputs {
+            self.graph.add_edge(src, id, ());
         }
-    }
-    /// Add op on the graph, and get back a NewOp. Just like add_op, except a boxed op is expected.
-    pub fn add_boxed_op(&mut self, op: Box<dyn HLIROp + 'static>) -> NewOp<'_> {
-        NewOp {
-            new_op_id: self.graph.add_node(op),
-            graph_ref: self,
-            num_srcs: 0,
-        }
+        id
     }
 
     pub fn try_get_op<T: HLIROp + 'static>(&self, node: NodeIndex) -> Option<&T> {
@@ -156,15 +148,16 @@ impl Graph {
         dtype: DType,
     ) -> GraphTensor {
         self.custom_ops.push(Box::new(op));
-        let mut add = self.add_op(CustomOpHLIR {
-            id: self.custom_ops.len() - 1,
-            dtype,
-        });
-        for input in inputs.to_ids() {
-            add = add.input(input, ShapeTracker::new(()));
-        }
+        let input_ids = inputs.to_ids();
+        let id = self.add_op(
+            CustomOpHLIR {
+                id: self.custom_ops.len() - 1,
+                dtype,
+            },
+            &input_ids,
+        );
         GraphTensor::from_id(
-            add.finish(),
+            id,
             ShapeTracker::new_with_element_bits(shape, dtype.bits()),
             self,
             dtype,
@@ -308,12 +301,14 @@ impl Graph {
         // Allocate dummy buffers for boundary inputs so groups can be profiled
         for desc in &self.subgraph_descriptors {
             for bi in &desc.boundary_inputs {
-                let n_elements = bi
-                    .shape
-                    .n_elements()
-                    .exec(&self.dyn_map)
-                    .expect("Failed to resolve boundary input shape");
-                runtime.allocate_dummy_input(bi.break_node.index(), n_elements);
+                if !runtime.has_hlir_buffer(bi.break_node.index()) {
+                    let n_elements = bi
+                        .shape
+                        .n_elements()
+                        .exec(&self.dyn_map)
+                        .expect("Failed to resolve boundary input shape");
+                    runtime.allocate_dummy_input(bi.break_node.index(), n_elements);
+                }
             }
         }
 
@@ -351,22 +346,50 @@ impl Graph {
             // Clear intermediate buffers from previous group's profiling
             runtime.clear_intermediate_buffers();
 
-            let mut best_genome = random_initial_choice(egraph, rng);
-            prev_selected.insert(hash_choice_set(&best_genome));
+            // Find a viable initial genome (may need multiple attempts if some panic)
+            let (mut best_genome, mut best_graph, mut best_metric, display, mut n_graphs);
+            let mut init_attempts = 0;
+            loop {
+                init_attempts += 1;
+                if init_attempts > 100 {
+                    panic!(
+                        "Failed to find a viable initial genome for group {group_idx} after 100 attempts"
+                    );
+                }
+                let genome = random_initial_choice(egraph, rng);
+                prev_selected.insert(hash_choice_set(&genome));
 
-            let mut best_graph = egglog_to_llir(
-                egraph,
-                best_genome.clone(),
-                ops,
-                &self.custom_ops,
-                &mut list_cache,
-                &mut expr_cache,
-                None,
-            );
-            let (mut best_metric, display) =
-                runtime.profile(&best_graph, &self.dyn_map, Self::TRIALS_PER_PROFILE);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let graph = egglog_to_llir(
+                        egraph,
+                        genome.clone(),
+                        ops,
+                        &self.custom_ops,
+                        &mut list_cache,
+                        &mut expr_cache,
+                        None,
+                    );
+                    runtime.clear_intermediate_buffers();
+                    let profile = runtime.profile(&graph, &self.dyn_map, Self::TRIALS_PER_PROFILE);
+                    (graph, profile)
+                }));
 
-            let mut n_graphs = 1;
+                match result {
+                    Ok((graph, (metric, disp))) => {
+                        best_genome = genome;
+                        best_graph = graph;
+                        best_metric = metric;
+                        display = disp;
+                        n_graphs = 1;
+                        break;
+                    }
+                    Err(_) => {
+                        list_cache.clear();
+                        expr_cache.clear();
+                        continue;
+                    }
+                }
+            }
 
             // Print initial result and progress
             {
@@ -421,24 +444,29 @@ impl Graph {
                     list_cache.clear();
                     expr_cache.clear();
 
-                    let llir_graph = egglog_to_llir(
-                        egraph,
-                        genome.clone(),
-                        ops,
-                        &self.custom_ops,
-                        &mut list_cache,
-                        &mut expr_cache,
-                        None,
-                    );
-
-                    // Use catch_unwind to handle CUDA errors from invalid LLIR
-                    runtime.clear_intermediate_buffers();
+                    // Wrap LLIR extraction + profiling in catch_unwind to handle
+                    // panics from invalid genomes, expression simplification, or CUDA errors
                     let profile_result =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            runtime.profile(&llir_graph, &self.dyn_map, Self::TRIALS_PER_PROFILE)
+                            let llir_graph = egglog_to_llir(
+                                egraph,
+                                genome.clone(),
+                                ops,
+                                &self.custom_ops,
+                                &mut list_cache,
+                                &mut expr_cache,
+                                None,
+                            );
+                            runtime.clear_intermediate_buffers();
+                            let result = runtime.profile(
+                                &llir_graph,
+                                &self.dyn_map,
+                                Self::TRIALS_PER_PROFILE,
+                            );
+                            (result, llir_graph)
                         }));
 
-                    let (new_metric, display_metric) = match profile_result {
+                    let ((new_metric, display_metric), llir_graph) = match profile_result {
                         Ok(result) => result,
                         Err(_) => {
                             if multi_chunk {
@@ -465,7 +493,7 @@ impl Graph {
                     if new_best {
                         best_metric = new_metric;
                         best_graph = llir_graph;
-                        best_genome = genome;
+                        best_genome = genome.clone();
                     }
 
                     if new_best {
@@ -597,24 +625,6 @@ impl Deref for Graph {
 impl DerefMut for Graph {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.graph
-    }
-}
-
-pub struct NewOp<'a> {
-    new_op_id: NodeIndex,
-    graph_ref: &'a mut Graph,
-    num_srcs: u8,
-}
-
-impl NewOp<'_> {
-    pub fn finish(self) -> NodeIndex {
-        self.new_op_id
-    }
-
-    pub fn input(mut self, id: NodeIndex, shape: ShapeTracker) -> Self {
-        self.graph_ref.graph.add_edge(id, self.new_op_id, shape);
-        self.num_srcs += 1;
-        self
     }
 }
 
@@ -773,15 +783,14 @@ pub fn split_at_graph_breaks(graph: &Graph) -> Vec<SubgraphDescriptor> {
             let bi = break_index[&brk];
             if bi + 1 == chunk_idx {
                 // This break feeds into this chunk
-                // Get shape/dtype from the incoming edge of the GraphBreak
-                let edge = graph
+                // Get shape from the GraphBreak op itself
+                let shape = graph.get_op::<crate::hlir::GraphBreak>(brk).input_shape;
+                // Get dtype from the predecessor
+                let pred = graph
                     .graph
-                    .edges_directed(brk, Direction::Incoming)
+                    .neighbors_directed(brk, Direction::Incoming)
                     .next()
                     .expect("GraphBreak must have exactly one input");
-                let shape = *edge.weight();
-                // Get dtype from the predecessor
-                let pred = edge.source();
                 let dtype = if let Some(inp) = graph.try_get_op::<crate::hlir::Input>(pred) {
                     inp.dtype
                 } else {

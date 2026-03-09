@@ -6,7 +6,9 @@ use tinyvec::ArrayVec;
 
 use crate::prelude::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub struct ShapeTracker {
     pub dims: ArrayVec<[Expression; 10]>,
     pub strides: ArrayVec<[Expression; 10]>,
@@ -276,23 +278,29 @@ impl ShapeTracker {
         }
     }
 
-    /// Merge two adjacent contiguous dimensions together (inverse of split_dims)
+    /// Merge two dimensions together.
+    ///
+    /// The merged dimension is computed as `outer_stride * inner_stride`
+    /// The merged stride is computed as: `outer_stride(z / inner_dim) + inner_stride(z % inner_dim)`
     pub fn merge_dims(&mut self, axis1: usize, axis2: usize) {
-        assert_eq!(axis2, axis1 + 1, "Can only merge adjacent dims");
-        assert!(
-            self.strides[axis1] == self.dims[axis2] * self.strides[axis2],
-            "Can only merge contiguous adjacent dims (stride[{}]={} != dim[{}]={} * stride[{}]={})",
-            axis1,
-            self.strides[axis1],
-            axis2,
-            self.dims[axis2],
-            axis2,
-            self.strides[axis2]
-        );
-        self.dims[axis1] = self.dims[axis1] * self.dims[axis2];
-        self.strides[axis1] = self.strides[axis2];
-        self.dims.remove(axis2);
-        self.strides.remove(axis2);
+        assert!(axis1 < axis2, "axis1 must be less than axis2");
+        // Move axis2 to axis1+1 if not already adjacent
+        if axis2 != axis1 + 1 {
+            let dim = self.dims.remove(axis2);
+            let stride = self.strides.remove(axis2);
+            self.dims.insert(axis1 + 1, dim);
+            self.strides.insert(axis1 + 1, stride);
+        }
+        let z = expr('z');
+        let inner_dim = self.dims[axis1 + 1];
+        let outer_stride = self.strides[axis1];
+        let inner_stride = self.strides[axis1 + 1];
+        let merged_stride = outer_stride.substitute('z', z / inner_dim)
+            + inner_stride.substitute('z', z % inner_dim);
+        self.dims[axis1] = self.dims[axis1] * self.dims[axis1 + 1];
+        self.strides[axis1] = merged_stride.simplify();
+        self.dims.remove(axis1 + 1);
+        self.strides.remove(axis1 + 1);
     }
 
     /// Split a dim into 2 dims, new dim is placed directly after original dim
@@ -383,15 +391,58 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn test_merge_dims() {
-    //     let mut tracker = ShapeTracker::new((10, 5, 3));
-    //     println!("Shape: {:?}", tracker.dims);
-    //     println!("Strides: {:?}", tracker.strides);
-    //     tracker.merge_dims(1, 2);
-    //     println!("Shape: {:?}", tracker.dims);
-    //     println!("Strides: {:?}", tracker.strides);
-    // }
+    #[test]
+    fn test_merge_dims() {
+        let z = expr('z');
+        let mut tracker = ShapeTracker::new((10, 5, 3));
+        assert_eq!(tracker.dims.len(), 3);
+        tracker.merge_dims(1, 2);
+        // merged: dims [10, 15], strides [z*15, z]
+        assert_eq!(tracker.dims.len(), 2);
+        assert_eq!(tracker.dims[0], expr(10));
+        assert_eq!(tracker.dims[1].simplify(), expr(15));
+        assert_eq!(tracker.strides[1], z);
+        // stride[0] should evaluate to z*15 (check numerically)
+        let s0 = tracker.strides[0].simplify();
+        for val in [0, 1, 5, 10] {
+            assert_eq!(
+                s0.substitute('z', val).to_usize(),
+                Some(val * 15),
+                "stride[0] failed for z={val}: got {s0}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_dims_non_adjacent() {
+        // Shape [A, B, C] = [4, 3, 5], merge dims 0 and 2
+        // This should permute to [A, C, B] then merge A and C
+        let mut tracker = ShapeTracker::new((4, 3, 5));
+        tracker.merge_dims(0, 2);
+        // Result: dims [4*5, 3] = [20, 3]
+        assert_eq!(tracker.dims.len(), 2);
+        assert_eq!(tracker.dims[0].simplify(), expr(20));
+        assert_eq!(tracker.dims[1], expr(3));
+        // Verify index mapping numerically
+        let idx = tracker.index_expression();
+        for a in 0..4 {
+            for c in 0..5 {
+                for b in 0..3 {
+                    let merged_idx = (a * 5 + c) * 3 + b;
+                    let physical = a * 15 + b * 5 + c; // original [A,B,C] layout
+                    let result = idx
+                        .substitute('z', merged_idx)
+                        .simplify()
+                        .to_usize()
+                        .unwrap();
+                    assert_eq!(
+                        result, physical,
+                        "Failed for a={a}, b={b}, c={c}: merged_idx={merged_idx}"
+                    );
+                }
+            }
+        }
+    }
 
     // #[test]
     // fn test_symbolic_idx() {
