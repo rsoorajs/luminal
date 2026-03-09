@@ -434,3 +434,128 @@ int data, so the pre-cast float data was reinterpreted as garbage ints.
 **Always search for sibling implementations**: KernelEmbed (in `kernel/hlir.rs`) and RowEmbed
 (in `block/ops.rs`) had the SAME bug in their "with cast" rules. Fixing one without the other
 only reduces the failure rate — both must be fixed.
+
+---
+
+## 2026-03-09 — TileMatmulFullSplit Matches Element-wise Square+Sum from LayerNorm
+
+### What the symptom was
+
+`test_qwen_image_transformer_tiny` on CUDA produced NaN in specific output rows. The failure
+was non-deterministic (~85% failure rate) due to egglog's random e-class extraction picking
+TileMatmulFullSplit for some operations.
+
+### What the actual root cause was
+
+The `TileMatmulFullSplit` rewrite rule in `block/ops.rs` matched any `Mul + Sum` pattern with
+a 2D output, contiguous K-strides, and F32 inputs. This correctly matched real matmuls, but
+ALSO matched the element-wise `x * x + Sum(last_dim)` pattern from LayerNorm/RMSNorm
+(Pow(x, 2) → ReduceMean).
+
+For a [1, 4, 64] activation tensor `x`:
+- `Mul(x, x)` shape: [1, 4, 64], strides: [256z, 64z, z] for both inputs
+- `Sum(dim=2)` output: [1, 4], len=2 ✓
+
+TileMatmulFullSplit interpreted this as a [1, 64] × [64, 4] → [1, 4] matmul with:
+- A = row 0 of x (64 elements), B = same buffer at column offsets
+
+The kernel computed `C[j] = sum_k x[k] * x[j*64+k]` (cross-products) instead of the correct
+`C[j] = sum_k x[j*64+k]^2` (squared sums). This produced subtly wrong values for j > 0
+(correct for j=0 since cross-product with self = squared sum). These wrong values propagated
+through LayerNorm → downstream operations → softmax → NaN.
+
+Key diagnostic: adding `printf` to the kernel showed `a_ptr == b_ptr` (same buffer for both
+inputs), confirming the kernel was operating on `x * x` not a real matmul.
+
+### Why it was hard to find
+
+1. **Individual op tests passed**: Simple Gemm tests, attention tests, and all other bisection
+   tests passed because they didn't have the specific `x*x → Sum` pattern.
+2. **Non-deterministic**: The bug only manifested when egglog selected TileMatmulFullSplit
+   over the kernel fallback for the square+sum operation.
+3. **No NaN from TileMatmulFullSplit itself**: The kernel produced wrong-but-finite values.
+   NaN only appeared downstream through softmax (exp(large) → ∞ → ∞/∞ = NaN).
+4. **Systematic elimination needed**: Had to disable all block ops, then enable one at a time,
+   to narrow down TileMatmulFullSplit as the culprit.
+
+### The fix
+
+Added matmul broadcast constraints to both `TileMatmulFullSplit` and `TileMatmulSplitK` rules:
+
+```egglog
+; Assert proper matmul broadcast pattern:
+; A is broadcast over N (a_n_stride = 0), B is broadcast over M (b_m_stride = 0)
+(= ?a_n_stride (MNum 0))
+(= ?b_m_stride (MNum 0))
+```
+
+In a real matmul `[M, K] × [K, N]`, the Mul is created by expanding dims:
+- A is broadcast over N → a_n_stride = 0
+- B is broadcast over M → b_m_stride = 0
+
+In element-wise `x * x`, both strides are identical (non-zero for all dims), so the
+constraints correctly reject it. The cuBLAS `.egg` rules already had these constraints.
+
+### General principle
+
+**Matmul Mul+Sum patterns have specific broadcast structure: one input is broadcast over M
+and the other over N.** When writing egglog rules that match `Mul + Sum` patterns for matmul
+optimization, always verify the broadcast pattern (`a_n_stride = 0` and `b_m_stride = 0`).
+This prevents matching element-wise operations like `x*x → sum` that happen to have a 2D
+output and contiguous strides.
+
+---
+
+## 2026-03-09 — Conv3D Permute Axis Mismatch in ONNX Conv Parser
+
+### Symptom
+
+`test_qwen_image_vae_decoder_tiny` panicked with:
+> Permute axes (5) doesn't match shape axes (6)
+
+at `src/shape/tracker.rs:153`, during `parse_conv_node`.
+
+### Root cause
+
+The Conv parser's unfold → matmul algorithm used two consecutive permutes with incorrect
+index calculations. After unfold produces a 2N-dimensional tensor
+`[win_0..win_{N-1}, k_0..k_{N-1}]`, the first permute swapped kernel dims to the front.
+But the second permute's index math still assumed the original (pre-first-permute) ordering,
+confusing kernel dimensions with window dimensions. Additionally:
+
+1. `output_spatial_dims` was captured from wrong indices (kernel dims instead of window
+   spatial dims)
+2. The `split_dims` loop iterated `spatial` times instead of `spatial-1`, creating a
+   spurious size-1 dimension
+3. The final permute array had `1+spatial` elements for a tensor with `2+spatial` dims
+
+For Conv2D (spatial=2) this was never caught because the xfail'd VAE decoder test was the
+only test exercising the Conv parser — the transformer tests don't use Conv ONNX nodes.
+
+### Why it was hard to find
+
+The Conv parser was written and the VAE test immediately xfail'd due to a *different* bug
+(`merge_dims` being `todo!()`). Once `merge_dims` was implemented, the Conv parser's own
+bugs surfaced for the first time.
+
+### Fix
+
+Rewrote the unfold → matmul section with a single correct permute:
+
+1. **One permute** to `[N, win_spatial..., C_in, k_batch, k_chan, k_spatial...]`
+   — groups batch | output spatial | channel+kernel
+2. **Capture** `output_spatial_dims` from correct indices `[1..1+spatial]`
+3. **Merge** all channel+kernel dims from the end into one
+4. **Merge** spatial dims into one → `[N, spatial_product, C_in*kernel_product]`
+5. **Matmul** → `[N, spatial_product, C_out]`
+6. **Split** spatial back with `spatial-1` splits (not `spatial`)
+7. **Permute** C_out to position 1 with correct `2+spatial` element array
+
+### General principle
+
+**When chaining permutes on high-dimensional tensors, prefer a single combined permute.**
+Multiple permutes with hand-computed index arrays are error-prone because each permute
+redefines what indices mean. A single permute from the original layout to the target layout
+is easier to verify and less likely to confuse source/destination ordering. Also, ensure
+`split_dims` loop counts match: splitting N dims out of a product requires N-1 splits
+(the outermost dim is the quotient, not split out separately).

@@ -120,69 +120,56 @@ pub fn parse_conv_node(
     }
 
     let unfolded = padded.unfold(kernel_full, stride_full, dilation_full);
+    // unfolded shape: [win_N, win_C, win_spatial..., k_batch=1, k_chan=1, k_spatial...]
+    //                  (2*rank dimensions total)
 
-    // unfolded shape: [win_batch, win_channel, win_spatial..., k_batch, k_channel, k_spatial...]
-    // We need to rearrange for matmul.
+    // Step 1: Permute to [N, win_spatial..., C_in, k_batch, k_chan, k_spatial...]
+    // This groups: batch | output spatial | channel+kernel (for merging)
+    let mut perm: Vec<usize> = Vec::with_capacity(2 * rank);
+    perm.push(0); // win_N (batch)
+    perm.extend(2..2 + spatial); // win_spatial dims
+    perm.push(1); // win_C (= C_in)
+    perm.extend(rank..2 * rank); // all kernel dims: k_batch=1, k_chan=1, k_spatial...
+    let permuted = unfolded.permute(perm);
 
-    // Move window dimensions to front
-    let mut order: Vec<usize> = (rank..2 * rank).collect();
-    order.extend(0..rank);
-    let unfolded = unfolded.permute(order);
-    let unfolded_dims = unfolded.dims();
-
-    // Capture output spatial dimensions
+    // Step 2: Capture output spatial dimensions (win_spatial sizes)
     let output_spatial_dims: Vec<Expression> =
-        unfolded_dims[3..3 + spatial].to_vec();
+        permuted.dims()[1..1 + spatial].to_vec();
 
-    // batch_len = 1 (single batch dim for standard conv input)
-    let batch_len = 1;
-
-    // Reorder: [win_batch, win_spatial..., win_channel, k_spatial..., k_batch, k_channel]
-    let mut order2 = Vec::with_capacity(2 * rank);
-    // win batch dims
-    order2.extend(0..batch_len); // [0]
-    // win spatial dims (outputs)
-    order2.extend(batch_len + 1..batch_len + 1 + spatial); // [2..2+spatial]
-    // win channel dim
-    order2.push(batch_len); // [1]
-    // k spatial dims
-    order2.extend(rank + batch_len + 1..rank + batch_len + 1 + spatial);
-    // k batch + k channel
-    order2.extend(rank..rank + batch_len + 1);
-    let mut patches = unfolded.permute(order2);
-
-    // Drop kernel axes for batch + channel by merging them into the previous dimension
-    for _ in 0..=batch_len {
+    // Step 3: Merge all channel+kernel dims into one (C_in * kernel_product)
+    // From index (1+spatial) to end there are (1 + 2 + spatial) dims to merge
+    let mut patches = permuted;
+    let target_before_spatial_merge = 2 + spatial; // [N, spatial..., merged_patch]
+    while patches.dims().len() > target_before_spatial_merge {
         let last = patches.dims().len();
         patches = patches.merge_dims(last - 2, last - 1);
     }
+    // patches: [N, spatial_0, ..., spatial_{s-1}, C_in * kernel_product]
 
-    // Flatten channel and kernel spatial dims together
-    for _ in 0..spatial {
-        let channel_axis = batch_len + spatial;
-        patches = patches.merge_dims(channel_axis, channel_axis + 1);
-    }
-
-    // Collapse output spatial dims into one for matmul
+    // Step 4: Merge spatial dims into one
     for _ in 1..spatial {
         patches = patches.merge_dims(1, 2);
     }
+    // patches: [N, spatial_product, C_in * kernel_product]
 
-    // patches shape: [batch, out_spatial_product, C_in * kernel_product]
-    // weight shape: [C_out, C_in * kernel_product]
-    // matmul: patches @ weight^T => [batch, out_spatial_product, C_out]
+    // Step 5: Matmul with weight
     let mut out = patches.matmul(w_reshaped.permute((1, 0)));
+    // out: [N, spatial_product, C_out]
 
-    // Restore spatial dimensions
-    for dim in output_spatial_dims.iter().rev() {
-        out = out.split_dims(batch_len, *dim);
+    // Step 6: Restore spatial dimensions via split_dims
+    // Split from innermost spatial dim first (reverse order, skip outermost)
+    for i in (1..spatial).rev() {
+        out = out.split_dims(1, output_spatial_dims[i]);
     }
+    // out: [N, spatial_0, spatial_1, ..., spatial_{s-1}, C_out]
 
-    // Move channel dimension ahead of spatial: [batch, C_out, spatial...]
-    let mut final_order: Vec<usize> = (0..batch_len).collect();
-    final_order.push(batch_len + spatial); // C_out
-    final_order.extend(batch_len..batch_len + spatial); // spatial dims
+    // Step 7: Move C_out from last position to position 1 (after batch)
+    let mut final_order: Vec<usize> = Vec::with_capacity(2 + spatial);
+    final_order.push(0); // batch
+    final_order.push(1 + spatial); // C_out
+    final_order.extend(1..1 + spatial); // spatial dims
     out = out.permute(final_order);
+    // out: [N, C_out, spatial_0, ..., spatial_{s-1}]
 
     // Add bias if present: bias shape [C_out], broadcast to [1, C_out, 1, 1, ...]
     if let Some(b) = bias {

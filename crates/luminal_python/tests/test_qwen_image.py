@@ -7,7 +7,7 @@ The transformer uses complex-valued RoPE (torch.view_as_complex) which isn't ONN
 so tests use a wrapper that pre-computes RoPE as real-valued cos/sin and replaces the
 attention processor with a real-valued equivalent.
 
-The VAE uses Conv3d which triggers ShapeTracker limitations (xfail for now).
+The VAE uses Conv3d, which is supported via the N-dimensional unfold-based conv parser.
 """
 
 import os
@@ -338,9 +338,6 @@ def test_qwen_image_transformer_small():
     _run_transformer_test(config, backend, atol=1e-4)
 
 
-@pytest.mark.xfail(
-    reason="VAE uses Conv3d which triggers ShapeTracker 'Need CuTE-style nested dims' panic"
-)
 def test_qwen_image_vae_decoder_tiny():
     """Tiny QwenImage VAE decoder: base_dim=8, z_dim=4."""
     import luminal
