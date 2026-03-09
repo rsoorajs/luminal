@@ -986,6 +986,17 @@ extern \"C\" {{
         self.out_shape.iter().copied().product()
     }
 
+    fn all_dyn_vars(&self) -> FxHashSet<char> {
+        self.out_shape
+            .iter()
+            .flat_map(|e| e.dyn_vars())
+            .chain(self.index_stride.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.data_shape.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.data_stride.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.out_stride.iter().flat_map(|e| e.dyn_vars()))
+            .collect()
+    }
+
     fn output_bytes(&self) -> Expression {
         (self.output_size() * self.dtype.bits()).ceil_div(8)
     }
@@ -1243,6 +1254,18 @@ extern \"C\" {{
 
     fn output_size(&self) -> Expression {
         self.dest_shape.iter().copied().product()
+    }
+
+    fn all_dyn_vars(&self) -> FxHashSet<char> {
+        self.dest_shape
+            .iter()
+            .flat_map(|e| e.dyn_vars())
+            .chain(self.dest_strides.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.index_shape.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.index_strides.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.src_strides.iter().flat_map(|e| e.dyn_vars()))
+            .chain(self.out_strides.iter().flat_map(|e| e.dyn_vars()))
+            .collect()
     }
 
     fn output_bytes(&self) -> Expression {
@@ -2580,14 +2603,24 @@ impl KernelOp for KernelConstant {
         Expression,
         FxHashMap<char, CudaSlice<u8>>,
     ) {
+        let value_str = if self.value.is_nan() {
+            "__int_as_float(0x7fc00000)".to_string()
+        } else if self.value.is_infinite() {
+            if self.value > 0.0 {
+                "__int_as_float(0x7f800000)".to_string()
+            } else {
+                "__int_as_float(0xff800000)".to_string()
+            }
+        } else {
+            format!("{:.10}f", self.value)
+        };
         let kernel = format!(
             "
 extern \"C\" {{
     __global__ void constant_k(float *out) {{
-        out[0] = {:.10}f;
+        out[0] = {value_str};
     }}
-}}",
-            self.value
+}}"
         );
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
@@ -2786,13 +2819,53 @@ extern \"C\" {{
     }
 }
 
+/// Thread-local global dim ordering override. When set, `generate_dyn_dims_defines`
+/// uses this ordering for buffer indices instead of the kernel's local ordering.
+/// This ensures all kernels in a CudaGraphOp use consistent indices into the shared
+/// dyn_dims buffer.
+thread_local! {
+    static GLOBAL_DYN_DIMS: std::cell::RefCell<Option<Vec<char>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Set the global dyn dims ordering for subsequent kernel compilations.
+pub fn set_global_dyn_dims(dims: Vec<char>) {
+    GLOBAL_DYN_DIMS.with(|g| *g.borrow_mut() = Some(dims));
+}
+
+/// Clear the global dyn dims ordering.
+pub fn clear_global_dyn_dims() {
+    GLOBAL_DYN_DIMS.with(|g| *g.borrow_mut() = None);
+}
+
 /// Generate #define macros for dynamic dimensions that read from a shared dyn_dims buffer.
 /// The buffer layout is alphabetically sorted by dim char for consistency.
 /// Returns (defines_string, sorted_dims) where sorted_dims gives the order of dims in the buffer.
+///
+/// When a global dyn dims ordering is set (via `set_global_dyn_dims`), indices are based
+/// on the global ordering to ensure consistency across kernels sharing a dyn_dims buffer.
 pub fn generate_dyn_dims_defines(vars: &FxHashSet<char>) -> (String, Vec<char>) {
     if vars.is_empty() {
         return (String::new(), Vec::new());
     }
+    // Check for global ordering override
+    let global = GLOBAL_DYN_DIMS.with(|g| g.borrow().clone());
+    if let Some(global_order) = global {
+        // Use global ordering for indices - each dim gets its position in the global list
+        let defines = vars
+            .iter()
+            .sorted()
+            .map(|dim| {
+                let idx = global_order
+                    .iter()
+                    .position(|d| d == dim)
+                    .unwrap_or_else(|| panic!("Dim '{dim}' not found in global dyn_dims ordering"));
+                format!("#define const_{dim} (dyn_dims + {idx})")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return (defines, global_order);
+    }
+    // Default: local ordering
     let mut sorted_dims: Vec<char> = vars.iter().copied().collect();
     sorted_dims.sort();
     let defines = sorted_dims

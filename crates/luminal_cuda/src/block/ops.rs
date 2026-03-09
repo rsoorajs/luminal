@@ -20,6 +20,7 @@ use luminal::shape::flatten_strides;
 fn resolve_z(e: Expression) -> Expression {
     e.substitute('z', Expression::from(1))
 }
+#[allow(dead_code)]
 fn resolve_z_vec(v: &[Expression]) -> Vec<Expression> {
     v.iter().map(|e| resolve_z(*e)).collect()
 }
@@ -1382,22 +1383,27 @@ impl BlockOp for TileMatmulSplitK {
 #[derive(Debug, Default)]
 pub struct TileMatmulFullSplit {
     sm_count: Expression,           // Number of work units (num_sm)
-    untiled_range: Vec<Expression>, // [M, N]
+    untiled_range: Vec<Expression>, // [batch..., M, N]
     m_tiles: Expression,
     n_tiles: Expression,
     total_k: Expression,
     #[allow(dead_code)]
-    a_stride: Vec<Expression>, // Batch strides for A (reserved for batch support)
+    a_stride: Vec<Expression>, // Tiled strides for A (batch + tiled M/N)
     a_m_stride: Expression, // A stride for m tile position (TILE_SIZE steps)
     a_k_stride: Expression, // A stride for k position (usually 1)
     #[allow(dead_code)]
-    b_stride: Vec<Expression>, // Batch strides for B (reserved for batch support)
+    b_stride: Vec<Expression>, // Tiled strides for B (batch + tiled M/N)
     b_n_stride: Expression, // B stride for n tile position (TILE_SIZE steps)
     b_k_stride: Expression, // B stride for k position (usually 1)
     #[allow(dead_code)]
-    out_stride: Vec<Expression>, // Batch strides for output (reserved for batch support)
+    out_stride: Vec<Expression>, // Tiled strides for output (batch + tiled M/N)
     out_m_stride: Expression, // Output stride for m position within tile
     out_n_stride: Expression, // Output stride for n position within tile
+    // Batch support: derived from batch dims of untiled_range and strides
+    batch_size: Expression,        // Product of batch dims, or 1 for 2D
+    a_batch_offset: Expression,    // flatten_strides expr, evaluate with z=batch_idx
+    b_batch_offset: Expression,    // flatten_strides expr, evaluate with z=batch_idx
+    out_batch_offset: Expression,  // flatten_strides expr, evaluate with z=batch_idx
 }
 
 impl EgglogOp for TileMatmulFullSplit {
@@ -1429,6 +1435,8 @@ impl EgglogOp for TileMatmulFullSplit {
     fn rewrites(&self) -> Vec<Rule> {
         vec![
             // Match Mul -> Sum pattern for matmul (A row-major, B col-major)
+            // Only matches 2D output shapes to avoid 3D attention matmuls (which are
+            // slower in block-op megakernel due to work-stealing/barrier overhead).
             Rule::raw(format!(
                 "
         (rule
@@ -1439,25 +1447,19 @@ impl EgglogOp for TileMatmulFullSplit {
                 ; Match Sum that reduces the Mul (k dimension)
                 (= ?sum (Sum ?out_shape ?k ?mul ?sum_in_stride ?k_stride ?sum_out_stride))
 
-                ; Get dimensions from output shape
-                (= ?m (nth_from_end ?out_shape 1))
-                (= ?n (nth_from_end ?out_shape 0))
+                ; Match exactly 2D output shape (prevents matching 3D+ attention matmuls)
+                (= ?out_shape (ECons ?m (ECons ?n (ENil))))
                 (!= ?m (MNum 0))
                 (!= ?n (MNum 0))
 
-                ; Get output strides
-                (= ?sum_out_m_stride (nth_from_end ?sum_out_stride 1))
-                (= ?sum_out_n_stride (nth_from_end ?sum_out_stride 0))
+                ; Match exactly 2D output strides
+                (= ?sum_out_stride (ECons ?sum_out_m_stride (ECons ?sum_out_n_stride (ENil))))
 
-                ; Get A strides
-                (= ?a_m_stride (nth_from_end ?a_stride 2))
-                (= ?a_n_stride (nth_from_end ?a_stride 1))
-                (= ?a_k_stride (nth_from_end ?a_stride 0))
+                ; Match exactly 3D A strides [m_stride, n_stride, k_stride]
+                (= ?a_stride (ECons ?a_m_stride (ECons ?a_n_stride (ECons ?a_k_stride (ENil)))))
 
-                ; Get B strides
-                (= ?b_m_stride (nth_from_end ?b_stride 2))
-                (= ?b_n_stride (nth_from_end ?b_stride 1))
-                (= ?b_k_stride (nth_from_end ?b_stride 0))
+                ; Match exactly 3D B strides [m_stride, n_stride, k_stride]
+                (= ?b_stride (ECons ?b_m_stride (ECons ?b_n_stride (ECons ?b_k_stride (ENil)))))
 
                 ; Assert contiguous k stride on output (required for reduction)
                 (= ?k_stride (MIter))
@@ -1528,24 +1530,64 @@ impl EgglogOp for TileMatmulFullSplit {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
+        let untiled_range =
+            extract_expr_list(egraph, children[1], list_cache, expr_cache).unwrap();
+        let a_stride =
+            extract_expr_list(egraph, children[6], list_cache, expr_cache).unwrap();
+        let b_stride =
+            extract_expr_list(egraph, children[10], list_cache, expr_cache).unwrap();
+        let out_stride =
+            extract_expr_list(egraph, children[13], list_cache, expr_cache).unwrap();
+
+        // Compute batch dimensions: everything before the last 2 dims (M, N)
+        let n_batch = untiled_range.len().saturating_sub(2);
+        let batch_size = if n_batch > 0 {
+            untiled_range[..n_batch]
+                .iter()
+                .copied()
+                .product::<Expression>()
+        } else {
+            1.into()
+        };
+        // Batch offsets via flatten_strides on z-based batch strides.
+        // The resulting expressions use z as the flat batch index.
+        // At kernel runtime, eval_expression(offset, batch_idx) gives element offset.
+        let a_batch_offset = if n_batch > 0 {
+            flatten_strides(&untiled_range[..n_batch], &a_stride[..n_batch])
+        } else {
+            0.into()
+        };
+        let b_batch_offset = if n_batch > 0 {
+            flatten_strides(&untiled_range[..n_batch], &b_stride[..n_batch])
+        } else {
+            0.into()
+        };
+        let out_batch_offset = if n_batch > 0 {
+            flatten_strides(&untiled_range[..n_batch], &out_stride[..n_batch])
+        } else {
+            0.into()
+        };
+
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
                 sm_count: extract_expr(egraph, children[0], expr_cache).unwrap(),
-                untiled_range: extract_expr_list(egraph, children[1], list_cache, expr_cache)
-                    .unwrap(),
+                untiled_range,
                 m_tiles: extract_expr(egraph, children[2], expr_cache).unwrap(),
                 n_tiles: extract_expr(egraph, children[3], expr_cache).unwrap(),
                 total_k: extract_expr(egraph, children[4], expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, children[6], list_cache, expr_cache).unwrap(),
+                a_stride,
                 a_m_stride: extract_expr(egraph, children[7], expr_cache).unwrap(),
                 a_k_stride: extract_expr(egraph, children[8], expr_cache).unwrap(),
-                b_stride: extract_expr_list(egraph, children[10], list_cache, expr_cache).unwrap(),
+                b_stride,
                 b_n_stride: extract_expr(egraph, children[11], expr_cache).unwrap(),
                 b_k_stride: extract_expr(egraph, children[12], expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, children[13], list_cache, expr_cache)
-                    .unwrap(),
+                out_stride,
                 out_m_stride: extract_expr(egraph, children[14], expr_cache).unwrap(),
                 out_n_stride: extract_expr(egraph, children[15], expr_cache).unwrap(),
+                batch_size,
+                a_batch_offset,
+                b_batch_offset,
+                out_batch_offset,
             })),
             vec![children[5], children[9]],
         )
@@ -1576,35 +1618,32 @@ impl BlockOp for TileMatmulFullSplit {
     }
 
     fn bytes_stored(&self) -> Expression {
-        let m = self.untiled_range[0];
-        let n = self.untiled_range[1];
-        m * n * 4
+        self.untiled_range.iter().copied().product::<Expression>() * 4
     }
 
     fn flops(&self) -> Expression {
-        let m = self.untiled_range[0];
-        let n = self.untiled_range[1];
-        let k = self.total_k;
-        m * n * k * 2
+        self.untiled_range.iter().copied().product::<Expression>() * self.total_k * 2
     }
 
     fn bytes_loaded(&self) -> Expression {
-        let m = self.untiled_range[0];
-        let n = self.untiled_range[1];
+        let n_dims = self.untiled_range.len();
+        let m = self.untiled_range[n_dims - 2];
+        let n = self.untiled_range[n_dims - 1];
         let k = self.total_k;
-        (m * k + k * n) * 4
+        self.batch_size * (m * k + k * n) * 4
     }
 
     fn cuda_function(&self) -> String {
         format!(
             r#"
-        // TileMatmulFullSplit: Optimized for both M=1 decode and general matmul
+        // TileMatmulFullSplit: Batched matmul with M=1 decode and general paths
         const int m_tiles = eval_expression(payload.m_tiles, 0);
         const int n_tiles = eval_expression(payload.n_tiles, 0);
         const int total_k = eval_expression(payload.total_k, 0);
         const int sm_count = eval_expression(payload.sm_count, 0);
-        const int M = eval_expression(payload.untiled_range[0], 0);
-        const int N = eval_expression(payload.untiled_range[1], 0);
+        const int M = eval_expression(payload.M, 0);
+        const int N = eval_expression(payload.N, 0);
+        const int batch = eval_expression(payload.batch_size, 0);
 
         const float* a_base = source_ptrs[0];
         const float* b_base = source_ptrs[1];
@@ -1629,75 +1668,86 @@ impl BlockOp for TileMatmulFullSplit {
         }};
 
         // ============== M=1 DECODE PATH (NO K-SPLITTING, NO ATOMICS) ==============
-        // For M=1, we split by N columns instead of K. Each SM handles complete dot products.
         if (M == 1) {{
-            // Split N columns across SMs
-            const int cols_per_sm = (N + sm_count - 1) / sm_count;
+            // Distribute batch * N columns across SMs
+            const int total_cols = batch * N;
+            const int cols_per_sm = (total_cols + sm_count - 1) / sm_count;
             const int col_start = current * cols_per_sm;
-            const int col_end = min(col_start + cols_per_sm, N);
+            const int col_end = min(col_start + cols_per_sm, total_cols);
 
-            if (col_start >= N) return;
+            if (col_start >= total_cols) return;
 
-            const float* a = a_base;
             const int K = total_k;
-
-            // Each warp handles 4 columns, threads parallelize over K
             constexpr int COLS_PER_WARP = 4;
 
-            for (int col_base = col_start + warp_id * COLS_PER_WARP; col_base < col_end; col_base += num_warps * COLS_PER_WARP) {{
-                float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
+            // Process columns, grouped by batch to reuse A pointer and enable 4-col optimization
+            int gc = col_start;
+            while (gc < col_end) {{
+                const int b = gc / N;
+                const int lc_start = gc % N;
+                const int lc_end = min(N, lc_start + (col_end - gc));
 
-                // Compute base pointers for B columns
-                const float* b0 = b_base + col_base * b_n_stride;
-                const float* b1 = b_base + (col_base + 1) * b_n_stride;
-                const float* b2 = b_base + (col_base + 2) * b_n_stride;
-                const float* b3 = b_base + (col_base + 3) * b_n_stride;
+                // Compute batch offsets (once per batch, outside inner loop)
+                const int a_off = eval_expression(payload.a_batch_offset, b);
+                const int b_off = eval_expression(payload.b_batch_offset, b);
+                const int c_off = eval_expression(payload.out_batch_offset, b);
 
-                const int valid_cols = min(COLS_PER_WARP, col_end - col_base);
+                const float* a = a_base + a_off;
+                const float* b_ptr = b_base + b_off;
+                float* c = c_base + c_off;
 
-                // Main K loop - unroll by 4 for ILP
-                int k = lane;
-                for (; k + 96 < K; k += 128) {{
-                    float a0 = a[k];
-                    float a1 = a[k + 32];
-                    float a2 = a[k + 64];
-                    float a3 = a[k + 96];
+                for (int col_base = lc_start + warp_id * COLS_PER_WARP; col_base < lc_end; col_base += num_warps * COLS_PER_WARP) {{
+                    float partial[COLS_PER_WARP] = {{0.0f, 0.0f, 0.0f, 0.0f}};
+                    const int valid_cols = min(COLS_PER_WARP, lc_end - col_base);
 
-                    if (valid_cols > 0) partial[0] += a0 * b0[k] + a1 * b0[k + 32] + a2 * b0[k + 64] + a3 * b0[k + 96];
-                    if (valid_cols > 1) partial[1] += a0 * b1[k] + a1 * b1[k + 32] + a2 * b1[k + 64] + a3 * b1[k + 96];
-                    if (valid_cols > 2) partial[2] += a0 * b2[k] + a1 * b2[k + 32] + a2 * b2[k + 64] + a3 * b2[k + 96];
-                    if (valid_cols > 3) partial[3] += a0 * b3[k] + a1 * b3[k + 32] + a2 * b3[k + 64] + a3 * b3[k + 96];
+                    const float* b0 = b_ptr + col_base * b_n_stride;
+                    const float* b1 = b_ptr + (col_base + 1) * b_n_stride;
+                    const float* b2 = b_ptr + (col_base + 2) * b_n_stride;
+                    const float* b3 = b_ptr + (col_base + 3) * b_n_stride;
+
+                    int k = lane;
+                    for (; k + 96 < K; k += 128) {{
+                        float a0 = a[k];
+                        float a1 = a[k + 32];
+                        float a2 = a[k + 64];
+                        float a3 = a[k + 96];
+
+                        if (valid_cols > 0) partial[0] += a0 * b0[k] + a1 * b0[k + 32] + a2 * b0[k + 64] + a3 * b0[k + 96];
+                        if (valid_cols > 1) partial[1] += a0 * b1[k] + a1 * b1[k + 32] + a2 * b1[k + 64] + a3 * b1[k + 96];
+                        if (valid_cols > 2) partial[2] += a0 * b2[k] + a1 * b2[k + 32] + a2 * b2[k + 64] + a3 * b2[k + 96];
+                        if (valid_cols > 3) partial[3] += a0 * b3[k] + a1 * b3[k + 32] + a2 * b3[k + 64] + a3 * b3[k + 96];
+                    }}
+
+                    for (; k < K; k += 32) {{
+                        float a_val = a[k];
+                        if (valid_cols > 0) partial[0] += a_val * b0[k];
+                        if (valid_cols > 1) partial[1] += a_val * b1[k];
+                        if (valid_cols > 2) partial[2] += a_val * b2[k];
+                        if (valid_cols > 3) partial[3] += a_val * b3[k];
+                    }}
+
+                    #pragma unroll
+                    for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
+                        partial[ci] = warp_reduce_sum(partial[ci]);
+                    }}
+
+                    if (lane == 0) {{
+                        if (valid_cols > 0) c[col_base * c_n_stride] = partial[0];
+                        if (valid_cols > 1) c[(col_base + 1) * c_n_stride] = partial[1];
+                        if (valid_cols > 2) c[(col_base + 2) * c_n_stride] = partial[2];
+                        if (valid_cols > 3) c[(col_base + 3) * c_n_stride] = partial[3];
+                    }}
                 }}
 
-                // Handle remaining K
-                for (; k < K; k += 32) {{
-                    float a_val = a[k];
-                    if (valid_cols > 0) partial[0] += a_val * b0[k];
-                    if (valid_cols > 1) partial[1] += a_val * b1[k];
-                    if (valid_cols > 2) partial[2] += a_val * b2[k];
-                    if (valid_cols > 3) partial[3] += a_val * b3[k];
-                }}
-
-                // Warp reduction
-                #pragma unroll
-                for (int ci = 0; ci < COLS_PER_WARP; ci++) {{
-                    partial[ci] = warp_reduce_sum(partial[ci]);
-                }}
-
-                // Direct write
-                if (lane == 0) {{
-                    if (valid_cols > 0) c_base[col_base] = partial[0];
-                    if (valid_cols > 1) c_base[col_base + 1] = partial[1];
-                    if (valid_cols > 2) c_base[col_base + 2] = partial[2];
-                    if (valid_cols > 3) c_base[col_base + 3] = partial[3];
-                }}
+                gc += (lc_end - lc_start);
             }}
             return;
         }}
 
         // ============== GENERAL PATH (M > 1) ==============
-        // Total work units in linearized (m_tiles, n_tiles, k) space
-        const int total_work = m_tiles * n_tiles * total_k;
+        const int tiles_per_batch = m_tiles * n_tiles;
+        const int total_tiles = batch * tiles_per_batch;
+        const int total_work = total_tiles * total_k;
         const int k_chunk_size = (total_work + sm_count - 1) / sm_count;
 
         const int work_start = current * k_chunk_size;
@@ -1705,48 +1755,9 @@ impl BlockOp for TileMatmulFullSplit {
 
         if (work_start >= total_work) return;
 
-        // Compute which tiles we touch
         const int first_tile = work_start / total_k;
         const int last_tile = (work_end - 1) / total_k;
 
-        // Fast path: single tile
-        if (first_tile == last_tile) {{
-            const int tile_idx = first_tile;
-            const int tile_work_start = tile_idx * total_k;
-
-            const int k_start = work_start - tile_work_start;
-            const int k_end = work_end - tile_work_start;
-            const int K = k_end - k_start;
-
-            const int n_tile = tile_idx % n_tiles;
-            const int m_tile = tile_idx / n_tiles;
-
-            const int global_m0 = m_tile * TILE_SIZE;
-            const int global_n0 = n_tile * TILE_SIZE;
-            const int tile_m = min(TILE_SIZE, M - global_m0);
-            const int tile_n = min(TILE_SIZE, N - global_n0);
-
-            const float* a = a_base + global_m0 * a_m_stride + k_start;
-            const float* b = b_base + global_n0 * b_n_stride + k_start;
-            float* c = c_base + global_m0 * c_m_stride + global_n0 * c_n_stride;
-
-            const int tile_elems = tile_m * tile_n;
-            for (int idx = t; idx < tile_elems; idx += threads) {{
-                const int ty = idx / tile_n;
-                const int tx = idx % tile_n;
-                const float* A0 = a + ty * a_m_stride;
-                const float* B0 = b + tx * b_n_stride;
-                float acc = 0.f;
-                for (int k = 0; k < K; ++k) {{
-                    acc += A0[k] * B0[k];
-                }}
-                // Output buffer is zeroed by runtime before execution, so use atomicAdd
-                atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
-            }}
-            return;
-        }}
-
-        // Slow path: multiple tiles
         for (int tile_idx = first_tile; tile_idx <= last_tile; tile_idx++) {{
             const int tile_work_start = tile_idx * total_k;
             const int tile_work_end = tile_work_start + total_k;
@@ -1755,29 +1766,35 @@ impl BlockOp for TileMatmulFullSplit {
             const int k_end = (work_end < tile_work_end) ? (work_end - tile_work_start) : total_k;
             const int K = k_end - k_start;
 
-            const int n_tile = tile_idx % n_tiles;
-            const int m_tile = tile_idx / n_tiles;
+            // Decompose tile_idx into batch, m_tile, n_tile
+            const int b = tile_idx / tiles_per_batch;
+            const int local_tile = tile_idx % tiles_per_batch;
+            const int m_tile = local_tile / n_tiles;
+            const int n_tile = local_tile % n_tiles;
+
+            const int a_off = eval_expression(payload.a_batch_offset, b);
+            const int b_off = eval_expression(payload.b_batch_offset, b);
+            const int c_off = eval_expression(payload.out_batch_offset, b);
 
             const int global_m0 = m_tile * TILE_SIZE;
             const int global_n0 = n_tile * TILE_SIZE;
             const int tile_m = min(TILE_SIZE, M - global_m0);
             const int tile_n = min(TILE_SIZE, N - global_n0);
 
-            const float* a = a_base + global_m0 * a_m_stride + k_start;
-            const float* b = b_base + global_n0 * b_n_stride + k_start;
-            float* c = c_base + global_m0 * c_m_stride + global_n0 * c_n_stride;
+            const float* a = a_base + a_off + global_m0 * a_m_stride + k_start;
+            const float* b_ptr = b_base + b_off + global_n0 * b_n_stride + k_start;
+            float* c = c_base + c_off + global_m0 * c_m_stride + global_n0 * c_n_stride;
 
             const int tile_elems = tile_m * tile_n;
             for (int idx = t; idx < tile_elems; idx += threads) {{
                 const int ty = idx / tile_n;
                 const int tx = idx % tile_n;
                 const float* A0 = a + ty * a_m_stride;
-                const float* B0 = b + tx * b_n_stride;
+                const float* B0 = b_ptr + tx * b_n_stride;
                 float acc = 0.f;
-                for (int k = 0; k < K; ++k) {{
-                    acc += A0[k] * B0[k];
+                for (int kk = 0; kk < K; ++kk) {{
+                    acc += A0[kk] * B0[kk];
                 }}
-                // Output buffer is zeroed by runtime before execution, so use atomicAdd
                 atomicAdd(&c[ty * c_m_stride + tx * c_n_stride], acc);
             }}
         }}
@@ -1787,12 +1804,21 @@ impl BlockOp for TileMatmulFullSplit {
     }
 
     fn build_payload<'a>(&self, _: &Arc<CudaStream>, payload: CStruct<'a>) -> CStruct<'a> {
+        let n_dims = self.untiled_range.len();
+        let m = resolve_z(self.untiled_range[n_dims - 2]);
+        let n = resolve_z(self.untiled_range[n_dims - 1]);
         payload
-            .expr_arr("untiled_range", &resolve_z_vec(&self.untiled_range))
+            .expr("M", m)
+            .expr("N", n)
             .expr("m_tiles", resolve_z(self.m_tiles))
             .expr("n_tiles", resolve_z(self.n_tiles))
             .expr("total_k", resolve_z(self.total_k))
             .expr("sm_count", resolve_z(self.sm_count))
+            .expr("batch_size", resolve_z(self.batch_size))
+            // Batch offsets: z-based expressions evaluated with z=batch_idx at runtime
+            .expr("a_batch_offset", self.a_batch_offset)
+            .expr("b_batch_offset", self.b_batch_offset)
+            .expr("out_batch_offset", self.out_batch_offset)
             .expr("a", flatten_strides(&[self.sm_count], &[0.into()]))
             .expr("a_m_stride", resolve_z(self.a_m_stride))
             .expr("a_k_stride", resolve_z(self.a_k_stride))

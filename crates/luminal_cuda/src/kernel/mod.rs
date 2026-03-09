@@ -173,6 +173,13 @@ pub trait KernelOp: std::fmt::Debug + as_any::AsAny {
     /// Returns the output buffer size in elements.
     fn output_size(&self) -> Expression;
 
+    /// Returns all dynamic variables used by this kernel (for grid dims, strides, etc).
+    /// Default: returns dyn vars from output_size(). Override if the kernel has dyn vars
+    /// in expressions not captured by output_size (e.g., KernelScatter's index_shape).
+    fn all_dyn_vars(&self) -> FxHashSet<char> {
+        self.output_size().dyn_vars().into_iter().collect()
+    }
+
     /// Returns the output buffer size in bytes (accounts for dtype).
     fn output_bytes(&self) -> Expression;
 

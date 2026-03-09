@@ -26,6 +26,7 @@ use crate::{
     kernel::{
         CudaFunctionExt, CudaGraphExecHandle, CudaGraphHandle, KernelOp, create_cuda_event,
         destroy_cuda_event,
+        hlir::{set_global_dyn_dims, clear_global_dyn_dims},
     },
     runtime::partition_marked_convex,
 };
@@ -689,11 +690,28 @@ pub fn kernel_to_host(
             .filter(|n| subgraph.contains(n))
             .collect();
 
-        let mut kernels = Vec::with_capacity(topo_order.len());
         let mut all_dyn_dims = FxHashSet::default();
         let mut all_buffer_nodes = FxHashSet::default();
         let mut all_buffer_sizes: FxHashMap<NodeIndex, Expression> = FxHashMap::default();
 
+        // Pre-scan: collect all dynamic vars from all kernel ops without compiling.
+        // This uses KernelOp::all_dyn_vars() which inspects struct expression fields.
+        for kernel_node_idx in &topo_order {
+            let kernel_op_ref = llir_graph[*kernel_node_idx]
+                .to_dialect::<dyn KernelOp>()
+                .unwrap();
+            all_dyn_dims.extend(kernel_op_ref.all_dyn_vars());
+        }
+
+        // Set global dyn dims ordering so compiles use consistent indices
+        let mut global_dyn_dims: Vec<char> = all_dyn_dims.iter().copied().collect();
+        global_dyn_dims.sort();
+        if !global_dyn_dims.is_empty() {
+            set_global_dyn_dims(global_dyn_dims.clone());
+        }
+
+        // Compile all kernels with global ordering for correct dyn_dims indices
+        let mut kernels = Vec::with_capacity(topo_order.len());
         for kernel_node_idx in &topo_order {
             let kernel_op_ref = llir_graph[*kernel_node_idx]
                 .to_dialect::<dyn KernelOp>()
@@ -713,16 +731,6 @@ pub fn kernel_to_host(
             if let Some(block_nodes) = megakernel_to_blocks.get(kernel_node_idx) {
                 inputs.extend(block_nodes.iter().copied());
             }
-
-            // Collect dyn dims used by this kernel
-            all_dyn_dims.extend(grid.0.dyn_vars());
-            all_dyn_dims.extend(grid.1.dyn_vars());
-            all_dyn_dims.extend(grid.2.dyn_vars());
-            all_dyn_dims.extend(block.0.dyn_vars());
-            all_dyn_dims.extend(block.1.dyn_vars());
-            all_dyn_dims.extend(block.2.dyn_vars());
-            all_dyn_dims.extend(shared_mem.dyn_vars());
-            all_dyn_dims.extend(kernel_op_ref.output_size().dyn_vars());
 
             // Collect buffer nodes and sizes
             // Only add kernel nodes with non-zero output size (MegakernelOps have size 0)
@@ -747,6 +755,9 @@ pub fn kernel_to_host(
                 kernel_op.kernel_name(),
             ));
         }
+
+        // Clear global ordering now that all kernels are compiled
+        clear_global_dyn_dims();
 
         // Sort dyn dims alphabetically for consistent buffer layout
         let mut dyn_dims_order: Vec<char> = all_dyn_dims.into_iter().collect();

@@ -19,7 +19,6 @@ pub const RUN_SCHEDULE: &str = "(run-schedule
     )
     (saturate expr)
     (saturate base_cleanup)
-    (saturate cleanup)
 )";
 
 fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
@@ -672,6 +671,40 @@ pub fn run_egglog(
     };
     // Strip out all [...] enodes
     egraph.enodes.retain(|_, (label, _)| label != "[...]");
+
+    // Conditional cleanup: remove HLIR ops from eclasses that have alternative (rewritten) enodes.
+    // This replaces the egglog-side `(saturate cleanup)` which unconditionally deleted all HLIR ops,
+    // causing eclasses without rewrites to lose their only representation (becoming [...]-only).
+    // Conditional cleanup: remove HLIR ops from eclasses that have alternative (rewritten) enodes.
+    // This replaces the egglog-side `(saturate cleanup)` which unconditionally deleted all HLIR ops,
+    // causing eclasses without rewrites to lose their only representation (becoming [...]-only).
+    if cleanup {
+        let cleanup_ops: FxHashSet<String> = ops
+            .iter()
+            .filter(|o| o.cleanup())
+            .map(|o| o.sort().name.to_string())
+            .collect();
+        let mut to_remove = vec![];
+        for (_cid, (_typ, enodes)) in &egraph.eclasses {
+            let has_non_cleanup = enodes.iter().any(|n| {
+                egraph.enodes.get(n).map_or(false, |(label, _)| !cleanup_ops.contains(label.as_str()))
+            });
+            if has_non_cleanup {
+                for n in enodes {
+                    if let Some((label, _)) = egraph.enodes.get(n) {
+                        if cleanup_ops.contains(label.as_str()) {
+                            to_remove.push(n.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for n in &to_remove {
+            egraph.enodes.remove(n);
+        }
+    }
+
+    // Cascade: remove enodes whose children reference empty eclasses
     loop {
         let mut to_remove = vec![];
         for (id, (_, children)) in &egraph.enodes {

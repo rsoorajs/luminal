@@ -166,6 +166,15 @@ impl CudaRuntime {
         self.changed_hlir.insert(id);
     }
 
+    /// Allocate a zeroed GPU buffer for the given node. This is more efficient than
+    /// `set_data` with a host-side zero vector since it avoids the host allocation and H2D copy.
+    pub fn set_zeros(&mut self, id: impl ToId, num_bytes: usize) {
+        let id = id.to_id();
+        let buf = self.cuda_stream.alloc_zeros(num_bytes).unwrap();
+        self.hlir_buffers.insert(id, CudaInput::Buffer(buf));
+        self.changed_hlir.insert(id);
+    }
+
     #[tracing::instrument(skip_all)]
     fn get_output_data(&self, id: impl ToId) -> Vec<u8> {
         let id = id.to_id();
@@ -225,6 +234,51 @@ impl CudaRuntime {
         unsafe { Vec::from_raw_parts(float_ptr, n_bytes / 4, n_bytes / 4) }
     }
 
+    /// Take a GPU buffer handle for an output tensor. This removes the buffer from
+    /// the runtime, so the caller owns it. Use `set_buffer` to give it back.
+    pub fn remove_buffer(&mut self, id: impl ToId) -> CudaSlice<u8> {
+        let id = id.to_id();
+        let output_id = self
+            .llir_graph
+            .node_indices()
+            .find(|n| {
+                if let Some(Output { node }) = self.llir_graph[*n].to_op::<Output>() {
+                    *node == id.index()
+                } else {
+                    false
+                }
+            })
+            .expect("Cannot find output tensor!");
+        let data_id = self
+            .llir_graph
+            .neighbors_directed(output_id, Direction::Incoming)
+            .next()
+            .unwrap();
+
+        if let Some(hlir_node) = self.llir_to_hlir.get(&data_id) {
+            match self
+                .hlir_buffers
+                .remove(hlir_node)
+                .expect("Cannot find input tensor in runtime!")
+            {
+                CudaInput::Buffer(buf) => buf,
+                CudaInput::Ptr(p) => panic!("Cannot take raw pointer input (ptr=0x{:x})", p),
+            }
+        } else {
+            self.buffers
+                .remove(&data_id)
+                .expect("Cannot find tensor in runtime!")
+        }
+    }
+
+    /// Set a GPU buffer handle as input data for a node. This is a zero-copy operation
+    /// (just a pointer swap, no GPU memcpy).
+    pub fn set_buffer(&mut self, id: impl ToId, buf: CudaSlice<u8>) {
+        let id = id.to_id();
+        self.hlir_buffers.insert(id, CudaInput::Buffer(buf));
+        self.changed_hlir.insert(id);
+    }
+
     pub fn get_bool(&self, id: impl ToId) -> Vec<bool> {
         self.get_output_data(id)
             .into_iter()
@@ -255,6 +309,59 @@ impl CudaRuntime {
         let bytes_ptr = bytes.as_mut_ptr();
         let bf16_ptr = bytes_ptr as *mut bf16;
         unsafe { Vec::from_raw_parts(bf16_ptr, n_bytes / 2, n_bytes / 2) }
+    }
+
+    /// Swap the GPU buffer of an output tensor into the input slot for another tensor.
+    /// This is a zero-copy operation (just pointer swaps, no GPU memcpy).
+    /// Useful for feeding back output state (like KV caches) as input for the next step.
+    pub fn swap_output_to_input(&mut self, output_id: impl ToId, input_id: impl ToId) {
+        let output_id = output_id.to_id();
+        let input_id = input_id.to_id();
+
+        // Find LLIR Output node for output_id
+        let output_llir_node = self
+            .llir_graph
+            .node_indices()
+            .find(|n| {
+                self.llir_graph[*n]
+                    .to_op::<Output>()
+                    .map_or(false, |o| o.node == output_id.index())
+            })
+            .expect("Cannot find output node for swap!");
+
+        // Get its data-producing predecessor
+        let data_llir_node = self
+            .llir_graph
+            .neighbors_directed(output_llir_node, Direction::Incoming)
+            .next()
+            .unwrap();
+
+        // Get the LLIR node for the input
+        let input_llir_node = *self
+            .hlir_to_llir
+            .get(&input_id)
+            .expect("Cannot find input in LLIR mapping!");
+
+        // Swap intermediate buffer <-> input buffer
+        let intermediate_buf = self
+            .buffers
+            .get_mut(&data_llir_node)
+            .expect("Output not in intermediate buffers");
+        if let CudaInput::Buffer(input_buf) = self
+            .hlir_buffers
+            .get_mut(&input_id)
+            .expect("Input not in hlir_buffers")
+        {
+            std::mem::swap(intermediate_buf, input_buf);
+        } else {
+            panic!("Input is a raw pointer, cannot swap");
+        }
+
+        // Update cached pointer for the input
+        if let CudaInput::Buffer(buf) = &self.hlir_buffers[&input_id] {
+            self.cached_buffer_ptrs
+                .insert(input_llir_node, buf.device_ptr(&self.cuda_stream).0);
+        }
     }
 
     #[tracing::instrument(skip_all)]

@@ -917,7 +917,47 @@ fn build_chunk_remaps(
         node_remap.insert(*r, *t);
     }
 
-    // 4. CustomOpHLIR ID remapping: match positionally by sorted HLIR node index
+    // 4. Internal Output nodes: Output nodes may reference internal computation nodes
+    //    (e.g., scatter results marked with .output()). These need remapping too.
+    //    Match positionally by sorted `node` value, skipping those already remapped.
+    let rep_output_refs: Vec<usize> = rep_desc
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            hlir_graph
+                .node_weight(*n)
+                .and_then(|w| w.as_any().downcast_ref::<crate::hlir::Output>())
+                .map(|o| o.node)
+        })
+        .filter(|n| !node_remap.contains_key(n))
+        .sorted()
+        .collect();
+    let target_output_refs: Vec<usize> = target_desc
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            hlir_graph
+                .node_weight(*n)
+                .and_then(|w| w.as_any().downcast_ref::<crate::hlir::Output>())
+                .map(|o| o.node)
+        })
+        .filter(|n| !node_remap.values().any(|v| v == n))
+        .sorted()
+        .collect();
+    assert_eq!(
+        rep_output_refs.len(),
+        target_output_refs.len(),
+        "Internal Output node count mismatch: rep has {}, target has {}",
+        rep_output_refs.len(),
+        target_output_refs.len()
+    );
+    for (r, t) in rep_output_refs.iter().zip(&target_output_refs) {
+        if r != t {
+            node_remap.insert(*r, *t);
+        }
+    }
+
+    // 5. CustomOpHLIR ID remapping: match positionally by sorted HLIR node index
     let mut custom_op_id_remap: FxHashMap<usize, usize> = FxHashMap::default();
     let rep_custom_ops: Vec<usize> = rep_desc
         .nodes
