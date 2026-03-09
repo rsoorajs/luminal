@@ -2794,6 +2794,7 @@ impl EgglogOp for KernelEmbed {
             Rule::raw("(rule
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
+                    (= (len ?idx_shape) 2)
                     (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
                     (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
@@ -2803,7 +2804,7 @@ impl EgglogOp for KernelEmbed {
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
                 )
                 (
-                    (let ?ke (KernelEmbed ?batch_shape ?token_ids ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (let ?ke (KernelEmbed ?batch_shape ?token_ids_cast ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
                     (union ?gather ?ke)
                     (set (dtype ?ke) (F32))
                 )
@@ -2813,6 +2814,7 @@ impl EgglogOp for KernelEmbed {
             Rule::raw("(rule
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
+                    (= (len ?idx_shape) 2)
                     (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
                     (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
@@ -2822,7 +2824,7 @@ impl EgglogOp for KernelEmbed {
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
                 )
                 (
-                    (let ?ke (KernelEmbed ?batch_shape ?token_ids ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (let ?ke (KernelEmbed ?batch_shape ?token_ids_cast ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
                     (union ?gather ?ke)
                     (set (dtype ?ke) (F32))
                 )
@@ -2832,6 +2834,7 @@ impl EgglogOp for KernelEmbed {
             Rule::raw("(rule
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
+                    (= (len ?idx_shape) 2)
                     (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
                     (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
@@ -2850,6 +2853,7 @@ impl EgglogOp for KernelEmbed {
             Rule::raw("(rule
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
+                    (= (len ?idx_shape) 2)
                     (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
                     (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
@@ -2936,7 +2940,7 @@ extern \"C\" {{
         long long token_offset = {token_offset_expr};
         long long out_offset = {out_offset_expr};
         int token_id = token_ids[token_offset];
-        out[out_offset * embed_dim + embed_idx] = embed_table[(long long)token_id * embed_dim + embed_idx];
+        out[out_offset + embed_idx] = embed_table[(long long)token_id * embed_dim + embed_idx];
     }}
 }}",
             vars.iter()

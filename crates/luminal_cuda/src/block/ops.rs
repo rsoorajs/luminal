@@ -1047,6 +1047,9 @@ impl EgglogOp for TileMatmulSplitK {
                 ; Match Sum that reduces the Mul (k dimension)
                 (= ?sum (Sum ?out_shape ?k ?mul ?sum_in_stride ?k_stride ?sum_out_stride))
 
+                ; Must be exactly 2D (no batch dims) — batched matmul uses CuBlasLt
+                (= (len ?out_shape) 2)
+
                 ; Get dimensions from output shape
                 (= ?m (nth_from_end ?out_shape 1))
                 (= ?n (nth_from_end ?out_shape 0))
@@ -1437,6 +1440,9 @@ impl EgglogOp for TileMatmulFullSplit {
 
                 ; Match Sum that reduces the Mul (k dimension)
                 (= ?sum (Sum ?out_shape ?k ?mul ?sum_in_stride ?k_stride ?sum_out_stride))
+
+                ; Must be exactly 2D (no batch dims) — batched matmul uses CuBlasLt
+                (= (len ?out_shape) 2)
 
                 ; Get dimensions from output shape
                 (= ?m (nth_from_end ?out_shape 1))
@@ -1837,6 +1843,7 @@ impl EgglogOp for RowEmbed {
             Rule::raw("(rule
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
+                    (= (len ?idx_shape) 2)
                     (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
                     (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
@@ -1846,7 +1853,7 @@ impl EgglogOp for RowEmbed {
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
                 )
                 (
-                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (let ?re (RowEmbed ?batch_shape ?token_ids_cast ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
                     (union ?gather ?re)
                     (set (dtype ?re) (F32))
                 )
@@ -1856,6 +1863,7 @@ impl EgglogOp for RowEmbed {
             Rule::raw("(rule
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
+                    (= (len ?idx_shape) 2)
                     (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
                     (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
@@ -1865,7 +1873,7 @@ impl EgglogOp for RowEmbed {
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
                 )
                 (
-                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (let ?re (RowEmbed ?batch_shape ?token_ids_cast ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
                     (union ?gather ?re)
                     (set (dtype ?re) (F32))
                 )
@@ -1875,6 +1883,7 @@ impl EgglogOp for RowEmbed {
             Rule::raw("(rule
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
+                    (= (len ?idx_shape) 2)
                     (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
                     (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
@@ -1893,6 +1902,7 @@ impl EgglogOp for RowEmbed {
             Rule::raw("(rule
                 (
                     (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
+                    (= (len ?idx_shape) 2)
                     (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
                     (= ?iota_result (Iota ?iota_expr ?iota_range))
                     (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
