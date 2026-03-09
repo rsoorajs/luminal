@@ -55,9 +55,11 @@ impl ConvND {
         let kernel_product: usize = kernel.iter().product();
 
         Self {
-            weight: cx.named_tensor("ConvWeight", (ch_out, ch_in * kernel_product)),
+            weight: cx
+                .named_tensor("ConvWeight", (ch_out, ch_in * kernel_product))
+                .persist(),
             bias: if bias {
-                Some(cx.named_tensor("ConvBias", ch_out))
+                Some(cx.named_tensor("ConvBias", ch_out).persist())
             } else {
                 None
             },

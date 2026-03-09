@@ -1,4 +1,5 @@
 use luminal::prelude::*;
+use luminal::shape::Expression;
 
 /// Gather entire rows from a 2D tensor using row indices.
 ///
@@ -48,7 +49,7 @@ pub fn scatter_rows(
     src.scatter(flat_idx, dest)
 }
 
-/// Pure HLIR paged attention for one layer.
+/// Pure HLIR paged attention for one layer with causal masking.
 ///
 /// Inputs:
 /// - `q`:           (s, hidden)         f32 — query vectors
@@ -58,7 +59,7 @@ pub fn scatter_rows(
 /// - `v_cache`:     (num_slots, kv_dim) f32 — value cache (preallocated)
 /// - `gather_idx`:  (ctx_len,)          Int — which cache slots to read
 /// - `scatter_idx`: (s,)                Int — which cache slots to write new KV into
-/// - `attn_mask`:   (s, ctx_len)        f32 — causal mask (0 or -inf)
+/// - `prev_seq`:    number of previously cached tokens (for causal mask offset)
 /// - `n_heads`:     number of query heads
 /// - `n_kv_heads`:  number of KV heads (for GQA)
 /// - `head_dim`:    dimension per head
@@ -76,7 +77,7 @@ pub fn paged_attention(
     v_cache: GraphTensor,
     gather_idx: GraphTensor,
     scatter_idx: GraphTensor,
-    attn_mask: GraphTensor,
+    prev_seq: Expression,
     n_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
@@ -85,6 +86,8 @@ pub fn paged_attention(
     let kv_groups = n_heads / n_kv_heads;
     let scale = 1.0 / (head_dim as f32).sqrt();
     let s = q.dims()[0];
+    let ctx = gather_idx.dims()[0];
+    let cx = q.graph();
 
     // ── Phase 1: Write new KV into cache ──
     let k_cache = scatter_rows(k_new, scatter_idx, k_cache, kv_dim);
@@ -121,10 +124,20 @@ pub fn paged_attention(
     //     → (n_kv_heads, kv_groups, s, ctx)
     let scores = q.matmul(k) * scale;
 
-    // Apply causal mask: broadcast (s, ctx) → (n_kv_heads, kv_groups, s, ctx)
-    let mask = attn_mask
-        .expand_dim(0, n_kv_heads) // (n_kv_heads, s, ctx)
-        .expand_dim(1, kv_groups); // (n_kv_heads, kv_groups, s, ctx)
+    // Build causal mask: query at position prev_seq+i can attend to context j iff j <= prev_seq+i.
+    // row_vals[i] = prev_seq + i, col_vals[j] = j
+    // mask[i,j] = -1e9 where row_vals[i] < col_vals[j], else 0
+    let z = Expression::from('z');
+    let row_vals = cx.iota(z + prev_seq, s).expand_dim(1, ctx); // (s, ctx)
+    let col_vals = cx.arange(ctx).expand_dim(0, s); // (s, ctx)
+    let mask = row_vals
+        .cast(DType::F32)
+        .lt(col_vals.cast(DType::F32))
+        .cast(DType::F32)
+        * -1e9;
+
+    // Broadcast (s, ctx) → (n_kv_heads, kv_groups, s, ctx)
+    let mask = mask.expand_dim(0, n_kv_heads).expand_dim(1, kv_groups);
     let scores = scores + mask;
 
     // Softmax over context dimension (axis 3)
@@ -240,8 +253,8 @@ mod tests {
         let v_cache = cx.tensor((num_slots, kv_dim));
         let gather_idx = cx.tensor(3).as_dtype(DType::Int); // 3 context tokens
         let scatter_idx = cx.tensor(1).as_dtype(DType::Int); // 1 new token
-        let attn_mask = cx.tensor((1, 3)); // (s=1, ctx=3)
 
+        // prev_seq=2: this is the 3rd token (positions 0,1 cached, position 2 is new)
         let (attn_out, k_cache_new, v_cache_new) = paged_attention(
             q,
             k_new,
@@ -250,7 +263,7 @@ mod tests {
             v_cache,
             gather_idx,
             scatter_idx,
-            attn_mask,
+            2.into(),
             n_heads,
             n_kv_heads,
             head_dim,
@@ -275,8 +288,6 @@ mod tests {
         rt.set_data(scatter_idx.id, vec![2]);
         // Gather context from slots 0, 1, 2 (slots 0,1 are zeros, slot 2 is the new KV)
         rt.set_data(gather_idx.id, vec![0, 1, 2]);
-        // No masking (all can attend to all)
-        rt.set_data(attn_mask.id, vec![0., 0., 0.]);
 
         rt.execute(&cx.dyn_map);
 
@@ -316,8 +327,9 @@ mod tests {
         let v_cache = cx.tensor((num_slots, kv_dim));
         let gather_idx = cx.tensor(2).as_dtype(DType::Int);
         let scatter_idx = cx.tensor(1).as_dtype(DType::Int);
-        let attn_mask = cx.tensor((1, 2));
 
+        // prev_seq=1: 1 cached token + 1 new token, context len=2
+        // Query at absolute position 1 can attend to context positions 0 and 1
         let (attn_out, _, _) = paged_attention(
             q,
             k_new,
@@ -326,7 +338,7 @@ mod tests {
             v_cache,
             gather_idx,
             scatter_idx,
-            attn_mask,
+            1.into(),
             n_heads,
             n_kv_heads,
             head_dim,
@@ -356,31 +368,11 @@ mod tests {
         rt.set_data(v_cache.id, v_cache_data);
         rt.set_data(scatter_idx.id, vec![1]); // write to slot 1
         rt.set_data(gather_idx.id, vec![0, 1]); // gather slots 0, 1
-        rt.set_data(attn_mask.id, vec![0., 0.]); // no masking
 
         rt.execute(&cx.dyn_map);
 
         let out = rt.get_f32(attn_out.id);
         assert_eq!(out.len(), hidden);
-
-        // Manual computation:
-        // After scatter: K = [[1,0], [0,1]] at slots 0,1
-        //                V = [[10,20], [30,40]] at slots 0,1
-        // After gather (slots 0,1):
-        //   K context = [[1,0], [0,1]], shape (2, 2)
-        //   V context = [[10,20], [30,40]], shape (2, 2)
-        //
-        // Reshape for attention (1 head, 1 kv_head, head_dim=2):
-        //   Q: (1, 1, 1, 2) = [[[[1, 1]]]]
-        //   K: (1, 1, 2, 2) = [[[[1, 0], [0, 1]]]]  (transposed: head_dim x ctx)
-        //   V: (1, 1, 2, 2) = [[[[10, 20], [30, 40]]]]
-        //
-        // QK^T = Q @ K = [1,1] @ [[1,0],[0,1]] = [1, 1]
-        // scale = 1/sqrt(2) ≈ 0.7071
-        // scores = [0.7071, 0.7071]
-        // softmax([0.7071, 0.7071]) = [0.5, 0.5]
-        //
-        // out = [0.5, 0.5] @ [[10,20],[30,40]] = [20, 30]
         let expected = vec![20.0, 30.0];
         for (a, b) in out.iter().zip(&expected) {
             assert!((a - b).abs() < 0.1, "Expected {expected:?}, got {out:?}");
@@ -406,8 +398,10 @@ mod tests {
         let v_cache = cx.tensor((num_slots, kv_dim));
         let gather_idx = cx.tensor(3).as_dtype(DType::Int); // 3 context (1 cached + 2 new)
         let scatter_idx = cx.tensor(2).as_dtype(DType::Int);
-        let attn_mask = cx.tensor((2, 3));
 
+        // prev_seq=1: 1 cached token, 2 new tokens → context len=3
+        // Query 0 at absolute pos 1: can see ctx 0,1 (not 2)
+        // Query 1 at absolute pos 2: can see ctx 0,1,2
         let (attn_out, _, _) = paged_attention(
             q,
             k_new,
@@ -416,7 +410,7 @@ mod tests {
             v_cache,
             gather_idx,
             scatter_idx,
-            attn_mask,
+            1.into(),
             n_heads,
             n_kv_heads,
             head_dim,
@@ -443,25 +437,14 @@ mod tests {
         rt.set_data(scatter_idx.id, vec![1, 2]); // write to slots 1, 2
         rt.set_data(gather_idx.id, vec![0, 1, 2]); // gather all 3
 
-        // Causal mask: token0 (pos 1) can see ctx 0,1 but not 2
-        //              token1 (pos 2) can see ctx 0,1,2
-        let neg_inf = -1e9_f32;
-        rt.set_data(
-            attn_mask.id,
-            vec![
-                0., 0., neg_inf, // token 0: can see positions 0,1
-                0., 0., 0., // token 1: can see all
-            ],
-        );
-
         rt.execute(&cx.dyn_map);
 
         let out = rt.get_f32(attn_out.id);
         assert_eq!(out.len(), 2 * hidden);
 
-        // Token 0 with mask: attends only to context positions 0,1
-        // Token 1 without mask: attends to all 3 context positions
-        // Just verify the output has valid (non-NaN, non-inf) values and correct length
+        // Token 0 (abs pos 1): attends to ctx 0,1 only (ctx 2 is masked)
+        // Token 1 (abs pos 2): attends to ctx 0,1,2
+        // Verify output has valid (non-NaN, non-inf) values and correct length
         for val in out.iter() {
             assert!(val.is_finite(), "Output contains non-finite value: {}", val);
         }

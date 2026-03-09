@@ -113,6 +113,8 @@ pub struct CudaRuntime {
     pub last_total_time_us: f64,
     kernel_cache: FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
     num_sms: usize,
+    /// When true, execute() skips input buffer consumption (used during search/profile)
+    profiling: bool,
 }
 
 impl CudaRuntime {
@@ -178,6 +180,7 @@ impl CudaRuntime {
                 }
             })
             .expect("Cannot find output tensor!");
+        // Output nodes don't own buffers — they just point to their input
         let data_id = self
             .llir_graph
             .neighbors_directed(output_id, Direction::Incoming)
@@ -185,13 +188,32 @@ impl CudaRuntime {
             .unwrap();
 
         let _span = span!(Level::TRACE, "dtoh").entered();
-        self.cuda_stream
-            .clone_dtoh(
-                self.buffers
-                    .get(&data_id)
-                    .expect("Cannot find tensor in runtime!"),
-            )
-            .unwrap()
+        // If predecessor is an Input node, data lives in hlir_buffers
+        if let Some(hlir_node) = self.llir_to_hlir.get(&data_id) {
+            match self
+                .hlir_buffers
+                .get(hlir_node)
+                .expect("Cannot find input tensor in runtime!")
+            {
+                CudaInput::Buffer(buf) => self.cuda_stream.clone_dtoh(buf).unwrap(),
+                CudaInput::Ptr(p) => {
+                    // Raw pointer — need size from cached_buffer_ptrs or error
+                    panic!(
+                        "Cannot read raw pointer input (ptr=0x{:x}) — use Buffer variant",
+                        p
+                    );
+                }
+            }
+        } else {
+            // Predecessor is a computation node — data is in intermediate buffers
+            self.cuda_stream
+                .clone_dtoh(
+                    self.buffers
+                        .get(&data_id)
+                        .expect("Cannot find tensor in runtime!"),
+                )
+                .unwrap()
+        }
     }
 
     pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
@@ -432,6 +454,15 @@ impl ToCudaInput for Vec<u8> {
     }
 }
 
+fn format_duration_precise(d: &std::time::Duration) -> String {
+    let us = d.as_micros();
+    if us >= 1000 {
+        format!("{} ms {} µs", us / 1000, us % 1000)
+    } else {
+        format!("{} µs", us)
+    }
+}
+
 impl Runtime for CudaRuntime {
     type Ops = (
         crate::logical::Ops,
@@ -500,15 +531,14 @@ impl Runtime for CudaRuntime {
             last_kernel_stats: vec![],
             last_total_time_us: 0.0,
             kernel_cache: FxHashMap::default(),
+            profiling: false,
         }
     }
 
     #[tracing::instrument(skip_all)]
     fn load_llir(&mut self, llir_graph: &LLIRGraph) {
         // Sync before clearing old data to ensure all operations complete
-        self.cuda_stream
-            .synchronize()
-            .expect("Failed to sync at start of load_llir");
+        let _ = self.cuda_stream.synchronize();
 
         // exec_graph entries are ExecutableHostOp which are dropped automatically
 
@@ -521,15 +551,16 @@ impl Runtime for CudaRuntime {
         self.exec_graph.clear();
 
         // Sync after clearing all buffers to ensure CUDA resources are freed
-        self.cuda_stream
-            .synchronize()
-            .expect("Failed to sync after clearing buffers");
+        if let Err(e) = self.cuda_stream.synchronize() {
+            // Context may be corrupted from a previous CUDA error — try to recover
+            let _ = self.cuda_stream.context().bind_to_thread();
+            if self.cuda_stream.synchronize().is_err() {
+                panic!("CUDA context unrecoverable after sync error: {e}");
+            }
+        }
 
         // Rebind CUDA context to thread after cleanup to ensure valid state
-        self.cuda_stream
-            .context()
-            .bind_to_thread()
-            .expect("Failed to bind CUDA context after cleanup");
+        let _ = self.cuda_stream.context().bind_to_thread();
 
         let mut exec_graph = StableGraph::default();
         let mut node_to_exec = FxHashMap::default();
@@ -636,7 +667,7 @@ impl Runtime for CudaRuntime {
     }
 
     fn clear_intermediate_buffers(&mut self) {
-        self.cuda_stream.synchronize().unwrap();
+        let _ = self.cuda_stream.synchronize();
         self.buffers.clear();
         self.cached_buffer_ptrs.clear();
     }
@@ -654,8 +685,10 @@ impl Runtime for CudaRuntime {
     ) -> (Self::ProfileMetric, String) {
         self.buffers.clear();
         self.load_llir(llir_graph);
+        self.profiling = true;
         let start = std::time::Instant::now();
         self.execute(dyn_map);
+        self.profiling = false;
         let duration = start.elapsed();
 
         // Flush pending timing data so it's available for stats
@@ -700,7 +733,7 @@ impl Runtime for CudaRuntime {
         let mbu = peak_bw.map(|p| aggregate_bw / p as f64);
         let mfu = peak_tf.map(|p| aggregate_tf / p as f64);
 
-        let duration_str = pretty_duration::pretty_duration(&duration, None);
+        let duration_str = format_duration_precise(&duration);
         let mbu_str = mbu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
         let mfu_str = mfu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
         let display = format!(
@@ -815,8 +848,18 @@ impl Runtime for CudaRuntime {
                     &buffer_map,
                     dyn_map,
                 )
-                .unwrap();
-            self.cuda_stream.synchronize().unwrap();
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "CUDA execute error in {:?}: {e}",
+                        exec_op.internal.stats_name().unwrap_or("unknown")
+                    );
+                });
+            self.cuda_stream.synchronize().unwrap_or_else(|e| {
+                panic!(
+                    "CUDA sync error after {:?}: {e}",
+                    exec_op.internal.stats_name().unwrap_or("unknown")
+                );
+            });
         }
         self.last_total_time_us = total_start.elapsed().as_secs_f64() * 1_000_000.0;
 
@@ -841,6 +884,39 @@ impl Runtime for CudaRuntime {
         self.cuda_stream
             .synchronize()
             .expect("Final sync failed in execute");
+
+        // Consume input buffers: inputs are always consumed after execute, UNLESS
+        // they are directly followed by an Output node (which preserves them for retrieval
+        // and reuse across runs). This means weight tensors must have .persist() to survive.
+        // Skip consumption during profiling/search to preserve inputs across profile iterations.
+        if self.profiling {
+            return;
+        }
+        let inputs_with_outputs: FxHashSet<NodeIndex> = self
+            .llir_graph
+            .node_indices()
+            .filter(|n| self.llir_graph[*n].to_op::<Output>().is_some())
+            .filter_map(|output_node| {
+                self.llir_graph
+                    .neighbors_directed(output_node, Direction::Incoming)
+                    .next()
+                    .and_then(|pred| self.llir_to_hlir.get(&pred).copied())
+            })
+            .collect();
+
+        let to_consume: Vec<NodeIndex> = self
+            .hlir_buffers
+            .keys()
+            .filter(|hlir_node| !inputs_with_outputs.contains(hlir_node))
+            .copied()
+            .collect();
+
+        for hlir_node in to_consume {
+            self.hlir_buffers.remove(&hlir_node);
+            if let Some(llir_node) = self.hlir_to_llir.get(&hlir_node) {
+                self.cached_buffer_ptrs.remove(llir_node);
+            }
+        }
     }
 }
 

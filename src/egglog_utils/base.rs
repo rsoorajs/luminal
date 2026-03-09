@@ -622,6 +622,14 @@ pub fn base_expression_egglog() -> String {
         ])
         .ruleset("expr"),
     );
+    p.add_rule(
+        rewrite(
+            "merge-dims",
+            add(mul(div(v("?z"), v("?x")), v("?x")), modd(v("?z"), v("?x"))),
+            v("?z"),
+        )
+        .ruleset("expr"),
+    );
 
     p.add_rule(
         rewrite(

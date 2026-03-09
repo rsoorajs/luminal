@@ -50,22 +50,10 @@ impl EgglogOp for KernelMeanReduce {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        vec![Rule::raw("
-(rule
-    (
-        (= ?sum (Sum ?out_shape ?iters ?inp ?in_stride ?iter_stride ?sum_out_stride))
-        (= ?iota (Iota ?iters ?one))
-        (= ?cast (Cast ?iota ?one (F32)))
-        (= ?recip (Recip ?r_shape ?cast ?r_in_strides ?r_out_strides))
-        (= ?result (Mul ?shape ?sum ?sum_strides ?recip ?recip_strides ?out_strides))
-        (= ?dty (dtype ?inp))
-    )
-    (
-        (union ?result (KernelMean ?out_shape ?iters ?inp ?in_stride ?iter_stride ?out_strides ?dty))
-    )
-    :name \"kernel mean reduce\"
-)
-")]
+        // Disabled: the e-graph union introduced by this rule can cause the search
+        // to select genomes with accumulated FP precision issues over many layers.
+        // The unfused Sum + Mul(Recip(Cast(Iota))) path produces equivalent results.
+        vec![]
     }
 
     fn cleanup(&self) -> bool {
@@ -80,14 +68,25 @@ impl EgglogOp for KernelMeanReduce {
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
-            LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                iters: extract_expr(egraph, children[1], expr_cache).unwrap(),
-                in_stride: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
-                iter_stride: extract_expr(egraph, children[4], expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
-                dtype: extract_dtype(egraph, children[6]),
-            }) as Box<dyn KernelOp>),
+            {
+                let out_shape =
+                    extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap();
+                let iters = extract_expr(egraph, children[1], expr_cache).unwrap();
+                let in_stride =
+                    extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap();
+                let iter_stride = extract_expr(egraph, children[4], expr_cache).unwrap();
+                let out_stride =
+                    extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap();
+                let dtype = extract_dtype(egraph, children[6]);
+                LLIROp::new::<dyn KernelOp>(Box::new(Self {
+                    out_shape,
+                    iters,
+                    in_stride,
+                    iter_stride,
+                    out_stride,
+                    dtype,
+                }) as Box<dyn KernelOp>)
+            },
             vec![children[2]],
         )
     }
@@ -132,18 +131,12 @@ impl KernelOp for KernelMeanReduce {
 
         let kernel = format!(
             "{includes}
-#define WARP_SIZE 32
-#define THREADS_PER_BLOCK 256
-#define FULL_MASK 0xffffffff
 {dyn_defines}
 extern \"C\" {{
     __global__ void reduce_mean_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
-        __shared__ {dtype} warp_sums[THREADS_PER_BLOCK / WARP_SIZE];
         long long const_z = blockIdx.x;
-
-        int tid = threadIdx.x;
-        int lane_id = tid % WARP_SIZE;
-        int warp_id = tid / WARP_SIZE;
+        long long n_elements = {n_outputs};
+        if (const_z >= n_elements) return;
 
         long long in_start = {in_index};
         long long iters = {iters};
@@ -153,34 +146,13 @@ extern \"C\" {{
             sum += in[in_start + {iter_stride_of_i}];
         }}
 
-        #pragma unroll
-        for (int s = WARP_SIZE / 2; s > 0; s /= 2) {{
-            sum += __shfl_down_sync(FULL_MASK, sum, s);
-        }}
-
-        if (lane_id == 0) {{
-            warp_sums[warp_id] = sum;
-        }}
-        __syncthreads();
-
-        if (warp_id == 0) {{
-            int cnt = THREADS_PER_BLOCK / WARP_SIZE;
-            {dtype} block_sum = tid < cnt ? warp_sums[tid] : 0;
-
-            #pragma unroll
-            for (int s = cnt / 2; s > 0; s /= 2) {{
-                block_sum += __shfl_down_sync(FULL_MASK, block_sum, s);
-            }}
-
-            if (tid == 0) {{
-                out[{out_index}] = ({dtype})(block_sum / (float)iters);
-            }}
-        }}
+        out[{out_index}] = ({dtype})(sum / ({dtype})iters);
     }}
 }}",
             dtype = dtype,
             in_index = flatten_strides(&self.out_shape, &self.in_stride).to_kernel(),
             out_index = flatten_strides(&self.out_shape, &self.out_stride).to_kernel(),
+            n_outputs = n_outputs.to_kernel(),
             iters = self.iters.to_kernel(),
             iter_stride_of_i = iter_stride_of_i,
         );
@@ -199,9 +171,9 @@ extern \"C\" {{
             func,
             module,
             kernel,
-            (n_outputs, 1.into(), 1.into()),                // grid
-            (threads_per_block.into(), 1.into(), 1.into()), // blocks
-            32.into(),                                      // shmem size
+            (n_outputs, 1.into(), 1.into()), // grid
+            (1.into(), 1.into(), 1.into()),  // blocks (single-threaded)
+            0.into(),                        // shmem size
             FxHashMap::default(),
         )
     }

@@ -14,8 +14,8 @@ const REPO_ID: &str = "unsloth/gemma-3-4b-it";
 
 fn main() {
     let max_seq_len = 4096;
-    let gen_tokens = 100;
-    let search_graphs = 500; // the number of graphs we want to search during compilation
+    let gen_tokens = 500;
+    let search_graphs = 500;
     let prompt = "Explain what a neural network is in simple terms:";
 
     // Set up cuda context and stream
@@ -81,9 +81,15 @@ fn main() {
         runtime.execute(&cx.dyn_map);
         let logits_data = runtime.get_f32(logits);
 
-        // Sample next token
+        // Sample next token (greedy)
         sentence = vec![*sample(&logits_data, VOCAB_SIZE).last().unwrap()];
         prev_seq += seq_len;
+
+        // Stop on EOS tokens
+        if sentence[0] == 1 || sentence[0] == 107 {
+            fwd_durations.push(start.elapsed());
+            break;
+        }
         print!("{}", tokenizer.decode(&sentence, true).unwrap());
         std::io::stdout().flush().unwrap();
         fwd_durations.push(start.elapsed());

@@ -450,7 +450,7 @@ fn test_passthrough_preserves_weights() {
     let w = cx.tensor(3);
     let x = cx.tensor(3);
     let y = (w * x).output();
-    w.passthrough();
+    w.persist();
 
     cx.build_search_space::<NativeRuntime>();
     let mut rt = cx.search(NativeRuntime::default(), 1);

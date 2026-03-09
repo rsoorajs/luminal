@@ -352,14 +352,25 @@ impl EgglogOp for KernelSumReduce {
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
-            LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                iters: extract_expr(egraph, children[1], expr_cache).unwrap(),
-                in_stride: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
-                iter_stride: extract_expr(egraph, children[4], expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
-                dtype: extract_dtype(egraph, children[6]),
-            }) as Box<dyn KernelOp>),
+            {
+                let out_shape =
+                    extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap();
+                let iters = extract_expr(egraph, children[1], expr_cache).unwrap();
+                let in_stride =
+                    extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap();
+                let iter_stride = extract_expr(egraph, children[4], expr_cache).unwrap();
+                let out_stride =
+                    extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap();
+                let dtype = extract_dtype(egraph, children[6]);
+                LLIROp::new::<dyn KernelOp>(Box::new(Self {
+                    out_shape,
+                    iters,
+                    in_stride,
+                    iter_stride,
+                    out_stride,
+                    dtype,
+                }) as Box<dyn KernelOp>)
+            },
             vec![children[2]],
         )
     }
@@ -655,7 +666,37 @@ impl EgglogOp for KernelMul {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        vec![kernel_rewrite::<Mul, Self>()]
+        vec![
+            kernel_rewrite::<Mul, Self>(),
+            // Delete KernelMul nodes whose output shape is too large (>= 1M elements in static dims).
+            // This prevents the search from selecting the HLIR matmul fallback path
+            // (broadcast Mul + SumReduce), which creates huge intermediates and causes OOM.
+            // Matmul intermediates have 3+ dims with two large static dims, e.g. [s, 14336, 4096].
+            Rule::raw("(rule
+                ((= ?m (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?a ?as ?b ?bs ?os ?dt))
+                 (= (MNum ?v1) ?d1)
+                 (= (MNum ?v2) ?d2)
+                 (>= (* ?v1 ?v2) 1000000))
+                ((delete (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?a ?as ?b ?bs ?os ?dt)))
+                :ruleset cleanup
+            )"),
+            Rule::raw("(rule
+                ((= ?m (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?a ?as ?b ?bs ?os ?dt))
+                 (= (MNum ?v0) ?d0)
+                 (= (MNum ?v1) ?d1)
+                 (>= (* ?v0 ?v1) 1000000))
+                ((delete (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?a ?as ?b ?bs ?os ?dt)))
+                :ruleset cleanup
+            )"),
+            Rule::raw("(rule
+                ((= ?m (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?a ?as ?b ?bs ?os ?dt))
+                 (= (MNum ?v0) ?d0)
+                 (= (MNum ?v2) ?d2)
+                 (>= (* ?v0 ?v2) 1000000))
+                ((delete (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?a ?as ?b ?bs ?os ?dt)))
+                :ruleset cleanup
+            )"),
+        ]
     }
 
     fn cleanup(&self) -> bool {

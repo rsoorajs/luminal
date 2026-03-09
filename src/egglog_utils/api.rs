@@ -802,7 +802,10 @@ fn rule_to_egglog(rule: &Rule) -> String {
     let actions: Vec<_> = rule.actions.iter().map(action_to_egglog).collect();
     let mut out = format!("(rule ({}) ({})", facts.join(" "), actions.join(" "));
     if let Some(rs) = &rule.ruleset {
-        out.push_str(&format!(" :ruleset {}", rs));
+        out.push_str(&format!(" :ruleset {rs}"));
+    }
+    if let Some(name) = &rule.name {
+        out.push_str(&format!(" :name \"{name}\""));
     }
     out.push(')');
     out

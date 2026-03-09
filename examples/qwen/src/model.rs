@@ -36,35 +36,56 @@ impl Qwen {
     pub fn init(cx: &mut Graph) -> Self {
         let mut w = vec![];
         for l in 0..LAYERS {
-            w.push(QwenLayer {
-                up: cx.named_tensor(
+            let up = cx
+                .named_tensor(
                     format!("model.layers.{l}.mlp.up_proj.weight"),
                     (INTERMEDIATE, HIDDEN),
-                ),
-                gate: cx.named_tensor(
+                )
+                .persist();
+            let gate = cx
+                .named_tensor(
                     format!("model.layers.{l}.mlp.gate_proj.weight"),
                     (INTERMEDIATE, HIDDEN),
-                ),
-                down: cx.named_tensor(
+                )
+                .persist();
+            let down = cx
+                .named_tensor(
                     format!("model.layers.{l}.mlp.down_proj.weight"),
                     (HIDDEN, INTERMEDIATE),
-                ),
-                q_proj: cx.named_tensor(
+                )
+                .persist();
+            let q_proj = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.q_proj.weight"),
                     (Q_DIM, HIDDEN),
-                ),
-                k_proj: cx.named_tensor(
+                )
+                .persist();
+            let k_proj = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.k_proj.weight"),
                     (KV_DIM, HIDDEN),
-                ),
-                v_proj: cx.named_tensor(
+                )
+                .persist();
+            let v_proj = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.v_proj.weight"),
                     (KV_DIM, HIDDEN),
-                ),
-                o_proj: cx.named_tensor(
+                )
+                .persist();
+            let o_proj = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.o_proj.weight"),
                     (HIDDEN, Q_DIM),
-                ),
+                )
+                .persist();
+            w.push(QwenLayer {
+                up,
+                gate,
+                down,
+                q_proj,
+                k_proj,
+                v_proj,
+                o_proj,
                 attn_rms: LayerNorm::new(
                     HIDDEN,
                     Some(&format!("model.layers.{l}.input_layernorm.weight")),
@@ -91,8 +112,11 @@ impl Qwen {
             RMS_NORM_EPS,
             cx,
         );
+        let embedding = cx
+            .named_tensor("model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN))
+            .persist();
         Self {
-            embedding: cx.named_tensor("model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN)),
+            embedding,
             layers: w,
             lm_norm,
         }

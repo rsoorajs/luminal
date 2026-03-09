@@ -39,23 +39,53 @@ impl Qwen3MoE {
     pub fn init(cx: &mut Graph) -> Self {
         let mut layers = vec![];
         for l in 0..LAYERS {
-            layers.push(Qwen3MoELayer {
-                q_proj: cx.named_tensor(
+            let q_proj = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.q_proj.weight"),
                     (Q_DIM, HIDDEN),
-                ),
-                k_proj: cx.named_tensor(
+                )
+                .persist();
+            let k_proj = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.k_proj.weight"),
                     (KV_DIM, HIDDEN),
-                ),
-                v_proj: cx.named_tensor(
+                )
+                .persist();
+            let v_proj = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.v_proj.weight"),
                     (KV_DIM, HIDDEN),
-                ),
-                o_proj: cx.named_tensor(
+                )
+                .persist();
+            let o_proj = cx
+                .named_tensor(
                     format!("model.layers.{l}.self_attn.o_proj.weight"),
                     (HIDDEN, Q_DIM),
-                ),
+                )
+                .persist();
+            let router = cx
+                .named_tensor(
+                    format!("model.layers.{l}.mlp.gate.weight"),
+                    (NUM_EXPERTS, HIDDEN),
+                )
+                .persist();
+            let gate_up_weights = cx
+                .named_tensor(
+                    format!("model.layers.{l}.mlp.gate_up_weights"),
+                    (NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN),
+                )
+                .persist();
+            let down_weights = cx
+                .named_tensor(
+                    format!("model.layers.{l}.mlp.down_weights"),
+                    (NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE),
+                )
+                .persist();
+            layers.push(Qwen3MoELayer {
+                q_proj,
+                k_proj,
+                v_proj,
+                o_proj,
                 attn_rms: LayerNorm::new(
                     HIDDEN,
                     Some(&format!("model.layers.{l}.input_layernorm.weight")),
@@ -73,22 +103,9 @@ impl Qwen3MoE {
                     cx,
                 ),
                 moe: QwenMoE {
-                    router: cx.named_tensor(
-                        format!("model.layers.{l}.mlp.gate.weight"),
-                        (NUM_EXPERTS, HIDDEN),
-                    ),
-                    gate_up_weights: cx
-                        .named_tensor(
-                            format!("model.layers.{l}.mlp.gate_up_weights"),
-                            (NUM_EXPERTS, MOE_INTERMEDIATE * 2, HIDDEN),
-                        )
-                        .as_dtype(DType::Bf16),
-                    down_weights: cx
-                        .named_tensor(
-                            format!("model.layers.{l}.mlp.down_weights"),
-                            (NUM_EXPERTS, HIDDEN, MOE_INTERMEDIATE),
-                        )
-                        .as_dtype(DType::Bf16),
+                    router,
+                    gate_up_weights: gate_up_weights.as_dtype(DType::Bf16),
+                    down_weights: down_weights.as_dtype(DType::Bf16),
                 },
             });
         }
@@ -100,11 +117,17 @@ impl Qwen3MoE {
             RMS_NORM_EPS,
             cx,
         );
+        let embedding = cx
+            .named_tensor("model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN))
+            .persist();
+        let lm_head = cx
+            .named_tensor("lm_head.weight", (VOCAB_SIZE, HIDDEN))
+            .persist();
         Self {
-            embedding: cx.named_tensor("model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN)),
+            embedding,
             layers,
             lm_norm,
-            lm_head: cx.named_tensor("lm_head.weight", (VOCAB_SIZE, HIDDEN)),
+            lm_head,
         }
     }
 
