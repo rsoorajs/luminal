@@ -11,7 +11,7 @@ use cudarc::driver::{
 };
 use itertools::Itertools;
 use luminal::{
-    egglog_utils::{api::Rule, base::IR},
+    egglog_utils::{api::Rule, base::OP_KIND},
     graph::LLIRGraph,
     op::{EgglogOp, LLIROp},
     prelude::{
@@ -26,7 +26,7 @@ use crate::{
     kernel::{
         CudaFunctionExt, CudaGraphExecHandle, CudaGraphHandle, KernelOp, create_cuda_event,
         destroy_cuda_event,
-        hlir::{set_global_dyn_dims, clear_global_dyn_dims},
+        hlir::{clear_global_dyn_dims, set_global_dyn_dims},
     },
     runtime::partition_marked_convex,
 };
@@ -196,7 +196,7 @@ impl std::fmt::Debug for CudaGraphOp {
 
 impl EgglogOp for CudaGraphOp {
     fn sort(&self) -> luminal::egglog_utils::api::SortDef {
-        luminal::egglog_utils::api::sort(IR, "CudaGraphOp", &[])
+        luminal::egglog_utils::api::sort(OP_KIND, "CudaGraphOp", &[])
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -206,7 +206,8 @@ impl EgglogOp for CudaGraphOp {
     fn extract<'a>(
         &'a self,
         _egraph: &'a luminal::egglog_utils::SerializedEGraph,
-        _children: &[&'a luminal::prelude::ENodeId],
+        _kind_children: &[&'a luminal::prelude::ENodeId],
+        _input_enodes: Vec<&'a luminal::prelude::ENodeId>,
         _list_cache: &mut FxHashMap<&'a luminal::prelude::ENodeId, Vec<Expression>>,
         _expr_cache: &mut FxHashMap<&'a luminal::prelude::ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a luminal::prelude::ENodeId>) {
@@ -341,6 +342,15 @@ impl CudaGraphOp {
             }
         }
 
+        // Apply output-aliases-input
+        for kernel in state.kernels.iter() {
+            if let Some(input_idx) = kernel.kernel_op.output_aliases_input() {
+                if let Some(&input_ptr) = current_buffer_ptrs.get(&kernel.inputs[input_idx]) {
+                    current_buffer_ptrs.insert(kernel.node, input_ptr);
+                }
+            }
+        }
+
         // Always call pre_execute for each kernel to reset internal state
         // (e.g., MegakernelOps need work queue, head, barriers, lock reset every execution)
         for idx in 0..state.kernels.len() {
@@ -426,42 +436,8 @@ impl CudaGraphOp {
             state.last_buffer_ptrs = current_buffer_ptrs;
         }
 
-        // Call pre_launch for each kernel (e.g., KernelScatter copies dest→output before graph)
-        {
-            let dyn_dims_ptr = state
-                .dyn_dims_buffer
-                .as_ref()
-                .map(|buf| buf.device_ptr(stream).0)
-                .unwrap_or(0);
-            for kernel in state.kernels.iter() {
-                let output_ptr = state
-                    .last_buffer_ptrs
-                    .get(&kernel.node)
-                    .copied()
-                    .unwrap_or(0);
-                let input_ptrs: Vec<u64> = kernel
-                    .inputs
-                    .iter()
-                    .map(|inp| state.last_buffer_ptrs.get(inp).copied().unwrap_or(0))
-                    .collect();
-                kernel.kernel_op.pre_launch(
-                    stream,
-                    output_ptr,
-                    &input_ptrs,
-                    dyn_dims_ptr,
-                    dyn_map,
-                )?;
-            }
-        }
-
-        // Sync before launch
-        stream.synchronize()?;
-
         // Launch the graph
         state.cuda_graph_exec.as_ref().unwrap().launch(stream)?;
-
-        // Sync after launch
-        stream.synchronize()?;
 
         Ok(())
     }

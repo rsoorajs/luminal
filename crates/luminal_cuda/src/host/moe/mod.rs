@@ -3,7 +3,7 @@ use std::sync::{Arc, OnceLock};
 use luminal::{
     egglog_utils::{
         api::{Rule, SortDef, sort},
-        base::{EXPRESSION, IR},
+        base::{EXPRESSION, OP_KIND},
         extract_expr,
     },
     op::{EgglogOp, LLIROp},
@@ -168,14 +168,9 @@ extern "C" __global__ void swiglu_bf16(unsigned long long gate_up_ptr, unsigned 
 impl EgglogOp for GLUMoE {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "GLUMoE",
             &[
-                ("x", IR),
-                ("topk_idx", IR),
-                ("topk_vals", IR),
-                ("gate_up_w", IR),
-                ("down_w", IR),
                 ("gu_io", EXPRESSION),
                 ("dn_io", EXPRESSION),
                 ("gu_matmul_k", EXPRESSION),
@@ -187,6 +182,10 @@ impl EgglogOp for GLUMoE {
         )
     }
 
+    fn n_inputs(&self) -> usize {
+        5
+    }
+
     fn early_rewrites(&self) -> Vec<Rule> {
         vec![Rule::raw(include_str!["glumoe_rewrite.egg"])]
     }
@@ -194,17 +193,18 @@ impl EgglogOp for GLUMoE {
     fn extract<'a>(
         &'a self,
         egraph: &'a luminal::egglog_utils::SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        let gu_io = extract_expr(egraph, children[5], expr_cache).unwrap();
-        let dn_io = extract_expr(egraph, children[6], expr_cache).unwrap();
-        let gu_matmul_k = extract_expr(egraph, children[7], expr_cache).unwrap();
-        let dn_matmul_k = extract_expr(egraph, children[8], expr_cache).unwrap();
-        let output_k = extract_expr(egraph, children[9], expr_cache).unwrap();
-        let gu_within_range = extract_expr(egraph, children[10], expr_cache).unwrap();
-        let dn_within_range = extract_expr(egraph, children[11], expr_cache).unwrap();
+        let gu_io = extract_expr(egraph, kind_children[0], expr_cache).unwrap();
+        let dn_io = extract_expr(egraph, kind_children[1], expr_cache).unwrap();
+        let gu_matmul_k = extract_expr(egraph, kind_children[2], expr_cache).unwrap();
+        let dn_matmul_k = extract_expr(egraph, kind_children[3], expr_cache).unwrap();
+        let output_k = extract_expr(egraph, kind_children[4], expr_cache).unwrap();
+        let gu_within_range = extract_expr(egraph, kind_children[5], expr_cache).unwrap();
+        let dn_within_range = extract_expr(egraph, kind_children[6], expr_cache).unwrap();
 
         let extracted = GLUMoE {
             gu_io,
@@ -220,16 +220,7 @@ impl EgglogOp for GLUMoE {
 
         let op = LLIROp::new::<dyn HostOp>(Box::new(extracted) as Box<dyn HostOp>);
         // Return the 5 IR inputs: x, topk_idx, topk_vals, gate_up_w, down_w
-        (
-            op,
-            vec![
-                children[0],
-                children[1],
-                children[2],
-                children[3],
-                children[4],
-            ],
-        )
+        (op, input_enodes)
     }
 
     fn cleanup(&self) -> bool {

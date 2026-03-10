@@ -6,7 +6,7 @@ use crate::{
     egglog_utils::SerializedEGraph,
     op::{EgglogOp, IntoEgglogOp, LLIROp},
 };
-use crate::{hlir::CustomOpHLIR, op::*, prelude::*};
+use crate::{hlir::CustomOpKind, op::*, prelude::*};
 use colored::Colorize;
 use itertools::Itertools;
 use petgraph::{Direction, algo::toposort, stable_graph::StableGraph, visit::EdgeRef};
@@ -150,7 +150,7 @@ impl Graph {
         self.custom_ops.push(Box::new(op));
         let input_ids = inputs.to_ids();
         let id = self.add_op(
-            CustomOpHLIR {
+            CustomOpKind {
                 id: self.custom_ops.len() - 1,
                 dtype,
             },
@@ -844,7 +844,7 @@ pub fn split_at_graph_breaks(graph: &Graph) -> Vec<SubgraphDescriptor> {
 ///
 /// Returns:
 /// - `node_remap`: maps rep HLIR node indices → target HLIR node indices (for Input/Output nodes)
-/// - `custom_op_id_remap`: maps rep CustomOpHLIR IDs → target CustomOpHLIR IDs
+/// - `custom_op_id_remap`: maps rep CustomOpKind IDs → target CustomOpKind IDs
 fn build_chunk_remaps(
     rep_desc: &SubgraphDescriptor,
     target_desc: &SubgraphDescriptor,
@@ -957,7 +957,7 @@ fn build_chunk_remaps(
         }
     }
 
-    // 5. CustomOpHLIR ID remapping: match positionally by sorted HLIR node index
+    // 5. CustomOpKind ID remapping: match positionally by sorted HLIR node index
     let mut custom_op_id_remap: FxHashMap<usize, usize> = FxHashMap::default();
     let rep_custom_ops: Vec<usize> = rep_desc
         .nodes
@@ -965,7 +965,7 @@ fn build_chunk_remaps(
         .filter_map(|n| {
             hlir_graph
                 .node_weight(*n)
-                .and_then(|w| w.as_any().downcast_ref::<crate::hlir::CustomOpHLIR>())
+                .and_then(|w| w.as_any().downcast_ref::<crate::hlir::CustomOpKind>())
                 .map(|op| op.id)
         })
         .sorted()
@@ -976,7 +976,7 @@ fn build_chunk_remaps(
         .filter_map(|n| {
             hlir_graph
                 .node_weight(*n)
-                .and_then(|w| w.as_any().downcast_ref::<crate::hlir::CustomOpHLIR>())
+                .and_then(|w| w.as_any().downcast_ref::<crate::hlir::CustomOpKind>())
                 .map(|op| op.id)
         })
         .sorted()
@@ -984,7 +984,7 @@ fn build_chunk_remaps(
     assert_eq!(
         rep_custom_ops.len(),
         target_custom_ops.len(),
-        "CustomOpHLIR count mismatch: rep has {}, target has {}",
+        "CustomOpKind count mismatch: rep has {}, target has {}",
         rep_custom_ops.len(),
         target_custom_ops.len()
     );
@@ -1252,31 +1252,31 @@ mod tests {
 
     #[test]
     fn test_hash_egglog_normalized_custom_op_id() {
-        // CustomOpHLIR lines differ only in the integer ID (layer index)
+        // CustomOpKind lines differ only in the integer ID (layer index)
         let text_a = r#"(let t0 (Input 441 "boundary" (F32)))
-(let t1 (CustomOpHLIR (ICons t74 (ICons t120 (ICons t28 (INil)))) 1 (F32)))
+(let t1 (Op (CustomOpKind 1 (F32)) (ICons t74 (ICons t120 (ICons t28 (INil))))))
 (let t2 (Output t1 585))
 "#;
         let text_b = r#"(let t0 (Input 585 "boundary" (F32)))
-(let t1 (CustomOpHLIR (ICons t74 (ICons t120 (ICons t28 (INil)))) 2 (F32)))
+(let t1 (Op (CustomOpKind 2 (F32)) (ICons t74 (ICons t120 (ICons t28 (INil))))))
 (let t2 (Output t1 729))
 "#;
         assert_eq!(
             hash_egglog_normalized(text_a),
             hash_egglog_normalized(text_b),
-            "CustomOpHLIR with different IDs should hash the same"
+            "CustomOpKind with different IDs should hash the same"
         );
     }
 
     #[test]
     fn test_hash_egglog_normalized_custom_op_different_structure() {
-        // CustomOpHLIR lines with different input lists should hash differently
-        let text_a = "(let t1 (CustomOpHLIR (ICons t74 (ICons t120 (INil))) 1 (F32)))\n";
-        let text_b = "(let t1 (CustomOpHLIR (ICons t74 (ICons t99 (INil))) 1 (F32)))\n";
+        // CustomOpKind lines with different input lists should hash differently
+        let text_a = "(let t1 (Op (CustomOpKind 1 (F32)) (ICons t74 (ICons t120 (INil)))))\n";
+        let text_b = "(let t1 (Op (CustomOpKind 1 (F32)) (ICons t74 (ICons t99 (INil)))))\n";
         assert_ne!(
             hash_egglog_normalized(text_a),
             hash_egglog_normalized(text_b),
-            "CustomOpHLIR with different input lists should hash differently"
+            "CustomOpKind with different input lists should hash differently"
         );
     }
 }

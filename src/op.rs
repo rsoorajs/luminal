@@ -147,11 +147,22 @@ pub trait EgglogOp: Debug {
         vec![]
     }
     fn cleanup(&self) -> bool;
+
+    /// Number of IR inputs this op takes (from IList).
+    /// Used by generic IList walking during extraction.
+    fn n_inputs(&self) -> usize {
+        0
+    }
+
+    /// Extract this op from the egraph.
+    /// - `kind_children`: metadata fields from OpKind enode (shapes, strides, dtypes, etc.)
+    /// - `input_enodes`: IR inputs from IList, already walked and resolved
     #[allow(unused_variables)]
     fn extract<'a>(
         &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {

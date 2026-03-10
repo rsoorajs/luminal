@@ -251,18 +251,11 @@ pub trait KernelOp: std::fmt::Debug + as_any::AsAny {
     ) {
     }
 
-    /// Called before each CUDA graph launch. Runs stream-level work outside the graph.
-    /// Used by ops like KernelScatter that need a copy kernel before the main graph kernel.
-    /// Default: no-op.
-    fn pre_launch(
-        &self,
-        _stream: &Arc<CudaStream>,
-        _output_ptr: u64,
-        _input_ptrs: &[u64],
-        _dyn_dims_ptr: u64,
-        _dyn_map: &FxHashMap<char, usize>,
-    ) -> anyhow::Result<()> {
-        Ok(())
+
+    /// If this kernel's output aliases one of its inputs (i.e., writes in-place),
+    /// return the input index. Used to propagate buffer pointers in CUDA graphs.
+    fn output_aliases_input(&self) -> Option<usize> {
+        None
     }
 
     /// Returns indices of internal buffers containing timing data, if any.
@@ -270,6 +263,7 @@ pub trait KernelOp: std::fmt::Debug + as_any::AsAny {
     fn timing_buffer_indices(&self) -> Option<(usize, usize, usize)> {
         None
     }
+
 }
 
 luminal::impl_into_ops!(KernelOp);

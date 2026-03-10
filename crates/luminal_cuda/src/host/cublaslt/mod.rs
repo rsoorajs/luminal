@@ -4,7 +4,7 @@ use luminal::{
     dtype::DType,
     egglog_utils::{
         api::{Rule, SortDef, sort},
-        base::{DTYPE, EXPRESSION, IR, STRING},
+        base::{DTYPE, EXPRESSION, OP_KIND, STRING},
         extract_dtype, extract_expr,
     },
     op::{EgglogOp, LLIROp},
@@ -70,11 +70,9 @@ impl Default for CuBlasLt {
 impl EgglogOp for CuBlasLt {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "cublaslt",
             &[
-                ("a", IR),
-                ("b", IR),
                 ("m", EXPRESSION),
                 ("n", EXPRESSION),
                 ("k", EXPRESSION),
@@ -86,6 +84,10 @@ impl EgglogOp for CuBlasLt {
                 ("dtype", DTYPE),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        2
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -101,28 +103,29 @@ impl EgglogOp for CuBlasLt {
     fn extract<'a>(
         &'a self,
         egraph: &'a luminal::egglog_utils::SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         // Extract dimensions from egglog
-        let m = extract_expr(egraph, children[2], expr_cache).unwrap();
-        let n = extract_expr(egraph, children[3], expr_cache).unwrap();
-        let k = extract_expr(egraph, children[4], expr_cache).unwrap();
+        let m = extract_expr(egraph, kind_children[0], expr_cache).unwrap();
+        let n = extract_expr(egraph, kind_children[1], expr_cache).unwrap();
+        let k = extract_expr(egraph, kind_children[2], expr_cache).unwrap();
 
         // Extract layout strings from egglog
-        let a_layout_str = &egraph.enodes[children[5]].0;
-        let b_layout_str = &egraph.enodes[children[6]].0;
+        let a_layout_str = &egraph.enodes[kind_children[3]].0;
+        let b_layout_str = &egraph.enodes[kind_children[4]].0;
         let a_layout = parse_cublas_op(a_layout_str);
         let b_layout = parse_cublas_op(b_layout_str);
 
         // Extract leading dimensions from egglog
-        let lda = extract_expr(egraph, children[7], expr_cache).unwrap();
-        let ldb = extract_expr(egraph, children[8], expr_cache).unwrap();
-        let ldc = extract_expr(egraph, children[9], expr_cache).unwrap();
+        let lda = extract_expr(egraph, kind_children[5], expr_cache).unwrap();
+        let ldb = extract_expr(egraph, kind_children[6], expr_cache).unwrap();
+        let ldc = extract_expr(egraph, kind_children[7], expr_cache).unwrap();
 
         // Extract dtype from egglog
-        let dtype = extract_dtype(egraph, children[10]);
+        let dtype = extract_dtype(egraph, kind_children[8]);
 
         let extracted_state = Self {
             m,
@@ -140,7 +143,7 @@ impl EgglogOp for CuBlasLt {
 
         let extracted = LLIROp::new::<dyn HostOp>(Box::new(extracted_state) as Box<dyn HostOp>);
 
-        (extracted, vec![children[0], children[1]])
+        (extracted, input_enodes)
     }
 
     fn cleanup(&self) -> bool {

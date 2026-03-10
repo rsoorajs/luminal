@@ -4,7 +4,7 @@ use cudarc::driver::CudaStream;
 use luminal::{
     egglog_utils::{
         api::{Rule, SortDef, sort},
-        base::{ELIST, EXPRESSION, IR},
+        base::{ELIST, EXPRESSION, OP_KIND},
         extract_expr, extract_expr_list,
     },
     op::*,
@@ -47,13 +47,11 @@ pub struct RowAdd {
 impl EgglogOp for RowAdd {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "RowAdd",
             &[
                 ("shape", ELIST),
-                ("a", IR),
                 ("a_strides", ELIST),
-                ("b", IR),
                 ("b_strides", ELIST),
                 ("out_strides", ELIST),
                 ("row_width", EXPRESSION),
@@ -61,11 +59,15 @@ impl EgglogOp for RowAdd {
         )
     }
 
+    fn n_inputs(&self) -> usize {
+        2
+    }
+
     fn rewrites(&self) -> Vec<Rule> {
         vec![Rule::raw("(rule
             (
                 ; get add
-                (= ?sa (Add ?shape ?a ?a_stride ?b ?b_stride ?out_stride))
+                (= ?sa (Op (Add ?shape ?a_stride ?b_stride ?out_stride) (ICons ?a (ICons ?b (INil)))))
                 (= ?row_width (nth_from_end ?shape 0))
                 (= (MNum ?row_width_num) ?row_width)
                 (<= ?row_width_num 4096) ; currently load full row to sram, should instead load chunks in up to capacity and stream rest in
@@ -82,7 +84,7 @@ impl EgglogOp for RowAdd {
                 (let ?new_a_stride (RemoveNthFromEnd ?a_stride 0))
                 (let ?new_b_stride (RemoveNthFromEnd ?b_stride 0))
                 (let ?new_out_stride (RemoveNthFromEnd ?out_stride 0))
-                (let ?ra (RowAdd ?new_shape ?a ?new_a_stride ?b ?new_b_stride ?new_out_stride ?row_width))
+                (let ?ra (Op (RowAdd ?new_shape ?new_a_stride ?new_b_stride ?new_out_stride ?row_width) (ICons ?a (ICons ?b (INil)))))
                 (union ?sa ?ra)
                 (set (dtype ?ra) (F32))
             )
@@ -95,21 +97,22 @@ impl EgglogOp for RowAdd {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
-                range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                b_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
-                row_width: extract_expr(egraph, children[6], expr_cache).unwrap(),
+                range: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache).unwrap(),
+                row_width: extract_expr(egraph, kind_children[4], expr_cache).unwrap(),
             })),
-            vec![children[1], children[3]],
+            input_enodes,
         )
     }
 }
@@ -191,13 +194,11 @@ pub struct RowSwishMul {
 impl EgglogOp for RowSwishMul {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "RowSwishMul",
             &[
                 ("shape", ELIST),
-                ("a", IR),
                 ("a_strides", ELIST),
-                ("b", IR),
                 ("b_strides", ELIST),
                 ("row_width", EXPRESSION),
                 ("sm_count", EXPRESSION),
@@ -205,45 +206,42 @@ impl EgglogOp for RowSwishMul {
         )
     }
 
+    fn n_inputs(&self) -> usize {
+        2
+    }
+
     fn rewrites(&self) -> Vec<Rule> {
         vec![Rule::raw(
             "(rule
             (
-                (= ?sigmoid (Sigmoid
+                (= ?sigmoid (Op (Sigmoid
                     (ECons ?batch (ECons ?width (ENil)))
-                    ?self
                     (ECons ?width (ECons (MNum 1) (ENil)))
                     (ECons ?width (ECons (MNum 1) (ENil)))
-                ))
-                (= ?swish (Mul
+                ) (ICons ?self (INil))))
+                (= ?swish (Op (Mul
                     (ECons ?batch (ECons ?width (ENil)))
-                    ?self
-                    (ECons ?width (ECons (MNum 1) (ENil)))
-                    ?sigmoid
                     (ECons ?width (ECons (MNum 1) (ENil)))
                     (ECons ?width (ECons (MNum 1) (ENil)))
-                ))
-                (= ?swishmul (Mul
+                    (ECons ?width (ECons (MNum 1) (ENil)))
+                ) (ICons ?self (ICons ?sigmoid (INil)))))
+                (= ?swishmul (Op (Mul
                     (ECons ?batch (ECons ?width (ENil)))
-                    ?swish
-                    (ECons ?width (ECons (MNum 1) (ENil)))
-                    ?other
                     (ECons ?width (ECons (MNum 1) (ENil)))
                     (ECons ?width (ECons (MNum 1) (ENil)))
-                ))
+                    (ECons ?width (ECons (MNum 1) (ENil)))
+                ) (ICons ?swish (ICons ?other (INil)))))
                 ;(= (F32) (dtype ?self))
                 ;(= (F32) (dtype ?other))
             )
             (
-                (let ?rsm (RowSwishMul
+                (let ?rsm (Op (RowSwishMul
                     (ECons ?batch (ENil))
-                    ?self
                     (ECons ?width (ENil))
-                    ?other
                     (ECons ?width (ENil))
                     ?width
                     (MNum 4)
-                ))
+                ) (ICons ?self (ICons ?other (INil)))))
                 (union ?swishmul ?rsm)
                 (set (dtype ?rsm) (F32))
             )
@@ -257,21 +255,22 @@ impl EgglogOp for RowSwishMul {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
-                range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                b_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                row_width: extract_expr(egraph, children[5], expr_cache).unwrap(),
-                sm_count: extract_expr(egraph, children[6], expr_cache).unwrap(),
+                range: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                row_width: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
+                sm_count: extract_expr(egraph, kind_children[4], expr_cache).unwrap(),
             })),
-            vec![children[1], children[3]],
+            input_enodes,
         )
     }
 }
@@ -375,102 +374,95 @@ pub struct RowRMSNorm {
 impl EgglogOp for RowRMSNorm {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "RowRMSNorm",
             &[
                 ("shape", ELIST),
-                ("inp", IR),
                 ("strides", ELIST),
                 ("row_width", EXPRESSION),
-                ("weight", IR),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        2
     }
 
     fn rewrites(&self) -> Vec<Rule> {
         vec![Rule::raw(
             "(rule
             (
-                (= ?square (Mul ?inp_range ?x ?inp_stride ?x ?inp_stride ?square_stride))
+                (= ?square (Op (Mul ?inp_range ?inp_stride ?inp_stride ?square_stride) (ICons ?x (ICons ?x (INil)))))
                 (= ?width (nth_from_end ?inp_range 0))
                 (= ?batch (nth_from_end ?inp_range 1))
                 (= ?square_summed
-                    (Sum
+                    (Op (Sum
                         (ECons ?batch (ENil))
                         ?width
-                        ?square
                         (ECons ?width (ENil))
                         (MNum 1)
                         (ECons (MNum 1) (ENil))
-                    )
+                    ) (ICons ?square (INil)))
                 )
                 (= ?inv_div_factor
-                    (Recip (ECons ?batch (ENil)) (Cast (Iota ?width (MNum 1)) (MNum 1) (F32))
-                                    (ECons (MNum 0) (ENil))  ; broadcast the constant
-                                    (ECons (MNum 1) (ENil)))) ; produce per-batch vector
+                    (Op (Recip (ECons ?batch (ENil))
+                                    (ECons (MNum 0) (ENil))
+                                    (ECons (MNum 1) (ENil)))
+                        (ICons (Op (Cast (MNum 1) (F32)) (ICons (Op (Iota ?width (MNum 1)) (INil)) (INil))) (INil))))
 
                 (= ?mean
-                    (Mul (ECons ?batch (ENil))
-                                ?square_summed (ECons (MNum 1) (ENil))
-                                ?inv_div_factor (ECons (MNum 1) (ENil))
-                                (ECons (MNum 1) (ENil))))
+                    (Op (Mul (ECons ?batch (ENil))
+                                (ECons (MNum 1) (ENil))
+                                (ECons (MNum 1) (ENil))
+                                (ECons (MNum 1) (ENil)))
+                        (ICons ?square_summed (ICons ?inv_div_factor (INil)))))
                 (= ?eps_add
-                    (Add
+                    (Op (Add
                         (ECons ?batch (ENil))
-                        ?mean
                         (ECons (MNum 1) (ENil))
-                        (Constant ?eps)
                         (ECons (MNum 0) (ENil))
                         (ECons (MNum 1) (ENil))
-                    )
+                    ) (ICons ?mean (ICons (Op (Constant ?eps) (INil)) (INil))))
                 )
                 (= ?sqrt
-                    (Sqrt
+                    (Op (Sqrt
                         (ECons ?batch (ENil))
-                        ?eps_add
                         (ECons (MNum 1) (ENil))
                         (ECons (MNum 1) (ENil))
-                    )
+                    ) (ICons ?eps_add (INil)))
                 )
                 (= ?recip
-                    (Recip
+                    (Op (Recip
                         (ECons ?batch (ENil))
-                        ?sqrt
                         (ECons (MNum 1) (ENil))
                         (ECons (MNum 1) (ENil))
-                    )
+                    ) (ICons ?sqrt (INil)))
                 )
                 (= ?std_normed
-                    (Mul
+                    (Op (Mul
                         ?inp_range
-                        ?recip
                         (ECons (MNum 1) (ECons (MNum 0) (ENil)))
-                        ?x
                         ?inp_stride
                         ?inp_stride
-                    )
+                    ) (ICons ?recip (ICons ?x (INil))))
                 )
                 (= ?final
-                    (Mul
+                    (Op (Mul
                         ?inp_range
-                        ?std_normed
                         ?inp_stride
-                        ?weight
                         (ECons (MNum 0) (ECons (MNum 1) (ENil)))
                         ?inp_stride
-                    )
+                    ) (ICons ?std_normed (ICons ?weight (INil))))
                 )
                ;(= (F32) (dtype ?x))
             )
             (
                 (let ?new
-                    (RowRMSNorm
+                    (Op (RowRMSNorm
                         (ECons ?batch (ENil))
-                        ?x
                         (ECons ?width (ENil))
                         ?width
-                        ?weight
-                    )
+                    ) (ICons ?x (ICons ?weight (INil))))
                 )
                 (union ?final ?new)
                 (set (dtype ?new) (F32))
@@ -485,19 +477,20 @@ impl EgglogOp for RowRMSNorm {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
-                range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                row_width: extract_expr(egraph, children[3], expr_cache).unwrap(),
+                range: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                row_width: extract_expr(egraph, kind_children[2], expr_cache).unwrap(),
             })),
-            vec![children[1], children[4]],
+            input_enodes,
         )
     }
 }
@@ -607,16 +600,18 @@ pub struct RowRope {
 impl EgglogOp for RowRope {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "RowRope",
             &[
                 ("shape", ELIST),
-                ("inp", IR),
                 ("strides", ELIST),
                 ("row_width", EXPRESSION),
-                ("pos_ids", IR),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        2
     }
 
     fn cleanup(&self) -> bool {
@@ -624,19 +619,20 @@ impl EgglogOp for RowRope {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
-                range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                row_width: extract_expr(egraph, children[3], expr_cache).unwrap(),
+                range: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                row_width: extract_expr(egraph, kind_children[2], expr_cache).unwrap(),
             })),
-            vec![children[1], children[4]],
+            input_enodes,
         )
     }
 
@@ -644,7 +640,7 @@ impl EgglogOp for RowRope {
         vec![Rule::raw(
             "(rule
            (
-                (= ?e (RowRope ?shape ?inp ?stride ?row_width ?pos_ids))
+                (= ?e (Op (RowRope ?shape ?stride ?row_width) (ICons ?inp (ICons ?pos_ids (INil)))))
                 (= (F32) (dtype ?inp))
             )
            ((set (dtype ?e) (F32)))
@@ -664,48 +660,52 @@ impl EgglogOp for RowRope {
                 ;; -----------------------------
                 ;; inv_freq construction (exact literals as in dump)
                 ;; -----------------------------
-                (= ?freq_indices        (Cast (Iota (MMul (MIter) (MNum 2)) (MNum 64)) (MNum 64) (F32)))
-                (= ?c_inv_head_dim      (Constant 0.007812))
-                (= ?freq_scaled         (Mul (ECons (MNum 64) (ENil)) ?freq_indices
-                                             (ECons (MNum 1) (ENil)) ?c_inv_head_dim
-                                             (ECons (MNum 0) (ENil)) (ECons (MNum 1) (ENil))))
-                (= ?c_ln_theta          (Constant 13.122363))
-                (= ?log_arg             (Mul (ECons (MNum 64) (ENil)) ?freq_scaled
-                                             (ECons (MNum 1) (ENil)) ?c_ln_theta
-                                             (ECons (MNum 0) (ENil)) (ECons (MNum 1) (ENil))))
-                (= ?c_log2e             (Constant 1.442695))
-                (= ?exp2_arg            (Mul (ECons (MNum 64) (ENil)) ?log_arg
-                                             (ECons (MNum 1) (ENil)) ?c_log2e
-                                             (ECons (MNum 0) (ENil)) (ECons (MNum 1) (ENil))))
-                (= ?pow_theta           (Exp2 (ECons (MNum 64) (ENil)) ?exp2_arg
-                                              (ECons (MNum 1) (ENil)) (ECons (MNum 1) (ENil))))
-                (= ?inv_freq            (Recip (ECons (MNum 64) (ENil)) ?pow_theta
-                                               (ECons (MNum 1) (ENil)) (ECons (MNum 1) (ENil))))
+                (= ?freq_indices        (Op (Cast (MNum 64) (F32)) (ICons (Op (Iota (MMul (MIter) (MNum 2)) (MNum 64)) (INil)) (INil))))
+                (= ?c_inv_head_dim      (Op (Constant 0.007812) (INil)))
+                (= ?freq_scaled         (Op (Mul (ECons (MNum 64) (ENil))
+                                             (ECons (MNum 1) (ENil))
+                                             (ECons (MNum 0) (ENil)) (ECons (MNum 1) (ENil)))
+                                            (ICons ?freq_indices (ICons ?c_inv_head_dim (INil)))))
+                (= ?c_ln_theta          (Op (Constant 13.122363) (INil)))
+                (= ?log_arg             (Op (Mul (ECons (MNum 64) (ENil))
+                                             (ECons (MNum 1) (ENil))
+                                             (ECons (MNum 0) (ENil)) (ECons (MNum 1) (ENil)))
+                                            (ICons ?freq_scaled (ICons ?c_ln_theta (INil)))))
+                (= ?c_log2e             (Op (Constant 1.442695) (INil)))
+                (= ?exp2_arg            (Op (Mul (ECons (MNum 64) (ENil))
+                                             (ECons (MNum 1) (ENil))
+                                             (ECons (MNum 0) (ENil)) (ECons (MNum 1) (ENil)))
+                                            (ICons ?log_arg (ICons ?c_log2e (INil)))))
+                (= ?pow_theta           (Op (Exp2 (ECons (MNum 64) (ENil))
+                                              (ECons (MNum 1) (ENil)) (ECons (MNum 1) (ENil)))
+                                            (ICons ?exp2_arg (INil))))
+                (= ?inv_freq            (Op (Recip (ECons (MNum 64) (ENil))
+                                               (ECons (MNum 1) (ENil)) (ECons (MNum 1) (ENil)))
+                                            (ICons ?pow_theta (INil))))
 
                 ;; -----------------------------
                 ;; emb = pos_ids @ inv_freq
                 ;; -----------------------------
-                (= ?pos_f32             (Cast ?pos_ids ?cast_sh (F32)))
+                (= ?pos_f32             (Op (Cast ?cast_sh (F32)) (ICons ?pos_ids (INil))))
                 (= ?pos_times_invfreq_bcast
-                   (Mul (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil))))
-                        ?pos_f32
+                   (Op (Mul (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil))))
                         (ECons (MNum 1) (ECons (MNum 0) (ECons (MNum 0) (ENil))))
-                        ?inv_freq
                         (ECons (MNum 0) (ECons (MNum 1) (ECons (MNum 0) (ENil))))
-                        (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil))))))
+                        (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
+                       (ICons ?pos_f32 (ICons ?inv_freq (INil)))))
                 (= ?emb
-                   (Sum (ECons (MVar "s") (ECons (MNum 64) (ENil)))
+                   (Op (Sum (ECons (MVar "s") (ECons (MNum 64) (ENil)))
                         (MNum 1)
-                        ?pos_times_invfreq_bcast
                         (ECons (MNum 64) (ECons (MNum 1) (ENil)))
                         (MNum 1)
-                        (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                        (ECons (MNum 64) (ECons (MNum 1) (ENil))))
+                       (ICons ?pos_times_invfreq_bcast (INil))))
 
                 ;; -----------------------------
                 ;; Gather odd lane (x1) from inp (structure preserved; 32 -> ?n_heads, 4096 -> ?hidden_dim)
                 ;; -----------------------------
                 (= ?odd_lane_index
-                   (Iota
+                   (Op (Iota
                      (MAdd
                        (MAdd
                          (MAdd
@@ -714,100 +714,97 @@ impl EgglogOp for RowRope {
                          (MMul (MMod (MDiv (MIter) (MNum 64)) (MVar "s")) (MNum 128)))
                        (MMul (MDiv (MIter) (MMul (MNum 64) (MVar "s")))
                              (MMul (MNum 128) (MVar "s"))))
-                     (MMul (MMul ?n_heads (MVar "s")) (MNum 64))))
+                     (MMul (MMul ?n_heads (MVar "s")) (MNum 64)))
+                    (INil)))
                 (= ?odd_lane
-                   (Gather
-                     ?odd_lane_index
+                   (Op (Gather
                      (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
                      (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
-                     ?inp
                      (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
-                     ?inp_strides))
+                     ?inp_strides)
+                    (ICons ?odd_lane_index (ICons ?inp (INil)))))
                 ;(= (F32) (dtype ?inp))
 
                 ;; -----------------------------
                 ;; cos(emb) = sin(-emb + pi/2), sin(emb)
                 ;; -----------------------------
-                (= ?c_neg1    (Constant -1.000000))
-                (= ?neg_emb   (Mul (ECons (MVar "s") (ECons (MNum 64) (ENil))) ?emb
-                                   (ECons (MNum 64) (ECons (MNum 1) (ENil))) ?c_neg1
-                                   (ECons (MNum 0) (ECons (MNum 0) (ENil)))
-                                   (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
-                (= ?c_pihalf  (Constant 1.570796))
-                (= ?cos_phase (Add (ECons (MVar "s") (ECons (MNum 64) (ENil))) ?neg_emb
-                                   (ECons (MNum 64) (ECons (MNum 1) (ENil))) ?c_pihalf
-                                   (ECons (MNum 0) (ECons (MNum 0) (ENil)))
-                                   (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
-                (= ?cos_emb   (Sin (ECons (MVar "s") (ECons (MNum 64) (ENil))) ?cos_phase
+                (= ?c_neg1    (Op (Constant -1.000000) (INil)))
+                (= ?neg_emb   (Op (Mul (ECons (MVar "s") (ECons (MNum 64) (ENil)))
                                    (ECons (MNum 64) (ECons (MNum 1) (ENil)))
-                                   (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
-                (= ?sin_emb   (Sin (ECons (MVar "s") (ECons (MNum 64) (ENil))) ?emb
+                                   (ECons (MNum 0) (ECons (MNum 0) (ENil)))
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil))))
+                                  (ICons ?emb (ICons ?c_neg1 (INil)))))
+                (= ?c_pihalf  (Op (Constant 1.570796) (INil)))
+                (= ?cos_phase (Op (Add (ECons (MVar "s") (ECons (MNum 64) (ENil)))
                                    (ECons (MNum 64) (ECons (MNum 1) (ENil)))
-                                   (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
+                                   (ECons (MNum 0) (ECons (MNum 0) (ENil)))
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil))))
+                                  (ICons ?neg_emb (ICons ?c_pihalf (INil)))))
+                (= ?cos_emb   (Op (Sin (ECons (MVar "s") (ECons (MNum 64) (ENil)))
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil)))
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil))))
+                                  (ICons ?cos_phase (INil))))
+                (= ?sin_emb   (Op (Sin (ECons (MVar "s") (ECons (MNum 64) (ENil)))
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil)))
+                                   (ECons (MNum 64) (ECons (MNum 1) (ENil))))
+                                  (ICons ?emb (INil))))
 
                 ;; -----------------------------
                 ;; even_lane_rot = x0*cos - x1*sin
                 ;; -----------------------------
                 (= ?x0_cos
-                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
-                        ?inp
+                   (Op (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
                         ?inp_strides
-                        ?cos_emb
                         (ECons (MNum 0) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 0) (ENil)))))
-                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil))))))
+                       (ICons ?inp (ICons ?cos_emb (INil)))))
                 (= ?x1_sin
-                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
-                        ?odd_lane
+                   (Op (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
                         (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
-                        ?sin_emb
                         (ECons (MNum 0) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 0) (ENil)))))
-                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
-                (= ?c_neg1b (Constant -1.000000))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil))))))
+                       (ICons ?odd_lane (ICons ?sin_emb (INil)))))
+                (= ?c_neg1b (Op (Constant -1.000000) (INil)))
                 (= ?neg_x1_sin
-                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
-                        ?x1_sin
+                   (Op (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
                         (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
-                        ?c_neg1b
                         (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ENil)))))
-                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil))))))
+                       (ICons ?x1_sin (ICons ?c_neg1b (INil)))))
                 (= ?even_lane_rot
-                   (Add (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
-                        ?x0_cos
+                   (Op (Add (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
                         (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
-                        ?neg_x1_sin
                         (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
-                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil))))))
+                       (ICons ?x0_cos (ICons ?neg_x1_sin (INil)))))
 
                 ;; -----------------------------
                 ;; odd_lane_rot = x0*sin + x1*cos
                 ;; -----------------------------
                 (= ?x0_sin
-                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
-                        ?inp
+                   (Op (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
                         ?inp_strides
-                        ?sin_emb
                         (ECons (MNum 0) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 0) (ENil)))))
-                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil))))))
+                       (ICons ?inp (ICons ?sin_emb (INil)))))
                 (= ?x1_cos
-                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
-                        ?odd_lane
+                   (Op (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
                         (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
-                        ?cos_emb
                         (ECons (MNum 0) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 0) (ENil)))))
-                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil))))))
+                       (ICons ?odd_lane (ICons ?cos_emb (INil)))))
                 (= ?odd_lane_rot
-                   (Add (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
-                        ?x0_sin
+                   (Op (Add (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
                         (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
-                        ?x1_cos
                         (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))
-                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                        (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil))))))
+                       (ICons ?x0_sin (ICons ?x1_cos (INil)))))
 
                 ;; -----------------------------
                 ;; Scatter + masks (keep the same MMul nesting as original)
                 ;; -----------------------------
                 (= ?scatter_even_index
-                   (Iota
+                   (Op (Iota
                      (MAdd
                        (MAdd
                          (MAdd
@@ -815,28 +812,28 @@ impl EgglogOp for RowRope {
                            (MMod (MDiv (MIter) (MNum 2)) (MNum 64)))
                          (MMul (MMod (MDiv (MIter) (MNum 128)) (MVar "s")) (MNum 64)))
                        (MMul (MDiv (MIter) (MMul (MNum 128) (MVar "s"))) (MMul (MNum 64) (MVar "s"))))
-                     (MMul (MMul (MMul ?n_heads (MVar "s")) (MNum 64)) (MNum 2))))
+                     (MMul (MMul (MMul ?n_heads (MVar "s")) (MNum 64)) (MNum 2)))
+                    (INil)))
                 (= ?scattered_even
-                   (Gather
-                     ?scatter_even_index
+                   (Op (Gather
                      (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
                      (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
-                     ?even_lane_rot
                      (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
-                     (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                     (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil))))))
+                    (ICons ?scatter_even_index (ICons ?even_lane_rot (INil)))))
                 (= ?even_mask
-                   (Iota (MLt (MMod (MIter) (MNum 2)) (MNum 1))
-                         (MMul (MMul (MMul ?n_heads (MVar "s")) (MNum 64)) (MNum 2))))
+                   (Op (Iota (MLt (MMod (MIter) (MNum 2)) (MNum 1))
+                         (MMul (MMul (MMul ?n_heads (MVar "s")) (MNum 64)) (MNum 2)))
+                    (INil)))
                 (= ?even_masked
-                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
-                        ?scattered_even
+                   (Op (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
                         (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
-                        ?even_mask
                         (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
-                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))))
+                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil))))))
+                       (ICons ?scattered_even (ICons ?even_mask (INil)))))
 
                 (= ?scatter_odd_index
-                   (Iota
+                   (Op (Iota
                      (MAdd
                        (MAdd
                          (MAdd
@@ -844,60 +841,55 @@ impl EgglogOp for RowRope {
                            (MMod (MDiv (MIter) (MNum 2)) (MNum 64)))
                          (MMul (MMod (MDiv (MIter) (MNum 128)) (MVar "s")) (MNum 64)))
                        (MMul (MDiv (MIter) (MMul (MNum 128) (MVar "s"))) (MMul (MNum 64) (MVar "s"))))
-                     (MMul (MMul (MMul ?n_heads (MVar "s")) (MNum 64)) (MNum 2))))
+                     (MMul (MMul (MMul ?n_heads (MVar "s")) (MNum 64)) (MNum 2)))
+                    (INil)))
                 (= ?scattered_odd
-                   (Gather
-                     ?scatter_odd_index
+                   (Op (Gather
                      (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
                      (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
-                     ?odd_lane_rot
                      (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 1) (ENil)))))
-                     (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil)))))))
+                     (ECons (MMul (MNum 64) (MVar "s")) (ECons (MNum 64) (ECons (MNum 1) (ECons (MNum 1) (ENil))))))
+                    (ICons ?scatter_odd_index (ICons ?odd_lane_rot (INil)))))
                 (= ?odd_mask
-                   (Iota (MGte (MMod (MIter) (MNum 2)) (MNum 1))
-                         (MMul (MMul (MMul ?n_heads (MVar "s")) (MNum 64)) (MNum 2))))
+                   (Op (Iota (MGte (MMod (MIter) (MNum 2)) (MNum 1))
+                         (MMul (MMul (MMul ?n_heads (MVar "s")) (MNum 64)) (MNum 2)))
+                    (INil)))
                 (= ?odd_masked
-                   (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
-                        ?scattered_odd
+                   (Op (Mul (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
                         (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
-                        ?odd_mask
                         (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
-                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))))
+                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil))))))
+                       (ICons ?scattered_odd (ICons ?odd_mask (INil)))))
 
                 (= ?interleaved_rot
-                   (Add (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
-                        ?even_masked
+                   (Op (Add (ECons ?n_heads (ECons (MVar "s") (ECons (MNum 64) (ECons (MNum 2) (ENil)))))
                         (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
-                        ?odd_masked
                         (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))
-                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil)))))))
+                        (ECons (MMul (MNum 128) (MVar "s")) (ECons (MNum 128) (ECons (MNum 2) (ECons (MNum 1) (ENil))))))
+                       (ICons ?even_masked (ICons ?odd_masked (INil)))))
 
                 ;; Final identity mul "* 1.0" with output shape/strides
-                (= ?c_one (Constant 1.000000))
+                (= ?c_one (Op (Constant 1.000000) (INil)))
                 (= ?rope_out
-                   (Mul (ECons (MVar "s") (ECons ?n_heads (ECons (MNum 128) (ENil))))
-                        ?interleaved_rot
+                   (Op (Mul (ECons (MVar "s") (ECons ?n_heads (ECons (MNum 128) (ENil))))
                         (ECons (MNum 128) (ECons (MMul (MVar "s") (MNum 128)) (ECons (MNum 1) (ENil))))
-                        ?c_one
                         (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ENil))))
                         (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil)))))
-              )
+                       (ICons ?interleaved_rot (ICons ?c_one (INil)))))
               )
               (
                 (union ?rope_out
-                  (RowRope
+                  (Op (RowRope
                     (ECons (MVar "s") (ENil))
-                    ?inp
                     (ECons ?hidden_dim (ENil))
                     ?hidden_dim
-                    ?pos_ids))
+                  ) (ICons ?inp (ICons ?pos_ids (INil)))))
                 ; we want to subsume all terms up to ?inp and ?pos_ids. don't know how to do this.
-                (delete (Mul (ECons (MVar "s") (ECons ?n_heads (ECons (MNum 128) (ENil))))
-                     ?interleaved_rot
+                (delete (Op (Mul (ECons (MVar "s") (ECons ?n_heads (ECons (MNum 128) (ENil))))
                      (ECons (MNum 128) (ECons (MMul (MVar "s") (MNum 128)) (ECons (MNum 1) (ENil))))
-                     ?c_one
                      (ECons (MNum 0) (ECons (MNum 0) (ECons (MNum 0) (ENil))))
-                     (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil))))))
+                     (ECons ?hidden_dim (ECons (MNum 128) (ECons (MNum 1) (ENil)))))
+                    (ICons ?interleaved_rot (ICons ?c_one (INil)))))
               )
               :name "row rope"
             )
@@ -1014,17 +1006,15 @@ pub struct TileMatmulSplitK {
 impl EgglogOp for TileMatmulSplitK {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "TileMatmulSplitK",
             &[
                 ("tiled_shape", ELIST),
                 ("out_shape", ELIST),
                 ("k", EXPRESSION),
-                ("a", IR),
                 ("a_stride", ELIST),
                 ("a_m_stride", EXPRESSION),
                 ("a_k_stride", EXPRESSION),
-                ("b", IR),
                 ("b_stride", ELIST),
                 ("b_k_stride", EXPRESSION),
                 ("b_n_stride", EXPRESSION),
@@ -1036,6 +1026,10 @@ impl EgglogOp for TileMatmulSplitK {
         )
     }
 
+    fn n_inputs(&self) -> usize {
+        2
+    }
+
     fn rewrites(&self) -> Vec<Rule> {
         vec![
             // Direct Mul -> Sum -> TileMatmulSplitK (A row-major, B col-major, C row-major)
@@ -1044,10 +1038,10 @@ impl EgglogOp for TileMatmulSplitK {
         (rule
             (
                 ; Match Mul node
-                (= ?mul (Mul ?mul_shape ?a ?a_stride ?b ?b_stride ?mul_out_stride))
+                (= ?mul (Op (Mul ?mul_shape ?a_stride ?b_stride ?mul_out_stride) (ICons ?a (ICons ?b (INil)))))
 
                 ; Match Sum that reduces the Mul (k dimension)
-                (= ?sum (Sum ?out_shape ?k ?mul ?sum_in_stride ?k_stride ?sum_out_stride))
+                (= ?sum (Op (Sum ?out_shape ?k ?sum_in_stride ?k_stride ?sum_out_stride) (ICons ?mul (INil))))
 
                 ; Get dimensions from output shape
                 (= ?m (nth_from_end ?out_shape 1))
@@ -1077,7 +1071,7 @@ impl EgglogOp for TileMatmulSplitK {
 
                 ; Assert B has contiguous k (col-major B / transposed)
                 (= ?b_k_stride (MIter))
-              
+
                 ; Only match F32 inputs (BlockOp matmul is F32-only)
                 (= (F32) (dtype ?a))
                 (= (F32) (dtype ?b))
@@ -1118,16 +1112,17 @@ impl EgglogOp for TileMatmulSplitK {
                             (ReplaceNthFromEnd ?sum_out_stride (MMul ?sum_out_n_stride (MNum {ts})) 0)
                         (MMul ?sum_out_m_stride (MNum {ts})) 1)))
 
-                (let ?tm (TileMatmulSplitK
+                (let ?tm (Op (TileMatmulSplitK
                     ?tiled_shape ?out_shape ?k
-                    ?a ?tiled_a_stride ?a_m_stride (MNum 1)
-                    ?b ?tiled_b_stride (MNum 1) ?b_n_stride
-                    ?tiled_out_stride ?sum_out_m_stride (MNum 1) (MNum {kc})))
+                    ?tiled_a_stride ?a_m_stride (MNum 1)
+                    ?tiled_b_stride (MNum 1) ?b_n_stride
+                    ?tiled_out_stride ?sum_out_m_stride (MNum 1) (MNum {kc}))
+                    (ICons ?a (ICons ?b (INil)))))
                 (union ?sum ?tm)
                 (set (dtype ?tm) (F32))
                 ; Subsume TileSum and CubeMul so they aren't chosen over TileMatmul
-                (subsume (TileSum ?sum_shape ?untiled_sum_shape ?iters ?cm ?sum_in_stride ?sum_in_m_stride ?sum_in_n_stride ?sum_in_k_stride ?sum_out_stride ?sum_out_m_stride ?sum_out_n_stride))
-                (subsume (CubeMul ?mul_shape ?untiled_mul_shape ?a ?a_stride ?a_m_stride ?a_n_stride ?a_k_stride ?b ?b_stride ?b_m_stride ?b_n_stride ?b_k_stride ?out_stride ?out_m_stride ?out_n_stride ?out_k_stride))
+                (subsume (Op (TileSum ?sum_shape ?untiled_sum_shape ?iters ?sum_in_stride ?sum_in_m_stride ?sum_in_n_stride ?sum_in_k_stride ?sum_out_stride ?sum_out_m_stride ?sum_out_n_stride) (ICons ?cm (INil))))
+                (subsume (Op (CubeMul ?mul_shape ?untiled_mul_shape ?a_stride ?a_m_stride ?a_n_stride ?a_k_stride ?b_stride ?b_m_stride ?b_n_stride ?b_k_stride ?out_stride ?out_m_stride ?out_n_stride ?out_k_stride) (ICons ?a (ICons ?b (INil)))))
             )
             :name \"tile matmul split k\"
         )",
@@ -1142,28 +1137,29 @@ impl EgglogOp for TileMatmulSplitK {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
-                range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                untiled_range: extract_expr_list(egraph, children[1], list_cache, expr_cache)
+                range: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                untiled_range: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
                     .unwrap(),
-                total_k: extract_expr(egraph, children[2], expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                a_m_stride: extract_expr(egraph, children[5], expr_cache).unwrap(),
-                b_stride: extract_expr_list(egraph, children[8], list_cache, expr_cache).unwrap(),
-                b_n_stride: extract_expr(egraph, children[10], expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, children[11], list_cache, expr_cache)
+                total_k: extract_expr(egraph, kind_children[2], expr_cache).unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache).unwrap(),
+                a_m_stride: extract_expr(egraph, kind_children[4], expr_cache).unwrap(),
+                b_stride: extract_expr_list(egraph, kind_children[6], list_cache, expr_cache).unwrap(),
+                b_n_stride: extract_expr(egraph, kind_children[8], expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[9], list_cache, expr_cache)
                     .unwrap(),
-                out_m_stride: extract_expr(egraph, children[12], expr_cache).unwrap(),
-                k_chunk: extract_expr(egraph, children[14], expr_cache).unwrap(),
+                out_m_stride: extract_expr(egraph, kind_children[10], expr_cache).unwrap(),
+                k_chunk: extract_expr(egraph, kind_children[12], expr_cache).unwrap(),
             })),
-            vec![children[3], children[7]],
+            input_enodes,
         )
     }
 }
@@ -1409,7 +1405,7 @@ pub struct TileMatmulFullSplit {
 impl EgglogOp for TileMatmulFullSplit {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "TileMatmulFullSplit",
             &[
                 ("sm_count", EXPRESSION),
@@ -1417,11 +1413,9 @@ impl EgglogOp for TileMatmulFullSplit {
                 ("m_tiles", EXPRESSION),
                 ("n_tiles", EXPRESSION),
                 ("total_k", EXPRESSION),
-                ("a", IR),
                 ("a_stride", ELIST),
                 ("a_m_stride", EXPRESSION),
                 ("a_k_stride", EXPRESSION),
-                ("b", IR),
                 ("b_stride", ELIST),
                 ("b_n_stride", EXPRESSION),
                 ("b_k_stride", EXPRESSION),
@@ -1430,6 +1424,10 @@ impl EgglogOp for TileMatmulFullSplit {
                 ("out_n_stride", EXPRESSION),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        2
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -1442,10 +1440,10 @@ impl EgglogOp for TileMatmulFullSplit {
         (rule
             (
                 ; Match Mul node
-                (= ?mul (Mul ?mul_shape ?a ?a_stride ?b ?b_stride ?mul_out_stride))
+                (= ?mul (Op (Mul ?mul_shape ?a_stride ?b_stride ?mul_out_stride) (ICons ?a (ICons ?b (INil)))))
 
                 ; Match Sum that reduces the Mul (k dimension)
-                (= ?sum (Sum ?out_shape ?k ?mul ?sum_in_stride ?k_stride ?sum_out_stride))
+                (= ?sum (Op (Sum ?out_shape ?k ?sum_in_stride ?k_stride ?sum_out_stride) (ICons ?mul (INil))))
 
                 ; Match exactly 2D output shape (prevents matching 3D+ attention matmuls)
                 (= ?out_shape (ECons ?m (ECons ?n (ENil))))
@@ -1501,13 +1499,14 @@ impl EgglogOp for TileMatmulFullSplit {
                             (MMul ?sum_out_n_stride (MNum {ts})) 0)
                         (MMul ?sum_out_m_stride (MNum {ts})) 1))
 
-                (let ?tm (TileMatmulFullSplit
+                (let ?tm (Op (TileMatmulFullSplit
                     (MNum {sm_count})
                     ?out_shape
                     ?tiled_m ?tiled_n ?k
-                    ?a ?tiled_a_stride ?a_m_stride (MIter)
-                    ?b ?tiled_b_stride ?b_n_stride (MIter)
-                    ?tiled_out_stride ?sum_out_m_stride ?sum_out_n_stride))
+                    ?tiled_a_stride ?a_m_stride (MIter)
+                    ?tiled_b_stride ?b_n_stride (MIter)
+                    ?tiled_out_stride ?sum_out_m_stride ?sum_out_n_stride)
+                    (ICons ?a (ICons ?b (INil)))))
                 (union ?sum ?tm)
                 (set (dtype ?tm) (F32))
             )
@@ -1524,20 +1523,21 @@ impl EgglogOp for TileMatmulFullSplit {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let untiled_range =
-            extract_expr_list(egraph, children[1], list_cache, expr_cache).unwrap();
+            extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap();
         let a_stride =
-            extract_expr_list(egraph, children[6], list_cache, expr_cache).unwrap();
+            extract_expr_list(egraph, kind_children[5], list_cache, expr_cache).unwrap();
         let b_stride =
-            extract_expr_list(egraph, children[10], list_cache, expr_cache).unwrap();
+            extract_expr_list(egraph, kind_children[8], list_cache, expr_cache).unwrap();
         let out_stride =
-            extract_expr_list(egraph, children[13], list_cache, expr_cache).unwrap();
+            extract_expr_list(egraph, kind_children[11], list_cache, expr_cache).unwrap();
 
         // Compute batch dimensions: everything before the last 2 dims (M, N)
         let n_batch = untiled_range.len().saturating_sub(2);
@@ -1570,26 +1570,26 @@ impl EgglogOp for TileMatmulFullSplit {
 
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
-                sm_count: extract_expr(egraph, children[0], expr_cache).unwrap(),
+                sm_count: extract_expr(egraph, kind_children[0], expr_cache).unwrap(),
                 untiled_range,
-                m_tiles: extract_expr(egraph, children[2], expr_cache).unwrap(),
-                n_tiles: extract_expr(egraph, children[3], expr_cache).unwrap(),
-                total_k: extract_expr(egraph, children[4], expr_cache).unwrap(),
+                m_tiles: extract_expr(egraph, kind_children[2], expr_cache).unwrap(),
+                n_tiles: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
+                total_k: extract_expr(egraph, kind_children[4], expr_cache).unwrap(),
                 a_stride,
-                a_m_stride: extract_expr(egraph, children[7], expr_cache).unwrap(),
-                a_k_stride: extract_expr(egraph, children[8], expr_cache).unwrap(),
+                a_m_stride: extract_expr(egraph, kind_children[6], expr_cache).unwrap(),
+                a_k_stride: extract_expr(egraph, kind_children[7], expr_cache).unwrap(),
                 b_stride,
-                b_n_stride: extract_expr(egraph, children[11], expr_cache).unwrap(),
-                b_k_stride: extract_expr(egraph, children[12], expr_cache).unwrap(),
+                b_n_stride: extract_expr(egraph, kind_children[9], expr_cache).unwrap(),
+                b_k_stride: extract_expr(egraph, kind_children[10], expr_cache).unwrap(),
                 out_stride,
-                out_m_stride: extract_expr(egraph, children[14], expr_cache).unwrap(),
-                out_n_stride: extract_expr(egraph, children[15], expr_cache).unwrap(),
+                out_m_stride: extract_expr(egraph, kind_children[12], expr_cache).unwrap(),
+                out_n_stride: extract_expr(egraph, kind_children[13], expr_cache).unwrap(),
                 batch_size,
                 a_batch_offset,
                 b_batch_offset,
                 out_batch_offset,
             })),
-            vec![children[5], children[9]],
+            input_enodes,
         )
     }
 }
@@ -1845,17 +1845,19 @@ pub struct RowEmbed {
 impl EgglogOp for RowEmbed {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "RowEmbed",
             &[
                 ("shape", ELIST),
-                ("token_ids", IR),
                 ("token_strides", ELIST),
-                ("embed_table", IR),
                 ("out_strides", ELIST),
                 ("embed_dim", EXPRESSION),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        2
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -1863,16 +1865,16 @@ impl EgglogOp for RowEmbed {
             // Match Gather with Add(Mul(Cast(token_ids), const), Iota) indices
             Rule::raw("(rule
                 (
-                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
-                    (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
-                    (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
-                    (= ?token_ids_cast (Cast ?token_ids ?cast_size ?cast_dtype))
+                    (= ?gather (Op (Gather ?idx_shape ?idx_stride ?embed_shape ?embed_stride) (ICons ?indices (ICons ?embed_table (INil)))))
+                    (= ?indices (Op (Add ?add_shape ?mul_stride ?iota_stride ?add_out_stride) (ICons ?mul_result (ICons ?iota_result (INil)))))
+                    (= ?mul_result (Op (Mul ?mul_shape ?token_cast_stride ?mul_const_stride ?mul_out_stride) (ICons ?token_ids_cast (ICons ?mul_const (INil)))))
+                    (= ?token_ids_cast (Op (Cast ?cast_size ?cast_dtype) (ICons ?token_ids (INil))))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
                 )
                 (
-                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (let ?re (Op (RowEmbed ?batch_shape ?token_cast_stride ?out_stride_batch ?embed_dim) (ICons ?token_ids (ICons ?embed_table (INil)))))
                     (union ?gather ?re)
                     (set (dtype ?re) (F32))
                 )
@@ -1881,16 +1883,16 @@ impl EgglogOp for RowEmbed {
             // Match Gather with Add(Iota, Mul(Cast(token_ids), const)) indices (reversed order)
             Rule::raw("(rule
                 (
-                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
-                    (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
-                    (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
-                    (= ?token_ids_cast (Cast ?token_ids ?cast_size ?cast_dtype))
+                    (= ?gather (Op (Gather ?idx_shape ?idx_stride ?embed_shape ?embed_stride) (ICons ?indices (ICons ?embed_table (INil)))))
+                    (= ?indices (Op (Add ?add_shape ?iota_stride ?mul_stride ?add_out_stride) (ICons ?iota_result (ICons ?mul_result (INil)))))
+                    (= ?mul_result (Op (Mul ?mul_shape ?token_cast_stride ?mul_const_stride ?mul_out_stride) (ICons ?token_ids_cast (ICons ?mul_const (INil)))))
+                    (= ?token_ids_cast (Op (Cast ?cast_size ?cast_dtype) (ICons ?token_ids (INil))))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
                 )
                 (
-                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (let ?re (Op (RowEmbed ?batch_shape ?token_cast_stride ?out_stride_batch ?embed_dim) (ICons ?token_ids (ICons ?embed_table (INil)))))
                     (union ?gather ?re)
                     (set (dtype ?re) (F32))
                 )
@@ -1899,15 +1901,15 @@ impl EgglogOp for RowEmbed {
             // Match Gather with Add(Mul(token_ids, const), Iota) indices (no Cast)
             Rule::raw("(rule
                 (
-                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
-                    (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
-                    (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
+                    (= ?gather (Op (Gather ?idx_shape ?idx_stride ?embed_shape ?embed_stride) (ICons ?indices (ICons ?embed_table (INil)))))
+                    (= ?indices (Op (Add ?add_shape ?mul_stride ?iota_stride ?add_out_stride) (ICons ?mul_result (ICons ?iota_result (INil)))))
+                    (= ?mul_result (Op (Mul ?mul_shape ?token_stride ?mul_const_stride ?mul_out_stride) (ICons ?token_ids (ICons ?mul_const (INil)))))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
                 )
                 (
-                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (let ?re (Op (RowEmbed ?batch_shape ?token_stride ?out_stride_batch ?embed_dim) (ICons ?token_ids (ICons ?embed_table (INil)))))
                     (union ?gather ?re)
                     (set (dtype ?re) (F32))
                 )
@@ -1916,15 +1918,15 @@ impl EgglogOp for RowEmbed {
             // Match Gather with Add(Iota, Mul(token_ids, const)) indices (reversed order, no Cast)
             Rule::raw("(rule
                 (
-                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
-                    (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
-                    (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
+                    (= ?gather (Op (Gather ?idx_shape ?idx_stride ?embed_shape ?embed_stride) (ICons ?indices (ICons ?embed_table (INil)))))
+                    (= ?indices (Op (Add ?add_shape ?iota_stride ?mul_stride ?add_out_stride) (ICons ?iota_result (ICons ?mul_result (INil)))))
+                    (= ?mul_result (Op (Mul ?mul_shape ?token_stride ?mul_const_stride ?mul_out_stride) (ICons ?token_ids (ICons ?mul_const (INil)))))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
                 )
                 (
-                    (let ?re (RowEmbed ?batch_shape ?token_ids ?token_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (let ?re (Op (RowEmbed ?batch_shape ?token_stride ?out_stride_batch ?embed_dim) (ICons ?token_ids (ICons ?embed_table (INil)))))
                     (union ?gather ?re)
                     (set (dtype ?re) (F32))
                 )
@@ -1938,21 +1940,22 @@ impl EgglogOp for RowEmbed {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn BlockOp>(Box::new(Self {
-                range: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                token_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache)
+                range: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                token_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
                     .unwrap(),
-                out_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                embed_dim: extract_expr(egraph, children[5], expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                embed_dim: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
             })),
-            vec![children[1], children[3]], // token_ids, embedding_table
+            input_enodes, // token_ids, embedding_table
         )
     }
 }

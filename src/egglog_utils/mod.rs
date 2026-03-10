@@ -22,24 +22,36 @@ pub const RUN_SCHEDULE: &str = "(run-schedule
 )";
 
 fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
-    let ops_str = ops
-        .iter()
-        .map(|o| {
-            let s = o.sort();
-            format!(
-                "({} {})",
-                s.name,
-                s.fields.iter().map(|f| &f.sort).join(" ")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Partition ops by sort class: IR-class (Input, Output) vs OpKind-class (everything else)
+    let mut ir_variants = Vec::new();
+    let mut opkind_variants = Vec::new();
+    for o in ops {
+        let s = o.sort();
+        let variant_str = format!(
+            "({} {})",
+            s.name,
+            s.fields.iter().map(|f| &f.sort).join(" ")
+        );
+        if s.class == "IR" {
+            ir_variants.push(variant_str);
+        } else if s.class == "OpKind" {
+            opkind_variants.push(variant_str);
+        } else {
+            panic!("Unknown sort class '{}' for op '{}'", s.class, s.name);
+        }
+    }
+    let ir_str = ir_variants.join("\n");
+    let opkind_str = opkind_variants.join("\n");
     format!(
         "
     (datatype*
         (IR
             (OutputJoin IR IR)
-            {ops_str}
+            (Op OpKind IList)
+            {ir_str}
+        )
+        (OpKind
+            {opkind_str}
         )
         (IList
             (ICons IR IList)
@@ -63,14 +75,27 @@ fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
                 let body_terms = (0..s.fields.len())
                     .map(|i| (b'a' + i as u8) as char)
                     .join(" ");
-                format!(
-                    "(rule
+                if s.class == "OpKind" {
+                    // Normalized op: (Op (XxxKind ...) ?inputs)
+                    format!(
+                        "(rule
+                ((= ?m (Op ({} {body_terms}) ?__cleanup_inputs)))
+                ((delete (Op ({} {body_terms}) ?__cleanup_inputs)))
+                :ruleset cleanup
+            )",
+                        s.name, s.name
+                    )
+                } else {
+                    // Direct IR variant (Input, Output)
+                    format!(
+                        "(rule
                 ((= ?m ({} {body_terms})))
                 ((delete ({} {body_terms})))
                 :ruleset cleanup
             )",
-                    s.name, s.name
-                )
+                        s.name, s.name
+                    )
+                }
             })
             .join("\n")
     )
@@ -277,12 +302,12 @@ pub fn hash_serialized_egraph(egraph: &SerializedEGraph) -> u64 {
 /// egglog text except for:
 /// - Input node indices and labels (differ per layer)
 /// - Output node indices (differ per layer)
-/// - CustomOpHLIR integer IDs (global custom_ops index, differs per layer)
+/// - CustomOpKind integer IDs (global custom_ops index, differs per layer)
 ///
 /// This function hashes the text while normalizing those chunk-specific values:
 /// - Input lines: only the dtype is hashed (not node index or label)
 /// - Output lines: only the "OUTPUT" marker is hashed (not the node index)
-/// - CustomOpHLIR lines: the integer ID is replaced with a constant
+/// - CustomOpKind lines: the integer ID is replaced with a constant
 /// - All other lines (ops, shapes, strides): hashed verbatim
 pub fn hash_egglog_normalized(text: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -300,8 +325,8 @@ pub fn hash_egglog_normalized(text: &str) -> u64 {
             }
         } else if line.contains("(Output ") && !line.contains("(OutputJoin ") {
             "OUTPUT".hash(&mut hasher);
-        } else if line.contains("(CustomOpHLIR ") {
-            // Format: (let tN (CustomOpHLIR (ICons ... (INil)) ID (DTYPE)))
+        } else if line.contains("(CustomOpKind ") {
+            // Format: (let tN (Op (CustomOpKind ID (DTYPE)) (ICons ...)))
             // The integer ID varies per layer. Replace it with a constant.
             normalize_custom_op_id(line).hash(&mut hasher);
         } else {
@@ -311,25 +336,19 @@ pub fn hash_egglog_normalized(text: &str) -> u64 {
     hasher.finish()
 }
 
-/// Replace the integer ID in a CustomOpHLIR egglog line with a constant "0".
-/// Input format: `(let tN (CustomOpHLIR (ICons ... (INil))) ID (DTYPE)))`
-/// The ID is the integer between the closing of IList and the opening of DType.
+/// Replace the integer ID in a CustomOpKind egglog line with a constant "0".
 fn normalize_custom_op_id(line: &str) -> String {
-    if let Some(custom_start) = line.find("(CustomOpHLIR ") {
-        let after = &line[custom_start + "(CustomOpHLIR ".len()..];
-        // Find the dtype opening paren (last " (" in the line)
-        if let Some(last_open) = after.rfind(" (") {
-            let before_dtype = &after[..last_open];
-            // Find the space before the integer ID
-            if let Some(space_before_id) = before_dtype.rfind(' ') {
-                let id_str = &before_dtype[space_before_id + 1..];
-                if id_str.chars().all(|c| c.is_ascii_digit()) {
-                    return format!(
-                        "{}0{}",
-                        &line[..custom_start + "(CustomOpHLIR ".len() + space_before_id + 1],
-                        &line[custom_start + "(CustomOpHLIR ".len() + last_open..]
-                    );
-                }
+    if let Some(custom_start) = line.find("(CustomOpKind ") {
+        let after = &line[custom_start + "(CustomOpKind ".len()..];
+        // The ID is the first token (integer) after "CustomOpKind "
+        if let Some(space_after_id) = after.find(' ') {
+            let id_str = &after[..space_after_id];
+            if id_str.chars().all(|c| c.is_ascii_digit()) {
+                return format!(
+                    "{}0{}",
+                    &line[..custom_start + "(CustomOpKind ".len()],
+                    &line[custom_start + "(CustomOpKind ".len() + space_after_id..]
+                );
             }
         }
     }
@@ -684,17 +703,42 @@ pub fn run_egglog(
             .filter(|o| o.cleanup())
             .map(|o| o.sort().name.to_string())
             .collect();
+
+        // Helper: check if an enode is a cleanup-eligible op.
+        // For normalized ops (label=="Op"), check the OpKind child's label.
+        // For direct IR ops, check the label directly.
+        let is_cleanup_enode =
+            |n: &NodeId, egraph: &SerializedEGraph| -> bool {
+                let Some((label, children)) = egraph.enodes.get(n) else {
+                    return false;
+                };
+                if label == "Op" {
+                    // Child[0] is OpKind eclass — check its enode label
+                    if let Some(kind_eclass) = children.first() {
+                        if let Some(kind_enodes) = egraph.eclasses.get(kind_eclass) {
+                            return kind_enodes.1.iter().any(|kn| {
+                                egraph
+                                    .enodes
+                                    .get(kn)
+                                    .map_or(false, |(kl, _)| cleanup_ops.contains(kl.as_str()))
+                            });
+                        }
+                    }
+                    false
+                } else {
+                    cleanup_ops.contains(label.as_str())
+                }
+            };
+
         let mut to_remove = vec![];
         for (_cid, (_typ, enodes)) in &egraph.eclasses {
-            let has_non_cleanup = enodes.iter().any(|n| {
-                egraph.enodes.get(n).map_or(false, |(label, _)| !cleanup_ops.contains(label.as_str()))
-            });
+            let has_non_cleanup = enodes
+                .iter()
+                .any(|n| egraph.enodes.contains_key(n) && !is_cleanup_enode(n, &egraph));
             if has_non_cleanup {
                 for n in enodes {
-                    if let Some((label, _)) = egraph.enodes.get(n) {
-                        if cleanup_ops.contains(label.as_str()) {
-                            to_remove.push(n.clone());
-                        }
+                    if egraph.enodes.contains_key(n) && is_cleanup_enode(n, &egraph) {
+                        to_remove.push(n.clone());
                     }
                 }
             }
@@ -977,17 +1021,34 @@ pub fn validate_choice_set<'a>(
 
     // Check all reachable IR nodes have corresponding ops
     for node in &reachable {
-        let (op_name, _) = &egraph.enodes[*node];
+        let (op_name, children) = &egraph.enodes[*node];
         let eclass = &egraph.node_to_class[*node];
         let (label, _) = &egraph.eclasses[eclass];
         if label != "IR" {
-            continue; // Skip IList nodes
+            continue; // Skip IList / OpKind nodes
         }
-        if op_name == "OutputJoin" || op_name == "CustomOpHLIR" {
+        if op_name == "OutputJoin" {
             continue;
         }
+        if op_name == "Op" {
+            // Normalized op — check OpKind child
+            if let Some(kind_eclass) = children.first() {
+                if let Some((_, kind_enodes)) = egraph.eclasses.get(kind_eclass) {
+                    if let Some(kn) = kind_enodes.first() {
+                        let kind_name = &egraph.enodes[kn].0;
+                        if kind_name != "CustomOpKind"
+                            && !ops.iter().any(|op| op.sort().name == *kind_name)
+                        {
+                            return Err(format!("No extractor for OpKind {kind_name}"));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        // Direct IR variant (Input, Output)
         if !ops.iter().any(|op| op.sort().name == *op_name) {
-            return Err(format!("No extractor for op {}", op_name));
+            return Err(format!("No extractor for op {op_name}"));
         }
     }
 
@@ -1071,6 +1132,27 @@ pub fn extract_generation<'a>(
     offspring
 }
 
+/// Walk an IList in the egraph, returning the chosen IR enodes in order.
+fn walk_ilist<'a>(
+    egraph: &'a SerializedEGraph,
+    ilist_eclass: &'a ClassId,
+    choices: &EGraphChoiceSet<'a>,
+) -> Vec<&'a NodeId> {
+    let mut inputs = Vec::new();
+    let mut current = choices[ilist_eclass];
+    loop {
+        if egraph.enodes[current].0 == "INil" {
+            break;
+        }
+        // ICons: child[0] = IR eclass, child[1] = IList tail eclass
+        let input_eclass = &egraph.enodes[current].1[0];
+        inputs.push(choices[input_eclass]);
+        let tail_eclass = &egraph.enodes[current].1[1];
+        current = choices[tail_eclass];
+    }
+    inputs
+}
+
 #[tracing::instrument(skip_all)]
 pub fn egglog_to_llir<'a>(
     egraph: &'a SerializedEGraph,
@@ -1114,58 +1196,88 @@ pub fn egglog_to_llir<'a>(
             continue;
         }
         if egraph.eclasses[&egraph.node_to_class[node]].0 != "IR" {
-            // Skip IList
+            // Skip IList / OpKind
             continue;
         }
-        let ch = egraph.enodes[node]
-            .1
-            .iter()
-            .map(|c| {
-                if egraph.eclasses[c].0.contains("IR") || egraph.eclasses[c].0.contains("IList") {
-                    choices[c]
-                } else {
-                    &egraph.eclasses[c].1[0]
+        let enode_label = egraph.enodes[node].0.as_str();
+        if enode_label == "Op" {
+            // Normalized op: (Op OpKind IList)
+            // child[0] = OpKind eclass, child[1] = IList eclass
+            let kind_eclass = &egraph.enodes[node].1[0];
+            let ilist_eclass = &egraph.enodes[node].1[1];
+
+            // Resolve OpKind enode
+            let kind_enode = &egraph.eclasses[kind_eclass].1[0];
+            let kind_label = &egraph.enodes[kind_enode].0;
+
+            // Resolve kind's metadata children (shapes, strides, etc.)
+            let kind_children: Vec<&NodeId> = egraph.enodes[kind_enode]
+                .1
+                .iter()
+                .map(|c| {
+                    if egraph.eclasses[c].0.contains("IR")
+                        || egraph.eclasses[c].0.contains("IList")
+                    {
+                        choices[c]
+                    } else {
+                        &egraph.eclasses[c].1[0]
+                    }
+                })
+                .collect_vec();
+
+            // Walk IList to get IR inputs
+            let input_enodes = walk_ilist(egraph, ilist_eclass, &choices);
+
+            // Check for CustomOpKind first
+            if kind_label == "CustomOpKind" {
+                // kind_children: [id, dtype]
+                let id: usize = egraph.enodes[&kind_children[0]].0.parse().unwrap();
+                let remapped_id = custom_op_id_remap
+                    .and_then(|m| m.get(&id).copied())
+                    .unwrap_or(id);
+                let r = graph.add_node(custom_ops[remapped_id].to_llir_op());
+                enode_to_node.insert(node, r);
+                for source in input_enodes {
+                    edges_to_place.push((source, node));
                 }
-            })
-            .collect_vec();
-        if egraph.enodes[node].0.as_str() == "CustomOpHLIR" {
-            // Extract custom op inputs and id
-            let mut inputs = vec![];
-            // Walk through the IList to get inputs - use choices[] for IR/IList eclasses
-            let ilist_eclass = &egraph.enodes[node].1[0];
-            let mut ch = choices[ilist_eclass];
-            loop {
-                if egraph.enodes[ch].0 == "INil" {
-                    break;
-                } else {
-                    // The first child of ICons is an IR node - use choices[] to get the chosen enode
-                    let input_eclass = &egraph.enodes[ch].1[0];
-                    inputs.push(choices[input_eclass]);
-                    // The second child of ICons is the rest of the IList - use choices[] for the tail
-                    ch = choices[&egraph.enodes[ch].1[1]];
+            } else {
+                // Find matching op by OpKind name
+                let Some(op) = ops.iter().find(|op| kind_label.as_str() == op.sort().name)
+                else {
+                    todo!("{kind_label} extraction not implemented!");
+                };
+                let (op_instance, sources) =
+                    op.extract(egraph, &kind_children, input_enodes, list_cache, expr_cache);
+                let r = graph.add_node(op_instance);
+                enode_to_node.insert(node, r);
+                for source in sources {
+                    edges_to_place.push((source, node));
                 }
             }
-            let id: usize = egraph.enodes[&egraph.eclasses[&egraph.enodes[node].1[1]].1[0]]
-                .0
-                .parse()
-                .unwrap();
-            let remapped_id = custom_op_id_remap
-                .and_then(|m| m.get(&id).copied())
-                .unwrap_or(id);
-            let r = graph.add_node(custom_ops[remapped_id].to_llir_op());
-            enode_to_node.insert(node, r);
-            for source in inputs {
-                edges_to_place.push((source, node));
-            }
-        } else if egraph.enodes[node].0.as_str() != "OutputJoin" {
+        } else if enode_label != "OutputJoin" {
+            // Direct IR variant (Input, Output)
+            let ch = egraph.enodes[node]
+                .1
+                .iter()
+                .map(|c| {
+                    if egraph.eclasses[c].0.contains("IR")
+                        || egraph.eclasses[c].0.contains("IList")
+                    {
+                        choices[c]
+                    } else {
+                        &egraph.eclasses[c].1[0]
+                    }
+                })
+                .collect_vec();
             let Some(op) = ops
                 .iter()
-                .find(|op| egraph.enodes[node].0.as_str() == op.sort().name)
+                .find(|op| enode_label == op.sort().name)
             else {
-                todo!("{} extraction not implemented!", egraph.enodes[node].0);
+                todo!("{enode_label} extraction not implemented!");
             };
-            // Extract this op
-            let (op_instance, sources) = op.extract(egraph, &ch, list_cache, expr_cache);
+            // Direct IR ops pass children as kind_children, empty input_enodes
+            let (op_instance, sources) =
+                op.extract(egraph, &ch, vec![], list_cache, expr_cache);
             let r = graph.add_node(op_instance);
             enode_to_node.insert(node, r);
             for source in sources {

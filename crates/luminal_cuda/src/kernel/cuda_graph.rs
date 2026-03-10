@@ -155,6 +155,7 @@ impl CudaGraphExecHandle {
         unsafe { sys::cuGraphExecKernelNodeSetParams_v2(self.cu_graph_exec, node, &params) }
             .result()
     }
+
 }
 
 impl Drop for CudaGraphExecHandle {

@@ -115,6 +115,8 @@ pub struct CudaRuntime {
     num_sms: usize,
     /// When true, execute() skips input buffer consumption (used during search/profile)
     profiling: bool,
+    /// Buffer nodes that are outputs of BlockOps (need zeroing due to atomicAdd)
+    block_op_buffers: FxHashSet<NodeIndex>,
 }
 
 impl CudaRuntime {
@@ -366,86 +368,70 @@ impl CudaRuntime {
 
     #[tracing::instrument(skip_all)]
     fn allocate_intermediate_buffers(&mut self, dyn_dims: &FxHashMap<char, usize>) {
-        // Free old buffers before allocating new ones to avoid peak memory doubling
-        self.buffers.clear();
-        self.cached_buffer_ptrs.clear();
-        self.cuda_stream.synchronize().unwrap();
+        let is_first_alloc = self.buffers.is_empty();
+        if is_first_alloc {
+            self.block_op_buffers.clear();
+        }
+
+        // Only sync if we might need to free/reallocate buffers
+        if is_first_alloc {
+            self.cuda_stream.synchronize().unwrap();
+        }
 
         self.intermediate_buffer_dims.clear();
         let mut total_alloc: usize = 0;
-        let mut max_alloc: usize = 0;
-        let mut max_alloc_node = NodeIndex::new(0);
-        let mut alloc_count: usize = 0;
+        let mut realloc_count: usize = 0;
         for node in self.llir_graph.node_indices().collect_vec() {
             if self.llir_graph[node].to_op::<Input>().is_some() {
                 continue;
             }
-            if let Some(op) = self.llir_graph[node].to_dialect::<dyn BlockOp>() {
-                let out_bytes = op.output_bytes();
-                let exec_size = out_bytes.exec(dyn_dims).unwrap();
-                if exec_size == 0 {
+            let (needed_bytes, is_block_op) =
+                if let Some(op) = self.llir_graph[node].to_dialect::<dyn BlockOp>() {
+                    let out_bytes = op.output_bytes();
+                    self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
+                    (out_bytes.exec(dyn_dims).unwrap(), true)
+                } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
+                    let out_bytes = op.output_bytes();
+                    self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
+                    (out_bytes.exec(dyn_dims).unwrap(), false)
+                } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
+                    let out_bytes = op.output_bytes();
+                    self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
+                    (out_bytes.exec(dyn_dims).unwrap(), false)
+                } else {
                     continue;
-                }
-                total_alloc += exec_size;
-                alloc_count += 1;
-                if exec_size > max_alloc {
-                    max_alloc = exec_size;
-                    max_alloc_node = node;
-                }
-                self.intermediate_buffer_dims
-                    .extend(op.output_bytes().dyn_vars());
-                self.buffers.insert(
-                    node,
-                    self.cuda_stream
-                        .alloc_zeros(op.output_bytes().exec(dyn_dims).unwrap())
-                        .unwrap(),
-                );
-                let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
-                self.cached_buffer_ptrs.insert(node, ptr);
-            } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
-                let out_bytes = op.output_bytes();
-                let exec_bytes = out_bytes.exec(dyn_dims).unwrap();
-                if exec_bytes == 0 {
-                    continue;
-                }
-                total_alloc += exec_bytes;
-                alloc_count += 1;
-                if exec_bytes > max_alloc {
-                    max_alloc = exec_bytes;
-                    max_alloc_node = node;
-                }
-                self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
-                self.buffers
-                    .insert(node, self.cuda_stream.alloc_zeros(exec_bytes).unwrap());
-                let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
-                self.cached_buffer_ptrs.insert(node, ptr);
-            } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
-                let out_bytes_expr = op.output_bytes();
-                self.intermediate_buffer_dims
-                    .extend(out_bytes_expr.dyn_vars());
-                let out_bytes = out_bytes_expr.exec(dyn_dims).unwrap();
-                if out_bytes > 0 {
-                    total_alloc += out_bytes;
-                    alloc_count += 1;
-                    if out_bytes > max_alloc {
-                        max_alloc = out_bytes;
-                        max_alloc_node = node;
-                    }
-                    self.buffers
-                        .insert(node, self.cuda_stream.alloc_zeros(out_bytes).unwrap());
-                    let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
-                    self.cached_buffer_ptrs.insert(node, ptr);
-                }
+                };
+
+            if needed_bytes == 0 {
+                continue;
             }
+
+            if is_block_op {
+                self.block_op_buffers.insert(node);
+            }
+
+            // Only allocate/reallocate if we don't have a buffer or existing one is too small
+            let existing_len = self.buffers.get(&node).map(|b| b.len()).unwrap_or(0);
+            if existing_len >= needed_bytes {
+                continue; // Existing buffer is large enough, reuse it
+            }
+
+            // Need to allocate (or reallocate)
+            total_alloc += needed_bytes;
+            realloc_count += 1;
+            self.buffers
+                .insert(node, self.cuda_stream.alloc_zeros(needed_bytes).unwrap());
+            let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
+            self.cached_buffer_ptrs.insert(node, ptr);
         }
-        tracing::debug!(
-            "[ALLOC] dyn_dims={:?} total={:.1}MB ({} buffers, max={:.1}MB node={:?})",
-            dyn_dims,
-            total_alloc as f64 / 1e6,
-            alloc_count,
-            max_alloc as f64 / 1e6,
-            max_alloc_node,
-        );
+        if realloc_count > 0 {
+            tracing::debug!(
+                "[ALLOC] dyn_dims={:?} reallocated={} ({:.1}MB)",
+                dyn_dims,
+                realloc_count,
+                total_alloc as f64 / 1e6,
+            );
+        }
     }
 
     /// Pre-allocate buffers with the given dynamic dimension values.
@@ -639,6 +625,7 @@ impl Runtime for CudaRuntime {
             last_total_time_us: 0.0,
             kernel_cache: FxHashMap::default(),
             profiling: false,
+            block_op_buffers: FxHashSet::default(),
         }
     }
 
@@ -653,6 +640,7 @@ impl Runtime for CudaRuntime {
         // reallocated and re-registered with the new work_queue
         self.buffers.clear();
         self.cached_buffer_ptrs.clear();
+        self.block_op_buffers.clear();
         // Mark all HLIR inputs as changed so their pointers get re-cached in execute
         self.changed_hlir.extend(self.hlir_buffers.keys().copied());
         self.exec_graph.clear();
@@ -875,14 +863,13 @@ impl Runtime for CudaRuntime {
             self.last_dyn_map = dyn_map.clone();
             self.allocate_intermediate_buffers(dyn_map);
         }
-
-        // Always clear intermediate buffers to ensure correctness for operations using atomicAdd
-        // TODO: this is very expensive. Need to eliminate ops that require zeroed outputs
-        for buffer in self.buffers.values_mut() {
-            self.cuda_stream.memset_zeros(buffer).unwrap();
+        // Only zero block op output buffers (they use atomicAdd and accumulate into output)
+        // HLIR kernel outputs are fully written and don't need zeroing
+        for &node in &self.block_op_buffers {
+            if let Some(buffer) = self.buffers.get_mut(&node) {
+                self.cuda_stream.memset_zeros(buffer).unwrap();
+            }
         }
-        self.cuda_stream.synchronize().unwrap();
-
         // Cache HLIR input pointers
         if !self.changed_hlir.is_empty() {
             for hlir_node in self.changed_hlir.clone() {
@@ -901,7 +888,6 @@ impl Runtime for CudaRuntime {
             }
             self.changed_hlir.clear();
         }
-
         // Ensure all CUDA graphs are built (handles first execute and any missing graphs)
         self.prebuild_graphs(dyn_map);
 
@@ -961,13 +947,9 @@ impl Runtime for CudaRuntime {
                         exec_op.internal.stats_name().unwrap_or("unknown")
                     );
                 });
-            self.cuda_stream.synchronize().unwrap_or_else(|e| {
-                panic!(
-                    "CUDA sync error after {:?}: {e}",
-                    exec_op.internal.stats_name().unwrap_or("unknown")
-                );
-            });
         }
+        // Single sync at end - CUDA stream ordering guarantees sequential execution
+        self.cuda_stream.synchronize().unwrap();
         self.last_total_time_us = total_start.elapsed().as_secs_f64() * 1_000_000.0;
 
         // Populate last_kernel_stats from HostOps that report stats

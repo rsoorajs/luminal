@@ -12,7 +12,7 @@ use itertools::Itertools;
 use luminal::{
     egglog_utils::{
         api::{Rule, SortDef, app, eq, rule, set, sort, union, v},
-        base::{DTYPE, ELIST, EXPRESSION, F64, IR, OP_SORTS, SORTS, dtype},
+        base::{DTYPE, ELIST, EXPRESSION, F64, OP_KIND, SORTS, dtype, ilist, op_term},
         extract_dtype, extract_expr, extract_expr_list,
     },
     hlir::{Add, Exp2, LessThan, Log2, MaxReduce, Mod, Mul, Recip, Scatter, Sin, Sqrt, SumReduce},
@@ -108,10 +108,14 @@ pub type Ops = (
 fn kernel_rewrite<H: Default + EgglogOp, L: Default + EgglogOp>() -> Rule {
     let hlir = H::default().sort();
     let llir = L::default().sort();
-    let (mut args, hlir_match) = hlir.new_call();
+    let (mut args, hlir_kind_term) = hlir.new_call();
+    let inputs = v("?__inputs");
+    let hlir_op = op_term(hlir_kind_term, inputs.clone());
     let dt = v("?__dt");
     args.add("dtype", dt.clone());
-    rule(union(hlir_match.clone(), llir.call(&args))).fact(eq(dt, dtype(hlir_match)))
+    let llir_kind_term = llir.call(&args);
+    let llir_op = op_term(llir_kind_term, inputs);
+    rule(union(hlir_op.clone(), llir_op)).fact(eq(dt, dtype(hlir_op)))
 }
 
 #[derive(Default, Debug, Clone)]
@@ -127,18 +131,21 @@ pub struct KernelMaxReduce {
 impl EgglogOp for KernelMaxReduce {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelMax",
             &[
                 ("shape", ELIST),
                 ("iters", EXPRESSION),
-                ("inp", IR),
                 ("strides", ELIST),
                 ("iter_stride", EXPRESSION),
                 ("out_strides", ELIST),
                 ("dtype", DTYPE),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        1
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -150,22 +157,23 @@ impl EgglogOp for KernelMaxReduce {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                iters: extract_expr(egraph, children[1], expr_cache).unwrap(),
-                in_stride: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
-                iter_stride: extract_expr(egraph, children[4], expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
-                dtype: extract_dtype(egraph, children[6]),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                iters: extract_expr(egraph, kind_children[1], expr_cache).unwrap(),
+                in_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                iter_stride: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[4], list_cache, expr_cache).unwrap(),
+                dtype: extract_dtype(egraph, kind_children[5]),
             }) as Box<dyn KernelOp>),
-            vec![children[2]],
+            input_enodes,
         )
     }
 }
@@ -325,18 +333,21 @@ pub struct KernelSumReduce {
 impl EgglogOp for KernelSumReduce {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelSum",
             &[
                 ("shape", ELIST),
                 ("iters", EXPRESSION),
-                ("inp", IR),
                 ("strides", ELIST),
                 ("iter_stride", EXPRESSION),
                 ("out_strides", ELIST),
                 ("dtype", DTYPE),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        1
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -348,23 +359,24 @@ impl EgglogOp for KernelSumReduce {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             {
                 let out_shape =
-                    extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap();
-                let iters = extract_expr(egraph, children[1], expr_cache).unwrap();
+                    extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap();
+                let iters = extract_expr(egraph, kind_children[1], expr_cache).unwrap();
                 let in_stride =
-                    extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap();
-                let iter_stride = extract_expr(egraph, children[4], expr_cache).unwrap();
+                    extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap();
+                let iter_stride = extract_expr(egraph, kind_children[3], expr_cache).unwrap();
                 let out_stride =
-                    extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap();
-                let dtype = extract_dtype(egraph, children[6]);
+                    extract_expr_list(egraph, kind_children[4], list_cache, expr_cache).unwrap();
+                let dtype = extract_dtype(egraph, kind_children[5]);
                 LLIROp::new::<dyn KernelOp>(Box::new(Self {
                     out_shape,
                     iters,
@@ -374,7 +386,7 @@ impl EgglogOp for KernelSumReduce {
                     dtype,
                 }) as Box<dyn KernelOp>)
             },
-            vec![children[2]],
+            input_enodes,
         )
     }
 }
@@ -406,6 +418,7 @@ impl KernelOp for KernelSumReduce {
         let dtype = cuda_dtype(self.dtype);
         let includes = dtype_includes(&[self.dtype]);
         let n_outputs: Expression = self.out_shape.iter().copied().product();
+        let threads_per_block = 256; // 8 warps per block
         let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
         let dyn_dims_param = if vars.is_empty() {
             ""
@@ -415,21 +428,51 @@ impl KernelOp for KernelSumReduce {
 
         let kernel = format!(
             "{includes}
+#define WARP_SIZE 32
+#define THREADS_PER_BLOCK 256
+#define FULL_MASK 0xffffffff
 {dyn_defines}
 extern \"C\" {{
-    __global__ void reduce_sum_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
+    __global__ void reduce_sum_k({dtype} *out, const {dtype} *in_data{dyn_dims_param}) {{
+        __shared__ {dtype} warp_sums[THREADS_PER_BLOCK / WARP_SIZE];
         long long const_z = blockIdx.x;
+
+        int tid = threadIdx.x;
+        int lane_id = tid % WARP_SIZE;
+        int warp_id = tid / WARP_SIZE;
 
         long long in_start = {in_index};
         long long iters = {iters};
         long long iter_stride = {iter_stride};
 
-        {dtype} sum = 0;
-        for (long long i = 0; i < iters; i++) {{
-            sum += in[in_start + i * iter_stride];
+        {dtype} partial = 0;
+        for (long long i = tid; i < iters; i += THREADS_PER_BLOCK) {{
+            partial += in_data[in_start + i * iter_stride];
         }}
 
-        out[{out_index}] = sum;
+        #pragma unroll
+        for (int s = WARP_SIZE / 2; s > 0; s /= 2) {{
+            partial += __shfl_down_sync(FULL_MASK, partial, s);
+        }}
+
+        if (lane_id == 0) {{
+            warp_sums[warp_id] = partial;
+        }}
+        __syncthreads();
+
+        if (warp_id == 0) {{
+            int cnt = THREADS_PER_BLOCK / WARP_SIZE;
+            {dtype} block_sum = tid < cnt ? warp_sums[tid] : ({dtype})0;
+
+            #pragma unroll
+            for (int s = cnt / 2; s > 0; s /= 2) {{
+                block_sum += __shfl_down_sync(FULL_MASK, block_sum, s);
+            }}
+
+            if (tid == 0) {{
+                out[{out_index}] = block_sum;
+            }}
+        }}
     }}
 }}",
             dtype = dtype,
@@ -457,9 +500,9 @@ extern \"C\" {{
             func,
             module,
             kernel,
-            (n_outputs, 1.into(), 1.into()), // grid
-            (1.into(), 1.into(), 1.into()),  // blocks (single-threaded)
-            0.into(),                        // shmem size
+            (n_outputs, 1.into(), 1.into()),                // grid
+            (threads_per_block.into(), 1.into(), 1.into()), // blocks (warp-parallel)
+            32.into(),                                       // shmem for warp_sums
             FxHashMap::default(),
         )
     }
@@ -502,18 +545,20 @@ pub struct KernelAdd {
 impl EgglogOp for KernelAdd {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelAdd",
             &[
                 ("shape", ELIST),
-                ("inp_a", IR),
                 ("a_strides", ELIST),
-                ("inp_b", IR),
                 ("b_strides", ELIST),
                 ("out_strides", ELIST),
                 ("dtype", DTYPE),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        2
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -525,21 +570,22 @@ impl EgglogOp for KernelAdd {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                b_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
-                dtype: extract_dtype(egraph, children[6]),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache).unwrap(),
+                dtype: extract_dtype(egraph, kind_children[4]),
             })),
-            vec![children[1], children[3]],
+            input_enodes,
         )
     }
 }
@@ -656,18 +702,20 @@ pub struct KernelMul {
 impl EgglogOp for KernelMul {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelMul",
             &[
                 ("shape", ELIST),
-                ("inp_a", IR),
                 ("a_strides", ELIST),
-                ("inp_b", IR),
                 ("b_strides", ELIST),
                 ("out_strides", ELIST),
                 ("dtype", DTYPE),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        2
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -677,28 +725,29 @@ impl EgglogOp for KernelMul {
             // This prevents the search from selecting the HLIR matmul fallback path
             // (broadcast Mul + SumReduce), which creates huge intermediates and causes OOM.
             // Matmul intermediates have 3+ dims with two large static dims, e.g. [s, 14336, 4096].
+            // Now uses (Op (KernelMul ...) (ICons ...)) format.
             Rule::raw("(rule
-                ((= ?m (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?a ?as ?b ?bs ?os ?dt))
+                ((= ?m (Op (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?as ?bs ?os ?dt) ?inputs))
                  (= (MNum ?v1) ?d1)
                  (= (MNum ?v2) ?d2)
                  (>= (* ?v1 ?v2) 1000000))
-                ((delete (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?a ?as ?b ?bs ?os ?dt)))
+                ((delete (Op (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?as ?bs ?os ?dt) ?inputs)))
                 :ruleset cleanup
             )"),
             Rule::raw("(rule
-                ((= ?m (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?a ?as ?b ?bs ?os ?dt))
+                ((= ?m (Op (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?as ?bs ?os ?dt) ?inputs))
                  (= (MNum ?v0) ?d0)
                  (= (MNum ?v1) ?d1)
                  (>= (* ?v0 ?v1) 1000000))
-                ((delete (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?a ?as ?b ?bs ?os ?dt)))
+                ((delete (Op (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?as ?bs ?os ?dt) ?inputs)))
                 :ruleset cleanup
             )"),
             Rule::raw("(rule
-                ((= ?m (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?a ?as ?b ?bs ?os ?dt))
+                ((= ?m (Op (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?as ?bs ?os ?dt) ?inputs))
                  (= (MNum ?v0) ?d0)
                  (= (MNum ?v2) ?d2)
                  (>= (* ?v0 ?v2) 1000000))
-                ((delete (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?a ?as ?b ?bs ?os ?dt)))
+                ((delete (Op (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?as ?bs ?os ?dt) ?inputs)))
                 :ruleset cleanup
             )"),
         ]
@@ -709,21 +758,22 @@ impl EgglogOp for KernelMul {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                b_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
-                dtype: extract_dtype(egraph, children[6]),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache).unwrap(),
+                dtype: extract_dtype(egraph, kind_children[4]),
             })),
-            vec![children[1], children[3]],
+            input_enodes,
         )
     }
 }
@@ -839,13 +889,11 @@ pub struct KernelGather {
 impl EgglogOp for KernelGather {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelGather",
             &[
                 ("out_shape", ELIST),
-                ("indexes", IR),
                 ("index_strides", ELIST),
-                ("data", IR),
                 ("data_shape", ELIST),
                 ("data_strides", ELIST),
                 ("out_strides", ELIST),
@@ -854,20 +902,30 @@ impl EgglogOp for KernelGather {
         )
     }
 
+    fn n_inputs(&self) -> usize {
+        2
+    }
+
     fn rewrites(&self) -> Vec<Rule> {
-        let (gather_args, gather_match) = luminal::hlir::Gather::default().sort().new_call();
+        // Match HLIR Gather (now in Op format) and rewrite to KernelGather
+        let hlir_gather = luminal::hlir::Gather::default().sort();
+        let (gather_args, gather_kind_term) = hlir_gather.new_call();
+        // HLIR Gather inputs: [indexes, data] (n_inputs=2)
+        let indexes = v("?__indexes");
+        let data = v("?__data");
+        let gather_inputs = ilist(vec![indexes.clone(), data.clone()]);
+        let gather_op = op_term(gather_kind_term, gather_inputs);
+
         let out_strides = SORTS
             .row_major
             .call(("list".to_string(), gather_args["index_shape"].clone()));
         let dt = v("?__dt");
-        let kernel_args = [
+        let kernel_kind_args = [
             ("out_shape".to_string(), gather_args["index_shape"].clone()),
-            ("indexes".to_string(), gather_args["indexes"].clone()),
             (
                 "index_strides".to_string(),
                 gather_args["index_strides"].clone(),
             ),
-            ("data".to_string(), gather_args["data"].clone()),
             ("data_shape".to_string(), gather_args["data_shape"].clone()),
             (
                 "data_strides".to_string(),
@@ -876,9 +934,11 @@ impl EgglogOp for KernelGather {
             ("out_strides".to_string(), out_strides),
             ("dtype".to_string(), dt.clone()),
         ];
+        let kernel_kind_term = self.sort().call(kernel_kind_args);
+        let kernel_op = op_term(kernel_kind_term, ilist(vec![indexes, data.clone()]));
         vec![
-            rule(union(gather_match, self.sort().call(kernel_args)))
-                .fact(eq(dt, dtype(gather_args["data"].clone()))),
+            rule(union(gather_op, kernel_op))
+                .fact(eq(dt, dtype(data))),
         ]
     }
 
@@ -887,24 +947,25 @@ impl EgglogOp for KernelGather {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                index_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache)
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                index_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
                     .unwrap(),
-                data_shape: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                data_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache)
+                data_shape: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                data_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache)
                     .unwrap(),
-                out_stride: extract_expr_list(egraph, children[6], list_cache, expr_cache).unwrap(),
-                dtype: extract_dtype(egraph, children[7]),
+                out_stride: extract_expr_list(egraph, kind_children[4], list_cache, expr_cache).unwrap(),
+                dtype: extract_dtype(egraph, kind_children[5]),
             })),
-            vec![children[1], children[3]],
+            input_enodes,
         )
     }
 }
@@ -1020,7 +1081,7 @@ extern \"C\" {{
 }
 
 // KernelScatter: inverse of gather - out = copy(dest); out[indexes[i]] = src[i]
-// Two-phase: copy kernel runs via pre_launch (stream-level), scatter runs in CUDA graph.
+// Two-phase: memcpy graph node copies dest→output, then scatter kernel runs in same CUDA graph.
 #[derive(Debug, Clone)]
 pub struct KernelScatter {
     dest_shape: Vec<Expression>,
@@ -1030,7 +1091,6 @@ pub struct KernelScatter {
     src_strides: Vec<Expression>,
     out_strides: Vec<Expression>,
     dtype: DType,
-    copy_func: std::sync::OnceLock<(CudaFunction, Arc<CudaModule>, String)>,
 }
 
 impl Default for KernelScatter {
@@ -1043,7 +1103,6 @@ impl Default for KernelScatter {
             src_strides: Vec::new(),
             out_strides: Vec::new(),
             dtype: DType::F32,
-            copy_func: std::sync::OnceLock::new(),
         }
     }
 }
@@ -1051,16 +1110,13 @@ impl Default for KernelScatter {
 impl EgglogOp for KernelScatter {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelScatter",
             &[
                 ("dest_shape", ELIST),
                 ("dest_strides", ELIST),
-                ("dest", IR),
-                ("indexes", IR),
                 ("index_shape", ELIST),
                 ("index_strides", ELIST),
-                ("src", IR),
                 ("src_strides", ELIST),
                 ("out_strides", ELIST),
                 ("dtype", DTYPE),
@@ -1068,20 +1124,31 @@ impl EgglogOp for KernelScatter {
         )
     }
 
+    fn n_inputs(&self) -> usize {
+        3
+    }
+
     fn rewrites(&self) -> Vec<Rule> {
-        let (scatter_args, scatter_match) = luminal::hlir::Scatter::default().sort().new_call();
+        // Match HLIR Scatter (now in Op format) and rewrite to KernelScatter
+        let hlir_scatter = luminal::hlir::Scatter::default().sort();
+        let (scatter_args, scatter_kind_term) = hlir_scatter.new_call();
+        // HLIR Scatter inputs: [dest, indexes, src] (n_inputs=3)
+        let dest = v("?__dest");
+        let indexes = v("?__indexes");
+        let src = v("?__src");
+        let scatter_inputs = ilist(vec![dest.clone(), indexes.clone(), src.clone()]);
+        let scatter_op = op_term(scatter_kind_term, scatter_inputs);
+
         let out_strides = SORTS
             .row_major
             .call(("list".to_string(), scatter_args["dest_shape"].clone()));
         let dt = v("?__dt");
-        let kernel_args = [
+        let kernel_kind_args = [
             ("dest_shape".to_string(), scatter_args["dest_shape"].clone()),
             (
                 "dest_strides".to_string(),
                 scatter_args["dest_strides"].clone(),
             ),
-            ("dest".to_string(), scatter_args["dest"].clone()),
-            ("indexes".to_string(), scatter_args["indexes"].clone()),
             (
                 "index_shape".to_string(),
                 scatter_args["index_shape"].clone(),
@@ -1090,7 +1157,6 @@ impl EgglogOp for KernelScatter {
                 "index_strides".to_string(),
                 scatter_args["index_strides"].clone(),
             ),
-            ("src".to_string(), scatter_args["src"].clone()),
             (
                 "src_strides".to_string(),
                 scatter_args["src_strides"].clone(),
@@ -1098,9 +1164,11 @@ impl EgglogOp for KernelScatter {
             ("out_strides".to_string(), out_strides),
             ("dtype".to_string(), dt.clone()),
         ];
+        let kernel_kind_term = self.sort().call(kernel_kind_args);
+        let kernel_op = op_term(kernel_kind_term, ilist(vec![dest, indexes, src.clone()]));
         vec![
-            rule(union(scatter_match, self.sort().call(kernel_args)))
-                .fact(eq(dt, dtype(scatter_args["src"].clone()))),
+            rule(union(scatter_op, kernel_op))
+                .fact(eq(dt, dtype(src))),
         ]
     }
 
@@ -1109,29 +1177,29 @@ impl EgglogOp for KernelScatter {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                dest_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                dest_strides: extract_expr_list(egraph, children[1], list_cache, expr_cache)
+                dest_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                dest_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
                     .unwrap(),
-                index_shape: extract_expr_list(egraph, children[4], list_cache, expr_cache)
+                index_shape: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
                     .unwrap(),
-                index_strides: extract_expr_list(egraph, children[5], list_cache, expr_cache)
+                index_strides: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache)
                     .unwrap(),
-                src_strides: extract_expr_list(egraph, children[7], list_cache, expr_cache)
+                src_strides: extract_expr_list(egraph, kind_children[4], list_cache, expr_cache)
                     .unwrap(),
-                out_strides: extract_expr_list(egraph, children[8], list_cache, expr_cache)
+                out_strides: extract_expr_list(egraph, kind_children[5], list_cache, expr_cache)
                     .unwrap(),
-                dtype: extract_dtype(egraph, children[9]),
-                copy_func: std::sync::OnceLock::new(),
+                dtype: extract_dtype(egraph, kind_children[6]),
             })),
-            vec![children[2], children[3], children[6]], // dest, indexes, src
+            input_enodes, // dest, indexes, src
         )
     }
 }
@@ -1169,40 +1237,9 @@ impl KernelOp for KernelScatter {
             ", const int* dyn_dims"
         };
 
-        // Compile copy kernel: copies dest → output (one thread per dest element)
-        let n_dest = self
-            .dest_shape
-            .iter()
-            .copied()
-            .product::<Expression>()
-            .to_kernel();
-        let copy_out_idx = flatten_strides(&self.dest_shape, &self.out_strides).to_kernel();
-        let copy_in_idx = flatten_strides(&self.dest_shape, &self.dest_strides).to_kernel();
-        let copy_kernel = format!(
-            "{includes}
-{dyn_defines}
-extern \"C\" {{
-    __global__ void scatter_copy({dtype} *out, const {dtype} *dest{dyn_dims_param}) {{
-        long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-        if (const_z >= {n_dest}) return;
-        out[{copy_out_idx}] = dest[{copy_in_idx}];
-    }}
-}}"
-        );
-        // Compile and store the copy function
-        let (copy_module, copy_func) = if let Some((module, func)) = compile_cache.get(&copy_kernel)
-        {
-            (module.clone(), func.clone())
-        } else {
-            let ptx = compile_kernel(&copy_kernel, &[self.dtype]);
-            let module = stream.context().load_module(ptx).unwrap();
-            let func = module.load_function("scatter_copy").unwrap();
-            compile_cache.insert(copy_kernel.clone(), (module.clone(), func.clone()));
-            (module, func)
-        };
-        let _ = self.copy_func.set((copy_func, copy_module, copy_kernel));
-
-        // Compile scatter kernel: writes src[i] → output[indexes[i]] (one thread per src element)
+        // Single-kernel scatter: copy dest→output then scatter src→output[indexes]
+        // Launched as 1 block of 1024 threads with __syncthreads() barrier.
+        // Uses float4 vectorized copy (4x throughput) for the copy phase.
         let n_src_elements = self
             .index_shape
             .iter()
@@ -1221,12 +1258,31 @@ extern \"C\" {{
             "{includes}
 {dyn_defines}
 extern \"C\" {{
-    __global__ void scatter({dtype} *out, const int *indexes, const {dtype} *src{dyn_dims_param}) {{
-        long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-        if (const_z >= {n_src_elements}) return;
-        int idx = indexes[{scatter_idx_idx}];
-        if (idx >= 0 && idx < {n_dest_elements}) {{
-            out[idx] = src[{scatter_src_idx}];
+    __global__ void scatter(
+        {dtype} *out, const {dtype} *dest, const int *indexes, const {dtype} *src{dyn_dims_param}
+    ) {{
+        int tid = threadIdx.x;
+        long long n_dest = {n_dest_elements};
+        long long n_src = {n_src_elements};
+        // Phase 1: vectorized copy dest → output (float4 = 4 elements per op)
+        long long n_vec = n_dest / 4;
+        float4 *out4 = (float4 *)out;
+        const float4 *dest4 = (const float4 *)dest;
+        for (long long i = tid; i < n_vec; i += blockDim.x) {{
+            out4[i] = dest4[i];
+        }}
+        // Handle remaining elements
+        long long remainder_start = n_vec * 4;
+        for (long long i = remainder_start + tid; i < n_dest; i += blockDim.x) {{
+            out[i] = dest[i];
+        }}
+        __syncthreads();
+        // Phase 2: scatter src → output[indexes[i]]
+        for (long long const_z = tid; const_z < n_src; const_z += blockDim.x) {{
+            int idx = indexes[{scatter_idx_idx}];
+            if (idx >= 0 && idx < n_dest) {{
+                out[idx] = src[{scatter_src_idx}];
+            }}
         }}
     }}
 }}"
@@ -1240,13 +1296,12 @@ extern \"C\" {{
             compile_cache.insert(scatter_kernel.clone(), (module.clone(), func.clone()));
             (module, func)
         };
-        let n_src: Expression = self.index_shape.iter().copied().product();
         (
             func,
             module,
             scatter_kernel,
-            (n_src, 1.into(), 1.into()),
-            (1.into(), 1.into(), 1.into()),
+            (1.into(), 1.into(), 1.into()),    // grid: 1 block
+            (1024.into(), 1.into(), 1.into()),  // block: 1024 threads
             0.into(),
             FxHashMap::default(),
         )
@@ -1293,61 +1348,13 @@ extern \"C\" {{
         _internal_bufs: &[CudaSlice<u8>],
         dyn_dims_ptr: u64,
     ) -> Vec<u64> {
-        // scatter kernel: (out, indexes, src [, dyn_dims])
+        // params: (out, dest, indexes, src [, dyn_dims])
         // input_ptrs: [dest, indexes, src]
-        let mut params = vec![output_ptr, input_ptrs[1], input_ptrs[2]];
+        let mut params = vec![output_ptr, input_ptrs[0], input_ptrs[1], input_ptrs[2]];
         if dyn_dims_ptr != 0 {
             params.push(dyn_dims_ptr);
         }
         params
-    }
-
-    fn pre_launch(
-        &self,
-        stream: &Arc<CudaStream>,
-        output_ptr: u64,
-        input_ptrs: &[u64],
-        dyn_dims_ptr: u64,
-        dyn_map: &FxHashMap<char, usize>,
-    ) -> anyhow::Result<()> {
-        let (copy_func, _copy_module, _) = self.copy_func.get().expect("copy kernel not compiled");
-        let n_dest = self
-            .dest_shape
-            .iter()
-            .copied()
-            .product::<Expression>()
-            .exec(dyn_map)
-            .unwrap() as u32;
-        let dest_ptr = input_ptrs[0]; // dest is input 0
-
-        let has_dyn = dyn_dims_ptr != 0;
-        let mut param_values: Vec<u64> = vec![output_ptr, dest_ptr];
-        if has_dyn {
-            param_values.push(dyn_dims_ptr);
-        }
-        let mut param_ptrs: Vec<*mut std::ffi::c_void> = param_values
-            .iter()
-            .map(|v| v as *const u64 as *mut std::ffi::c_void)
-            .collect();
-
-        let cu_func = unsafe { copy_func.raw_function() };
-        unsafe {
-            cudarc::driver::sys::cuLaunchKernel(
-                cu_func,
-                n_dest,
-                1,
-                1,
-                1,
-                1,
-                1,
-                0,
-                stream.cu_stream() as *mut _,
-                param_ptrs.as_mut_ptr(),
-                std::ptr::null_mut(),
-            )
-            .result()?;
-        }
-        Ok(())
     }
 
     fn bytes_loaded(&self) -> Expression {
@@ -1391,18 +1398,25 @@ pub struct KernelIota {
 impl EgglogOp for KernelIota {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelIota",
             &[("expr", EXPRESSION), ("range", EXPRESSION)],
         )
     }
 
+    fn n_inputs(&self) -> usize {
+        0
+    }
+
     fn rewrites(&self) -> Vec<Rule> {
-        let (args, hlir_iota) = luminal::hlir::Iota::default().sort().new_call();
-        let kernel_iota = self.sort().call(&args);
+        let (args, hlir_iota_kind) = luminal::hlir::Iota::default().sort().new_call();
+        let hlir_inputs = v("?__inputs");
+        let hlir_op = op_term(hlir_iota_kind, hlir_inputs.clone());
+        let kernel_kind = self.sort().call(&args);
+        let kernel_op = op_term(kernel_kind, hlir_inputs);
         vec![
-            rule(union(hlir_iota, kernel_iota.clone()))
-                .set(dtype(kernel_iota), app(&SORTS.int_dt, vec![])),
+            rule(union(hlir_op, kernel_op.clone()))
+                .set(dtype(kernel_op), app(&SORTS.int_dt, vec![])),
         ]
     }
 
@@ -1411,16 +1425,17 @@ impl EgglogOp for KernelIota {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        kind_children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                expr: extract_expr(egraph, children[0], expr_cache).unwrap(),
-                range: extract_expr(egraph, children[1], expr_cache).unwrap(),
+                expr: extract_expr(egraph, kind_children[0], expr_cache).unwrap(),
+                range: extract_expr(egraph, kind_children[1], expr_cache).unwrap(),
             })),
             vec![],
         )
@@ -1520,16 +1535,19 @@ pub struct KernelExp2 {
 impl EgglogOp for KernelExp2 {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelExp2",
             &[
                 ("shape", ELIST),
-                ("inp", IR),
                 ("strides", ELIST),
                 ("out_strides", ELIST),
                 ("dtype", DTYPE),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        1
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -1541,21 +1559,22 @@ impl EgglogOp for KernelExp2 {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                in_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                out_strides: extract_expr_list(egraph, children[3], list_cache, expr_cache)
+                shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                out_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
                     .unwrap(),
-                dtype: extract_dtype(egraph, children[4]),
+                dtype: extract_dtype(egraph, kind_children[3]),
             })),
-            vec![children[1]],
+            input_enodes,
         )
     }
 }
@@ -1665,16 +1684,19 @@ pub struct KernelLog2 {
 impl EgglogOp for KernelLog2 {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelLog2",
             &[
                 ("shape", ELIST),
-                ("inp", IR),
                 ("strides", ELIST),
                 ("out_strides", ELIST),
                 ("dtype", DTYPE),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        1
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -1686,21 +1708,22 @@ impl EgglogOp for KernelLog2 {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                in_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                out_strides: extract_expr_list(egraph, children[3], list_cache, expr_cache)
+                shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                out_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
                     .unwrap(),
-                dtype: extract_dtype(egraph, children[4]),
+                dtype: extract_dtype(egraph, kind_children[3]),
             })),
-            vec![children[1]],
+            input_enodes,
         )
     }
 }
@@ -1810,16 +1833,19 @@ pub struct KernelSin {
 impl EgglogOp for KernelSin {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelSin",
             &[
                 ("shape", ELIST),
-                ("inp", IR),
                 ("strides", ELIST),
                 ("out_strides", ELIST),
                 ("dtype", DTYPE),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        1
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -1831,21 +1857,22 @@ impl EgglogOp for KernelSin {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                in_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                out_strides: extract_expr_list(egraph, children[3], list_cache, expr_cache)
+                shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                out_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
                     .unwrap(),
-                dtype: extract_dtype(egraph, children[4]),
+                dtype: extract_dtype(egraph, kind_children[3]),
             })),
-            vec![children[1]],
+            input_enodes,
         )
     }
 }
@@ -1955,16 +1982,19 @@ pub struct KernelRecip {
 impl EgglogOp for KernelRecip {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelRecip",
             &[
                 ("shape", ELIST),
-                ("inp", IR),
                 ("strides", ELIST),
                 ("out_strides", ELIST),
                 ("dtype", DTYPE),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        1
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -1976,21 +2006,22 @@ impl EgglogOp for KernelRecip {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                in_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                out_strides: extract_expr_list(egraph, children[3], list_cache, expr_cache)
+                shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                out_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
                     .unwrap(),
-                dtype: extract_dtype(egraph, children[4]),
+                dtype: extract_dtype(egraph, kind_children[3]),
             })),
-            vec![children[1]],
+            input_enodes,
         )
     }
 }
@@ -2100,16 +2131,19 @@ pub struct KernelSqrt {
 impl EgglogOp for KernelSqrt {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelSqrt",
             &[
                 ("shape", ELIST),
-                ("inp", IR),
                 ("strides", ELIST),
                 ("out_strides", ELIST),
                 ("dtype", DTYPE),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        1
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -2121,21 +2155,22 @@ impl EgglogOp for KernelSqrt {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                in_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                out_strides: extract_expr_list(egraph, children[3], list_cache, expr_cache)
+                shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                out_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
                     .unwrap(),
-                dtype: extract_dtype(egraph, children[4]),
+                dtype: extract_dtype(egraph, kind_children[3]),
             })),
-            vec![children[1]],
+            input_enodes,
         )
     }
 }
@@ -2246,18 +2281,20 @@ pub struct KernelMod {
 impl EgglogOp for KernelMod {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelMod",
             &[
                 ("shape", ELIST),
-                ("inp_a", IR),
                 ("a_strides", ELIST),
-                ("inp_b", IR),
                 ("b_strides", ELIST),
                 ("out_strides", ELIST),
                 ("dtype", DTYPE),
             ],
         )
+    }
+
+    fn n_inputs(&self) -> usize {
+        2
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -2269,21 +2306,22 @@ impl EgglogOp for KernelMod {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                b_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
-                dtype: extract_dtype(egraph, children[6]),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache).unwrap(),
+                dtype: extract_dtype(egraph, kind_children[4]),
             })),
-            vec![children[1], children[3]],
+            input_enodes,
         )
     }
 }
@@ -2397,13 +2435,11 @@ pub struct KernelLessThan {
 impl EgglogOp for KernelLessThan {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelLessThan",
             &[
                 ("shape", ELIST),
-                ("inp_a", IR),
                 ("a_strides", ELIST),
-                ("inp_b", IR),
                 ("b_strides", ELIST),
                 ("out_strides", ELIST),
                 ("dtype", DTYPE),
@@ -2411,15 +2447,26 @@ impl EgglogOp for KernelLessThan {
         )
     }
 
+    fn n_inputs(&self) -> usize {
+        2
+    }
+
     fn rewrites(&self) -> Vec<Rule> {
         let hlir = LessThan::default().sort();
-        let (mut args, hlir_match) = hlir.new_call();
+        let (mut args, hlir_kind_term) = hlir.new_call();
         // LessThan's dtype is Bool (output type), but the kernel needs the INPUT dtype
+        // HLIR LessThan inputs: [inp_a, inp_b]
+        let inp_a = v("?__inp_a");
+        let inp_b = v("?__inp_b");
+        let hlir_inputs = ilist(vec![inp_a.clone(), inp_b.clone()]);
+        let hlir_op = op_term(hlir_kind_term, hlir_inputs.clone());
         let dt = v("?__dt");
         args.add("dtype", dt.clone());
+        let kernel_kind_term = self.sort().call(&args);
+        let kernel_op = op_term(kernel_kind_term, hlir_inputs);
         vec![
-            rule(union(hlir_match, self.sort().call(&args)))
-                .fact(eq(dt, dtype(args["inp_a"].clone()))),
+            rule(union(hlir_op, kernel_op))
+                .fact(eq(dt, dtype(inp_a))),
         ]
     }
 
@@ -2428,21 +2475,22 @@ impl EgglogOp for KernelLessThan {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                b_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
-                dtype: extract_dtype(egraph, children[6]),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache).unwrap(),
+                dtype: extract_dtype(egraph, kind_children[4]),
             })),
-            vec![children[1], children[3]],
+            input_enodes,
         )
     }
 }
@@ -2553,15 +2601,22 @@ pub struct KernelConstant {
 
 impl EgglogOp for KernelConstant {
     fn sort(&self) -> SortDef {
-        sort(IR, "KernelConstant", &[("value", F64)])
+        sort(OP_KIND, "KernelConstant", &[("value", F64)])
+    }
+
+    fn n_inputs(&self) -> usize {
+        0
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        let (args, const_match) = luminal::hlir::Constant::default().sort().new_call();
-        let kernel_const = self.sort().call(&args);
+        let (args, const_kind) = luminal::hlir::Constant::default().sort().new_call();
+        let hlir_inputs = v("?__inputs");
+        let hlir_op = op_term(const_kind, hlir_inputs.clone());
+        let kernel_kind = self.sort().call(&args);
+        let kernel_op = op_term(kernel_kind, hlir_inputs);
         vec![
-            rule(union(const_match, kernel_const.clone()))
-                .set(dtype(kernel_const), app(&SORTS.f32_dt, vec![])),
+            rule(union(hlir_op, kernel_op.clone()))
+                .set(dtype(kernel_op), app(&SORTS.f32_dt, vec![])),
         ]
     }
 
@@ -2570,15 +2625,16 @@ impl EgglogOp for KernelConstant {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         _expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                value: egraph.enodes[children[0]]
+                value: egraph.enodes[kind_children[0]]
                     .0
                     .replace("\"", "")
                     .parse::<f32>()
@@ -2678,10 +2734,9 @@ pub struct KernelCast {
 impl EgglogOp for KernelCast {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelCast",
             &[
-                ("inp", IR),
                 ("size", EXPRESSION),
                 ("dtype", DTYPE),
                 ("src_dtype", DTYPE),
@@ -2689,15 +2744,27 @@ impl EgglogOp for KernelCast {
         )
     }
 
+    fn n_inputs(&self) -> usize {
+        1
+    }
+
     fn rewrites(&self) -> Vec<Rule> {
-        let (mut args, cast_match) = luminal::hlir::Cast::default().sort().new_call();
-        let out_dty = args.remove("dtype");
+        // Match HLIR Cast and rewrite to KernelCast
+        let hlir_cast = luminal::hlir::Cast::default().sort();
+        let (mut cast_args, cast_kind_term) = hlir_cast.new_call();
+        let inp = v("?__inp");
+        let cast_inputs = ilist(vec![inp.clone()]);
+        let cast_op = op_term(cast_kind_term, cast_inputs.clone());
+
+        let out_dty = cast_args.remove("dtype");
         let in_dty = v("?__in_dt");
-        args.add("dtype", in_dty.clone());
-        args.add("src_dtype", out_dty);
+        cast_args.add("dtype", in_dty.clone());
+        cast_args.add("src_dtype", out_dty);
+        let kernel_kind_term = self.sort().call(&cast_args);
+        let kernel_op = op_term(kernel_kind_term, cast_inputs);
         vec![
-            rule(union(cast_match, self.sort().call(&args)))
-                .fact(eq(in_dty, dtype(args["inp"].clone()))),
+            rule(union(cast_op, kernel_op))
+                .fact(eq(in_dty, dtype(inp))),
         ]
     }
 
@@ -2706,19 +2773,20 @@ impl EgglogOp for KernelCast {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
-        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
+        _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                size: extract_expr(egraph, children[1], expr_cache).unwrap_or_default(),
-                in_dtype: extract_dtype(egraph, children[2]),
-                out_dtype: extract_dtype(egraph, children[3]),
+                size: extract_expr(egraph, kind_children[0], expr_cache).unwrap_or_default(),
+                in_dtype: extract_dtype(egraph, kind_children[1]),
+                out_dtype: extract_dtype(egraph, kind_children[2]),
             })),
-            vec![children[0]],
+            input_enodes,
         )
     }
 }
@@ -2894,34 +2962,37 @@ pub struct KernelEmbed {
 impl EgglogOp for KernelEmbed {
     fn sort(&self) -> SortDef {
         sort(
-            IR,
+            OP_KIND,
             "KernelEmbed",
             &[
                 ("batch_shape", ELIST),
-                ("token_ids", IR),
                 ("token_stride", ELIST),
-                ("embed_table", IR),
                 ("out_stride", ELIST),
                 ("embed_dim", EXPRESSION),
             ],
         )
     }
 
+    fn n_inputs(&self) -> usize {
+        2
+    }
+
     fn rewrites(&self) -> Vec<Rule> {
         vec![
             // Match Gather with Add(Mul(Cast(token_ids), const), Iota) indices
+            // Now uses (Op (OpKind ...) (ICons ...)) format
             Rule::raw("(rule
                 (
-                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
-                    (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
-                    (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
-                    (= ?token_ids_cast (Cast ?token_ids ?cast_size ?cast_dtype))
+                    (= ?gather (Op (Gather ?idx_shape ?idx_stride ?embed_shape ?embed_stride) (ICons ?indices (ICons ?embed_table (INil)))))
+                    (= ?indices (Op (Add ?add_shape ?mul_stride ?iota_stride ?add_out_stride) (ICons ?mul_result (ICons ?iota_result (INil)))))
+                    (= ?mul_result (Op (Mul ?mul_shape ?token_cast_stride ?mul_const_stride ?mul_out_stride) (ICons ?token_ids_cast (ICons ?mul_const (INil)))))
+                    (= ?token_ids_cast (Op (Cast ?cast_size ?cast_dtype) (ICons ?token_ids (INil))))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
                 )
                 (
-                    (let ?ke (KernelEmbed ?batch_shape ?token_ids ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (let ?ke (Op (KernelEmbed ?batch_shape ?token_cast_stride ?out_stride_batch ?embed_dim) (ICons ?token_ids (ICons ?embed_table (INil)))))
                     (union ?gather ?ke)
                     (set (dtype ?ke) (F32))
                 )
@@ -2930,16 +3001,16 @@ impl EgglogOp for KernelEmbed {
             // Match Gather with Add(Iota, Mul(Cast(token_ids), const)) indices (reversed order)
             Rule::raw("(rule
                 (
-                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
-                    (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
-                    (= ?mul_result (Mul ?mul_shape ?token_ids_cast ?token_cast_stride ?mul_const ?mul_const_stride ?mul_out_stride))
-                    (= ?token_ids_cast (Cast ?token_ids ?cast_size ?cast_dtype))
+                    (= ?gather (Op (Gather ?idx_shape ?idx_stride ?embed_shape ?embed_stride) (ICons ?indices (ICons ?embed_table (INil)))))
+                    (= ?indices (Op (Add ?add_shape ?iota_stride ?mul_stride ?add_out_stride) (ICons ?iota_result (ICons ?mul_result (INil)))))
+                    (= ?mul_result (Op (Mul ?mul_shape ?token_cast_stride ?mul_const_stride ?mul_out_stride) (ICons ?token_ids_cast (ICons ?mul_const (INil)))))
+                    (= ?token_ids_cast (Op (Cast ?cast_size ?cast_dtype) (ICons ?token_ids (INil))))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
                 )
                 (
-                    (let ?ke (KernelEmbed ?batch_shape ?token_ids ?token_cast_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (let ?ke (Op (KernelEmbed ?batch_shape ?token_cast_stride ?out_stride_batch ?embed_dim) (ICons ?token_ids (ICons ?embed_table (INil)))))
                     (union ?gather ?ke)
                     (set (dtype ?ke) (F32))
                 )
@@ -2948,15 +3019,15 @@ impl EgglogOp for KernelEmbed {
             // Match Gather with Add(Mul(token_ids, const), Iota) indices (no Cast)
             Rule::raw("(rule
                 (
-                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
-                    (= ?indices (Add ?add_shape ?mul_result ?mul_stride ?iota_result ?iota_stride ?add_out_stride))
-                    (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
+                    (= ?gather (Op (Gather ?idx_shape ?idx_stride ?embed_shape ?embed_stride) (ICons ?indices (ICons ?embed_table (INil)))))
+                    (= ?indices (Op (Add ?add_shape ?mul_stride ?iota_stride ?add_out_stride) (ICons ?mul_result (ICons ?iota_result (INil)))))
+                    (= ?mul_result (Op (Mul ?mul_shape ?token_stride ?mul_const_stride ?mul_out_stride) (ICons ?token_ids (ICons ?mul_const (INil)))))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
                 )
                 (
-                    (let ?ke (KernelEmbed ?batch_shape ?token_ids ?token_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (let ?ke (Op (KernelEmbed ?batch_shape ?token_stride ?out_stride_batch ?embed_dim) (ICons ?token_ids (ICons ?embed_table (INil)))))
                     (union ?gather ?ke)
                     (set (dtype ?ke) (F32))
                 )
@@ -2965,15 +3036,15 @@ impl EgglogOp for KernelEmbed {
             // Match Gather with Add(Iota, Mul(token_ids, const)) indices (reversed order, no Cast)
             Rule::raw("(rule
                 (
-                    (= ?gather (Gather ?indices ?idx_shape ?idx_stride ?embed_table ?embed_shape ?embed_stride))
-                    (= ?indices (Add ?add_shape ?iota_result ?iota_stride ?mul_result ?mul_stride ?add_out_stride))
-                    (= ?mul_result (Mul ?mul_shape ?token_ids ?token_stride ?mul_const ?mul_const_stride ?mul_out_stride))
+                    (= ?gather (Op (Gather ?idx_shape ?idx_stride ?embed_shape ?embed_stride) (ICons ?indices (ICons ?embed_table (INil)))))
+                    (= ?indices (Op (Add ?add_shape ?iota_stride ?mul_stride ?add_out_stride) (ICons ?iota_result (ICons ?mul_result (INil)))))
+                    (= ?mul_result (Op (Mul ?mul_shape ?token_stride ?mul_const_stride ?mul_out_stride) (ICons ?token_ids (ICons ?mul_const (INil)))))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))
                 )
                 (
-                    (let ?ke (KernelEmbed ?batch_shape ?token_ids ?token_stride ?embed_table ?out_stride_batch ?embed_dim))
+                    (let ?ke (Op (KernelEmbed ?batch_shape ?token_stride ?out_stride_batch ?embed_dim) (ICons ?token_ids (ICons ?embed_table (INil)))))
                     (union ?gather ?ke)
                     (set (dtype ?ke) (F32))
                 )
@@ -2987,22 +3058,23 @@ impl EgglogOp for KernelEmbed {
     }
 
     fn extract<'a>(
-        &self,
+        &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                batch_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache)
+                batch_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
                     .unwrap(),
-                token_stride: extract_expr_list(egraph, children[2], list_cache, expr_cache)
+                token_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
                     .unwrap(),
-                out_stride: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                embed_dim: extract_expr(egraph, children[5], expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                embed_dim: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
             })),
-            vec![children[1], children[3]], // token_ids, embedding_table
+            input_enodes, // token_ids, embedding_table
         )
     }
 }
@@ -3122,3 +3194,4 @@ extern \"C\" {{
         "Embed"
     }
 }
+

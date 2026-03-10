@@ -2,10 +2,10 @@ use super::{MetalKernelOp, DYN_BUFFER_INDEX};
 use luminal::{
     egglog_utils::{
         api::{app, eq, rule, sort, union, v, Rule, SortDef},
-        base::{dtype, DTYPE, ELIST, EXPRESSION, F64, IR, OP_SORTS, SORTS},
+        base::{dtype, DTYPE, ELIST, EXPRESSION, F64, IR, SORTS},
         SerializedEGraph,
     },
-    hlir::{Add, Cast, Constant, Gather, Iota, LessThan, MaxReduce, Mod, Mul, Scatter, SumReduce},
+    hlir::{Add, Cast, Constant, Gather, Iota, LessThan, MaxReduce, Mod, Mul, Scatter, SumReduce, unary_sort, binary_sort, reduce_sort},
     op::*,
     prelude::*,
     shape::flatten_strides,
@@ -138,12 +138,12 @@ macro_rules! metal_unary_op {
 
         impl EgglogOp for $name {
             fn sort(&self) -> SortDef {
-                OP_SORTS.unary($op_name)
+                unary_sort($op_name)
             }
 
             fn rewrites(&self) -> Vec<Rule> {
                 let hlir_name = ($op_name).strip_prefix("Metal").unwrap_or($op_name);
-                let hlir_sort = OP_SORTS.unary(hlir_name);
+                let hlir_sort = unary_sort(hlir_name);
                 let (args, hlir_match) = hlir_sort.new_call();
                 let metal_op = self.sort().call(&args);
                 let dt = v("?__dt");
@@ -277,7 +277,7 @@ pub struct MetalAdd {
 
 impl EgglogOp for MetalAdd {
     fn sort(&self) -> SortDef {
-        OP_SORTS.binary("MetalAdd")
+        binary_sort("MetalAdd")
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -404,7 +404,7 @@ pub struct MetalMul {
 
 impl EgglogOp for MetalMul {
     fn sort(&self) -> SortDef {
-        OP_SORTS.binary("MetalMul")
+        binary_sort("MetalMul")
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -522,7 +522,7 @@ pub struct MetalMod {
 
 impl EgglogOp for MetalMod {
     fn sort(&self) -> SortDef {
-        OP_SORTS.binary("MetalMod")
+        binary_sort("MetalMod")
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -640,7 +640,7 @@ pub struct MetalLessThan {
 
 impl EgglogOp for MetalLessThan {
     fn sort(&self) -> SortDef {
-        OP_SORTS.binary("MetalLessThan")
+        binary_sort("MetalLessThan")
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -762,7 +762,7 @@ pub struct MetalSumReduce {
 
 impl EgglogOp for MetalSumReduce {
     fn sort(&self) -> SortDef {
-        OP_SORTS.reduce("MetalSum")
+        reduce_sort("MetalSum")
     }
 
     fn rewrites(&self) -> Vec<Rule> {
@@ -916,7 +916,7 @@ pub struct MetalMaxReduce {
 
 impl EgglogOp for MetalMaxReduce {
     fn sort(&self) -> SortDef {
-        OP_SORTS.reduce("MetalMax")
+        reduce_sort("MetalMax")
     }
 
     fn rewrites(&self) -> Vec<Rule> {
