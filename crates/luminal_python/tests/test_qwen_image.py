@@ -190,68 +190,40 @@ def _make_small_transformer_config():
     )
 
 
-def _export_and_simplify(wrapper, inputs, input_names, output_names):
-    """Export model to ONNX and simplify with onnxsim."""
-    tmp = tempfile.NamedTemporaryFile(suffix=".onnx", delete=False)
-    tmp_path = tmp.name
-    tmp.close()
-    try:
-        torch.onnx.export(
-            wrapper,
-            inputs,
-            tmp_path,
-            opset_version=20,
-            input_names=input_names,
-            output_names=output_names,
-            dynamo=False,
-        )
-        m = onnx.load(tmp_path)
-        m_sim, check = onnxsim.simplify(m)
-        assert check, "onnxsim simplification failed"
-        onnx.save(m_sim, tmp_path)
-        return tmp_path
-    except Exception:
-        os.unlink(tmp_path)
-        raise
+def _make_medium_transformer_config():
+    """Medium transformer config: ~39M params, 4 layers."""
+    return dict(
+        patch_size=2,
+        in_channels=32,
+        out_channels=32,
+        num_layers=4,
+        attention_head_dim=64,
+        num_attention_heads=8,
+        joint_attention_dim=512,
+        axes_dims_rope=(8, 28, 28),
+    )
 
 
-def _run_transformer_test(config, backend, atol):
-    """Export transformer to ONNX, run through luminal, compare."""
-    import luminal
+def _run_transformer_test(config, atol):
+    """Compile transformer with luminal backend, compare to PyTorch reference."""
     from diffusers.models import QwenImageTransformer2DModel
 
-    model = QwenImageTransformer2DModel(**config).eval()
+    from luminal import luminal_backend
 
-    # Image patches: T=1, H/p=2, W/p=2 -> 4 patches
+    model = QwenImageTransformer2DModel(**config).eval()
     img_seq_len = 4
     txt_seq_len = 3
-    inner_dim = config["num_attention_heads"] * config["attention_head_dim"]
 
     wrapper = TransformerONNXWrapper(model, [(1, 2, 2)], txt_seq_len).eval()
+    wrapper_compiled = torch.compile(wrapper, backend=luminal_backend)
 
     hidden = torch.randn(1, img_seq_len, config["in_channels"])
-    encoder_hs = torch.randn(1, txt_seq_len, inner_dim)
+    encoder_hs = torch.randn(1, txt_seq_len, config["joint_attention_dim"])
     timestep = torch.tensor([1.0])
 
     with torch.no_grad():
         ref = wrapper(hidden, encoder_hs, timestep)
-
-    onnx_path = _export_and_simplify(
-        wrapper,
-        (hidden, encoder_hs, timestep),
-        ["hidden_states", "encoder_hidden_states", "timestep"],
-        ["output"],
-    )
-    try:
-        graph = luminal.process_onnx(onnx_path, backend)
-        graph.set_input("hidden_states", hidden.flatten().tolist())
-        graph.set_input("encoder_hidden_states", encoder_hs.flatten().tolist())
-        graph.set_input("timestep", timestep.flatten().tolist())
-        graph.run()
-        out_data = graph.get_output("output")
-        out = torch.tensor(out_data, dtype=torch.float32).reshape(ref.shape)
-    finally:
-        os.unlink(onnx_path)
+        out = wrapper_compiled(hidden, encoder_hs, timestep)
 
     assert torch.allclose(out, ref, atol=atol), (
         f"max_diff={torch.max(torch.abs(out - ref)).item():.2e}"
@@ -295,6 +267,20 @@ def _make_tiny_vae_config():
     )
 
 
+def _make_medium_vae_config():
+    """Medium VAE config: base_dim=32, z_dim=8."""
+    return dict(
+        base_dim=32,
+        z_dim=8,
+        dim_mult=[1, 2, 4],
+        num_res_blocks=2,
+        attn_scales=[],
+        temperal_downsample=[False, True],
+        dropout=0.0,
+        input_channels=3,
+    )
+
+
 def _prepare_vae_for_onnx(vae):
     """Replace non-ONNX-exportable modules in the VAE."""
     import diffusers.models.autoencoders.autoencoder_kl_qwenimage as vae_mod
@@ -319,31 +305,38 @@ class _VAEDecoderWrapper(nn.Module):
         return self.vae.decode(z).sample
 
 
-# ============================================================================
-# Tests
-# ============================================================================
+def _export_and_simplify(wrapper, inputs, input_names, output_names):
+    """Export model to ONNX and simplify with onnxsim."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".onnx", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        torch.onnx.export(
+            wrapper,
+            inputs,
+            tmp_path,
+            opset_version=20,
+            input_names=input_names,
+            output_names=output_names,
+            dynamo=False,
+        )
+        m = onnx.load(tmp_path)
+        m_sim, check = onnxsim.simplify(m)
+        assert check, "onnxsim simplification failed"
+        onnx.save(m_sim, tmp_path)
+        return tmp_path
+    except Exception:
+        os.unlink(tmp_path)
+        raise
 
 
-def test_qwen_image_transformer_tiny():
-    """Tiny QwenImage transformer: 1 layer, 4 heads, dim=64."""
-    config = _make_tiny_transformer_config()
-    backend = os.environ.get("LUMINAL_BACKEND", "native")
-    _run_transformer_test(config, backend, atol=1e-4)
-
-
-def test_qwen_image_transformer_small():
-    """Small QwenImage transformer: 2 layers, 8 heads, dim=256."""
-    config = _make_small_transformer_config()
-    backend = os.environ.get("LUMINAL_BACKEND", "native")
-    _run_transformer_test(config, backend, atol=1e-4)
-
-
-def test_qwen_image_vae_decoder_tiny():
-    """Tiny QwenImage VAE decoder: base_dim=8, z_dim=4."""
-    import luminal
+def _run_vae_test(config, atol):
+    """Export VAE decoder to ONNX, run through luminal, compare."""
     from diffusers import AutoencoderKLQwenImage
 
-    config = _make_tiny_vae_config()
+    import luminal
+
+    backend = os.environ.get("LUMINAL_BACKEND", "native")
     vae = AutoencoderKLQwenImage(**config).eval()
     vae = _prepare_vae_for_onnx(vae)
 
@@ -353,11 +346,8 @@ def test_qwen_image_vae_decoder_tiny():
     with torch.no_grad():
         ref = wrapper(latents)
 
-    onnx_path = _export_and_simplify(
-        wrapper, (latents,), ["latents"], ["output"]
-    )
+    onnx_path = _export_and_simplify(wrapper, (latents,), ["latents"], ["output"])
     try:
-        backend = os.environ.get("LUMINAL_BACKEND", "native")
         graph = luminal.process_onnx(onnx_path, backend)
         graph.set_input("latents", latents.flatten().tolist())
         graph.run()
@@ -366,6 +356,71 @@ def test_qwen_image_vae_decoder_tiny():
     finally:
         os.unlink(onnx_path)
 
-    assert torch.allclose(out, ref, atol=1e-3), (
+    assert torch.allclose(out, ref, atol=atol), (
         f"max_diff={torch.max(torch.abs(out - ref)).item():.2e}"
     )
+
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+
+def test_qwen_image_transformer_tiny():
+    """Tiny QwenImage transformer: 1 layer, 4 heads, dim=64."""
+    _run_transformer_test(_make_tiny_transformer_config(), atol=1e-4)
+
+
+def test_qwen_image_transformer_small():
+    """Small QwenImage transformer: 2 layers, 8 heads, dim=256."""
+    _run_transformer_test(_make_small_transformer_config(), atol=1e-4)
+
+
+def test_qwen_image_transformer_medium():
+    """Medium QwenImage transformer: 4 layers, 8 heads, dim=512."""
+    _run_transformer_test(_make_medium_transformer_config(), atol=1e-4)
+
+
+def test_qwen_image_transformer_full():
+    """Full QwenImage transformer (production defaults)."""
+    from diffusers.models import QwenImageTransformer2DModel
+
+    from luminal import luminal_backend
+
+    model = QwenImageTransformer2DModel().eval()
+    config = {k: v for k, v in dict(model.config).items() if not k.startswith("_")}
+
+    wrapper = TransformerONNXWrapper(model, [(1, 2, 2)], txt_seq_len=3).eval()
+    wrapper_compiled = torch.compile(wrapper, backend=luminal_backend)
+
+    hidden = torch.randn(1, 4, config["in_channels"])
+    encoder_hs = torch.randn(1, 3, config["joint_attention_dim"])
+    timestep = torch.tensor([1.0])
+
+    with torch.no_grad():
+        ref = wrapper(hidden, encoder_hs, timestep)
+        out = wrapper_compiled(hidden, encoder_hs, timestep)
+
+    assert torch.allclose(out, ref, atol=1e-4), (
+        f"max_diff={torch.max(torch.abs(out - ref)).item():.2e}"
+    )
+
+
+def test_qwen_image_vae_decoder_tiny():
+    """Tiny QwenImage VAE decoder: base_dim=8, z_dim=4."""
+    _run_vae_test(_make_tiny_vae_config(), atol=1e-3)
+
+
+def test_qwen_image_vae_decoder_medium():
+    """Medium QwenImage VAE decoder: base_dim=32, z_dim=8."""
+    _run_vae_test(_make_medium_vae_config(), atol=1e-3)
+
+
+@pytest.mark.skip(reason="Full production VAE -- expected to be slow/OOM")
+def test_qwen_image_vae_decoder_full():
+    """Full QwenImage VAE decoder (production defaults)."""
+    from diffusers import AutoencoderKLQwenImage
+
+    config = dict(AutoencoderKLQwenImage().config)
+    config = {k: v for k, v in config.items() if not k.startswith("_")}
+    _run_vae_test(config, atol=1e-3)

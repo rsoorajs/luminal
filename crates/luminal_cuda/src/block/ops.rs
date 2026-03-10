@@ -1079,7 +1079,13 @@ impl EgglogOp for TileMatmulSplitK {
 
                 ; Assert B has contiguous k (col-major B / transposed)
                 (= ?b_k_stride (MIter))
-              
+
+                ; Assert proper matmul broadcast pattern:
+                ; A is broadcast over N (a_n_stride = 0), B is broadcast over M (b_m_stride = 0)
+                ; This prevents matching element-wise Mul+Sum patterns (e.g., x*x from LayerNorm)
+                (= ?a_n_stride (MNum 0))
+                (= ?b_m_stride (MNum 0))
+
                 ; Only match F32 inputs (BlockOp matmul is F32-only)
                 (= (F32) (dtype ?a))
                 (= (F32) (dtype ?b))
@@ -1474,6 +1480,12 @@ impl EgglogOp for TileMatmulFullSplit {
                 ; Assert B has contiguous k (col-major B / transposed)
                 (= ?b_k_stride (MIter))
 
+                ; Assert proper matmul broadcast pattern:
+                ; A is broadcast over N (a_n_stride = 0), B is broadcast over M (b_m_stride = 0)
+                ; This prevents matching element-wise Mul+Sum patterns (e.g., x*x from LayerNorm)
+                (= ?a_n_stride (MNum 0))
+                (= ?b_m_stride (MNum 0))
+
                 (= (F32) (dtype ?a))
                 (= (F32) (dtype ?b))
             )
@@ -1620,6 +1632,7 @@ impl BlockOp for TileMatmulFullSplit {
         const int b_n_stride = eval_expression(payload.b_n_stride, 0);
         const int c_m_stride = eval_expression(payload.c_m_stride, 0);
         const int c_n_stride = eval_expression(payload.c_n_stride, 0);
+
 
         constexpr int TILE_SIZE = {ts};
         const int threads = blockDim.x;
