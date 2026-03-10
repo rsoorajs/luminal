@@ -595,7 +595,7 @@ impl Drop for CudaGraphOp {
     fn drop(&mut self) {
         let mut state = self.state.borrow_mut();
 
-        // Destroy timing events - extract ctx first to avoid borrow issues
+        // Destroy timing events first
         let ctx = state.cuda_graph_exec.as_ref().map(|exec| exec.ctx.clone());
         if let Some(ctx) = ctx {
             for event in state.timing_events.drain(..) {
@@ -603,21 +603,21 @@ impl Drop for CudaGraphOp {
             }
         }
 
-        // Forget dyn_dims buffer (managed by runtime)
-        if let Some(buf) = state.dyn_dims_buffer.take() {
-            std::mem::forget(buf);
-        }
+        // Destroy CUDA graph handles BEFORE freeing buffers they reference.
+        // The graph exec holds device pointers to dyn_dims_buffer and internal_bufs,
+        // so it must be destroyed first to avoid dangling pointer issues.
+        drop(state.cuda_graph_exec.take());
+        drop(state.cuda_graph.take());
 
-        // Handle kernel resources
+        // Now safe to free dynamically allocated GPU buffers
+        // (dyn_dims_buffer and internal_bufs are freed by normal Drop)
+
+        // Constants point to __constant__ memory in the CUDA module,
+        // not dynamically allocated — must not be freed.
         for kernel in state.kernels.iter_mut() {
-            // Forget constants (they point to __constant__ memory)
             let constants = std::mem::take(&mut kernel.constants);
             for (_k, v) in constants {
                 std::mem::forget(v);
-            }
-            // Forget internal buffers (managed by runtime)
-            for buf in kernel.internal_bufs.drain(..) {
-                std::mem::forget(buf);
             }
         }
     }
