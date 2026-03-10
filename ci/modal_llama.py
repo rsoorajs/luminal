@@ -4,16 +4,14 @@ import os
 
 app = modal.App("luminal-ci-llama")
 
-# Persistent volumes for caching
 hf_cache = modal.Volume.from_name("luminal-hf-cache", create_if_missing=True)
-cargo_cache = modal.Volume.from_name("luminal-cargo-cache", create_if_missing=True)
 
-# Use existing GHCR CUDA image (already has Python, Rust, CUDA)
-# add_local_dir copies source code into the image (replaces deprecated modal.Mount)
 WORKDIR = "/workspace/luminal"
 
 cuda_image = (
-    modal.Image.from_registry("ghcr.io/luminal-ai/luminal-docker:cuda")
+    modal.Image.from_registry(
+        "ghcr.io/luminal-ai/luminal-docker:cuda", force_build=True
+    )
     .add_local_dir(".", remote_path=WORKDIR)
 )
 
@@ -24,7 +22,6 @@ cuda_image = (
     timeout=3600,  # 60 minutes
     volumes={
         "/root/.cache/huggingface": hf_cache,
-        f"{WORKDIR}/target": cargo_cache,
     },
 )
 def run_llama():
@@ -34,13 +31,11 @@ def run_llama():
     subprocess.run(
         ["cargo", "run", "--release"],
         cwd=f"{WORKDIR}/examples/llama",
-        env={**os.environ, "CUDA_COMPUTE_CAP": "80"},
+        env={**os.environ, "CUDA_COMPUTE_CAP": "80", "CUDARC_CUDA_VERSION": "13000"},
         check=True,
     )
 
-    # Persist caches for next run
     hf_cache.commit()
-    cargo_cache.commit()
 
 
 @app.local_entrypoint()
