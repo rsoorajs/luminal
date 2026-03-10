@@ -11,6 +11,7 @@ jobs:
     cuda_llama_modal:
         name: Cuda Llama (Modal A100)
         runs-on: ubuntu-latest
+        environment: Modal
         timeout-minutes: 70
 
         steps:
