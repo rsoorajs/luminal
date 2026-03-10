@@ -148,6 +148,12 @@ pub trait EgglogOp: Debug {
     }
     fn cleanup(&self) -> bool;
 
+    /// Additional IR datatype variants this op needs (e.g. `"(ConsumedBuffer IR)"`).
+    /// These are injected into the IR datatype definition.
+    fn ir_defs(&self) -> Vec<String> {
+        vec![]
+    }
+
     /// Number of IR inputs this op takes (from IList).
     /// Used by generic IList walking during extraction.
     fn n_inputs(&self) -> usize {

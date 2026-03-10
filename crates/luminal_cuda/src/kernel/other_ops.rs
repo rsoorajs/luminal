@@ -12,16 +12,15 @@ use cudarc::{
 use itertools::Itertools;
 use luminal::{
     egglog_utils::{
-        api::{Rule, SortDef, eq, rule, sort, union, v},
-        base::{DTYPE, ELIST, EXPRESSION, OP_KIND, SORTS, dtype, ilist, op_term},
+        api::{Rule, SortDef, sort},
+        base::{DTYPE, ELIST, EXPRESSION, OP_KIND},
         extract_dtype, extract_expr, extract_expr_list,
     },
-    hlir::Scatter,
     op::*,
     prelude::*,
 };
 
-pub type Ops = (KernelMeanReduce, KernelBatchMatVec);
+pub type Ops = (KernelMeanReduce, KernelBatchMatVec, KernelScatterNoCopy);
 
 #[derive(Default, Debug, Clone)]
 
@@ -260,52 +259,82 @@ impl EgglogOp for KernelScatterNoCopy {
         )
     }
 
+    fn ir_defs(&self) -> Vec<String> {
+        vec!["(ConsumedBuffer IR)".to_string()]
+    }
+
     fn n_inputs(&self) -> usize {
         3
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        // Same matching as KernelScatter but with higher priority (lower cost)
-        let hlir_scatter = Scatter::default().sort();
-        let (scatter_args, scatter_kind_term) = hlir_scatter.new_call();
-        // HLIR Scatter inputs: [dest, indexes, src] (n_inputs=3)
-        let dest = v("?__dest");
-        let indexes = v("?__indexes");
-        let src = v("?__src");
-        let scatter_inputs = ilist(vec![dest.clone(), indexes.clone(), src.clone()]);
-        let scatter_op = op_term(scatter_kind_term, scatter_inputs);
-
-        let out_strides = SORTS
-            .row_major
-            .call(("list".to_string(), scatter_args["dest_shape"].clone()));
-        let dt = v("?__dt");
-        let kernel_kind_args = [
-            ("dest_shape".to_string(), scatter_args["dest_shape"].clone()),
-            (
-                "dest_strides".to_string(),
-                scatter_args["dest_strides"].clone(),
+        // Match KernelScatter and rewrite to KernelScatterNoCopy with ConsumedBuffer on dest.
+        // ConsumedBuffer wraps dest to signal in-place modification.
+        //
+        // Two-phase resolution:
+        // 1. During (run): cleanup rules delete ConsumedBuffer if dest is shared (another op uses it)
+        // 2. During (saturate base_cleanup): surviving ConsumedBuffers are valid — union with
+        //    source and delete. This merges the ConsumedBuffer eclass into the source eclass,
+        //    making KernelScatterNoCopy's input resolve directly to the source buffer.
+        //
+        // If ConsumedBuffer was deleted (shared case), cascade cleanup removes the dependent
+        // ICons and KernelScatterNoCopy Op, leaving only KernelScatter.
+        let mut rules = vec![
+            // Rewrite: KernelScatter -> KernelScatterNoCopy with ConsumedBuffer
+            Rule::raw(
+                "(rule
+                    (
+                        (= ?scatter (Op (KernelScatter ?ds ?dst ?is ?istr ?ss ?os ?dt)
+                            (ICons ?dest (ICons ?indexes (ICons ?src (INil))))))
+                        (= ?dty (dtype ?src))
+                    )
+                    (
+                        (let ?consumed (ConsumedBuffer ?dest))
+                        (let ?nocopy (Op (KernelScatterNoCopy ?ds ?dst ?is ?istr ?ss ?os ?dt)
+                            (ICons ?consumed (ICons ?indexes (ICons ?src (INil))))))
+                        (union ?scatter ?nocopy)
+                        (set (dtype ?nocopy) ?dty)
+                    )
+                    :name \"scatter to scatter-no-copy\"
+                )",
             ),
-            (
-                "index_shape".to_string(),
-                scatter_args["index_shape"].clone(),
+            // Dtype propagation for ConsumedBuffer
+            Rule::raw(
+                "(rule
+                    ((= ?cb (ConsumedBuffer ?a))
+                     (= ?dt (dtype ?a)))
+                    ((set (dtype ?cb) ?dt))
+                    :name \"consumed-buffer-dtype\"
+                )",
             ),
-            (
-                "index_strides".to_string(),
-                scatter_args["index_strides"].clone(),
-            ),
-            (
-                "src_strides".to_string(),
-                scatter_args["src_strides"].clone(),
-            ),
-            ("out_strides".to_string(), out_strides),
-            ("dtype".to_string(), dt.clone()),
         ];
-        let kernel_kind_term = self.sort().call(kernel_kind_args);
-        let kernel_op = op_term(kernel_kind_term, ilist(vec![dest, indexes, src.clone()]));
-        vec![
-            rule(union(scatter_op, kernel_op))
-                .fact(eq(dt, dtype(src))),
-        ]
+        // Cleanup: delete ConsumedBuffer when inner buffer is used by a DIFFERENT Op.
+        rules.push(Rule::raw(&format!(
+            "(rule
+                ((= ?cb (ConsumedBuffer ?a))
+                 (= ?op1 (Op ?k1 ?ilist1))
+                 (= ?ilist1 (ICons ?cb ?rest1))
+                 (= ?op2 (Op ?k2 ?ilist2))
+                 (!= ?op1 ?op2)
+                 (= ?ilist2 (ICons ?a ?t2)))
+                ((delete (ConsumedBuffer ?a)))
+                :ruleset cleanup
+                :name \"consumed-buffer-cleanup-pos\"
+            )"
+        )));
+        // Surviving ConsumedBuffers are valid — union with source and delete.
+        // Runs in base_cleanup (after all (run) iterations).
+        // TODO: figure out how to validate this is a valid ConsumedBuffer independantly so we can run it in the cleanup ruleset, rather than base_cleanup
+        rules.push(Rule::raw(
+            "(rule
+                ((= ?cb (ConsumedBuffer ?a)))
+                ((union ?cb ?a)
+                 (delete (ConsumedBuffer ?a)))
+                :ruleset base_cleanup
+                :name \"consumed-buffer-resolve\"
+            )",
+        ));
+        rules
     }
 
     fn cleanup(&self) -> bool {
@@ -322,7 +351,8 @@ impl EgglogOp for KernelScatterNoCopy {
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                dest_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                dest_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
+                    .unwrap(),
                 dest_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
                     .unwrap(),
                 index_shape: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
@@ -514,6 +544,10 @@ extern \"C\" {{
         0.into()
     }
 
+    fn output_aliases_input(&self) -> Option<usize> {
+        Some(0) // output aliases dest (input 0)
+    }
+
     fn kernel_name(&self) -> &'static str {
         "ScatterNoCopy"
     }
@@ -630,13 +664,17 @@ impl EgglogOp for KernelBatchMatVec {
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
+                    .unwrap(),
                 k_dim: extract_expr(egraph, kind_children[1], expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
                 a_k_stride: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
-                b_stride: extract_expr_list(egraph, kind_children[4], list_cache, expr_cache).unwrap(),
+                b_stride: extract_expr_list(egraph, kind_children[4], list_cache, expr_cache)
+                    .unwrap(),
                 b_k_stride: extract_expr(egraph, kind_children[5], expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, kind_children[6], list_cache, expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[6], list_cache, expr_cache)
+                    .unwrap(),
                 dtype: extract_dtype(egraph, kind_children[7]),
             })),
             input_enodes, // A, B
@@ -762,9 +800,9 @@ extern \"C\" {{
             func,
             module,
             kernel,
-            (n_outputs, 1.into(), 1.into()),     // grid: one block per output
-            (256.into(), 1.into(), 1.into()),     // block: 256 threads
-            32.into(),                            // shared mem for warp_sums
+            (n_outputs, 1.into(), 1.into()), // grid: one block per output
+            (256.into(), 1.into(), 1.into()), // block: 256 threads
+            32.into(),                       // shared mem for warp_sums
             FxHashMap::default(),
         )
     }
@@ -805,11 +843,11 @@ extern \"C\" {{
 
 #[derive(Default, Debug, Clone)]
 pub struct KernelSoftmax {
-    out_shape: Vec<Expression>,   // shape of output (same as input)
-    in_stride: Vec<Expression>,   // input strides
-    out_stride: Vec<Expression>,  // output strides
-    reduce_dim: Expression,       // size of the softmax dimension (last dim)
-    reduce_stride: Expression,    // stride along softmax dimension in input
+    out_shape: Vec<Expression>,  // shape of output (same as input)
+    in_stride: Vec<Expression>,  // input strides
+    out_stride: Vec<Expression>, // output strides
+    reduce_dim: Expression,      // size of the softmax dimension (last dim)
+    reduce_stride: Expression,   // stride along softmax dimension in input
 }
 
 impl EgglogOp for KernelSoftmax {
@@ -850,9 +888,12 @@ impl EgglogOp for KernelSoftmax {
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                in_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
+                    .unwrap(),
+                in_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
                 reduce_dim: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
                 reduce_stride: extract_expr(egraph, kind_children[4], expr_cache).unwrap(),
             })),
@@ -1009,9 +1050,9 @@ extern \"C\" {{
             func,
             module,
             kernel,
-            (n_rows, 1.into(), 1.into()),        // grid: one block per row
-            (256.into(), 1.into(), 1.into()),     // block: 256 threads
-            32.into(),                            // shared mem
+            (n_rows, 1.into(), 1.into()),     // grid: one block per row
+            (256.into(), 1.into(), 1.into()), // block: 256 threads
+            32.into(),                        // shared mem
             FxHashMap::default(),
         )
     }

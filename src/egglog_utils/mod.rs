@@ -18,6 +18,7 @@ pub const RUN_SCHEDULE: &str = "(run-schedule
         (run)
     )
     (saturate expr)
+    (saturate cleanup)
     (saturate base_cleanup)
 )";
 
@@ -42,12 +43,15 @@ fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     }
     let ir_str = ir_variants.join("\n");
     let opkind_str = opkind_variants.join("\n");
+    let extra_ir: FxHashSet<String> = ops.iter().flat_map(|o| o.ir_defs()).collect();
+    let extra_ir_str = extra_ir.into_iter().join("\n");
     format!(
         "
     (datatype*
         (IR
             (OutputJoin IR IR)
             (Op OpKind IList)
+            {extra_ir_str}
             {ir_str}
         )
         (OpKind
@@ -137,16 +141,16 @@ pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool)
     [
         base::base_expression_egglog(),
         op_defs_string(ops),
-        ops.iter()
-            .flat_map(|o| o.rewrites())
-            .map(|r| r.to_egglog_string())
-            .join("\n"),
         if cleanup {
             op_cleanups_string(ops)
         } else {
             "".to_string()
         },
         base::base_cleanup_egglog(),
+        ops.iter()
+            .flat_map(|o| o.rewrites())
+            .map(|r| r.to_egglog_string())
+            .join("\n"),
         program.to_string(),
         RUN_SCHEDULE.to_string(),
     ]
@@ -631,15 +635,6 @@ pub fn run_egglog(
         )
         .green()
     );
-    // if enabled!(Level::TRACE) {
-    //     let log_dir = Path::new("egraph");
-    //     if log_dir.exists() {
-    //         fs::remove_dir_all(log_dir).unwrap();
-    //     }
-    //     fs::create_dir(log_dir).unwrap();
-    //     fs::write(log_dir.join("egraph.dot"), egraph.to_dot().unwrap()).unwrap();
-    //     fs::write(log_dir.join("egraph.html"), egraph.to_html().unwrap()).unwrap();
-    // }
     let (sort, value) = egraph.eval_expr(&var!(root))?;
     let s = egraph.serialize(egglog::SerializeConfig {
         root_eclasses: vec![(sort, value)],
@@ -690,63 +685,6 @@ pub fn run_egglog(
     };
     // Strip out all [...] enodes
     egraph.enodes.retain(|_, (label, _)| label != "[...]");
-
-    // Conditional cleanup: remove HLIR ops from eclasses that have alternative (rewritten) enodes.
-    // This replaces the egglog-side `(saturate cleanup)` which unconditionally deleted all HLIR ops,
-    // causing eclasses without rewrites to lose their only representation (becoming [...]-only).
-    // Conditional cleanup: remove HLIR ops from eclasses that have alternative (rewritten) enodes.
-    // This replaces the egglog-side `(saturate cleanup)` which unconditionally deleted all HLIR ops,
-    // causing eclasses without rewrites to lose their only representation (becoming [...]-only).
-    if cleanup {
-        let cleanup_ops: FxHashSet<String> = ops
-            .iter()
-            .filter(|o| o.cleanup())
-            .map(|o| o.sort().name.to_string())
-            .collect();
-
-        // Helper: check if an enode is a cleanup-eligible op.
-        // For normalized ops (label=="Op"), check the OpKind child's label.
-        // For direct IR ops, check the label directly.
-        let is_cleanup_enode =
-            |n: &NodeId, egraph: &SerializedEGraph| -> bool {
-                let Some((label, children)) = egraph.enodes.get(n) else {
-                    return false;
-                };
-                if label == "Op" {
-                    // Child[0] is OpKind eclass — check its enode label
-                    if let Some(kind_eclass) = children.first() {
-                        if let Some(kind_enodes) = egraph.eclasses.get(kind_eclass) {
-                            return kind_enodes.1.iter().any(|kn| {
-                                egraph
-                                    .enodes
-                                    .get(kn)
-                                    .map_or(false, |(kl, _)| cleanup_ops.contains(kl.as_str()))
-                            });
-                        }
-                    }
-                    false
-                } else {
-                    cleanup_ops.contains(label.as_str())
-                }
-            };
-
-        let mut to_remove = vec![];
-        for (_cid, (_typ, enodes)) in &egraph.eclasses {
-            let has_non_cleanup = enodes
-                .iter()
-                .any(|n| egraph.enodes.contains_key(n) && !is_cleanup_enode(n, &egraph));
-            if has_non_cleanup {
-                for n in enodes {
-                    if egraph.enodes.contains_key(n) && is_cleanup_enode(n, &egraph) {
-                        to_remove.push(n.clone());
-                    }
-                }
-            }
-        }
-        for n in &to_remove {
-            egraph.enodes.remove(n);
-        }
-    }
 
     // Cascade: remove enodes whose children reference empty eclasses
     loop {
@@ -1146,7 +1084,8 @@ fn walk_ilist<'a>(
         }
         // ICons: child[0] = IR eclass, child[1] = IList tail eclass
         let input_eclass = &egraph.enodes[current].1[0];
-        inputs.push(choices[input_eclass]);
+        let input_node = choices[input_eclass];
+        inputs.push(input_node);
         let tail_eclass = &egraph.enodes[current].1[1];
         current = choices[tail_eclass];
     }
@@ -1163,16 +1102,6 @@ pub fn egglog_to_llir<'a>(
     expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
     custom_op_id_remap: Option<&FxHashMap<usize, usize>>,
 ) -> LLIRGraph {
-    // Get maps for all e-classes to e-node options
-    // if enabled!(Level::DEBUG) {
-    //     let log_dir = Path::new("llir_graphs");
-
-    //     if log_dir.exists() {
-    //         fs::remove_dir_all(log_dir).unwrap();
-    //     }
-    //     fs::create_dir(log_dir).unwrap();
-    // }
-
     // Make reachability set from root
     let mut reachable = FxHashSet::default();
     reachable.insert(choices[&egraph.roots[0]]);
@@ -1215,8 +1144,7 @@ pub fn egglog_to_llir<'a>(
                 .1
                 .iter()
                 .map(|c| {
-                    if egraph.eclasses[c].0.contains("IR")
-                        || egraph.eclasses[c].0.contains("IList")
+                    if egraph.eclasses[c].0.contains("IR") || egraph.eclasses[c].0.contains("IList")
                     {
                         choices[c]
                     } else {
@@ -1242,8 +1170,7 @@ pub fn egglog_to_llir<'a>(
                 }
             } else {
                 // Find matching op by OpKind name
-                let Some(op) = ops.iter().find(|op| kind_label.as_str() == op.sort().name)
-                else {
+                let Some(op) = ops.iter().find(|op| kind_label.as_str() == op.sort().name) else {
                     todo!("{kind_label} extraction not implemented!");
                 };
                 let (op_instance, sources) =
@@ -1255,13 +1182,15 @@ pub fn egglog_to_llir<'a>(
                 }
             }
         } else if enode_label != "OutputJoin" {
-            // Direct IR variant (Input, Output)
+            // Direct IR variant (Input, Output) — skip unknown labels (backend IR wrappers)
+            let Some(op) = ops.iter().find(|op| enode_label == op.sort().name) else {
+                continue;
+            };
             let ch = egraph.enodes[node]
                 .1
                 .iter()
                 .map(|c| {
-                    if egraph.eclasses[c].0.contains("IR")
-                        || egraph.eclasses[c].0.contains("IList")
+                    if egraph.eclasses[c].0.contains("IR") || egraph.eclasses[c].0.contains("IList")
                     {
                         choices[c]
                     } else {
@@ -1269,15 +1198,8 @@ pub fn egglog_to_llir<'a>(
                     }
                 })
                 .collect_vec();
-            let Some(op) = ops
-                .iter()
-                .find(|op| enode_label == op.sort().name)
-            else {
-                todo!("{enode_label} extraction not implemented!");
-            };
             // Direct IR ops pass children as kind_children, empty input_enodes
-            let (op_instance, sources) =
-                op.extract(egraph, &ch, vec![], list_cache, expr_cache);
+            let (op_instance, sources) = op.extract(egraph, &ch, vec![], list_cache, expr_cache);
             let r = graph.add_node(op_instance);
             enode_to_node.insert(node, r);
             for source in sources {

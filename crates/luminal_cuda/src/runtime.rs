@@ -117,6 +117,9 @@ pub struct CudaRuntime {
     profiling: bool,
     /// Buffer nodes that are outputs of BlockOps (need zeroing due to atomicAdd)
     block_op_buffers: FxHashSet<NodeIndex>,
+    /// Alias map: for KernelOps with output_aliases_input(), maps output node → aliased input node.
+    /// Used to resolve cross-CudaGraphOp buffer references.
+    output_alias_map: FxHashMap<NodeIndex, NodeIndex>,
 }
 
 impl CudaRuntime {
@@ -178,7 +181,9 @@ impl CudaRuntime {
     }
 
     #[tracing::instrument(skip_all)]
-    fn get_output_data(&self, id: impl ToId) -> Vec<u8> {
+    /// Resolve the LLIR node that actually holds the data for an output tensor.
+    /// Follows output_aliases_input when the producing op aliases its output to an input.
+    fn resolve_data_node(&self, id: impl ToId) -> NodeIndex {
         let id = id.to_id();
         let output_id = self
             .llir_graph
@@ -191,12 +196,28 @@ impl CudaRuntime {
                 }
             })
             .expect("Cannot find output tensor!");
-        // Output nodes don't own buffers — they just point to their input
-        let data_id = self
+        let mut data_id = self
             .llir_graph
             .neighbors_directed(output_id, Direction::Incoming)
             .next()
             .unwrap();
+
+        // If the op aliases its output to an input, follow the alias
+        if let Some(kernel_op) = self.llir_graph[data_id].to_dialect::<dyn KernelOp>() {
+            if let Some(input_idx) = kernel_op.output_aliases_input() {
+                data_id = self
+                    .llir_graph
+                    .neighbors_directed(data_id, Direction::Incoming)
+                    .sorted_by_key(|n| self.llir_graph.find_edge(*n, data_id).unwrap())
+                    .nth(input_idx)
+                    .expect("output_aliases_input index out of range");
+            }
+        }
+        data_id
+    }
+
+    fn get_output_data(&self, id: impl ToId) -> Vec<u8> {
+        let data_id = self.resolve_data_node(id);
 
         let _span = span!(Level::TRACE, "dtoh").entered();
         // If predecessor is an Input node, data lives in hlir_buffers
@@ -239,23 +260,7 @@ impl CudaRuntime {
     /// Take a GPU buffer handle for an output tensor. This removes the buffer from
     /// the runtime, so the caller owns it. Use `set_buffer` to give it back.
     pub fn remove_buffer(&mut self, id: impl ToId) -> CudaSlice<u8> {
-        let id = id.to_id();
-        let output_id = self
-            .llir_graph
-            .node_indices()
-            .find(|n| {
-                if let Some(Output { node }) = self.llir_graph[*n].to_op::<Output>() {
-                    *node == id.index()
-                } else {
-                    false
-                }
-            })
-            .expect("Cannot find output tensor!");
-        let data_id = self
-            .llir_graph
-            .neighbors_directed(output_id, Direction::Incoming)
-            .next()
-            .unwrap();
+        let data_id = self.resolve_data_node(id);
 
         if let Some(hlir_node) = self.llir_to_hlir.get(&data_id) {
             match self
@@ -626,6 +631,7 @@ impl Runtime for CudaRuntime {
             kernel_cache: FxHashMap::default(),
             profiling: false,
             block_op_buffers: FxHashSet::default(),
+            output_alias_map: FxHashMap::default(),
         }
     }
 
@@ -679,6 +685,26 @@ impl Runtime for CudaRuntime {
             &mut self.kernel_cache,
             &megakernel_to_blocks,
         );
+
+        // Build output alias map: for KernelOps with output_aliases_input(),
+        // map the output node to its aliased input node. This is used to resolve
+        // cross-CudaGraphOp buffer references where the allocated output buffer
+        // is never written to (the kernel writes to the aliased input instead).
+        self.output_alias_map.clear();
+        for node in llir_graph.node_indices() {
+            if let Some(kernel_op) = llir_graph[node].to_dialect::<dyn KernelOp>() {
+                if let Some(input_idx) = kernel_op.output_aliases_input() {
+                    let alias_target = llir_graph
+                        .edges_directed(node, Direction::Incoming)
+                        .sorted_by_key(|e| e.id())
+                        .map(|e| e.source())
+                        .nth(input_idx);
+                    if let Some(target) = alias_target {
+                        self.output_alias_map.insert(node, target);
+                    }
+                }
+            }
+        }
 
         // Add host ops
         {
@@ -923,6 +949,21 @@ impl Runtime for CudaRuntime {
                         && let Some(CudaInput::Buffer(buf)) = self.hlir_buffers.get(hlir_node)
                     {
                         e.insert(buf);
+                    }
+                }
+            }
+            // Resolve output aliases: for KernelOps with output_aliases_input(),
+            // the allocated output buffer is never written — data lives in the aliased
+            // input's buffer. Override the buffer_map entry so cross-CudaGraphOp consumers
+            // read from the correct location.
+            for (&alias_node, &alias_target) in &self.output_alias_map {
+                if buffer_map.contains_key(&alias_node) {
+                    if let Some(hlir_node) = self.llir_to_hlir.get(&alias_target)
+                        && let Some(CudaInput::Buffer(buf)) = self.hlir_buffers.get(hlir_node)
+                    {
+                        buffer_map.insert(alias_node, buf);
+                    } else if let Some(buf) = self.buffers.get(&alias_target) {
+                        buffer_map.insert(alias_node, buf);
                     }
                 }
             }

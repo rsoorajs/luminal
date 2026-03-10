@@ -719,38 +719,7 @@ impl EgglogOp for KernelMul {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        vec![
-            kernel_rewrite::<Mul, Self>(),
-            // Delete KernelMul nodes whose output shape is too large (>= 1M elements in static dims).
-            // This prevents the search from selecting the HLIR matmul fallback path
-            // (broadcast Mul + SumReduce), which creates huge intermediates and causes OOM.
-            // Matmul intermediates have 3+ dims with two large static dims, e.g. [s, 14336, 4096].
-            // Now uses (Op (KernelMul ...) (ICons ...)) format.
-            Rule::raw("(rule
-                ((= ?m (Op (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?as ?bs ?os ?dt) ?inputs))
-                 (= (MNum ?v1) ?d1)
-                 (= (MNum ?v2) ?d2)
-                 (>= (* ?v1 ?v2) 1000000))
-                ((delete (Op (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?as ?bs ?os ?dt) ?inputs)))
-                :ruleset cleanup
-            )"),
-            Rule::raw("(rule
-                ((= ?m (Op (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?as ?bs ?os ?dt) ?inputs))
-                 (= (MNum ?v0) ?d0)
-                 (= (MNum ?v1) ?d1)
-                 (>= (* ?v0 ?v1) 1000000))
-                ((delete (Op (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?as ?bs ?os ?dt) ?inputs)))
-                :ruleset cleanup
-            )"),
-            Rule::raw("(rule
-                ((= ?m (Op (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?as ?bs ?os ?dt) ?inputs))
-                 (= (MNum ?v0) ?d0)
-                 (= (MNum ?v2) ?d2)
-                 (>= (* ?v0 ?v2) 1000000))
-                ((delete (Op (KernelMul (ECons ?d0 (ECons ?d1 (ECons ?d2 ?rest))) ?as ?bs ?os ?dt) ?inputs)))
-                :ruleset cleanup
-            )"),
-        ]
+        vec![kernel_rewrite::<Mul, Self>()]
     }
 
     fn cleanup(&self) -> bool {

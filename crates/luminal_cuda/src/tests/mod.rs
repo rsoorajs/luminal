@@ -8,3 +8,5 @@ mod op_functional_tests;
 mod performance_tests;
 #[cfg(test)]
 mod transformer;
+#[cfg(test)]
+mod consumed_buffer_tests;
