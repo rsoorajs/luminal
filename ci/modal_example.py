@@ -27,7 +27,7 @@ cuda_image = (
         "/root/.cache/huggingface": hf_cache,
     },
 )
-def run_example():
+def run_example(example: str):
     """Build and run a luminal example on a Modal GPU."""
     subprocess.run(["nvidia-smi"], check=True)
 
@@ -47,4 +47,4 @@ def run_example():
 
 @app.local_entrypoint()
 def main():
-    run_example.remote()
+    run_example.remote(example)
