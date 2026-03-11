@@ -2,7 +2,10 @@ import modal
 import subprocess
 import os
 
-app = modal.App("luminal-ci-llama")
+example = os.environ.get("EXAMPLE", "llama")
+gpu_type = os.environ.get("GPU_TYPE", "A100-80GB")
+
+app = modal.App(f"luminal-ci-{example}")
 
 hf_cache = modal.Volume.from_name("luminal-hf-cache", create_if_missing=True)
 
@@ -18,20 +21,23 @@ cuda_image = (
 
 @app.function(
     image=cuda_image,
-    gpu="A100-80GB",
+    gpu=gpu_type,
     timeout=3600,  # 60 minutes
     volumes={
         "/root/.cache/huggingface": hf_cache,
     },
 )
-def run_llama():
-    """Build and run the Llama 3 8B example on an A100 GPU."""
+def run_example():
+    """Build and run a luminal example on a Modal GPU."""
     subprocess.run(["nvidia-smi"], check=True)
 
     subprocess.run(
         ["cargo", "run", "--release"],
-        cwd=f"{WORKDIR}/examples/llama",
-        env={**os.environ, "CUDA_COMPUTE_CAP": "80", "CUDARC_CUDA_VERSION": "13000", "HF_HOME": "/root/.cache/huggingface"},
+        cwd=f"{WORKDIR}/examples/{example}",
+        env={
+            **os.environ,
+            "HF_HOME": "/root/.cache/huggingface",
+        },
         check=True,
     )
 
@@ -40,4 +46,4 @@ def run_llama():
 
 @app.local_entrypoint()
 def main():
-    run_llama.remote()
+    run_example.remote()
