@@ -37,6 +37,7 @@ def run_example():
         env={
             **os.environ,
             "HF_HOME": "/root/.cache/huggingface",
+            "CUDARC_CUDA_VERSION": "13000",
         },
         check=True,
     )

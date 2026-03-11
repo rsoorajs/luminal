@@ -18,9 +18,9 @@ jobs:
             matrix:
                 example: [llama, gemma, qwen, qwen3_moe]
                 gpu:
-                    - { type: "A100-80GB", compute_cap: "80" }
+                    - { type: "A100-80GB" }
                     # To add more GPUs, just append another entry:
-                    # - { type: "H100", compute_cap: "90" }
+                    # - { type: "H100" }
 
         steps:
             - uses: actions/checkout@v6
@@ -36,5 +36,4 @@ jobs:
                   MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
                   EXAMPLE: ${{ matrix.example }}
                   GPU_TYPE: ${{ matrix.gpu.type }}
-                  CUDA_COMPUTE_CAP: ${{ matrix.gpu.compute_cap }}
               run: modal run ci/modal_example.py
