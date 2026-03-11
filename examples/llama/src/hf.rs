@@ -3,13 +3,13 @@ use hf_hub::api::sync::Api;
 use memmap2::MmapOptions;
 use safetensors::{tensor::TensorView, Dtype, SafeTensors};
 use serde::Deserialize;
-use tracing::info;
 use std::{
     collections::HashMap,
     fs::File,
     io::Write,
     path::{Path, PathBuf},
 };
+use tracing::info;
 
 /// Index file structure for sharded safetensors models
 #[derive(Deserialize)]
@@ -52,7 +52,11 @@ pub fn download_hf_model(repo_id: &str) -> Result<PathBuf, Box<dyn std::error::E
     info!("Found {} shard files to download.", shard_files.len());
     // Download each shard
     for (i, shard_file) in shard_files.iter().enumerate() {
-        info!("Downloading shard {}/{}: {shard_file}", i + 1, shard_files.len());
+        info!(
+            "Downloading shard {}/{}: {shard_file}",
+            i + 1,
+            shard_files.len()
+        );
         repo.get(shard_file)?;
     }
     info!("All shards downloaded successfully.");
