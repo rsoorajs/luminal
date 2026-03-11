@@ -1,10 +1,12 @@
 #![allow(unexpected_cfgs)]
 
 use crate::kernel::{MetalKernelOp, DYN_SLOT_COUNT};
+use half::f16;
 use itertools::Itertools;
 use luminal::{
+    dtype::DType,
     graph::LLIRGraph,
-    hlir::{Input, Output},
+    hlir::{Input, NativeData, Output},
     op::{ExecutionStats, Runtime, RuntimeStats, TimingMethod},
     prelude::{
         petgraph::{algo::toposort, prelude::StableGraph, visit::EdgeRef, Direction},
@@ -18,6 +20,8 @@ use std::time::Duration;
 pub struct MetalRuntime {
     device: Device,
     command_queue: CommandQueue,
+    /// Host-side input tensors provided by the user.
+    input_data: FxHashMap<NodeIndex, NativeData>,
     /// Buffers for HLIR input tensors (set by user)
     pub hlir_buffers: FxHashMap<NodeIndex, Buffer>,
     /// Buffers for LLIR intermediate/output tensors
@@ -26,18 +30,15 @@ pub struct MetalRuntime {
     dyn_buffer: Buffer,
     /// The current LLIR graph
     llir_graph: LLIRGraph,
+    /// Inferred runtime dtype for each LLIR node.
+    node_dtypes: FxHashMap<NodeIndex, DType>,
     /// Compiled pipeline states for each kernel node
     pipelines: FxHashMap<NodeIndex, ComputePipelineState>,
 }
 
 impl MetalRuntime {
-    pub fn set_data(&mut self, id: impl ToId, data: &[f32]) {
-        let buffer = self.device.new_buffer_with_data(
-            data.as_ptr() as *const _,
-            std::mem::size_of_val(data) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
-        self.hlir_buffers.insert(id.to_id(), buffer);
+    pub fn set_data(&mut self, id: impl ToId, data: impl Into<NativeData>) {
+        self.input_data.insert(id.to_id(), data.into());
     }
 
     pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {
@@ -72,10 +73,42 @@ impl MetalRuntime {
                 }
             })
             .expect("Cannot find tensor in runtime!");
-        let ptr = buffer.contents() as *const f32;
-        let len = buffer.length() as usize / std::mem::size_of::<f32>();
+        let dtype = self
+            .node_dtypes
+            .get(&data_id)
+            .copied()
+            .or_else(|| {
+                self.llir_graph[data_id]
+                    .to_op::<Input>()
+                    .map(|inp| inp.dtype)
+            })
+            .unwrap_or(DType::F32);
 
-        unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
+        unsafe {
+            match dtype {
+                DType::F16 => {
+                    let ptr = buffer.contents() as *const f16;
+                    let len = buffer.length() as usize / std::mem::size_of::<f16>();
+                    std::slice::from_raw_parts(ptr, len)
+                        .iter()
+                        .map(|v| v.to_f32())
+                        .collect()
+                }
+                DType::Int => {
+                    let ptr = buffer.contents() as *const i32;
+                    let len = buffer.length() as usize / std::mem::size_of::<i32>();
+                    std::slice::from_raw_parts(ptr, len)
+                        .iter()
+                        .map(|v| *v as f32)
+                        .collect()
+                }
+                _ => {
+                    let ptr = buffer.contents() as *const f32;
+                    let len = buffer.length() as usize / std::mem::size_of::<f32>();
+                    std::slice::from_raw_parts(ptr, len).to_vec()
+                }
+            }
+        }
     }
 }
 
@@ -96,10 +129,12 @@ impl Runtime for MetalRuntime {
         Self {
             device,
             command_queue,
+            input_data: FxHashMap::default(),
             hlir_buffers: FxHashMap::default(),
             buffers: FxHashMap::default(),
             dyn_buffer,
             llir_graph: StableGraph::default(),
+            node_dtypes: FxHashMap::default(),
             pipelines: FxHashMap::default(),
         }
     }
@@ -108,16 +143,48 @@ impl Runtime for MetalRuntime {
     fn load_llir(&mut self, llir_graph: &LLIRGraph) {
         self.pipelines.clear();
         self.buffers.clear();
+        self.hlir_buffers.clear();
+        self.node_dtypes.clear();
+        self.llir_graph = llir_graph.clone();
 
-        // Compile all kernel ops
-        for node in llir_graph.node_indices() {
-            if let Some(kernel_op) = llir_graph[node].to_dialect::<dyn MetalKernelOp>() {
-                let pipeline = kernel_op.compile(&self.device);
+        let topo_order = toposort(&self.llir_graph, None).expect("Graph has cycles!");
+        for node in topo_order {
+            if let Some(input) = self.llir_graph[node].to_op::<Input>() {
+                self.node_dtypes.insert(node, input.dtype);
+                let hlir_id = NodeIndex::new(input.node);
+                if let Some(data) = self.input_data.get(&hlir_id) {
+                    let buffer = self.create_input_buffer(data, input.dtype);
+                    self.hlir_buffers.insert(hlir_id, buffer);
+                }
+                continue;
+            }
+
+            if self.llir_graph[node].to_op::<Output>().is_some() {
+                continue;
+            }
+
+            if let Some(kernel_op) = self.llir_graph[node].to_dialect::<dyn MetalKernelOp>() {
+                let input_nodes: Vec<NodeIndex> = self
+                    .llir_graph
+                    .edges_directed(node, Direction::Incoming)
+                    .sorted_by_key(|e| e.id())
+                    .map(|e| e.source())
+                    .collect();
+                let input_dtypes: Vec<DType> = input_nodes
+                    .iter()
+                    .map(|n| {
+                        self.node_dtypes
+                            .get(n)
+                            .copied()
+                            .unwrap_or_else(|| panic!("Missing inferred dtype for node {n:?}"))
+                    })
+                    .collect();
+                let output_dtype = kernel_op.infer_output_dtype(&input_dtypes);
+                let pipeline = kernel_op.compile(&self.device, &input_dtypes, output_dtype);
+                self.node_dtypes.insert(node, output_dtype);
                 self.pipelines.insert(node, pipeline);
             }
         }
-
-        self.llir_graph = llir_graph.clone();
     }
 
     #[tracing::instrument(skip_all)]
@@ -240,6 +307,36 @@ impl RuntimeStats for MetalRuntime {
 }
 
 impl MetalRuntime {
+    fn create_input_buffer(&self, data: &NativeData, dtype: DType) -> Buffer {
+        match dtype {
+            DType::F32 => {
+                let values: Vec<f32> = (0..data.len()).map(|i| data.f32(i)).collect();
+                self.device.new_buffer_with_data(
+                    values.as_ptr() as *const _,
+                    std::mem::size_of_val(values.as_slice()) as u64,
+                    MTLResourceOptions::StorageModeShared,
+                )
+            }
+            DType::F16 => {
+                let values: Vec<f16> = (0..data.len()).map(|i| data.f16(i)).collect();
+                self.device.new_buffer_with_data(
+                    values.as_ptr() as *const _,
+                    std::mem::size_of_val(values.as_slice()) as u64,
+                    MTLResourceOptions::StorageModeShared,
+                )
+            }
+            DType::Int => {
+                let values: Vec<i32> = (0..data.len()).map(|i| data.i32(i)).collect();
+                self.device.new_buffer_with_data(
+                    values.as_ptr() as *const _,
+                    std::mem::size_of_val(values.as_slice()) as u64,
+                    MTLResourceOptions::StorageModeShared,
+                )
+            }
+            unsupported => panic!("Metal input dtype {unsupported:?} is not supported yet"),
+        }
+    }
+
     pub fn allocate_intermediate_buffers(&mut self, dyn_map: &FxHashMap<char, usize>) {
         for node in self.llir_graph.node_indices() {
             if self.llir_graph[node].to_op::<Input>().is_some() {
@@ -248,8 +345,9 @@ impl MetalRuntime {
 
             if let Some(kernel_op) = self.llir_graph[node].to_dialect::<dyn MetalKernelOp>() {
                 let size = kernel_op.output_size().exec(dyn_map).unwrap();
+                let dtype = self.node_dtypes.get(&node).copied().unwrap_or(DType::F32);
                 let buffer = self.device.new_buffer(
-                    (size * std::mem::size_of::<f32>()) as u64,
+                    (size * dtype.bits().div_ceil(8)) as u64,
                     MTLResourceOptions::StorageModeShared,
                 );
                 self.buffers.insert(node, buffer);

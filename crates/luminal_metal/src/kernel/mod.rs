@@ -1,6 +1,7 @@
 mod ops;
 pub use ops::*;
 
+use luminal::dtype::DType;
 use luminal::op::EgglogOp;
 use luminal::prelude::*;
 use metal::{Buffer, ComputeCommandEncoderRef, ComputePipelineState, Device};
@@ -8,7 +9,16 @@ use metal::{Buffer, ComputeCommandEncoderRef, ComputePipelineState, Device};
 pub const DYN_SLOT_COUNT: usize = 26;
 
 pub trait MetalKernelOp: EgglogOp {
-    fn compile(&self, device: &Device) -> ComputePipelineState;
+    fn compile(
+        &self,
+        device: &Device,
+        input_dtypes: &[DType],
+        output_dtype: DType,
+    ) -> ComputePipelineState;
+
+    fn infer_output_dtype(&self, input_dtypes: &[DType]) -> DType {
+        input_dtypes.first().copied().unwrap_or(DType::F32)
+    }
 
     fn output_size(&self) -> Expression;
 

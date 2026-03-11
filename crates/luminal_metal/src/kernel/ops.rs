@@ -63,6 +63,40 @@ pub(crate) fn lower_expression_for_metal(expr: &Expression, index_var: &str) -> 
     lower_dynamic_consts(expr.to_kernel().replace("const_z", index_var))
 }
 
+fn metal_buffer_type(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F32 => "float",
+        DType::F16 => "half",
+        DType::Int => "int",
+        _ => panic!("Metal dtype {dtype:?} is not supported yet"),
+    }
+}
+
+fn metal_numeric_read(dtype: DType, buffer: &str, index: &str) -> String {
+    match dtype {
+        DType::F32 => format!("{buffer}[{index}]"),
+        DType::F16 => format!("float({buffer}[{index}])"),
+        DType::Int => format!("float({buffer}[{index}])"),
+        _ => panic!("Metal dtype {dtype:?} is not supported yet"),
+    }
+}
+
+fn metal_numeric_write(dtype: DType, expr: &str) -> String {
+    match dtype {
+        DType::F32 => expr.to_string(),
+        DType::F16 => format!("half({expr})"),
+        DType::Int => format!("int({expr})"),
+        _ => panic!("Metal dtype {dtype:?} is not supported yet"),
+    }
+}
+
+fn metal_copy_value(dtype: DType, buffer: &str, index: &str) -> String {
+    match dtype {
+        DType::F32 | DType::F16 | DType::Int => format!("{buffer}[{index}]"),
+        _ => panic!("Metal dtype {dtype:?} is not supported yet"),
+    }
+}
+
 // ============================================================================
 // Performance Metrics Macros
 // ============================================================================
@@ -128,7 +162,7 @@ macro_rules! impl_reduce_metrics {
 }
 
 macro_rules! metal_unary_op {
-    ($name:ident, $op_name:expr, $metal_op:expr) => {
+    ($name:ident, $op_name:expr, $expr_builder:expr) => {
         #[derive(Debug, Default, Clone)]
         pub struct $name {
             shape: Vec<Expression>,
@@ -189,7 +223,15 @@ macro_rules! metal_unary_op {
         }
 
         impl MetalKernelOp for $name {
-            fn compile(&self, device: &Device) -> ComputePipelineState {
+            fn compile(
+                &self,
+                device: &Device,
+                input_dtypes: &[DType],
+                output_dtype: DType,
+            ) -> ComputePipelineState {
+                let input_dtype = input_dtypes.first().copied().unwrap_or(DType::F32);
+                let input_ty = metal_buffer_type(input_dtype);
+                let output_ty = metal_buffer_type(output_dtype);
                 // Generate strided index expressions
                 let inp_index = flatten_strides(&self.shape, &self.input_strides);
                 let out_index = flatten_strides(&self.shape, &self.output_strides);
@@ -197,6 +239,9 @@ macro_rules! metal_unary_op {
                 // Convert expressions to Metal code
                 let inp_idx = lower_expression_for_metal(&inp_index, "idx");
                 let out_idx = lower_expression_for_metal(&out_index, "idx");
+                let input_expr = metal_numeric_read(input_dtype, "inp", &inp_idx);
+                let body_expr = ($expr_builder)(&input_expr);
+                let write_expr = metal_numeric_write(output_dtype, &body_expr);
 
                 let source = format!(
                     r#"
@@ -204,20 +249,21 @@ macro_rules! metal_unary_op {
                     using namespace metal;
 
                     kernel void mkernel(
-                        device float *inp [[buffer(0)]],
-                        device float *out [[buffer(1)]],
+                        device {input_ty} *inp [[buffer(0)]],
+                        device {output_ty} *out [[buffer(1)]],
                         constant int *dyn [[buffer({dyn_buffer_index})]],
                         device uint &n_elements [[buffer({n_elements_index})]],
                         uint idx [[thread_position_in_grid]]
                     ) {{
                         if (idx < n_elements) {{
-                            out[{out_idx}] = {metal_op}(inp[{inp_idx}]);
+                            out[{out_idx}] = {write_expr};
                         }}
                     }}
                     "#,
-                    metal_op = $metal_op,
-                    inp_idx = inp_idx,
                     out_idx = out_idx,
+                    input_ty = input_ty,
+                    output_ty = output_ty,
+                    write_expr = write_expr,
                     dyn_buffer_index = 2u64,
                     n_elements_index = 3u64,
                 );
@@ -262,11 +308,11 @@ macro_rules! metal_unary_op {
     };
 }
 
-metal_unary_op!(MetalExp2, "MetalExp2", "exp2");
-metal_unary_op!(MetalLog2, "MetalLog2", "log2");
-metal_unary_op!(MetalSin, "MetalSin", "sin");
-metal_unary_op!(MetalSqrt, "MetalSqrt", "sqrt");
-metal_unary_op!(MetalRecip, "MetalRecip", "1.0f /");
+metal_unary_op!(MetalExp2, "MetalExp2", |x: &str| format!("exp2({x})"));
+metal_unary_op!(MetalLog2, "MetalLog2", |x: &str| format!("log2({x})"));
+metal_unary_op!(MetalSin, "MetalSin", |x: &str| format!("sin({x})"));
+metal_unary_op!(MetalSqrt, "MetalSqrt", |x: &str| format!("sqrt({x})"));
+metal_unary_op!(MetalRecip, "MetalRecip", |x: &str| format!("1.0f / ({x})"));
 
 #[derive(Debug, Default, Clone)]
 pub struct MetalAdd {
@@ -324,7 +370,17 @@ impl EgglogOp for MetalAdd {
 }
 
 impl MetalKernelOp for MetalAdd {
-    fn compile(&self, device: &Device) -> ComputePipelineState {
+    fn compile(
+        &self,
+        device: &Device,
+        input_dtypes: &[DType],
+        output_dtype: DType,
+    ) -> ComputePipelineState {
+        let a_dtype = input_dtypes.first().copied().unwrap_or(DType::F32);
+        let b_dtype = input_dtypes.get(1).copied().unwrap_or(a_dtype);
+        let a_ty = metal_buffer_type(a_dtype);
+        let b_ty = metal_buffer_type(b_dtype);
+        let out_ty = metal_buffer_type(output_dtype);
         // Generate strided index expressions using 'z' = thread index
         let a_index = flatten_strides(&self.shape, &self.a_strides);
         let b_index = flatten_strides(&self.shape, &self.b_strides);
@@ -334,6 +390,9 @@ impl MetalKernelOp for MetalAdd {
         let a_idx = lower_expression_for_metal(&a_index, "idx");
         let b_idx = lower_expression_for_metal(&b_index, "idx");
         let out_idx = lower_expression_for_metal(&out_index, "idx");
+        let a_val = metal_numeric_read(a_dtype, "a", &a_idx);
+        let b_val = metal_numeric_read(b_dtype, "b", &b_idx);
+        let out_val = metal_numeric_write(output_dtype, &format!("({a_val}) + ({b_val})"));
 
         let source = format!(
             r#"
@@ -341,18 +400,22 @@ impl MetalKernelOp for MetalAdd {
             using namespace metal;
 
             kernel void mkernel(
-                device float *a [[buffer(0)]],
-                device float *b [[buffer(1)]],
-                device float *out [[buffer(2)]],
+                device {a_ty} *a [[buffer(0)]],
+                device {b_ty} *b [[buffer(1)]],
+                device {out_ty} *out [[buffer(2)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
                 device uint &n_elements [[buffer({n_elements_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
-                    out[{out_idx}] = a[{a_idx}] + b[{b_idx}];
+                    out[{out_idx}] = {out_val};
                 }}
             }}
             "#,
+            a_ty = a_ty,
+            b_ty = b_ty,
+            out_ty = out_ty,
+            out_val = out_val,
             dyn_buffer_index = 3u64,
             n_elements_index = 4u64,
         );
@@ -444,7 +507,17 @@ impl EgglogOp for MetalMul {
 }
 
 impl MetalKernelOp for MetalMul {
-    fn compile(&self, device: &Device) -> ComputePipelineState {
+    fn compile(
+        &self,
+        device: &Device,
+        input_dtypes: &[DType],
+        output_dtype: DType,
+    ) -> ComputePipelineState {
+        let a_dtype = input_dtypes.first().copied().unwrap_or(DType::F32);
+        let b_dtype = input_dtypes.get(1).copied().unwrap_or(a_dtype);
+        let a_ty = metal_buffer_type(a_dtype);
+        let b_ty = metal_buffer_type(b_dtype);
+        let out_ty = metal_buffer_type(output_dtype);
         let a_index = flatten_strides(&self.shape, &self.a_strides);
         let b_index = flatten_strides(&self.shape, &self.b_strides);
         let out_index = flatten_strides(&self.shape, &self.output_strides);
@@ -452,6 +525,9 @@ impl MetalKernelOp for MetalMul {
         let a_idx = lower_expression_for_metal(&a_index, "idx");
         let b_idx = lower_expression_for_metal(&b_index, "idx");
         let out_idx = lower_expression_for_metal(&out_index, "idx");
+        let a_val = metal_numeric_read(a_dtype, "a", &a_idx);
+        let b_val = metal_numeric_read(b_dtype, "b", &b_idx);
+        let out_val = metal_numeric_write(output_dtype, &format!("({a_val}) * ({b_val})"));
 
         let source = format!(
             r#"
@@ -459,18 +535,22 @@ impl MetalKernelOp for MetalMul {
             using namespace metal;
 
             kernel void mkernel(
-                device float *a [[buffer(0)]],
-                device float *b [[buffer(1)]],
-                device float *out [[buffer(2)]],
+                device {a_ty} *a [[buffer(0)]],
+                device {b_ty} *b [[buffer(1)]],
+                device {out_ty} *out [[buffer(2)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
                 device uint &n_elements [[buffer({n_elements_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
-                    out[{out_idx}] = a[{a_idx}] * b[{b_idx}];
+                    out[{out_idx}] = {out_val};
                 }}
             }}
             "#,
+            a_ty = a_ty,
+            b_ty = b_ty,
+            out_ty = out_ty,
+            out_val = out_val,
             dyn_buffer_index = 3u64,
             n_elements_index = 4u64,
         );
@@ -563,7 +643,17 @@ impl EgglogOp for MetalMod {
 }
 
 impl MetalKernelOp for MetalMod {
-    fn compile(&self, device: &Device) -> ComputePipelineState {
+    fn compile(
+        &self,
+        device: &Device,
+        input_dtypes: &[DType],
+        output_dtype: DType,
+    ) -> ComputePipelineState {
+        let a_dtype = input_dtypes.first().copied().unwrap_or(DType::F32);
+        let b_dtype = input_dtypes.get(1).copied().unwrap_or(a_dtype);
+        let a_ty = metal_buffer_type(a_dtype);
+        let b_ty = metal_buffer_type(b_dtype);
+        let out_ty = metal_buffer_type(output_dtype);
         let a_index = flatten_strides(&self.shape, &self.a_strides);
         let b_index = flatten_strides(&self.shape, &self.b_strides);
         let out_index = flatten_strides(&self.shape, &self.output_strides);
@@ -571,6 +661,9 @@ impl MetalKernelOp for MetalMod {
         let a_idx = lower_expression_for_metal(&a_index, "idx");
         let b_idx = lower_expression_for_metal(&b_index, "idx");
         let out_idx = lower_expression_for_metal(&out_index, "idx");
+        let a_val = metal_numeric_read(a_dtype, "a", &a_idx);
+        let b_val = metal_numeric_read(b_dtype, "b", &b_idx);
+        let out_val = metal_numeric_write(output_dtype, &format!("fmod({a_val}, {b_val})"));
 
         let source = format!(
             r#"
@@ -578,18 +671,22 @@ impl MetalKernelOp for MetalMod {
             using namespace metal;
 
             kernel void mkernel(
-                device float *a [[buffer(0)]],
-                device float *b [[buffer(1)]],
-                device float *out [[buffer(2)]],
+                device {a_ty} *a [[buffer(0)]],
+                device {b_ty} *b [[buffer(1)]],
+                device {out_ty} *out [[buffer(2)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
                 device uint &n_elements [[buffer({n_elements_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
-                    out[{out_idx}] = fmod(a[{a_idx}], b[{b_idx}]);
+                    out[{out_idx}] = {out_val};
                 }}
             }}
             "#,
+            a_ty = a_ty,
+            b_ty = b_ty,
+            out_ty = out_ty,
+            out_val = out_val,
             dyn_buffer_index = 3u64,
             n_elements_index = 4u64,
         );
@@ -682,7 +779,17 @@ impl EgglogOp for MetalLessThan {
 }
 
 impl MetalKernelOp for MetalLessThan {
-    fn compile(&self, device: &Device) -> ComputePipelineState {
+    fn compile(
+        &self,
+        device: &Device,
+        input_dtypes: &[DType],
+        output_dtype: DType,
+    ) -> ComputePipelineState {
+        let a_dtype = input_dtypes.first().copied().unwrap_or(DType::F32);
+        let b_dtype = input_dtypes.get(1).copied().unwrap_or(a_dtype);
+        let a_ty = metal_buffer_type(a_dtype);
+        let b_ty = metal_buffer_type(b_dtype);
+        let out_ty = metal_buffer_type(output_dtype);
         let a_index = flatten_strides(&self.shape, &self.a_strides);
         let b_index = flatten_strides(&self.shape, &self.b_strides);
         let out_index = flatten_strides(&self.shape, &self.output_strides);
@@ -690,6 +797,12 @@ impl MetalKernelOp for MetalLessThan {
         let a_idx = lower_expression_for_metal(&a_index, "idx");
         let b_idx = lower_expression_for_metal(&b_index, "idx");
         let out_idx = lower_expression_for_metal(&out_index, "idx");
+        let a_val = metal_numeric_read(a_dtype, "a", &a_idx);
+        let b_val = metal_numeric_read(b_dtype, "b", &b_idx);
+        let out_val = metal_numeric_write(
+            output_dtype,
+            &format!("(({a_val}) < ({b_val})) ? 1.0f : 0.0f"),
+        );
 
         let source = format!(
             r#"
@@ -697,22 +810,31 @@ impl MetalKernelOp for MetalLessThan {
             using namespace metal;
 
             kernel void mkernel(
-                device float *a [[buffer(0)]],
-                device float *b [[buffer(1)]],
-                device float *out [[buffer(2)]],
+                device {a_ty} *a [[buffer(0)]],
+                device {b_ty} *b [[buffer(1)]],
+                device {out_ty} *out [[buffer(2)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
                 device uint &n_elements [[buffer({n_elements_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
-                    out[{out_idx}] = (a[{a_idx}] < b[{b_idx}]) ? 1.0f : 0.0f;
+                    out[{out_idx}] = {out_val};
                 }}
             }}
             "#,
+            a_ty = a_ty,
+            b_ty = b_ty,
+            out_ty = out_ty,
+            out_val = out_val,
             dyn_buffer_index = 3u64,
             n_elements_index = 4u64,
         );
         compile_shader(device, &source, "mkernel")
+    }
+
+    fn infer_output_dtype(&self, _input_dtypes: &[DType]) -> DType {
+        // Metal currently materializes comparisons as numeric 0/1 values.
+        DType::F32
     }
 
     fn output_size(&self) -> Expression {
@@ -806,7 +928,15 @@ impl EgglogOp for MetalSumReduce {
 }
 
 impl MetalKernelOp for MetalSumReduce {
-    fn compile(&self, device: &Device) -> ComputePipelineState {
+    fn compile(
+        &self,
+        device: &Device,
+        input_dtypes: &[DType],
+        output_dtype: DType,
+    ) -> ComputePipelineState {
+        let input_dtype = input_dtypes.first().copied().unwrap_or(DType::F32);
+        let input_ty = metal_buffer_type(input_dtype);
+        let output_ty = metal_buffer_type(output_dtype);
         let in_index = flatten_strides(&self.out_shape, &self.in_stride);
         let out_index = flatten_strides(&self.out_shape, &self.out_stride);
 
@@ -815,6 +945,8 @@ impl MetalKernelOp for MetalSumReduce {
         let iters = lower_expression_for_metal(&self.iters, "gid");
         // iter_stride is an offset expression over the reduction-loop variable, not a scalar stride.
         let iter_offset = lower_expression_for_metal(&self.iter_stride, "i");
+        let in_val = metal_numeric_read(input_dtype, "in", &format!("in_start + {iter_offset}"));
+        let out_val = metal_numeric_write(output_dtype, "block_sum");
 
         let source = format!(
             r#"
@@ -824,8 +956,8 @@ impl MetalKernelOp for MetalSumReduce {
             #define THREADS_PER_GROUP 256
 
             kernel void mkernel(
-                const device float *in [[buffer(0)]],
-                device float *out [[buffer(1)]],
+                const device {input_ty} *in [[buffer(0)]],
+                device {output_ty} *out [[buffer(1)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
                 device uint &n_outputs [[buffer({n_outputs_index})]],
                 uint gid [[threadgroup_position_in_grid]],
@@ -844,7 +976,7 @@ impl MetalKernelOp for MetalSumReduce {
                 // Each thread accumulates multiple elements
                 float sum = 0.0f;
                 for (int i = tid; i < iters; i += THREADS_PER_GROUP) {{
-                    sum += in[in_start + {iter_offset}];
+                    sum += {in_val};
                 }}
 
                 // Warp-level reduction using simd_sum
@@ -863,11 +995,15 @@ impl MetalKernelOp for MetalSumReduce {
                     block_sum = simd_sum(block_sum);
 
                     if (tid == 0) {{
-                        out[{out_idx}] = block_sum;
+                        out[{out_idx}] = {out_val};
                     }}
                 }}
             }}
             "#,
+            input_ty = input_ty,
+            output_ty = output_ty,
+            in_val = in_val,
+            out_val = out_val,
             dyn_buffer_index = 2u64,
             n_outputs_index = 3u64,
         );
@@ -961,7 +1097,15 @@ impl EgglogOp for MetalMaxReduce {
 }
 
 impl MetalKernelOp for MetalMaxReduce {
-    fn compile(&self, device: &Device) -> ComputePipelineState {
+    fn compile(
+        &self,
+        device: &Device,
+        input_dtypes: &[DType],
+        output_dtype: DType,
+    ) -> ComputePipelineState {
+        let input_dtype = input_dtypes.first().copied().unwrap_or(DType::F32);
+        let input_ty = metal_buffer_type(input_dtype);
+        let output_ty = metal_buffer_type(output_dtype);
         let in_index = flatten_strides(&self.out_shape, &self.in_stride);
         let out_index = flatten_strides(&self.out_shape, &self.out_stride);
 
@@ -970,6 +1114,8 @@ impl MetalKernelOp for MetalMaxReduce {
         let iters = lower_expression_for_metal(&self.iters, "gid");
         // iter_stride is an offset expression over the reduction-loop variable, not a scalar stride.
         let iter_offset = lower_expression_for_metal(&self.iter_stride, "i");
+        let in_val = metal_numeric_read(input_dtype, "in", &format!("in_start + {iter_offset}"));
+        let out_val = metal_numeric_write(output_dtype, "block_max");
 
         let source = format!(
             r#"
@@ -980,8 +1126,8 @@ impl MetalKernelOp for MetalMaxReduce {
             #define NEG_INF_F (-INFINITY)
 
             kernel void mkernel(
-                const device float *in [[buffer(0)]],
-                device float *out [[buffer(1)]],
+                const device {input_ty} *in [[buffer(0)]],
+                device {output_ty} *out [[buffer(1)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
                 device uint &n_outputs [[buffer({n_outputs_index})]],
                 uint gid [[threadgroup_position_in_grid]],
@@ -1000,7 +1146,7 @@ impl MetalKernelOp for MetalMaxReduce {
                 // Each thread finds max of multiple elements
                 float max_val = NEG_INF_F;
                 for (int i = tid; i < iters; i += THREADS_PER_GROUP) {{
-                    max_val = fmax(max_val, in[in_start + {iter_offset}]);
+                    max_val = fmax(max_val, {in_val});
                 }}
 
                 // Warp-level reduction using simd_max
@@ -1019,11 +1165,15 @@ impl MetalKernelOp for MetalMaxReduce {
                     block_max = simd_max(block_max);
 
                     if (tid == 0) {{
-                        out[{out_idx}] = block_max;
+                        out[{out_idx}] = {out_val};
                     }}
                 }}
             }}
             "#,
+            input_ty = input_ty,
+            output_ty = output_ty,
+            in_val = in_val,
+            out_val = out_val,
             dyn_buffer_index = 2u64,
             n_outputs_index = 3u64,
         );
@@ -1113,7 +1263,12 @@ impl EgglogOp for MetalConstant {
 }
 
 impl MetalKernelOp for MetalConstant {
-    fn compile(&self, device: &Device) -> ComputePipelineState {
+    fn compile(
+        &self,
+        device: &Device,
+        _input_dtypes: &[DType],
+        _output_dtype: DType,
+    ) -> ComputePipelineState {
         // Ensure value is formatted with decimal point for Metal (e.g., -1.0f not -1f)
         let value_str = if self.value.fract() == 0.0 {
             format!("{:.1}", self.value)
@@ -1144,6 +1299,10 @@ impl MetalKernelOp for MetalConstant {
 
     fn output_size(&self) -> Expression {
         Expression::from(1)
+    }
+
+    fn infer_output_dtype(&self, _input_dtypes: &[DType]) -> DType {
+        DType::F32
     }
 
     fn encode(
@@ -1209,7 +1368,12 @@ impl EgglogOp for MetalIota {
 }
 
 impl MetalKernelOp for MetalIota {
-    fn compile(&self, device: &Device) -> ComputePipelineState {
+    fn compile(
+        &self,
+        device: &Device,
+        _input_dtypes: &[DType],
+        _output_dtype: DType,
+    ) -> ComputePipelineState {
         // Generate the expression as Metal code
         let expr_code = lower_expression_for_metal(&self.expr, "idx");
 
@@ -1238,6 +1402,10 @@ impl MetalKernelOp for MetalIota {
 
     fn output_size(&self) -> Expression {
         self.range
+    }
+
+    fn infer_output_dtype(&self, _input_dtypes: &[DType]) -> DType {
+        DType::Int
     }
 
     fn encode(
@@ -1342,7 +1510,15 @@ impl EgglogOp for MetalGather {
 }
 
 impl MetalKernelOp for MetalGather {
-    fn compile(&self, device: &Device) -> ComputePipelineState {
+    fn compile(
+        &self,
+        device: &Device,
+        input_dtypes: &[DType],
+        output_dtype: DType,
+    ) -> ComputePipelineState {
+        let data_dtype = input_dtypes.get(1).copied().unwrap_or(DType::F32);
+        let data_ty = metal_buffer_type(data_dtype);
+        let out_ty = metal_buffer_type(output_dtype);
         let out_idx =
             lower_expression_for_metal(&flatten_strides(&self.out_shape, &self.out_stride), "idx");
         let index_idx = lower_expression_for_metal(
@@ -1353,6 +1529,7 @@ impl MetalKernelOp for MetalGather {
             &flatten_strides(&self.out_shape, &self.data_stride),
             "gathered_index",
         );
+        let gathered_val = metal_copy_value(data_dtype, "data", &data_idx);
 
         let source = format!(
             r#"
@@ -1361,18 +1538,21 @@ impl MetalKernelOp for MetalGather {
 
             kernel void mkernel(
                 const device int *indexes [[buffer(0)]],
-                const device float *data [[buffer(1)]],
-                device float *out [[buffer(2)]],
+                const device {data_ty} *data [[buffer(1)]],
+                device {out_ty} *out [[buffer(2)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
                 device uint &n_elements [[buffer({n_elements_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
                     int gathered_index = indexes[{index_idx}];
-                    out[{out_idx}] = data[{data_idx}];
+                    out[{out_idx}] = {gathered_val};
                 }}
             }}
             "#,
+            data_ty = data_ty,
+            out_ty = out_ty,
+            gathered_val = gathered_val,
             dyn_buffer_index = 3u64,
             n_elements_index = 4u64,
         );
@@ -1507,11 +1687,9 @@ impl EgglogOp for MetalScatter {
             ("out_strides".to_string(), out_strides),
         ];
         let metal_op = self.sort().call(metal_args);
-        vec![rule([
-            union(scatter_match, metal_op.clone()),
-            set(dtype(metal_op), dt.clone()),
-        ])
-        .fact(eq(dt, dtype(scatter_args["src"].clone())))]
+        vec![rule(union(scatter_match, metal_op.clone()))
+            .set(dtype(metal_op), dt.clone())
+            .fact(eq(dt, dtype(scatter_args["src"].clone())))]
     }
 
     fn cleanup(&self) -> bool {
@@ -1547,7 +1725,17 @@ impl EgglogOp for MetalScatter {
 }
 
 impl MetalKernelOp for MetalScatter {
-    fn compile(&self, device: &Device) -> ComputePipelineState {
+    fn compile(
+        &self,
+        device: &Device,
+        input_dtypes: &[DType],
+        output_dtype: DType,
+    ) -> ComputePipelineState {
+        let dest_dtype = input_dtypes.first().copied().unwrap_or(DType::F32);
+        let src_dtype = input_dtypes.get(2).copied().unwrap_or(output_dtype);
+        let dest_ty = metal_buffer_type(dest_dtype);
+        let src_ty = metal_buffer_type(src_dtype);
+        let out_ty = metal_buffer_type(output_dtype);
         // Compile the copy kernel and store it
         let dest_idx = lower_expression_for_metal(
             &flatten_strides(&self.dest_shape, &self.dest_strides),
@@ -1562,8 +1750,8 @@ impl MetalKernelOp for MetalScatter {
             #include <metal_stdlib>
             using namespace metal;
             kernel void copy_kernel(
-                device float *out [[buffer(0)]],
-                const device float *dest [[buffer(1)]],
+                device {out_ty} *out [[buffer(0)]],
+                const device {dest_ty} *dest [[buffer(1)]],
                 device uint &n_elements [[buffer(2)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
                 uint idx [[thread_position_in_grid]]
@@ -1573,7 +1761,9 @@ impl MetalKernelOp for MetalScatter {
                 }}
             }}
             "#,
-            dyn_buffer_index = DYN_BUFFER_INDEX
+            out_ty = out_ty,
+            dest_ty = dest_ty,
+            dyn_buffer_index = 4u64
         );
         let _ = self
             .copy_pipeline
@@ -1593,9 +1783,9 @@ impl MetalKernelOp for MetalScatter {
             #include <metal_stdlib>
             using namespace metal;
             kernel void scatter_kernel(
-                device float *out [[buffer(0)]],
+                device {out_ty} *out [[buffer(0)]],
                 const device int *indexes [[buffer(1)]],
-                const device float *src [[buffer(2)]],
+                const device {src_ty} *src [[buffer(2)]],
                 device uint &n_elements [[buffer(3)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
                 uint idx [[thread_position_in_grid]]
@@ -1606,7 +1796,9 @@ impl MetalKernelOp for MetalScatter {
                 }}
             }}
             "#,
-            dyn_buffer_index = DYN_BUFFER_INDEX
+            out_ty = out_ty,
+            src_ty = src_ty,
+            dyn_buffer_index = 4u64
         );
         compile_shader(device, &scatter_source, "scatter_kernel")
     }
@@ -1751,28 +1943,49 @@ impl EgglogOp for MetalCast {
 }
 
 impl MetalKernelOp for MetalCast {
-    fn compile(&self, device: &Device) -> ComputePipelineState {
-        let _ = self.target_dtype;
-        // MetalRuntime currently allocates all buffers as fp32, so Cast is a no-op copy at runtime.
-        // The dtype lives in egglog for correctness / lowering checks, but is not yet reflected in
-        // Metal buffer allocation or kernel signatures.
+    fn compile(
+        &self,
+        device: &Device,
+        input_dtypes: &[DType],
+        output_dtype: DType,
+    ) -> ComputePipelineState {
+        let input_dtype = input_dtypes.first().copied().unwrap_or(DType::F32);
+        let input_ty = metal_buffer_type(input_dtype);
+        let output_ty = metal_buffer_type(output_dtype);
+        let cast_expr = match (input_dtype, output_dtype) {
+            (DType::F32, DType::F32)
+            | (DType::F16, DType::F16)
+            | (DType::Int, DType::Int)
+            | (DType::F32, DType::F16)
+            | (DType::F16, DType::F32)
+            | (DType::F32, DType::Int)
+            | (DType::Int, DType::F32)
+            | (DType::F16, DType::Int)
+            | (DType::Int, DType::F16) => format!("({output_ty})(inp[idx])"),
+            _ => panic!(
+                "MetalCast does not support runtime cast from {input_dtype:?} to {output_dtype:?}"
+            ),
+        };
         let source = format!(
             r#"
             #include <metal_stdlib>
             using namespace metal;
 
             kernel void mkernel(
-                device float *inp [[buffer(0)]],
-                device float *out [[buffer(1)]],
+                device {input_ty} *inp [[buffer(0)]],
+                device {output_ty} *out [[buffer(1)]],
                 constant int *dyn [[buffer({dyn_buffer_index})]],
                 device uint &n_elements [[buffer({n_elements_index})]],
                 uint idx [[thread_position_in_grid]]
             ) {{
                 if (idx < n_elements) {{
-                    out[idx] = inp[idx];
+                    out[idx] = {cast_expr};
                 }}
             }}
             "#,
+            input_ty = input_ty,
+            output_ty = output_ty,
+            cast_expr = cast_expr,
             dyn_buffer_index = 2u64,
             n_elements_index = 3u64,
         );
@@ -1781,6 +1994,10 @@ impl MetalKernelOp for MetalCast {
 
     fn output_size(&self) -> Expression {
         self.size
+    }
+
+    fn infer_output_dtype(&self, _input_dtypes: &[DType]) -> DType {
+        self.target_dtype
     }
 
     fn encode(
