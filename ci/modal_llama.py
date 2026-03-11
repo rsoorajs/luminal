@@ -10,7 +10,7 @@ WORKDIR = "/workspace/luminal"
 
 cuda_image = (
     modal.Image.from_registry(
-        "ghcr.io/luminal-ai/luminal-docker:cuda", force_build=True
+        "ghcr.io/luminal-ai/luminal-docker:cuda"
     )
     .add_local_dir(".", remote_path=WORKDIR)
 )
@@ -31,7 +31,7 @@ def run_llama():
     subprocess.run(
         ["cargo", "run", "--release"],
         cwd=f"{WORKDIR}/examples/llama",
-        env={**os.environ, "CUDA_COMPUTE_CAP": "80", "CUDARC_CUDA_VERSION": "13000"},
+        env={**os.environ, "CUDA_COMPUTE_CAP": "80", "CUDARC_CUDA_VERSION": "13000", "HF_HOME": "/root/.cache/huggingface"},
         check=True,
     )
 
