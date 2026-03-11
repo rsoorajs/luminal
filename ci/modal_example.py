@@ -13,8 +13,13 @@ WORKDIR = "/workspace/luminal"
 
 cuda_image = (
     modal.Image.from_registry(
-        "ghcr.io/luminal-ai/luminal-docker:cuda"
+        "nvcr.io/nvidia/pytorch:25.03-py3"
     )
+    .apt_install("protobuf-compiler")
+    .run_commands(
+        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+    )
+    .env({"PATH": "/root/.cargo/bin:$PATH"})
     .add_local_dir(".", remote_path=WORKDIR)
 )
 
@@ -37,7 +42,6 @@ def run_example(example: str):
         env={
             **os.environ,
             "HF_HOME": "/root/.cache/huggingface",
-            "CUDARC_CUDA_VERSION": "12080",
         },
         check=True,
     )
