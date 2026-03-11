@@ -774,10 +774,11 @@ impl Runtime for CudaRuntime {
     }
 
     fn allocate_dummy_input(&mut self, node_index: usize, num_elements: usize) {
-        let buf = self
-            .cuda_stream
-            .alloc_zeros(num_elements * std::mem::size_of::<f32>())
-            .unwrap();
+        // Use small non-zero values (ones) instead of zeros so that NaN-producing
+        // graph variants are detected during profiling. Zero inputs often hide
+        // numerical issues that appear with real data.
+        let host_data = vec![1.0f32; num_elements];
+        let buf = self.cuda_stream.clone_htod(bytemuck::cast_slice::<f32, u8>(&host_data)).unwrap();
         let id = NodeIndex::new(node_index);
         self.hlir_buffers.insert(id, CudaInput::Buffer(buf));
         self.changed_hlir.insert(id);
@@ -795,6 +796,25 @@ impl Runtime for CudaRuntime {
 
     fn intermediate_buffer_bytes(&self) -> usize {
         self.buffers.values().map(|b| b.len()).sum()
+    }
+
+    fn has_nan_outputs(&self, _llir_graph: &LLIRGraph, _dyn_map: &FxHashMap<char, usize>) -> bool {
+        let _ = self.cuda_stream.synchronize();
+        for (_node, buf) in &self.buffers {
+            let n_bytes = buf.len();
+            if n_bytes == 0 || n_bytes % 4 != 0 {
+                continue;
+            }
+            let host_bytes: Vec<u8> = match self.cuda_stream.clone_dtoh(buf) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let f32_slice: &[f32] = bytemuck::cast_slice(&host_bytes);
+            if f32_slice.iter().any(|x| x.is_nan()) {
+                return true;
+            }
+        }
+        false
     }
 
     #[tracing::instrument(skip_all)]

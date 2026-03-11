@@ -16,7 +16,7 @@ const REPO_ID: &str = "NousResearch/Meta-Llama-3-8B-Instruct";
 fn main() {
     let max_seq_len = 4096;
     let gen_tokens = 500;
-    let search_graphs = 5000;
+    let search_graphs = 500;
     let prompt = "Explain what a neural network is in a paragraph.";
 
     tracing_subscriber::registry()

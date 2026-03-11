@@ -371,11 +371,12 @@ impl Graph {
                     );
                     runtime.clear_intermediate_buffers();
                     let profile = runtime.profile(&graph, &self.dyn_map, Self::TRIALS_PER_PROFILE);
-                    (graph, profile)
+                    let has_nan = runtime.has_nan_outputs(&graph, &self.dyn_map);
+                    (graph, profile, has_nan)
                 }));
 
                 match result {
-                    Ok((graph, (metric, disp))) => {
+                    Ok((graph, (metric, disp), has_nan)) if !has_nan => {
                         best_genome = genome;
                         best_graph = graph;
                         best_metric = metric;
@@ -383,7 +384,7 @@ impl Graph {
                         n_graphs = 1;
                         break;
                     }
-                    Err(_) => {
+                    Ok(_) | Err(_) => {
                         list_cache.clear();
                         expr_cache.clear();
                         continue;
@@ -463,11 +464,32 @@ impl Graph {
                                 &self.dyn_map,
                                 Self::TRIALS_PER_PROFILE,
                             );
-                            (result, llir_graph)
+                            let has_nan = runtime.has_nan_outputs(&llir_graph, &self.dyn_map);
+                            (result, llir_graph, has_nan)
                         }));
 
                     let ((new_metric, display_metric), llir_graph) = match profile_result {
-                        Ok(result) => result,
+                        Ok((result, graph, false)) => (result, graph),
+                        Ok((_, _, true)) => {
+                            // NaN detected - skip this candidate
+                            if multi_chunk {
+                                print!(
+                                    "\x1b[1A\r\x1b[2K  {:>6}  {} {n_graphs}/{limit}\n\x1b[2K  {:>6}  {} {group_idx}/{n_groups}",
+                                    "Group".cyan().bold(),
+                                    make_bar(n_graphs, limit),
+                                    "Total".cyan().bold(),
+                                    make_bar(group_idx, n_groups)
+                                );
+                            } else {
+                                print!(
+                                    "\r\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
+                                    "Search".cyan().bold(),
+                                    make_bar(n_graphs, limit),
+                                );
+                            }
+                            std::io::stdout().flush().unwrap();
+                            continue;
+                        }
                         Err(_) => {
                             if multi_chunk {
                                 print!(

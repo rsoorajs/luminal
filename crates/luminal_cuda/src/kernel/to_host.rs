@@ -26,7 +26,7 @@ use crate::{
     kernel::{
         CudaFunctionExt, CudaGraphExecHandle, CudaGraphHandle, KernelOp, create_cuda_event,
         destroy_cuda_event,
-        hlir::{clear_global_dyn_dims, set_global_dyn_dims},
+        hlir::{clear_global_dyn_dims, get_global_dyn_dims, set_global_dyn_dims},
     },
     runtime::partition_marked_convex,
 };
@@ -732,12 +732,19 @@ pub fn kernel_to_host(
             ));
         }
 
+        // Get the possibly-extended global ordering (kernels may have discovered new dims)
+        let final_global = get_global_dyn_dims();
         // Clear global ordering now that all kernels are compiled
         clear_global_dyn_dims();
 
-        // Sort dyn dims alphabetically for consistent buffer layout
-        let mut dyn_dims_order: Vec<char> = all_dyn_dims.into_iter().collect();
-        dyn_dims_order.sort();
+        // Use the final global ordering if it was extended during compilation
+        let mut dyn_dims_order: Vec<char> = if let Some(final_order) = final_global {
+            final_order
+        } else {
+            let mut dims: Vec<char> = all_dyn_dims.into_iter().collect();
+            dims.sort();
+            dims
+        };
 
         let buffer_nodes: Vec<NodeIndex> = all_buffer_nodes.into_iter().collect();
 

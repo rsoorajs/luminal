@@ -35,6 +35,11 @@ pub trait Runtime {
     fn intermediate_buffer_bytes(&self) -> usize {
         0
     }
+    /// Check if the most recent execution produced NaN in any output buffer.
+    /// Used by the search to reject NaN-producing graph variants.
+    fn has_nan_outputs(&self, _llir_graph: &LLIRGraph, _dyn_map: &FxHashMap<char, usize>) -> bool {
+        false
+    }
 }
 
 /// Optional runtime instrumentation for collecting execution statistics.

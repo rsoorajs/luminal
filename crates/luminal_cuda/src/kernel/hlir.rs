@@ -2874,6 +2874,11 @@ pub fn clear_global_dyn_dims() {
     GLOBAL_DYN_DIMS.with(|g| *g.borrow_mut() = None);
 }
 
+/// Get the current global dyn dims ordering.
+pub fn get_global_dyn_dims() -> Option<Vec<char>> {
+    GLOBAL_DYN_DIMS.with(|g| g.borrow().clone())
+}
+
 /// Generate #define macros for dynamic dimensions that read from a shared dyn_dims buffer.
 /// The buffer layout is alphabetically sorted by dim char for consistency.
 /// Returns (defines_string, sorted_dims) where sorted_dims gives the order of dims in the buffer.
@@ -2886,8 +2891,21 @@ pub fn generate_dyn_dims_defines(vars: &FxHashSet<char>) -> (String, Vec<char>) 
     }
     // Check for global ordering override
     let global = GLOBAL_DYN_DIMS.with(|g| g.borrow().clone());
-    if let Some(global_order) = global {
+    if let Some(mut global_order) = global {
         // Use global ordering for indices - each dim gets its position in the global list
+        // Dynamically extend the ordering if a kernel uses a dim not in the pre-scan
+        let mut extended = false;
+        for dim in vars.iter().sorted() {
+            if !global_order.contains(dim) {
+                global_order.push(*dim);
+                extended = true;
+            }
+        }
+        if extended {
+            global_order.sort();
+            // Update the thread-local so subsequent kernels see the extended ordering
+            set_global_dyn_dims(global_order.clone());
+        }
         let defines = vars
             .iter()
             .sorted()
@@ -2895,7 +2913,7 @@ pub fn generate_dyn_dims_defines(vars: &FxHashSet<char>) -> (String, Vec<char>) 
                 let idx = global_order
                     .iter()
                     .position(|d| d == dim)
-                    .unwrap_or_else(|| panic!("Dim '{dim}' not found in global dyn_dims ordering"));
+                    .expect("Dim must be in global ordering after extension");
                 format!("#define const_{dim} (dyn_dims + {idx})")
             })
             .collect::<Vec<_>>()
