@@ -1,7 +1,7 @@
 use super::{MetalKernelOp, DYN_BUFFER_INDEX};
 use luminal::{
     egglog_utils::{
-        api::{app, eq, rule, set, sort, union, v, Rule, SortDef},
+        api::{app, eq, rule, sort, union, v, Rule, SortDef},
         base::{dtype, DTYPE, ELIST, EXPRESSION, F64, IR, OP_SORTS, SORTS},
         SerializedEGraph,
     },
@@ -1498,11 +1498,9 @@ impl EgglogOp for MetalScatter {
             ("out_strides".to_string(), out_strides),
         ];
         let metal_op = self.sort().call(metal_args);
-        vec![rule([
-            union(scatter_match, metal_op.clone()),
-            set(dtype(metal_op), dt.clone()),
-        ])
-        .fact(eq(dt, dtype(scatter_args["src"].clone())))]
+        vec![rule(union(scatter_match, metal_op.clone()))
+            .set(dtype(metal_op), dt.clone())
+            .fact(eq(dt, dtype(scatter_args["src"].clone())))]
     }
 
     fn cleanup(&self) -> bool {
