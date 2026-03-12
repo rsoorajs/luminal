@@ -1,9 +1,8 @@
 use crate::{
-    block::{BlockOp, N_TIMING_SLOTS, SMEvent, record_block_op_timings},
     host::HostOp,
     kernel::{CudaGraphTiming, KernelOp, record_cuda_graph_timings},
 };
-use cudarc::driver::{CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, PinnedHostSlice};
+use cudarc::driver::{CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr};
 
 use fixedbitset::FixedBitSet;
 use half::{bf16, f16};
@@ -30,7 +29,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tracing::{Level, enabled, span, trace};
+use tracing::{Level, span, trace};
 use uuid::Uuid;
 
 pub enum CudaInput {
@@ -59,29 +58,10 @@ pub struct KernelStats {
     pub tflops: f64,
 }
 
-/// Statistics for a single block op execution (aggregated across all SMs)
-#[derive(Debug, Clone)]
-pub struct BlockOpStats {
-    pub name: &'static str,
-    pub execution_time_us: f64,
-    pub bytes_loaded: usize,
-    pub bytes_stored: usize,
-    pub flops: usize,
-    pub bandwidth_gbps: f64,
-    pub tflops: f64,
-    pub count: usize,
-}
 impl Debug for ExecutableHostOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "HostOp: ({:?})", self.internal)
     }
-}
-
-/// Pending timing data using pinned memory for async copies
-struct PendingTimingData {
-    timing_buffer_idx: usize,
-    start_time_idx: usize,
-    span_id: Uuid,
 }
 
 pub struct CudaRuntime {
@@ -89,19 +69,9 @@ pub struct CudaRuntime {
     pub buffers: FxHashMap<NodeIndex, CudaSlice<u8>>,
     pub llir_graph: luminal::graph::LLIRGraph,
     cuda_stream: Arc<CudaStream>,
-    timing_stream: Arc<CudaStream>,
     exec_graph: StableGraph<ExecutableHostOp, (), Directed>,
     node_to_exec: FxHashMap<NodeIndex, NodeIndex>,
-    pub(crate) timings: Vec<Vec<(Vec<SMEvent>, u64, Uuid)>>,
     pub(crate) cuda_graph_timings: Vec<(CudaGraphTiming, Uuid)>,
-    /// Pending timing data collected asynchronously using pinned memory
-    pending_timing_data: Vec<PendingTimingData>,
-    /// Pool of pre-allocated pinned timing buffers (one per slot)
-    pinned_timing_pool: Vec<PinnedHostSlice<SMEvent>>,
-    /// Pool of pre-allocated pinned start time buffers (one per slot)
-    pinned_start_pool: Vec<PinnedHostSlice<u64>>,
-    /// Index of next available slot in the pinned buffer pools
-    next_pinned_slot: usize,
     last_dyn_map: FxHashMap<char, usize>,
     intermediate_buffer_dims: FxHashSet<char>,
     llir_to_hlir: FxHashMap<NodeIndex, NodeIndex>,
@@ -112,11 +82,8 @@ pub struct CudaRuntime {
     pub last_kernel_stats: Vec<KernelStats>,
     pub last_total_time_us: f64,
     kernel_cache: FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
-    num_sms: usize,
     /// When true, execute() skips input buffer consumption (used during search/profile)
     profiling: bool,
-    /// Buffer nodes that are outputs of BlockOps (need zeroing due to atomicAdd)
-    block_op_buffers: FxHashSet<NodeIndex>,
     /// Alias map: for KernelOps with output_aliases_input(), maps output node → aliased input node.
     /// Used to resolve cross-CudaGraphOp buffer references.
     output_alias_map: FxHashMap<NodeIndex, NodeIndex>,
@@ -381,9 +348,6 @@ impl CudaRuntime {
     #[tracing::instrument(skip_all)]
     fn allocate_intermediate_buffers(&mut self, dyn_dims: &FxHashMap<char, usize>) {
         let is_first_alloc = self.buffers.is_empty();
-        if is_first_alloc {
-            self.block_op_buffers.clear();
-        }
 
         // Only sync if we might need to free/reallocate buffers
         if is_first_alloc {
@@ -397,29 +361,21 @@ impl CudaRuntime {
             if self.llir_graph[node].to_op::<Input>().is_some() {
                 continue;
             }
-            let (needed_bytes, is_block_op) =
-                if let Some(op) = self.llir_graph[node].to_dialect::<dyn BlockOp>() {
+            let needed_bytes =
+                if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
                     let out_bytes = op.output_bytes();
                     self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
-                    (out_bytes.exec(dyn_dims).unwrap(), true)
-                } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
-                    let out_bytes = op.output_bytes();
-                    self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
-                    (out_bytes.exec(dyn_dims).unwrap(), false)
+                    out_bytes.exec(dyn_dims).unwrap()
                 } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
                     let out_bytes = op.output_bytes();
                     self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
-                    (out_bytes.exec(dyn_dims).unwrap(), false)
+                    out_bytes.exec(dyn_dims).unwrap()
                 } else {
                     continue;
                 };
 
             if needed_bytes == 0 {
                 continue;
-            }
-
-            if is_block_op {
-                self.block_op_buffers.insert(node);
             }
 
             // Only allocate/reallocate if we don't have a buffer or existing one is too small
@@ -565,7 +521,6 @@ impl Runtime for CudaRuntime {
     type Ops = (
         crate::logical::Ops,
         crate::kernel::Ops,
-        crate::block::Ops,
         crate::host::Ops,
     );
     type CompileArg = Arc<CudaStream>;
@@ -573,44 +528,10 @@ impl Runtime for CudaRuntime {
     type ProfileMetric = Duration;
 
     fn initialize(stream: Self::CompileArg) -> Self {
-        let ctx = stream.context();
-        let num_sms = ctx
-            .attribute(
-                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
-            )
-            .unwrap() as usize;
-        let timing_stream = ctx.new_stream().expect("Failed to create timing stream");
-
-        // Pre-allocate pinned buffer pools for async timing collection
-        // We allocate enough slots to handle many megakernels between flushes
-        const PINNED_POOL_SIZE: usize = 64;
-        let timing_len = num_sms * N_TIMING_SLOTS;
-        let pinned_timing_pool;
-        let pinned_start_pool;
-        if enabled!(Level::TRACE) {
-            pinned_timing_pool = (0..PINNED_POOL_SIZE)
-                .map(|_| unsafe {
-                    ctx.alloc_pinned::<SMEvent>(timing_len)
-                        .expect("Failed to allocate pinned timing buffer")
-                })
-                .collect::<Vec<_>>();
-            pinned_start_pool = (0..PINNED_POOL_SIZE)
-                .map(|_| unsafe {
-                    ctx.alloc_pinned::<u64>(num_sms)
-                        .expect("Failed to allocate pinned start time buffer")
-                })
-                .collect::<Vec<_>>();
-        } else {
-            pinned_timing_pool = vec![];
-            pinned_start_pool = vec![]
-        }
-
         Self {
-            num_sms,
             hlir_buffers: FxHashMap::default(),
             buffers: FxHashMap::default(),
             cuda_stream: stream,
-            timing_stream,
             llir_graph: StableGraph::default(),
             exec_graph: StableGraph::default(),
             node_to_exec: FxHashMap::default(),
@@ -618,19 +539,13 @@ impl Runtime for CudaRuntime {
             llir_to_hlir: FxHashMap::default(),
             changed_hlir: FxHashSet::default(),
             cached_buffer_ptrs: FxHashMap::default(),
-            timings: vec![],
             cuda_graph_timings: vec![],
-            pending_timing_data: vec![],
-            pinned_timing_pool,
-            pinned_start_pool,
-            next_pinned_slot: 0,
             last_dyn_map: FxHashMap::default(),
             intermediate_buffer_dims: FxHashSet::default(),
             last_kernel_stats: vec![],
             last_total_time_us: 0.0,
             kernel_cache: FxHashMap::default(),
             profiling: false,
-            block_op_buffers: FxHashSet::default(),
             output_alias_map: FxHashMap::default(),
         }
     }
@@ -646,7 +561,6 @@ impl Runtime for CudaRuntime {
         // reallocated and re-registered with the new work_queue
         self.buffers.clear();
         self.cached_buffer_ptrs.clear();
-        self.block_op_buffers.clear();
         // Mark all HLIR inputs as changed so their pointers get re-cached in execute
         self.changed_hlir.extend(self.hlir_buffers.keys().copied());
         self.exec_graph.clear();
@@ -666,15 +580,8 @@ impl Runtime for CudaRuntime {
         let mut exec_graph = StableGraph::default();
         let mut node_to_exec = FxHashMap::default();
 
-        // Clone llir_graph so we can modify it to add megakernel nodes
+        // Clone llir_graph so we can modify it
         let mut llir_graph = llir_graph.clone();
-
-        // Compile BlockOp subgraphs into MegakernelOps and add them to the llir_graph
-        let megakernel_to_blocks = crate::block::block_to_kernel(
-            &mut llir_graph,
-            &self.cuda_stream,
-            &mut self.kernel_cache,
-        );
 
         // Compile kernel subgraphs into CudaGraphOps (which implement HostOp)
         // This adds CudaGraphOp nodes to llir_graph and removes the original kernel nodes.
@@ -683,7 +590,6 @@ impl Runtime for CudaRuntime {
             &mut llir_graph,
             &self.cuda_stream,
             &mut self.kernel_cache,
-            &megakernel_to_blocks,
         );
 
         // Build output alias map: for KernelOps with output_aliases_input(),
@@ -832,32 +738,16 @@ impl Runtime for CudaRuntime {
         self.profiling = false;
         let duration = start.elapsed();
 
-        // Flush pending timing data so it's available for stats
-        self.flush_pending_timings();
-
-        // Compute aggregates for profile display
-        let block_op_stats = Self::compute_block_op_stats(
-            &self.llir_graph,
-            self.timings.last().unwrap_or(&vec![]),
-            &self.last_dyn_map,
-            self.num_sms,
-        );
-
         let total_bytes: usize = self
             .last_kernel_stats
             .iter()
             .map(|s| s.bytes_loaded + s.bytes_stored)
-            .sum::<usize>()
-            + block_op_stats
-                .iter()
-                .map(|s| s.bytes_loaded + s.bytes_stored)
-                .sum::<usize>();
+            .sum::<usize>();
         let total_flops: usize = self
             .last_kernel_stats
             .iter()
             .map(|s| s.flops)
-            .sum::<usize>()
-            + block_op_stats.iter().map(|s| s.flops).sum::<usize>();
+            .sum::<usize>();
         let aggregate_bw = if self.last_total_time_us > 0.0 {
             (total_bytes as f64) / (self.last_total_time_us * 1e-6) / 1e9
         } else {
@@ -878,11 +768,7 @@ impl Runtime for CudaRuntime {
         let mbu_str = mbu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
         let mfu_str = mfu.map_or("-".to_string(), |v| format!("{:.1}%", v * 100.0));
         let display = format!(
-            "{duration_str} | MBU: {mbu_str} | MFU: {mfu_str} [BLK: {} KRN: {} HOST: {}]",
-            llir_graph
-                .node_weights()
-                .filter(|n| n.to_dialect::<dyn BlockOp>().is_some())
-                .count(),
+            "{duration_str} | MBU: {mbu_str} | MFU: {mfu_str} [KRN: {} HOST: {}]",
             llir_graph
                 .node_weights()
                 .filter(|n| n.to_dialect::<dyn KernelOp>().is_some())
@@ -908,13 +794,6 @@ impl Runtime for CudaRuntime {
         if needs_realloc {
             self.last_dyn_map = dyn_map.clone();
             self.allocate_intermediate_buffers(dyn_map);
-        }
-        // Only zero block op output buffers (they use atomicAdd and accumulate into output)
-        // HLIR kernel outputs are fully written and don't need zeroing
-        for &node in &self.block_op_buffers {
-            if let Some(buffer) = self.buffers.get_mut(&node) {
-                self.cuda_stream.memset_zeros(buffer).unwrap();
-            }
         }
         // Cache HLIR input pointers
         if !self.changed_hlir.is_empty() {
@@ -1087,329 +966,29 @@ impl Runtime for CudaRuntime {
 }
 
 impl CudaRuntime {
-    fn compute_block_op_stats(
-        llir_graph: &LLIRGraph,
-        timings: &[(Vec<SMEvent>, u64, Uuid)],
-        dyn_map: &FxHashMap<char, usize>,
-        sm_count: usize,
-    ) -> Vec<BlockOpStats> {
-        // Get unique op names (same order as in interpreter)
-        let op_names: Vec<&'static str> = llir_graph
-            .node_indices()
-            .filter_map(|n| llir_graph[n].to_dialect::<dyn BlockOp>())
-            .map(|bo| (bo.op_name(), bo.clone()))
-            .collect::<FxHashMap<_, _>>()
-            .into_iter()
-            .sorted_by_key(|(n, _)| *n)
-            .map(|(n, _)| n)
-            .collect();
-
-        if op_names.is_empty() {
-            return vec![];
-        }
-
-        // Build map from op_name to index for event decoding
-        let op_name_to_idx: FxHashMap<&'static str, usize> =
-            op_names.iter().enumerate().map(|(i, n)| (*n, i)).collect();
-
-        // Sum up bytes_loaded, bytes_stored, flops across ALL instances of each op type
-        let mut op_bytes_loaded: Vec<usize> = vec![0; op_names.len()];
-        let mut op_bytes_stored: Vec<usize> = vec![0; op_names.len()];
-        let mut op_flops: Vec<usize> = vec![0; op_names.len()];
-
-        // Sum up prologue metrics across ALL instances of each op type
-        let mut prologue_a_bytes_loaded: Vec<usize> = vec![0; op_names.len()];
-        let mut prologue_a_flops: Vec<usize> = vec![0; op_names.len()];
-        let mut prologue_b_bytes_loaded: Vec<usize> = vec![0; op_names.len()];
-        let mut prologue_b_flops: Vec<usize> = vec![0; op_names.len()];
-        let mut prologue_c_bytes_loaded: Vec<usize> = vec![0; op_names.len()];
-        let mut prologue_c_flops: Vec<usize> = vec![0; op_names.len()];
-
-        for node in llir_graph.node_indices() {
-            if let Some(op) = llir_graph[node].to_dialect::<dyn BlockOp>()
-                && let Some(&idx) = op_name_to_idx.get(op.op_name())
-            {
-                let flops_expr = op.flops();
-                let flops_val = flops_expr.exec(dyn_map).unwrap();
-                op_bytes_loaded[idx] += op.bytes_loaded().exec(dyn_map).unwrap();
-                op_bytes_stored[idx] += op.bytes_stored().exec(dyn_map).unwrap();
-                op_flops[idx] += flops_val;
-
-                // Aggregate prologue metrics
-                prologue_a_bytes_loaded[idx] +=
-                    op.prologue_a_bytes_loaded().exec(dyn_map).unwrap_or(0);
-                prologue_a_flops[idx] += op.prologue_a_flops().exec(dyn_map).unwrap_or(0);
-                prologue_b_bytes_loaded[idx] +=
-                    op.prologue_b_bytes_loaded().exec(dyn_map).unwrap_or(0);
-                prologue_b_flops[idx] += op.prologue_b_flops().exec(dyn_map).unwrap_or(0);
-                prologue_c_bytes_loaded[idx] +=
-                    op.prologue_c_bytes_loaded().exec(dyn_map).unwrap_or(0);
-                prologue_c_flops[idx] += op.prologue_c_flops().exec(dyn_map).unwrap_or(0);
-            }
-        }
-
-        // Aggregate timing per op type across all SMs
-        // Event encoding:
-        // 0: Issue
-        // 1: Wait
-        // 2 to 2 + n_ops - 1: Main ops
-        // 2 + n_ops + op_idx * 3 + 0: Prologue A
-        // 2 + n_ops + op_idx * 3 + 1: Prologue B
-        // 2 + n_ops + op_idx * 3 + 2: Prologue C
-        let n_ops = op_names.len();
-        let mut op_times_ns: Vec<u64> = vec![0; n_ops];
-        let mut op_counts: Vec<usize> = vec![0; n_ops];
-        let mut prologue_a_times_ns: Vec<u64> = vec![0; n_ops];
-        let mut prologue_a_counts: Vec<usize> = vec![0; n_ops];
-        let mut prologue_b_times_ns: Vec<u64> = vec![0; n_ops];
-        let mut prologue_b_counts: Vec<usize> = vec![0; n_ops];
-        let mut prologue_c_times_ns: Vec<u64> = vec![0; n_ops];
-        let mut prologue_c_counts: Vec<usize> = vec![0; n_ops];
-        let mut issue_time_ns: u64 = 0;
-        let mut issue_count: usize = 0;
-        let mut wait_time_ns: u64 = 0;
-        let mut wait_count: usize = 0;
-
-        for (sm_timings, _start_time, _) in timings {
-            for sm_chunk in sm_timings.chunks(N_TIMING_SLOTS) {
-                for event in sm_chunk.iter() {
-                    if event.start == 0 {
-                        break; // No more events recorded for this SM
-                    }
-                    let stop = if event.stop == 0 {
-                        event.start
-                    } else {
-                        event.stop
-                    };
-                    let duration = stop.saturating_sub(event.start);
-                    let event_code = event.event as usize;
-                    if event_code == 0 {
-                        issue_time_ns += duration;
-                        issue_count += 1;
-                    } else if event_code == 1 {
-                        wait_time_ns += duration;
-                        wait_count += 1;
-                    } else if event_code >= 2 && event_code < 2 + n_ops {
-                        // Main op
-                        let op_idx = event_code - 2;
-                        op_times_ns[op_idx] += duration;
-                        op_counts[op_idx] += 1;
-                    } else if event_code >= 2 + n_ops {
-                        // Prologue event
-                        let prologue_event = event_code - 2 - n_ops;
-                        let op_idx = prologue_event / 3;
-                        let prologue_type = prologue_event % 3;
-                        if op_idx < n_ops {
-                            match prologue_type {
-                                0 => {
-                                    prologue_a_times_ns[op_idx] += duration;
-                                    prologue_a_counts[op_idx] += 1;
-                                }
-                                1 => {
-                                    prologue_b_times_ns[op_idx] += duration;
-                                    prologue_b_counts[op_idx] += 1;
-                                }
-                                2 => {
-                                    prologue_c_times_ns[op_idx] += duration;
-                                    prologue_c_counts[op_idx] += 1;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Compute bandwidth and TFLOPS from aggregated metrics
-        // Divide total SM-time by sm_count to get wall-clock time
-        let mut stats: Vec<BlockOpStats> = op_names
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| op_times_ns[*i] > 0)
-            .map(|(i, &name)| {
-                // Total SM-time divided by number of SMs gives wall-clock time
-                let time_us = (op_times_ns[i] as f64 / sm_count as f64) / 1000.0;
-                let bytes_loaded = op_bytes_loaded[i];
-                let bytes_stored = op_bytes_stored[i];
-                let flop_count = op_flops[i];
-
-                let total_bytes = bytes_loaded + bytes_stored;
-                let bandwidth_gbps = if time_us > 0.0 {
-                    (total_bytes as f64) / (time_us * 1e-6) / 1e9
-                } else {
-                    0.0
-                };
-                let tflops = if time_us > 0.0 {
-                    (flop_count as f64) / (time_us * 1e-6) / 1e12
-                } else {
-                    0.0
-                };
-
-                BlockOpStats {
-                    name,
-                    execution_time_us: time_us,
-                    bytes_loaded,
-                    bytes_stored,
-                    flops: flop_count,
-                    bandwidth_gbps,
-                    tflops,
-                    count: op_counts[i],
-                }
-            })
-            .collect();
-
-        // Add prologue timing stats (only for prologues that were recorded)
-        for (i, &name) in op_names.iter().enumerate() {
-            if prologue_a_times_ns[i] > 0 {
-                let time_us = (prologue_a_times_ns[i] as f64 / sm_count as f64) / 1000.0;
-                let bytes_loaded = prologue_a_bytes_loaded[i];
-                let flop_count = prologue_a_flops[i];
-                let bandwidth_gbps = if time_us > 0.0 && bytes_loaded > 0 {
-                    (bytes_loaded as f64) / (time_us * 1e-6) / 1e9
-                } else {
-                    0.0
-                };
-                let tflops = if time_us > 0.0 && flop_count > 0 {
-                    (flop_count as f64) / (time_us * 1e-6) / 1e12
-                } else {
-                    0.0
-                };
-                stats.push(BlockOpStats {
-                    name: Box::leak(format!("{} (prologue A)", name).into_boxed_str()),
-                    execution_time_us: time_us,
-                    bytes_loaded,
-                    bytes_stored: 0,
-                    flops: flop_count,
-                    bandwidth_gbps,
-                    tflops,
-                    count: prologue_a_counts[i],
-                });
-            }
-            if prologue_b_times_ns[i] > 0 {
-                let time_us = (prologue_b_times_ns[i] as f64 / sm_count as f64) / 1000.0;
-                let bytes_loaded = prologue_b_bytes_loaded[i];
-                let flop_count = prologue_b_flops[i];
-                let bandwidth_gbps = if time_us > 0.0 && bytes_loaded > 0 {
-                    (bytes_loaded as f64) / (time_us * 1e-6) / 1e9
-                } else {
-                    0.0
-                };
-                let tflops = if time_us > 0.0 && flop_count > 0 {
-                    (flop_count as f64) / (time_us * 1e-6) / 1e12
-                } else {
-                    0.0
-                };
-                stats.push(BlockOpStats {
-                    name: Box::leak(format!("{} (prologue B)", name).into_boxed_str()),
-                    execution_time_us: time_us,
-                    bytes_loaded,
-                    bytes_stored: 0,
-                    flops: flop_count,
-                    bandwidth_gbps,
-                    tflops,
-                    count: prologue_b_counts[i],
-                });
-            }
-            if prologue_c_times_ns[i] > 0 {
-                let time_us = (prologue_c_times_ns[i] as f64 / sm_count as f64) / 1000.0;
-                let bytes_loaded = prologue_c_bytes_loaded[i];
-                let flop_count = prologue_c_flops[i];
-                let bandwidth_gbps = if time_us > 0.0 && bytes_loaded > 0 {
-                    (bytes_loaded as f64) / (time_us * 1e-6) / 1e9
-                } else {
-                    0.0
-                };
-                let tflops = if time_us > 0.0 && flop_count > 0 {
-                    (flop_count as f64) / (time_us * 1e-6) / 1e12
-                } else {
-                    0.0
-                };
-                stats.push(BlockOpStats {
-                    name: Box::leak(format!("{} (prologue C)", name).into_boxed_str()),
-                    execution_time_us: time_us,
-                    bytes_loaded,
-                    bytes_stored: 0,
-                    flops: flop_count,
-                    bandwidth_gbps,
-                    tflops,
-                    count: prologue_c_counts[i],
-                });
-            }
-        }
-
-        // Add Issue and Wait timing stats
-        if issue_time_ns > 0 {
-            let time_us = (issue_time_ns as f64 / sm_count as f64) / 1000.0;
-            stats.push(BlockOpStats {
-                name: "Issue",
-                execution_time_us: time_us,
-                bytes_loaded: 0,
-                bytes_stored: 0,
-                flops: 0,
-                bandwidth_gbps: 0.0,
-                tflops: 0.0,
-                count: issue_count,
-            });
-        }
-        if wait_time_ns > 0 {
-            let time_us = (wait_time_ns as f64 / sm_count as f64) / 1000.0;
-            stats.push(BlockOpStats {
-                name: "Wait",
-                execution_time_us: time_us,
-                bytes_loaded: 0,
-                bytes_stored: 0,
-                flops: 0,
-                bandwidth_gbps: 0.0,
-                tflops: 0.0,
-                count: wait_count,
-            });
-        }
-
-        stats
-    }
-
-    /// Print execution statistics for the last execution (computes block op stats lazily).
+    /// Print execution statistics for the last execution.
     pub fn print_execution_stats(&self) {
-        if self.last_kernel_stats.is_empty() && self.timings.is_empty() {
+        if self.last_kernel_stats.is_empty() {
             println!("No execution stats available.");
             return;
         }
-
-        // Compute block op stats lazily
-        let sm_count = self
-            .cuda_stream
-            .context()
-            .attribute(
-                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
-            )
-            .unwrap() as usize;
-        let block_op_stats = Self::compute_block_op_stats(
-            &self.llir_graph,
-            self.timings.last().map(|v| v.as_slice()).unwrap_or(&[]),
-            &self.last_dyn_map,
-            sm_count,
-        );
 
         // Compute aggregates
         let total_bytes_loaded: usize = self
             .last_kernel_stats
             .iter()
             .map(|s| s.bytes_loaded)
-            .sum::<usize>()
-            + block_op_stats.iter().map(|s| s.bytes_loaded).sum::<usize>();
+            .sum::<usize>();
         let total_bytes_stored: usize = self
             .last_kernel_stats
             .iter()
             .map(|s| s.bytes_stored)
-            .sum::<usize>()
-            + block_op_stats.iter().map(|s| s.bytes_stored).sum::<usize>();
+            .sum::<usize>();
         let total_flops: usize = self
             .last_kernel_stats
             .iter()
             .map(|s| s.flops)
-            .sum::<usize>()
-            + block_op_stats.iter().map(|s| s.flops).sum::<usize>();
+            .sum::<usize>();
         let total_bytes = total_bytes_loaded + total_bytes_stored;
         let aggregate_bw = if self.last_total_time_us > 0.0 {
             (total_bytes as f64) / (self.last_total_time_us * 1e-6) / 1e9
@@ -1456,40 +1035,6 @@ impl CudaRuntime {
                 );
             }
             println!("{}", "-".repeat(116));
-        }
-
-        // Print block op stats
-        if !block_op_stats.is_empty() {
-            println!("\n=== Block Op Execution Statistics ===\n");
-            println!(
-                "{:<20} {:>12} {:>8} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8}",
-                "BlockOp",
-                "Time (us)",
-                "Count",
-                "Loaded",
-                "Stored",
-                "Agg FLOPS",
-                "BW (GB/s)",
-                "TFLOPS",
-                "MBU",
-                "MFU"
-            );
-            println!("{}", "-".repeat(124));
-            for s in &block_op_stats {
-                self.print_stat_row(
-                    s.name,
-                    s.execution_time_us,
-                    Some(s.count),
-                    s.bytes_loaded,
-                    s.bytes_stored,
-                    s.flops,
-                    s.bandwidth_gbps,
-                    s.tflops,
-                    peak_bw,
-                    peak_tf,
-                );
-            }
-            println!("{}", "-".repeat(124));
         }
 
         // Print aggregate stats
@@ -1584,62 +1129,12 @@ impl CudaRuntime {
         }
     }
 
-    /// Flush pending timing data to the timings collection.
-    fn flush_pending_timings(&mut self) {
-        if self.pending_timing_data.is_empty() {
-            return;
-        }
-
-        // Sync timing stream first to ensure all async copies are complete
-        self.timing_stream
-            .synchronize()
-            .expect("Failed to sync timing stream");
-
-        // Extract data from pinned memory pool
-        let mut timing_entries = Vec::with_capacity(self.pending_timing_data.len());
-        for pending in self.pending_timing_data.drain(..) {
-            let timing_data = self.pinned_timing_pool[pending.timing_buffer_idx]
-                .as_slice()
-                .expect("Failed to read timing buffer")
-                .to_vec();
-            let min_start = self.pinned_start_pool[pending.start_time_idx]
-                .as_slice()
-                .expect("Failed to read start time buffer")
-                .iter()
-                .copied()
-                .min()
-                .unwrap_or(0);
-            timing_entries.push((timing_data, min_start, pending.span_id));
-        }
-
-        // Reset pool index so buffers can be reused
-        self.next_pinned_slot = 0;
-
-        if !timing_entries.is_empty() {
-            self.timings.push(timing_entries);
-        }
-    }
-
     /// Record GPU timings to an existing perfetto trace file.
     pub fn record_cuda_perfetto_trace(&mut self, mut perfetto_guard: PerfettoGuard) {
-        // Flush any pending timing copies first
-        self.flush_pending_timings();
-
         perfetto_guard.stop();
-        let ops: Vec<Arc<Box<dyn BlockOp>>> = self
-            .llir_graph
-            .node_indices()
-            .filter_map(|n| self.llir_graph[n].to_dialect::<dyn BlockOp>())
-            .map(|bo| (bo.op_name(), bo.clone()))
-            .collect::<std::collections::HashMap<_, _>>()
-            .into_iter()
-            .sorted_by_key(|(n, _)| *n)
-            .map(|(_, o)| o)
-            .collect();
         let data = std::fs::read(&perfetto_guard.path).unwrap();
         let mut trace = luminal_tracing::schema::Trace::decode(data.as_slice()).unwrap();
-        let mut extra_packets = record_block_op_timings(&trace, &ops, &self.timings);
-        extra_packets.extend(record_cuda_graph_timings(&trace, &self.cuda_graph_timings));
+        let extra_packets = record_cuda_graph_timings(&trace, &self.cuda_graph_timings);
         trace.packet.extend(extra_packets);
         // Sort ALL packets by timestamp for proper Perfetto visualization
         trace.packet.sort_by_key(|p| p.timestamp.unwrap_or(0));

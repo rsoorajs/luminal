@@ -640,7 +640,6 @@ pub fn kernel_to_host(
     llir_graph: &mut LLIRGraph,
     cuda_stream: &Arc<CudaStream>,
     kernel_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
-    megakernel_to_blocks: &FxHashMap<NodeIndex, Vec<NodeIndex>>,
 ) {
     let _span = span!(Level::TRACE, "kernel_to_host").entered();
 
@@ -705,11 +704,6 @@ pub fn kernel_to_host(
                 .map(|e| e.source())
                 .collect_vec();
 
-            // If this is a megakernel, include all its block op nodes for buffer access
-            if let Some(block_nodes) = megakernel_to_blocks.get(kernel_node_idx) {
-                inputs.extend(block_nodes.iter().copied());
-            }
-
             // Collect buffer nodes and sizes
             // Only add kernel nodes with non-zero output size (MegakernelOps have size 0)
             let output_size = kernel_op_ref.output_size();
@@ -769,14 +763,6 @@ pub fn kernel_to_host(
         for kernel_node in &subgraph {
             kernel_to_cuda_graph.insert(*kernel_node, cuda_graph_node);
         }
-        // Also track block op nodes inside megakernels
-        for kernel_node in &subgraph {
-            if let Some(block_nodes) = megakernel_to_blocks.get(kernel_node) {
-                for block_node in block_nodes {
-                    kernel_to_cuda_graph.insert(*block_node, cuda_graph_node);
-                }
-            }
-        }
         cuda_graph_subgraphs.push((cuda_graph_node, subgraph.clone()));
 
         // Find external inputs: nodes outside subgraph that have edges into subgraph
@@ -804,23 +790,15 @@ pub fn kernel_to_host(
 
     // Second pass: Add edges between CudaGraphOps based on kernel dependencies.
     // This ensures proper execution ordering when a kernel in one CudaGraphOp
-    // produces output consumed by a kernel (or BlockOp inside a megakernel) in another CudaGraphOp.
+    // produces output consumed by a kernel in another CudaGraphOp.
     let mut edges_to_add: Vec<(NodeIndex, NodeIndex)> = Vec::new();
 
     for (cuda_graph_node, subgraph) in &cuda_graph_subgraphs {
-        // Find all nodes that this subgraph produces output for (including BlockOp nodes in megakernels)
-        let mut all_producer_nodes: FxHashSet<NodeIndex> = subgraph.clone();
-        for kernel_node in subgraph {
-            if let Some(block_nodes) = megakernel_to_blocks.get(kernel_node) {
-                all_producer_nodes.extend(block_nodes.iter().copied());
-            }
-        }
-
         // Find external consumers that are kernels belonging to other CudaGraphOps
-        for producer_node in &all_producer_nodes {
+        for producer_node in subgraph {
             for edge in llir_graph.edges_directed(*producer_node, Direction::Outgoing) {
                 let consumer = edge.target();
-                if all_producer_nodes.contains(&consumer) {
+                if subgraph.contains(&consumer) {
                     continue; // Same subgraph
                 }
                 // Check if consumer is a kernel in another CudaGraphOp

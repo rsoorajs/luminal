@@ -299,11 +299,9 @@ fn fuzz_layer_no_attn(
     );
 }
 
-/// Test a SwiGLU MLP with HLIR-only (no block ops) to specifically verify
+/// Test a SwiGLU MLP with HLIR-only to specifically verify
 /// the HLIR matmul decomposition (KernelMul + KernelSumReduce).
 fn fuzz_mlp_hlir_only(seq: usize, hidden: usize, intermediate: usize, seed: u64) {
-    use crate::block::Ops as BlockOps;
-
     let Some(stream) = get_cuda_stream() else {
         return;
     };
@@ -315,8 +313,7 @@ fn fuzz_mlp_hlir_only(seq: usize, hidden: usize, intermediate: usize, seed: u64)
     let w_down = cx.tensor((hidden, intermediate));
     let out = swiglu_mlp(input, w_gate, w_up, w_down).output();
 
-    // Exclude all block ops to force HLIR kernel fallback
-    cx.build_search_space_exclude_ops::<CudaRuntime, BlockOps>();
+    cx.build_search_space::<CudaRuntime>();
     let mut rt = CudaRuntime::initialize(stream.clone());
 
     let input_data = random_f32_vec(seq * hidden, seed, -0.5, 0.5);

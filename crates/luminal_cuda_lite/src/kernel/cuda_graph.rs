@@ -493,7 +493,7 @@ mod tests {
         let a = cx.tensor(size).persist();
         let b = cx.tensor(size).persist();
         let c = ((a + b) * a + b).output();
-        cx.build_search_space_exclude_ops::<CudaRuntime, crate::block::Ops>();
+
         let mut rt = CudaRuntime::initialize(stream);
         let data_a = random_f32_vec(size, 42, -0.5, 0.5);
         let data_b = random_f32_vec(size, 43, -0.5, 0.5);
@@ -524,7 +524,7 @@ mod tests {
         let a = cx.tensor(size).persist();
         let b = cx.tensor(size).persist();
         let c = (a + b + a + b).output();
-        cx.build_search_space_exclude_ops::<CudaRuntime, crate::block::Ops>();
+
         let mut rt = CudaRuntime::initialize(stream);
         let data_a = random_f32_vec(size, 42, -0.5, 0.5);
         let data_b = random_f32_vec(size, 43, -0.5, 0.5);
@@ -560,7 +560,7 @@ mod tests {
         let b = cx.tensor('s');
         let c = (a + b).output();
         let d = (c * a).output();
-        cx.build_search_space_exclude_ops::<CudaRuntime, crate::block::Ops>();
+
         let mut rt = CudaRuntime::initialize(stream);
         let data_a = random_f32_vec(size, 42, -0.5, 0.5);
         let data_b = random_f32_vec(size, 43, -0.5, 0.5);
@@ -602,7 +602,7 @@ mod tests {
         let a = cx.tensor(size);
         let b = cx.tensor(size);
         let c = (a + b).output();
-        cx.build_search_space_exclude_ops::<CudaRuntime, crate::block::Ops>();
+
         let mut rt = CudaRuntime::initialize(stream);
         let data_a = random_f32_vec(size, 42, -0.5, 0.5);
         let data_b = random_f32_vec(size, 43, -0.5, 0.5);
@@ -632,7 +632,7 @@ mod tests {
             result *= b;
         }
         let output = result.output();
-        cx.build_search_space_exclude_ops::<CudaRuntime, crate::block::Ops>();
+
         let mut rt = CudaRuntime::initialize(stream);
         let data_a = random_f32_vec(size, 42, -0.5, 0.5);
         let data_b = random_f32_vec(size, 43, -0.5, 0.5);
