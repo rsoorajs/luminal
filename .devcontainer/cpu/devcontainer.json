@@ -1,16 +1,23 @@
 {
-    "name": "Luminal",
-    "image": "ghcr.io/luminal-ai/luminal-docker:latest",
-    "features": {
-    "ghcr.io/devcontainers/features/github-cli:1": {}
-},
-"remoteEnv": {
-        "GH_TOKEN": "${localEnv:GH_TOKEN}"
-},
+    "name": "Luminal (CPU)",
+    "image": "ghcr.io/luminal-ai/luminal-docker:cpu",
+    "initializeCommand": "touch .env",
     "runArgs": [
-        "--gpus=all"
+        "--env-file", ".env"
     ],
-    "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder}",
+    "containerUser": "ubuntu",
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {
+            "installZsh": false,
+            "installOhMyZsh": false,
+            "username": "ubuntu",
+            "userUid": "1000",
+            "userGid": "1000",
+            "configureZshAsDefaultShell": false
+        }
+    },
+    "remoteUser": "ubuntu",
+    "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && gh auth setup-git",
     "customizations": {
         "vscode": {
             "extensions": [
