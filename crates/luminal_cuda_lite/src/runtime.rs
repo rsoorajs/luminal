@@ -851,7 +851,9 @@ impl Runtime for CudaRuntime {
             // input's buffer. Override the buffer_map entry so cross-CudaGraphOp consumers
             // read from the correct location.
             for (&alias_node, &alias_target) in &self.output_alias_map {
-                if let std::collections::hash_map::Entry::Occupied(mut e) = buffer_map.entry(alias_node) {
+                if let std::collections::hash_map::Entry::Occupied(mut e) =
+                    buffer_map.entry(alias_node)
+                {
                     if let Some(hlir_node) = self.llir_to_hlir.get(&alias_target)
                         && let Some(CudaInput::Buffer(buf)) = self.hlir_buffers.get(hlir_node)
                     {
