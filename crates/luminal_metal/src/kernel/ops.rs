@@ -1,7 +1,7 @@
 use super::{MetalKernelOp, DYN_BUFFER_INDEX};
 use luminal::{
     egglog_utils::{
-        api::{app, eq, rule, sort, union, v, Rule, SortDef},
+        api::{app, eq, rule, set, sort, union, v, Rule, SortDef},
         base::{dtype, DTYPE, ELIST, EXPRESSION, F64, IR, OP_SORTS, SORTS},
         SerializedEGraph,
     },
