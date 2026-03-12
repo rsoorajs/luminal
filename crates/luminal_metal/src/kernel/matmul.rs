@@ -5,7 +5,7 @@ use luminal::prelude::*;
 pub enum MetalMatmulFamily {
     #[default]
     Naive,
-    Tiled,
+    RegularTiled,
 }
 
 #[derive(Debug, Clone)]
@@ -75,9 +75,11 @@ pub struct MatmulPlan {
     pub batch_stride_a: u32,
     pub batch_stride_b: u32,
     pub batch_stride_d: u32,
-    pub threadgroup_width: u16,
-    pub threadgroup_height: u16,
-    pub tile_k: u16,
+    pub bm: u16,
+    pub bn: u16,
+    pub bk: u16,
+    pub wm: u16,
+    pub wn: u16,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -90,7 +92,7 @@ impl MetalMatmulPlanner {
             && desc.n.as_num().is_some_and(|n| n >= 32)
             && desc.k.as_num().is_some_and(|k| k >= 32)
         {
-            MetalMatmulFamily::Tiled
+            MetalMatmulFamily::RegularTiled
         } else {
             MetalMatmulFamily::Naive
         };
@@ -106,9 +108,11 @@ impl MetalMatmulPlanner {
             batch_stride_a: 0,
             batch_stride_b: 0,
             batch_stride_d: 0,
-            threadgroup_width: 16,
-            threadgroup_height: 16,
-            tile_k: 16,
+            bm: 16,
+            bn: 16,
+            bk: 8,
+            wm: 2,
+            wn: 2,
         }
     }
 }
@@ -179,16 +183,18 @@ mod tests {
         let planner = MetalMatmulPlanner;
         let plan = planner.plan(&desc);
         assert_eq!(plan.family, MetalMatmulFamily::Naive);
-        assert_eq!(plan.threadgroup_width, 16);
-        assert_eq!(plan.threadgroup_height, 16);
-        assert_eq!(plan.tile_k, 16);
+        assert_eq!(plan.bm, 16);
+        assert_eq!(plan.bn, 16);
+        assert_eq!(plan.bk, 8);
+        assert_eq!(plan.wm, 2);
+        assert_eq!(plan.wn, 2);
         assert_eq!(plan.lda, Expression::from('z') * 16);
         assert_eq!(plan.ldb, Expression::from('z') * 8);
         assert_eq!(plan.ldd, Expression::from('z') * 8);
     }
 
     #[test]
-    fn planner_promotes_large_problems_to_tiled() {
+    fn planner_promotes_large_problems_to_regular_tiled() {
         let desc = MatmulDescriptor {
             m: Expression::from(64),
             n: Expression::from(64),
@@ -211,7 +217,11 @@ mod tests {
 
         let planner = MetalMatmulPlanner;
         let plan = planner.plan(&desc);
-        assert_eq!(plan.family, MetalMatmulFamily::Tiled);
-        assert_eq!(plan.tile_k, 16);
+        assert_eq!(plan.family, MetalMatmulFamily::RegularTiled);
+        assert_eq!(plan.bm, 16);
+        assert_eq!(plan.bn, 16);
+        assert_eq!(plan.bk, 8);
+        assert_eq!(plan.wm, 2);
+        assert_eq!(plan.wn, 2);
     }
 }

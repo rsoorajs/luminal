@@ -606,7 +606,7 @@ fn metal_specialized_matmul() {
 }
 
 #[test]
-fn metal_tiled_matmul_path() {
+fn metal_regular_tiled_matmul_path() {
     let mut cx = Graph::default();
     let m = 64;
     let k = 64;
@@ -627,8 +627,8 @@ fn metal_tiled_matmul_path() {
 
     let kernels = rt.debug_kernel_ops();
     assert!(
-        kernels.iter().any(|k| k.contains("family: Tiled")),
-        "expected tiled matmul path, kernels: {:?}",
+        kernels.iter().any(|k| k.contains("family: RegularTiled")),
+        "expected regular tiled matmul path, kernels: {:?}",
         kernels
     );
 
