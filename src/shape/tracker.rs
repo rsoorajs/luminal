@@ -141,6 +141,29 @@ impl ShapeTracker {
         }
     }
 
+    /// Tile the tensor along each existing dimension without materializing new storage.
+    pub fn repeat(&mut self, repeats: impl ToShape) {
+        let repeats = repeats.to_shape();
+        assert_eq!(
+            repeats.len(),
+            self.len(),
+            "Repeat shape ({}) doesn't match tensor dimensions ({})",
+            repeats.len(),
+            self.len()
+        );
+
+        for ((dim, stride), repeat) in self
+            .dims
+            .iter_mut()
+            .zip(self.strides.iter_mut())
+            .zip(repeats)
+        {
+            let original_dim = *dim;
+            *dim = (*dim * repeat).simplify();
+            *stride = stride.substitute('z', expr('z') % original_dim).simplify();
+        }
+    }
+
     /// Remove a dimension
     pub fn remove_dim(&mut self, axis: usize) -> Expression {
         self.strides.remove(axis);
@@ -449,6 +472,27 @@ mod tests {
                         "Failed for a={a}, b={b}, c={c}: merged_idx={merged_idx}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_repeat_index_mapping() {
+        let mut tracker = ShapeTracker::new((2, 3));
+        tracker.repeat((2, 2));
+
+        assert_eq!(tracker.dims.as_slice(), &[expr(4), expr(6)]);
+
+        let idx = tracker.index_expression();
+        for row in 0..4 {
+            for col in 0..6 {
+                let logical = row * 6 + col;
+                let physical = (row % 2) * 3 + (col % 3);
+                let result = idx.substitute('z', logical).to_usize().unwrap();
+                assert_eq!(
+                    result, physical,
+                    "Failed for row={row}, col={col}: logical={logical}"
+                );
             }
         }
     }
