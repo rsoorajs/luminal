@@ -166,11 +166,14 @@ impl EgglogOp for KernelMaxReduce {
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
+                    .unwrap(),
                 iters: extract_expr(egraph, kind_children[1], expr_cache).unwrap(),
-                in_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                in_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
                 iter_stride: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, kind_children[4], list_cache, expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[4], list_cache, expr_cache)
+                    .unwrap(),
                 dtype: extract_dtype(egraph, kind_children[5]),
             }) as Box<dyn KernelOp>),
             input_enodes,
@@ -502,7 +505,7 @@ extern \"C\" {{
             kernel,
             (n_outputs, 1.into(), 1.into()),                // grid
             (threads_per_block.into(), 1.into(), 1.into()), // blocks (warp-parallel)
-            32.into(),                                       // shmem for warp_sums
+            32.into(),                                      // shmem for warp_sums
             FxHashMap::default(),
         )
     }
@@ -579,10 +582,14 @@ impl EgglogOp for KernelAdd {
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
-                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache).unwrap(),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
+                    .unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache)
+                    .unwrap(),
                 dtype: extract_dtype(egraph, kind_children[4]),
             })),
             input_enodes,
@@ -736,10 +743,14 @@ impl EgglogOp for KernelMul {
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
-                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache).unwrap(),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
+                    .unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache)
+                    .unwrap(),
                 dtype: extract_dtype(egraph, kind_children[4]),
             })),
             input_enodes,
@@ -905,10 +916,7 @@ impl EgglogOp for KernelGather {
         ];
         let kernel_kind_term = self.sort().call(kernel_kind_args);
         let kernel_op = op_term(kernel_kind_term, ilist(vec![indexes, data.clone()]));
-        vec![
-            rule(union(gather_op, kernel_op))
-                .fact(eq(dt, dtype(data))),
-        ]
+        vec![rule(union(gather_op, kernel_op)).fact(eq(dt, dtype(data)))]
     }
 
     fn cleanup(&self) -> bool {
@@ -925,13 +933,16 @@ impl EgglogOp for KernelGather {
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
+                    .unwrap(),
                 index_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
                     .unwrap(),
-                data_shape: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                data_shape: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
                 data_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache)
                     .unwrap(),
-                out_stride: extract_expr_list(egraph, kind_children[4], list_cache, expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[4], list_cache, expr_cache)
+                    .unwrap(),
                 dtype: extract_dtype(egraph, kind_children[5]),
             })),
             input_enodes,
@@ -1135,10 +1146,7 @@ impl EgglogOp for KernelScatter {
         ];
         let kernel_kind_term = self.sort().call(kernel_kind_args);
         let kernel_op = op_term(kernel_kind_term, ilist(vec![dest, indexes, src.clone()]));
-        vec![
-            rule(union(scatter_op, kernel_op))
-                .fact(eq(dt, dtype(src))),
-        ]
+        vec![rule(union(scatter_op, kernel_op)).fact(eq(dt, dtype(src)))]
     }
 
     fn cleanup(&self) -> bool {
@@ -1155,7 +1163,8 @@ impl EgglogOp for KernelScatter {
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                dest_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                dest_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
+                    .unwrap(),
                 dest_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
                     .unwrap(),
                 index_shape: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
@@ -1270,7 +1279,7 @@ extern \"C\" {{
             module,
             scatter_kernel,
             (1.into(), 1.into(), 1.into()),    // grid: 1 block
-            (1024.into(), 1.into(), 1.into()),  // block: 1024 threads
+            (1024.into(), 1.into(), 1.into()), // block: 1024 threads
             0.into(),
             FxHashMap::default(),
         )
@@ -1538,7 +1547,8 @@ impl EgglogOp for KernelExp2 {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
                 out_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
                     .unwrap(),
                 dtype: extract_dtype(egraph, kind_children[3]),
@@ -1687,7 +1697,8 @@ impl EgglogOp for KernelLog2 {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
                 out_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
                     .unwrap(),
                 dtype: extract_dtype(egraph, kind_children[3]),
@@ -1836,7 +1847,8 @@ impl EgglogOp for KernelSin {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
                 out_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
                     .unwrap(),
                 dtype: extract_dtype(egraph, kind_children[3]),
@@ -1985,7 +1997,8 @@ impl EgglogOp for KernelRecip {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
                 out_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
                     .unwrap(),
                 dtype: extract_dtype(egraph, kind_children[3]),
@@ -2134,7 +2147,8 @@ impl EgglogOp for KernelSqrt {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                in_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
                 out_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
                     .unwrap(),
                 dtype: extract_dtype(egraph, kind_children[3]),
@@ -2284,10 +2298,14 @@ impl EgglogOp for KernelMod {
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
-                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache).unwrap(),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
+                    .unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache)
+                    .unwrap(),
                 dtype: extract_dtype(egraph, kind_children[4]),
             })),
             input_enodes,
@@ -2433,10 +2451,7 @@ impl EgglogOp for KernelLessThan {
         args.add("dtype", dt.clone());
         let kernel_kind_term = self.sort().call(&args);
         let kernel_op = op_term(kernel_kind_term, hlir_inputs);
-        vec![
-            rule(union(hlir_op, kernel_op))
-                .fact(eq(dt, dtype(inp_a))),
-        ]
+        vec![rule(union(hlir_op, kernel_op)).fact(eq(dt, dtype(inp_a)))]
     }
 
     fn cleanup(&self) -> bool {
@@ -2453,10 +2468,14 @@ impl EgglogOp for KernelLessThan {
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
-                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache).unwrap(),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
+                    .unwrap(),
+                a_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache)
+                    .unwrap(),
                 dtype: extract_dtype(egraph, kind_children[4]),
             })),
             input_enodes,
@@ -2705,11 +2724,7 @@ impl EgglogOp for KernelCast {
         sort(
             OP_KIND,
             "KernelCast",
-            &[
-                ("size", EXPRESSION),
-                ("dtype", DTYPE),
-                ("src_dtype", DTYPE),
-            ],
+            &[("size", EXPRESSION), ("dtype", DTYPE), ("src_dtype", DTYPE)],
         )
     }
 
@@ -2731,10 +2746,7 @@ impl EgglogOp for KernelCast {
         cast_args.add("src_dtype", out_dty);
         let kernel_kind_term = self.sort().call(&cast_args);
         let kernel_op = op_term(kernel_kind_term, cast_inputs);
-        vec![
-            rule(union(cast_op, kernel_op))
-                .fact(eq(in_dty, dtype(inp))),
-        ]
+        vec![rule(union(cast_op, kernel_op)).fact(eq(in_dty, dtype(inp)))]
     }
 
     fn cleanup(&self) -> bool {
@@ -3058,7 +3070,8 @@ impl EgglogOp for KernelEmbed {
                     .unwrap(),
                 token_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
                     .unwrap(),
-                out_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
                 embed_dim: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
             })),
             input_enodes, // token_ids, embedding_table
@@ -3181,4 +3194,3 @@ extern \"C\" {{
         "Embed"
     }
 }
-

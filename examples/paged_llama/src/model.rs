@@ -213,6 +213,7 @@ fn llama_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> Grap
 /// The attention mask is precomputed on the CPU and handles:
 /// - Causal masking within a sequence
 /// - Cross-sequence isolation in supersequence batches
+#[allow(clippy::too_many_arguments)]
 fn paged_attention(
     q_rope: GraphTensor,      // (s, HIDDEN) — RoPE'd queries
     k_rope: GraphTensor,      // (s, KV_DIM) — RoPE'd keys for new tokens
@@ -265,6 +266,7 @@ fn paged_attention(
 }
 
 impl LlamaLayer {
+    #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
         mut x: GraphTensor,

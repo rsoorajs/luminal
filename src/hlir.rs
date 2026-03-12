@@ -1,7 +1,7 @@
 use std::fmt::Display;
 use std::{fmt::Debug, sync::Arc};
 
-use crate::egglog_utils::api::{eq, v, Term};
+use crate::egglog_utils::api::{Term, eq, v};
 use crate::egglog_utils::{
     api::{Action, Rule, SortDef, sort},
     base::*,
@@ -93,17 +93,40 @@ use tracing::info_span;
 
 /// Unary op kind: (shape: EList, strides: EList, out_strides: EList), IList: [inp]
 pub fn unary_sort(name: &str) -> SortDef {
-    sort(OP_KIND, name, &[("shape", ELIST), ("strides", ELIST), ("out_strides", ELIST)])
+    sort(
+        OP_KIND,
+        name,
+        &[("shape", ELIST), ("strides", ELIST), ("out_strides", ELIST)],
+    )
 }
 
 /// Binary op kind: (shape: EList, a_strides: EList, b_strides: EList, out_strides: EList), IList: [inp_a, inp_b]
 pub fn binary_sort(name: &str) -> SortDef {
-    sort(OP_KIND, name, &[("shape", ELIST), ("a_strides", ELIST), ("b_strides", ELIST), ("out_strides", ELIST)])
+    sort(
+        OP_KIND,
+        name,
+        &[
+            ("shape", ELIST),
+            ("a_strides", ELIST),
+            ("b_strides", ELIST),
+            ("out_strides", ELIST),
+        ],
+    )
 }
 
 /// Reduce op kind: (shape: EList, iters: Expression, strides: EList, iter_stride: Expression, out_strides: EList), IList: [inp]
 pub fn reduce_sort(name: &str) -> SortDef {
-    sort(OP_KIND, name, &[("shape", ELIST), ("iters", EXPRESSION), ("strides", ELIST), ("iter_stride", EXPRESSION), ("out_strides", ELIST)])
+    sort(
+        OP_KIND,
+        name,
+        &[
+            ("shape", ELIST),
+            ("iters", EXPRESSION),
+            ("strides", ELIST),
+            ("iter_stride", EXPRESSION),
+            ("out_strides", ELIST),
+        ],
+    )
 }
 
 pub type HLIROps = (
@@ -375,12 +398,20 @@ impl Display for Iota {
 }
 impl HLIROp for Iota {
     fn to_egglog(&self, _: &[(NodeIndex, String)]) -> String {
-        format!("(Op (Iota {} {}) (INil))", self.0.to_egglog(), self.1.to_egglog())
+        format!(
+            "(Op (Iota {} {}) (INil))",
+            self.0.to_egglog(),
+            self.1.to_egglog()
+        )
     }
 }
 impl EgglogOp for Iota {
     fn sort(&self) -> SortDef {
-        sort(OP_KIND, "Iota", &[("expr", EXPRESSION), ("range", EXPRESSION)])
+        sort(
+            OP_KIND,
+            "Iota",
+            &[("expr", EXPRESSION), ("range", EXPRESSION)],
+        )
     }
 
     fn cleanup(&self) -> bool {
@@ -607,7 +638,8 @@ impl EgglogOp for Log2 {
         (
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
                 ..Default::default()
             })),
             input_enodes,
@@ -674,7 +706,8 @@ impl EgglogOp for Exp2 {
         (
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
                 ..Default::default()
             })),
             input_enodes,
@@ -742,7 +775,8 @@ impl EgglogOp for Sin {
         (
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
                 ..Default::default()
             })),
             input_enodes,
@@ -810,7 +844,8 @@ impl EgglogOp for Recip {
         (
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
                 ..Default::default()
             })),
             input_enodes,
@@ -878,7 +913,8 @@ impl EgglogOp for Sqrt {
         (
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
+                strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
                 ..Default::default()
             })),
             input_enodes,
@@ -980,8 +1016,10 @@ impl EgglogOp for Add {
         (
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
-                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
                 ..Default::default()
             })),
             input_enodes,
@@ -1063,8 +1101,10 @@ impl EgglogOp for Mul {
         (
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
-                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
                 ..Default::default()
             })),
             input_enodes,
@@ -1146,8 +1186,10 @@ impl EgglogOp for Mod {
         (
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
-                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
                 ..Default::default()
             })),
             input_enodes,
@@ -1230,8 +1272,10 @@ impl EgglogOp for LessThan {
         (
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
-                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap(),
-                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
                 ..Default::default()
             })),
             input_enodes,
@@ -1310,25 +1354,27 @@ impl EgglogOp for Gather {
         let data = v("__data");
         let tail = v("__tail");
         let dty = v("__dty");
-        vec![Rule::new()
-            .fact(eq(
-                e.clone(),
-                op_term(
-                    kind_term,
-                    Term::App {
-                        variant: "ICons".to_string(),
-                        args: vec![
-                            indexes,
-                            Term::App {
-                                variant: "ICons".to_string(),
-                                args: vec![data.clone(), tail],
-                            },
-                        ],
-                    },
-                ),
-            ))
-            .fact(eq(dty.clone(), dtype(data)))
-            .action(Action::Set(dtype(e), dty))]
+        vec![
+            Rule::new()
+                .fact(eq(
+                    e.clone(),
+                    op_term(
+                        kind_term,
+                        Term::App {
+                            variant: "ICons".to_string(),
+                            args: vec![
+                                indexes,
+                                Term::App {
+                                    variant: "ICons".to_string(),
+                                    args: vec![data.clone(), tail],
+                                },
+                            ],
+                        },
+                    ),
+                ))
+                .fact(eq(dty.clone(), dtype(data)))
+                .action(Action::Set(dtype(e), dty)),
+        ]
     }
     fn extract<'a>(
         &'a self,
@@ -1451,31 +1497,33 @@ impl EgglogOp for Scatter {
         let src = v("__src");
         let tail = v("__tail");
         let dty = v("__dty");
-        vec![Rule::new()
-            .fact(eq(
-                e.clone(),
-                op_term(
-                    kind_term,
-                    Term::App {
-                        variant: "ICons".to_string(),
-                        args: vec![
-                            dest,
-                            Term::App {
-                                variant: "ICons".to_string(),
-                                args: vec![
-                                    indexes,
-                                    Term::App {
-                                        variant: "ICons".to_string(),
-                                        args: vec![src.clone(), tail],
-                                    },
-                                ],
-                            },
-                        ],
-                    },
-                ),
-            ))
-            .fact(eq(dty.clone(), dtype(src)))
-            .action(Action::Set(dtype(e), dty))]
+        vec![
+            Rule::new()
+                .fact(eq(
+                    e.clone(),
+                    op_term(
+                        kind_term,
+                        Term::App {
+                            variant: "ICons".to_string(),
+                            args: vec![
+                                dest,
+                                Term::App {
+                                    variant: "ICons".to_string(),
+                                    args: vec![
+                                        indexes,
+                                        Term::App {
+                                            variant: "ICons".to_string(),
+                                            args: vec![src.clone(), tail],
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                    ),
+                ))
+                .fact(eq(dty.clone(), dtype(src)))
+                .action(Action::Set(dtype(e), dty)),
+        ]
     }
     fn extract<'a>(
         &'a self,
@@ -1598,7 +1646,8 @@ impl EgglogOp for SumReduce {
                 dim: 0,
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
                 iters: extract_expr(egraph, kind_children[1], expr_cache).unwrap(),
-                strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
                 iter_stride: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
                 ..Default::default()
             })),
@@ -1714,7 +1763,8 @@ impl EgglogOp for MaxReduce {
                 dim: 0,
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
                 iters: extract_expr(egraph, kind_children[1], expr_cache).unwrap(),
-                strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap(),
+                strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
                 iter_stride: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
                 ..Default::default()
             })),

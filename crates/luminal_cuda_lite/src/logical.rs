@@ -2,7 +2,7 @@ use std::fmt::Debug;
 
 use luminal::{
     egglog_utils::api::{Rule, SortDef},
-    hlir::{unary_sort},
+    hlir::unary_sort,
     op::EgglogOp,
 };
 

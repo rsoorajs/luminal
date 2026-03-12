@@ -409,8 +409,7 @@ pub fn new_op_call(kind_sort: &SortDef, input_names: &[&str]) -> (Args, Term) {
     };
     let input_vars: Vec<Term> = input_names
         .iter()
-        .enumerate()
-        .map(|(_i, name)| {
+        .map(|name| {
             let var = v(format!("{prefix}_{name}"));
             args.add(name, var.clone());
             var

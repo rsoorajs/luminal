@@ -28,16 +28,10 @@ impl KVCache {
         let mut v_caches = Vec::with_capacity(LAYERS);
         for l in 0..LAYERS {
             let k = cx
-                .named_tensor(
-                    format!("kv_cache.{l}.k"),
-                    (N_KV_HEADS, max_seq, HEAD_DIM),
-                )
+                .named_tensor(format!("kv_cache.{l}.k"), (N_KV_HEADS, max_seq, HEAD_DIM))
                 .persist();
             let v = cx
-                .named_tensor(
-                    format!("kv_cache.{l}.v"),
-                    (N_KV_HEADS, max_seq, HEAD_DIM),
-                )
+                .named_tensor(format!("kv_cache.{l}.v"), (N_KV_HEADS, max_seq, HEAD_DIM))
                 .persist();
             k_caches.push(k);
             v_caches.push(v);
@@ -212,15 +206,18 @@ fn llama_rotary_embeddings(mut input: GraphTensor, pos_ids: GraphTensor) -> Grap
     let x1_out = x1 * cos + x0 * sin;
 
     // Combine back: [n_heads, seq, HEAD_DIM] -> [seq, n_heads, HEAD_DIM] -> [seq, dim]
-    x0_out.concat_along(x1_out, 2).transpose(0, 1).merge_dims(1, 2)
+    x0_out
+        .concat_along(x1_out, 2)
+        .transpose(0, 1)
+        .merge_dims(1, 2)
 }
 
 /// HLIR attention with pre-allocated KV cache using scatter.
 /// Returns (attn_output, k_cache_updated, v_cache_updated).
 fn hlir_attention(
-    q_rope: GraphTensor,    // [seq, HIDDEN]
-    k_rope: GraphTensor,    // [seq, HIDDEN/KV_GROUPS]
-    v: GraphTensor,         // [seq, HIDDEN/KV_GROUPS]
+    q_rope: GraphTensor,     // [seq, HIDDEN]
+    k_rope: GraphTensor,     // [seq, HIDDEN/KV_GROUPS]
+    v: GraphTensor,          // [seq, HIDDEN/KV_GROUPS]
     k_cache_in: GraphTensor, // [N_KV_HEADS, max_seq, HEAD_DIM]
     v_cache_in: GraphTensor, // [N_KV_HEADS, max_seq, HEAD_DIM]
     max_seq: usize,
@@ -265,9 +262,7 @@ fn hlir_attention(
     // Causal mask: mask positions where k_pos > prev + q_local_pos
     let q_abs = cx.arange(seq).cast(DType::F32) + prev;
     let k_pos = cx.arange(total_seq).cast(DType::F32);
-    let mask = k_pos
-        .expand_dim(0, seq)
-        .gt(q_abs.expand_dim(1, total_seq));
+    let mask = k_pos.expand_dim(0, seq).gt(q_abs.expand_dim(1, total_seq));
     let mask_3d = mask.cast(DType::F32).expand_dim(0, N_HEADS);
     let masked_scores = scores + mask_3d * (-1e10f32);
 

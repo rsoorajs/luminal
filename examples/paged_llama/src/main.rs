@@ -122,9 +122,9 @@ fn tick(
     let all = runtime.get_f32(logits);
 
     // Round-trip KV cache: move output buffers back to input tensors
-    for i in 0..LAYERS {
-        let k_buf = runtime.remove_buffer(cache_outputs[i].0);
-        let v_buf = runtime.remove_buffer(cache_outputs[i].1);
+    for (i, (k_out, v_out)) in cache_outputs.iter().enumerate() {
+        let k_buf = runtime.remove_buffer(*k_out);
+        let v_buf = runtime.remove_buffer(*v_out);
         runtime.set_buffer(kv_cache.k_caches[i], k_buf);
         runtime.set_buffer(kv_cache.v_caches[i], v_buf);
     }
@@ -247,15 +247,23 @@ fn main() {
     page_table.allocate(seq_a, n_a);
     let positions_a: Vec<usize> = (0..n_a).collect();
     let (scatter, gather, qpos, mask) = build_batch(&[(seq_a, positions_a)], &page_table);
-    runtime.set_data(input, tokens_a.iter().map(|&t| t as i32).collect::<Vec<_>>());
+    runtime.set_data(
+        input,
+        tokens_a.iter().map(|&t| t as i32).collect::<Vec<_>>(),
+    );
     runtime.set_data(q_pos_t, qpos);
     runtime.set_data(scatter_idx_t, scatter);
     runtime.set_data(gather_idx_t, gather.to_vec());
     runtime.set_data(attn_mask_t, mask);
     let prefill_start = std::time::Instant::now();
     let logits_data = tick(
-        &mut cx, &mut runtime, n_a, gather.len(),
-        logits, &kv_cache, &cache_outputs,
+        &mut cx,
+        &mut runtime,
+        n_a,
+        gather.len(),
+        logits,
+        &kv_cache,
+        &cache_outputs,
     );
     let prefill_dur = prefill_start.elapsed();
     let mut seen_a = FxHashSet::default();
@@ -264,7 +272,8 @@ fn main() {
     let decoded = tokenizer.decode(&[next_a], true).unwrap();
     println!(
         "  Prefill: {:.2} ms ({} tokens, {:.1} ms/token)",
-        prefill_dur.as_secs_f64() * 1e3, n_a,
+        prefill_dur.as_secs_f64() * 1e3,
+        n_a,
         prefill_dur.as_secs_f64() * 1e3 / n_a as f64,
     );
     print!("[A] {decoded}");
@@ -324,8 +333,10 @@ fn main() {
         "\n══ Phase 3: Mixed Prefill+Decode (A decode 1 + B prefill {}, s={}) ══",
         n_b, total_mixed
     );
-    let (scatter, gather, qpos, mask) =
-        build_batch(&[(seq_a, vec![pos_a_mixed]), (seq_b, positions_b)], &page_table);
+    let (scatter, gather, qpos, mask) = build_batch(
+        &[(seq_a, vec![pos_a_mixed]), (seq_b, positions_b)],
+        &page_table,
+    );
     let mut mixed_input = vec![next_a as i32];
     mixed_input.extend(tokens_b.iter().map(|&t| t as i32));
     runtime.set_data(input, mixed_input);
@@ -335,19 +346,30 @@ fn main() {
     runtime.set_data(attn_mask_t, mask);
     let mixed_start = std::time::Instant::now();
     let logits_data_mixed = tick(
-        &mut cx, &mut runtime, total_mixed, gather.len(),
-        logits, &kv_cache, &cache_outputs,
+        &mut cx,
+        &mut runtime,
+        total_mixed,
+        gather.len(),
+        logits,
+        &kv_cache,
+        &cache_outputs,
     );
     let mixed_dur = mixed_start.elapsed();
     // Row 0 = A's decode logits, row n_b = B's last prefill logits
     next_a = sample_greedy(logits_row(&logits_data_mixed, 0), &seen_a, penalty);
     seen_a.insert(next_a);
     let mut seen_b = FxHashSet::default();
-    let mut next_b = sample_greedy(logits_row(&logits_data_mixed, total_mixed - 1), &seen_b, penalty);
+    let mut next_b = sample_greedy(
+        logits_row(&logits_data_mixed, total_mixed - 1),
+        &seen_b,
+        penalty,
+    );
     seen_b.insert(next_b);
     println!(
         "  Mixed tick: {:.2} ms (s={}, c={})",
-        mixed_dur.as_secs_f64() * 1e3, total_mixed, gather.len()
+        mixed_dur.as_secs_f64() * 1e3,
+        total_mixed,
+        gather.len()
     );
     println!("[A] next: {}", tokenizer.decode(&[next_a], true).unwrap());
     println!("[B] first: {}", tokenizer.decode(&[next_b], true).unwrap());

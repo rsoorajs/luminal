@@ -262,9 +262,7 @@ impl HostOp for CuBlasLt {
         };
 
         // GEMM parameters — resolve z→1 for element stride before exec
-        let resolve = |e: &Expression| -> Expression {
-            e.substitute('z', Expression::from(1))
-        };
+        let resolve = |e: &Expression| -> Expression { e.substitute('z', Expression::from(1)) };
         let m = resolve(&self.m).exec(dyn_map).unwrap() as u64;
         let n = resolve(&self.n).exec(dyn_map).unwrap() as u64;
         let k = resolve(&self.k).exec(dyn_map).unwrap() as u64;
@@ -305,8 +303,16 @@ impl HostOp for CuBlasLt {
         // When a dimension is 1 (e.g., k=1 outer product), the stride along that
         // dimension may be 0 in the egglog representation, but cuBLAS requires
         // lda >= rows_of_A and ldb >= rows_of_B.
-        let a_ld_min = if a_layout == cublasOperation_t::CUBLAS_OP_N { m } else { k };
-        let b_ld_min = if b_layout == cublasOperation_t::CUBLAS_OP_N { k } else { n };
+        let a_ld_min = if a_layout == cublasOperation_t::CUBLAS_OP_N {
+            m
+        } else {
+            k
+        };
+        let b_ld_min = if b_layout == cublasOperation_t::CUBLAS_OP_N {
+            k
+        } else {
+            n
+        };
         let lda = std::cmp::max(lda, a_ld_min as i64);
         let ldb = std::cmp::max(ldb, b_ld_min as i64);
         let ldc = std::cmp::max(ldc, m as i64);
@@ -373,11 +379,7 @@ impl HostOp for CuBlasLt {
 
             // Set batched GEMM attributes if batch_count > 1
             if batch_count > 1 {
-                for (desc, stride) in [
-                    (a_desc, stride_a),
-                    (b_desc, stride_b),
-                    (c_desc, stride_c),
-                ] {
+                for (desc, stride) in [(a_desc, stride_a), (b_desc, stride_b), (c_desc, stride_c)] {
                     cublasLtMatrixLayoutSetAttribute(
                         desc,
                         cublasLtMatrixLayoutAttribute_t::CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
@@ -464,9 +466,7 @@ impl HostOp for CuBlasLt {
     }
 
     fn output_size(&self) -> Expression {
-        let resolve = |e: &Expression| -> Expression {
-            e.substitute('z', Expression::from(1))
-        };
+        let resolve = |e: &Expression| -> Expression { e.substitute('z', Expression::from(1)) };
         resolve(&self.batch_count) * resolve(&self.m) * resolve(&self.n)
     }
 

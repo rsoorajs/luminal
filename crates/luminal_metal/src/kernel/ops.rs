@@ -5,7 +5,10 @@ use luminal::{
         base::{dtype, DTYPE, ELIST, EXPRESSION, F64, IR, SORTS},
         SerializedEGraph,
     },
-    hlir::{Add, Cast, Constant, Gather, Iota, LessThan, MaxReduce, Mod, Mul, Scatter, SumReduce, unary_sort, binary_sort, reduce_sort},
+    hlir::{
+        binary_sort, reduce_sort, unary_sort, Add, Cast, Constant, Gather, Iota, LessThan,
+        MaxReduce, Mod, Mul, Scatter, SumReduce,
+    },
     op::*,
     prelude::*,
     shape::flatten_strides,
@@ -160,6 +163,7 @@ macro_rules! metal_unary_op {
                 &'a self,
                 egraph: &'a SerializedEGraph,
                 children: &[&'a ENodeId],
+                _input_enodes: Vec<&'a ENodeId>,
                 list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
                 expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
             ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -305,6 +309,7 @@ impl EgglogOp for MetalAdd {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -424,6 +429,7 @@ impl EgglogOp for MetalMul {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -542,6 +548,7 @@ impl EgglogOp for MetalMod {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -660,6 +667,7 @@ impl EgglogOp for MetalLessThan {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -782,6 +790,7 @@ impl EgglogOp for MetalSumReduce {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -936,6 +945,7 @@ impl EgglogOp for MetalMaxReduce {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -1089,6 +1099,7 @@ impl EgglogOp for MetalConstant {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         _: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -1187,6 +1198,7 @@ impl EgglogOp for MetalIota {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -1315,6 +1327,7 @@ impl EgglogOp for MetalGather {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -1511,6 +1524,7 @@ impl EgglogOp for MetalScatter {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -1725,6 +1739,7 @@ impl EgglogOp for MetalCast {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         _expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {

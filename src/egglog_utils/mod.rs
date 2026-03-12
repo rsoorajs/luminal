@@ -1159,7 +1159,7 @@ pub fn egglog_to_llir<'a>(
             // Check for CustomOpKind first
             if kind_label == "CustomOpKind" {
                 // kind_children: [id, dtype]
-                let id: usize = egraph.enodes[&kind_children[0]].0.parse().unwrap();
+                let id: usize = egraph.enodes[kind_children[0]].0.parse().unwrap();
                 let remapped_id = custom_op_id_remap
                     .and_then(|m| m.get(&id).copied())
                     .unwrap_or(id);

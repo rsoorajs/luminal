@@ -37,16 +37,10 @@ impl KVCache {
         let mut v_caches = Vec::with_capacity(LAYERS);
         for l in 0..LAYERS {
             let k = cx
-                .named_tensor(
-                    format!("kv_cache.{l}.k"),
-                    (N_KV_HEADS, max_seq, HEAD_DIM),
-                )
+                .named_tensor(format!("kv_cache.{l}.k"), (N_KV_HEADS, max_seq, HEAD_DIM))
                 .persist();
             let v = cx
-                .named_tensor(
-                    format!("kv_cache.{l}.v"),
-                    (N_KV_HEADS, max_seq, HEAD_DIM),
-                )
+                .named_tensor(format!("kv_cache.{l}.v"), (N_KV_HEADS, max_seq, HEAD_DIM))
                 .persist();
             k_caches.push(k);
             v_caches.push(v);
@@ -283,7 +277,10 @@ fn gemma_rotary_embeddings(
     let x0_out = x0 * cos - x1 * sin;
     let x1_out = x1 * cos + x0 * sin;
 
-    x0_out.concat_along(x1_out, 2).transpose(0, 1).merge_dims(1, 2)
+    x0_out
+        .concat_along(x1_out, 2)
+        .transpose(0, 1)
+        .merge_dims(1, 2)
 }
 
 /// HLIR attention with scatter-based KV cache.
@@ -394,8 +391,15 @@ impl GemmaLayer {
             self.rope_scaling_factor,
         );
 
-        let (attn_out, k_cache_out, v_cache_out) =
-            hlir_attention(q_rope, k_rope, v, k_cache_in, v_cache_in, max_seq, self.is_local);
+        let (attn_out, k_cache_out, v_cache_out) = hlir_attention(
+            q_rope,
+            k_rope,
+            v,
+            k_cache_in,
+            v_cache_in,
+            max_seq,
+            self.is_local,
+        );
 
         // O projection + post-attention norm + residual
         let attn_proj = attn_out.matmul(self.o_proj.t());
@@ -404,8 +408,8 @@ impl GemmaLayer {
 
         // Pre-feedforward norm + MLP + post-feedforward norm + residual
         let x_ff = self.pre_feedforward_layernorm.forward(x);
-        let mlp_out =
-            (gemma_gelu(x_ff.matmul(self.gate.t())) * x_ff.matmul(self.up.t())).matmul(self.down.t());
+        let mlp_out = (gemma_gelu(x_ff.matmul(self.gate.t())) * x_ff.matmul(self.up.t()))
+            .matmul(self.down.t());
         let mlp_normed = self.post_feedforward_layernorm.forward(mlp_out);
         (x + mlp_normed, k_cache_out, v_cache_out)
     }

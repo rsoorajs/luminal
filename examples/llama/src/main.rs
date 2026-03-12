@@ -115,9 +115,9 @@ fn main() {
         let logits_data = runtime.get_f32(logits);
 
         // Round-trip KV cache
-        for layer_idx in 0..LAYERS {
-            let k_buf = runtime.remove_buffer(cache_outputs[layer_idx].0);
-            let v_buf = runtime.remove_buffer(cache_outputs[layer_idx].1);
+        for (layer_idx, (k_out, v_out)) in cache_outputs.iter().enumerate() {
+            let k_buf = runtime.remove_buffer(*k_out);
+            let v_buf = runtime.remove_buffer(*v_out);
             runtime.set_buffer(kv_cache.k_caches[layer_idx], k_buf);
             runtime.set_buffer(kv_cache.v_caches[layer_idx], v_buf);
         }

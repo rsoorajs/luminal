@@ -170,15 +170,15 @@ impl CudaRuntime {
             .unwrap();
 
         // If the op aliases its output to an input, follow the alias
-        if let Some(kernel_op) = self.llir_graph[data_id].to_dialect::<dyn KernelOp>() {
-            if let Some(input_idx) = kernel_op.output_aliases_input() {
-                data_id = self
-                    .llir_graph
-                    .neighbors_directed(data_id, Direction::Incoming)
-                    .sorted_by_key(|n| self.llir_graph.find_edge(*n, data_id).unwrap())
-                    .nth(input_idx)
-                    .expect("output_aliases_input index out of range");
-            }
+        if let Some(kernel_op) = self.llir_graph[data_id].to_dialect::<dyn KernelOp>()
+            && let Some(input_idx) = kernel_op.output_aliases_input()
+        {
+            data_id = self
+                .llir_graph
+                .neighbors_directed(data_id, Direction::Incoming)
+                .sorted_by_key(|n| self.llir_graph.find_edge(*n, data_id).unwrap())
+                .nth(input_idx)
+                .expect("output_aliases_input index out of range");
         }
         data_id
     }
@@ -299,7 +299,7 @@ impl CudaRuntime {
             .find(|n| {
                 self.llir_graph[*n]
                     .to_op::<Output>()
-                    .map_or(false, |o| o.node == output_id.index())
+                    .is_some_and(|o| o.node == output_id.index())
             })
             .expect("Cannot find output node for swap!");
 
@@ -361,18 +361,18 @@ impl CudaRuntime {
             if self.llir_graph[node].to_op::<Input>().is_some() {
                 continue;
             }
-            let needed_bytes =
-                if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>() {
-                    let out_bytes = op.output_bytes();
-                    self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
-                    out_bytes.exec(dyn_dims).unwrap()
-                } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
-                    let out_bytes = op.output_bytes();
-                    self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
-                    out_bytes.exec(dyn_dims).unwrap()
-                } else {
-                    continue;
-                };
+            let needed_bytes = if let Some(op) = self.llir_graph[node].to_dialect::<dyn KernelOp>()
+            {
+                let out_bytes = op.output_bytes();
+                self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
+                out_bytes.exec(dyn_dims).unwrap()
+            } else if let Some(op) = self.llir_graph[node].to_dialect::<dyn HostOp>() {
+                let out_bytes = op.output_bytes();
+                self.intermediate_buffer_dims.extend(out_bytes.dyn_vars());
+                out_bytes.exec(dyn_dims).unwrap()
+            } else {
+                continue;
+            };
 
             if needed_bytes == 0 {
                 continue;
@@ -518,11 +518,7 @@ fn format_duration_precise(d: &std::time::Duration) -> String {
 }
 
 impl Runtime for CudaRuntime {
-    type Ops = (
-        crate::logical::Ops,
-        crate::kernel::Ops,
-        crate::host::Ops,
-    );
+    type Ops = (crate::logical::Ops, crate::kernel::Ops, crate::host::Ops);
     type CompileArg = Arc<CudaStream>;
     type ExecReturn = ();
     type ProfileMetric = Duration;
@@ -586,11 +582,7 @@ impl Runtime for CudaRuntime {
         // Compile kernel subgraphs into CudaGraphOps (which implement HostOp)
         // This adds CudaGraphOp nodes to llir_graph and removes the original kernel nodes.
         // After this, only HostOps remain in the llir_graph.
-        crate::kernel::kernel_to_host(
-            &mut llir_graph,
-            &self.cuda_stream,
-            &mut self.kernel_cache,
-        );
+        crate::kernel::kernel_to_host(&mut llir_graph, &self.cuda_stream, &mut self.kernel_cache);
 
         // Build output alias map: for KernelOps with output_aliases_input(),
         // map the output node to its aliased input node. This is used to resolve
@@ -598,16 +590,16 @@ impl Runtime for CudaRuntime {
         // is never written to (the kernel writes to the aliased input instead).
         self.output_alias_map.clear();
         for node in llir_graph.node_indices() {
-            if let Some(kernel_op) = llir_graph[node].to_dialect::<dyn KernelOp>() {
-                if let Some(input_idx) = kernel_op.output_aliases_input() {
-                    let alias_target = llir_graph
-                        .edges_directed(node, Direction::Incoming)
-                        .sorted_by_key(|e| e.id())
-                        .map(|e| e.source())
-                        .nth(input_idx);
-                    if let Some(target) = alias_target {
-                        self.output_alias_map.insert(node, target);
-                    }
+            if let Some(kernel_op) = llir_graph[node].to_dialect::<dyn KernelOp>()
+                && let Some(input_idx) = kernel_op.output_aliases_input()
+            {
+                let alias_target = llir_graph
+                    .edges_directed(node, Direction::Incoming)
+                    .sorted_by_key(|e| e.id())
+                    .map(|e| e.source())
+                    .nth(input_idx);
+                if let Some(target) = alias_target {
+                    self.output_alias_map.insert(node, target);
                 }
             }
         }
@@ -684,7 +676,10 @@ impl Runtime for CudaRuntime {
         // graph variants are detected during profiling. Zero inputs often hide
         // numerical issues that appear with real data.
         let host_data = vec![1.0f32; num_elements];
-        let buf = self.cuda_stream.clone_htod(bytemuck::cast_slice::<f32, u8>(&host_data)).unwrap();
+        let buf = self
+            .cuda_stream
+            .clone_htod(bytemuck::cast_slice::<f32, u8>(&host_data))
+            .unwrap();
         let id = NodeIndex::new(node_index);
         self.hlir_buffers.insert(id, CudaInput::Buffer(buf));
         self.changed_hlir.insert(id);
@@ -706,7 +701,7 @@ impl Runtime for CudaRuntime {
 
     fn has_nan_outputs(&self, _llir_graph: &LLIRGraph, _dyn_map: &FxHashMap<char, usize>) -> bool {
         let _ = self.cuda_stream.synchronize();
-        for (_node, buf) in &self.buffers {
+        for buf in self.buffers.values() {
             let n_bytes = buf.len();
             if n_bytes == 0 || n_bytes % 4 != 0 {
                 continue;
@@ -856,13 +851,13 @@ impl Runtime for CudaRuntime {
             // input's buffer. Override the buffer_map entry so cross-CudaGraphOp consumers
             // read from the correct location.
             for (&alias_node, &alias_target) in &self.output_alias_map {
-                if buffer_map.contains_key(&alias_node) {
+                if let std::collections::hash_map::Entry::Occupied(mut e) = buffer_map.entry(alias_node) {
                     if let Some(hlir_node) = self.llir_to_hlir.get(&alias_target)
                         && let Some(CudaInput::Buffer(buf)) = self.hlir_buffers.get(hlir_node)
                     {
-                        buffer_map.insert(alias_node, buf);
+                        e.insert(buf);
                     } else if let Some(buf) = self.buffers.get(&alias_target) {
-                        buffer_map.insert(alias_node, buf);
+                        e.insert(buf);
                     }
                 }
             }

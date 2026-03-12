@@ -251,7 +251,6 @@ pub trait KernelOp: std::fmt::Debug + as_any::AsAny {
     ) {
     }
 
-
     /// If this kernel's output aliases one of its inputs (i.e., writes in-place),
     /// return the input index. Used to propagate buffer pointers in CUDA graphs.
     fn output_aliases_input(&self) -> Option<usize> {
@@ -263,7 +262,6 @@ pub trait KernelOp: std::fmt::Debug + as_any::AsAny {
     fn timing_buffer_indices(&self) -> Option<(usize, usize, usize)> {
         None
     }
-
 }
 
 luminal::impl_into_ops!(KernelOp);

@@ -20,7 +20,12 @@ use luminal::{
     prelude::*,
 };
 
-pub type Ops = (KernelMeanReduce, KernelBatchMatVec, KernelBatchMatMul, KernelScatterNoCopy);
+pub type Ops = (
+    KernelMeanReduce,
+    KernelBatchMatVec,
+    KernelBatchMatMul,
+    KernelScatterNoCopy,
+);
 
 #[derive(Default, Debug, Clone)]
 
@@ -309,7 +314,7 @@ impl EgglogOp for KernelScatterNoCopy {
             ),
         ];
         // Cleanup: delete ConsumedBuffer when inner buffer is used by a DIFFERENT Op.
-        rules.push(Rule::raw(&format!(
+        rules.push(Rule::raw(
             "(rule
                 ((= ?cb (ConsumedBuffer ?a))
                  (= ?op1 (Op ?k1 ?ilist1))
@@ -320,8 +325,8 @@ impl EgglogOp for KernelScatterNoCopy {
                 ((delete (ConsumedBuffer ?a)))
                 :ruleset cleanup
                 :name \"consumed-buffer-cleanup-pos\"
-            )"
-        )));
+            )",
+        ));
         // Surviving ConsumedBuffers are valid — union with source and delete.
         // Runs in base_cleanup (after all (run) iterations).
         // TODO: figure out how to validate this is a valid ConsumedBuffer independantly so we can run it in the cleanup ruleset, rather than base_cleanup

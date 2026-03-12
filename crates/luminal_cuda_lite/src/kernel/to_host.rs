@@ -346,10 +346,10 @@ impl CudaGraphOp {
 
         // Apply output-aliases-input
         for kernel in state.kernels.iter() {
-            if let Some(input_idx) = kernel.kernel_op.output_aliases_input() {
-                if let Some(&input_ptr) = current_buffer_ptrs.get(&kernel.inputs[input_idx]) {
-                    current_buffer_ptrs.insert(kernel.node, input_ptr);
-                }
+            if let Some(input_idx) = kernel.kernel_op.output_aliases_input()
+                && let Some(&input_ptr) = current_buffer_ptrs.get(&kernel.inputs[input_idx])
+            {
+                current_buffer_ptrs.insert(kernel.node, input_ptr);
             }
         }
 
