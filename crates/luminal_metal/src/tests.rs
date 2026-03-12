@@ -569,6 +569,43 @@ fn metal_f16_intermediate_add_roundtrip() {
 }
 
 #[test]
+fn metal_specialized_matmul() {
+    let mut cx = Graph::default();
+    let a = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN));
+    let b = cx.tensor((TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN));
+    let output = a.matmul(b).output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+
+    let a_data = seeded_data(TRANSFORMER_SEQ * TRANSFORMER_HIDDEN, 1.0, -0.5);
+    let b_data = seeded_data(TRANSFORMER_HIDDEN * TRANSFORMER_HIDDEN, 0.8, -0.4);
+
+    rt.set_data(a, &a_data);
+    rt.set_data(b, &b_data);
+    rt = cx.search(rt, 1);
+    assert!(
+        rt.contains_matmul(),
+        "expected Metal runtime to fuse matmul, kernels: {:?}",
+        rt.debug_kernel_ops()
+    );
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let result = rt.get_f32(output);
+
+    let device = CandleDevice::Cpu;
+    let ref_a =
+        CandleTensor::from_vec(a_data, (TRANSFORMER_SEQ, TRANSFORMER_HIDDEN), &device).unwrap();
+    let ref_b =
+        CandleTensor::from_vec(b_data, (TRANSFORMER_HIDDEN, TRANSFORMER_HIDDEN), &device).unwrap();
+    let expected = ref_a.matmul(&ref_b).unwrap();
+    let expected: Vec<f32> = expected.flatten_all().unwrap().to_vec1().unwrap();
+
+    assert_close(&result, &expected, 1e-3);
+}
+
+#[test]
 fn metal_rms_norm() {
     let mut cx = Graph::default();
     let input = cx.tensor((TRANSFORMER_SEQ, TRANSFORMER_HIDDEN));

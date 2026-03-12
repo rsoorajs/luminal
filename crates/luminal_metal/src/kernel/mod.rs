@@ -1,4 +1,6 @@
+mod matmul;
 mod ops;
+pub use matmul::*;
 pub use ops::*;
 
 use luminal::dtype::DType;
@@ -7,6 +9,22 @@ use luminal::prelude::*;
 use metal::{Buffer, ComputeCommandEncoderRef, ComputePipelineState, Device};
 
 pub const DYN_SLOT_COUNT: usize = 26;
+
+#[derive(Debug, Clone)]
+pub struct MetalMulInfo {
+    pub shape: Vec<Expression>,
+    pub a_strides: Vec<Expression>,
+    pub b_strides: Vec<Expression>,
+    pub output_strides: Vec<Expression>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetalSumReduceInfo {
+    pub shape: Vec<Expression>,
+    pub strides: Vec<Expression>,
+    pub iters: Expression,
+    pub iter_stride: Expression,
+}
 
 pub trait MetalKernelOp: EgglogOp {
     fn compile(
@@ -45,6 +63,18 @@ pub trait MetalKernelOp: EgglogOp {
 
     fn flops(&self, _dyn_map: &FxHashMap<char, usize>) -> usize {
         0
+    }
+
+    fn mul_info(&self) -> Option<MetalMulInfo> {
+        None
+    }
+
+    fn sum_reduce_info(&self) -> Option<MetalSumReduceInfo> {
+        None
+    }
+
+    fn is_matmul(&self) -> bool {
+        false
     }
 }
 

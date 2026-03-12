@@ -1,6 +1,8 @@
 #![allow(unexpected_cfgs)]
 
-use crate::kernel::{MetalKernelOp, DYN_SLOT_COUNT};
+use crate::kernel::{
+    MatmulDescriptor, MetalKernelOp, MetalMatmul, MetalMatmulPlanner, DYN_SLOT_COUNT,
+};
 use half::f16;
 use itertools::Itertools;
 use luminal::{
@@ -37,6 +39,98 @@ pub struct MetalRuntime {
 }
 
 impl MetalRuntime {
+    fn fuse_matmuls(llir_graph: &LLIRGraph) -> LLIRGraph {
+        let mut graph = llir_graph.clone();
+        let planner = MetalMatmulPlanner;
+        let mut rewrites = Vec::new();
+
+        for sum_node in graph.node_indices().collect::<Vec<_>>() {
+            let Some(sum_info) = graph[sum_node]
+                .to_dialect::<dyn MetalKernelOp>()
+                .and_then(|op| op.sum_reduce_info())
+            else {
+                continue;
+            };
+
+            let input_edges: Vec<_> = graph
+                .edges_directed(sum_node, Direction::Incoming)
+                .sorted_by_key(|e| e.id())
+                .map(|e| e.source())
+                .collect();
+            if input_edges.len() != 1 {
+                continue;
+            }
+
+            let mul_node = input_edges[0];
+            let Some(mul_info) = graph[mul_node]
+                .to_dialect::<dyn MetalKernelOp>()
+                .and_then(|op| op.mul_info())
+            else {
+                continue;
+            };
+
+            let Some(desc) = MatmulDescriptor::from_mul_and_sum(&mul_info, &sum_info) else {
+                continue;
+            };
+
+            let mul_inputs: Vec<_> = graph
+                .edges_directed(mul_node, Direction::Incoming)
+                .sorted_by_key(|e| e.id())
+                .map(|e| e.source())
+                .collect();
+            if mul_inputs.len() != 2 {
+                continue;
+            }
+
+            rewrites.push((sum_node, mul_node, mul_inputs, planner.plan(&desc)));
+        }
+
+        for (sum_node, mul_node, mul_inputs, plan) in rewrites {
+            graph[sum_node] =
+                luminal::op::LLIROp::new::<dyn MetalKernelOp>(Box::new(MetalMatmul {
+                    m: plan.m,
+                    n: plan.n,
+                    k: plan.k,
+                    lda: plan.lda,
+                    ldb: plan.ldb,
+                    ldd: plan.ldd,
+                    family: plan.family,
+                    threadgroup_width: plan.threadgroup_width,
+                    threadgroup_height: plan.threadgroup_height,
+                    batch_size: plan.batch_size,
+                    batch_stride_a: plan.batch_stride_a,
+                    batch_stride_b: plan.batch_stride_b,
+                    batch_stride_d: plan.batch_stride_d,
+                }));
+
+            graph.remove_node(mul_node);
+            graph.add_edge(mul_inputs[0], sum_node, ());
+            graph.add_edge(mul_inputs[1], sum_node, ());
+        }
+
+        graph
+    }
+    #[cfg(test)]
+    pub(crate) fn contains_matmul(&self) -> bool {
+        self.llir_graph.node_indices().any(|node| {
+            self.llir_graph[node]
+                .to_dialect::<dyn MetalKernelOp>()
+                .is_some_and(|op| op.is_matmul())
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_kernel_ops(&self) -> Vec<String> {
+        self.llir_graph
+            .node_indices()
+            .filter_map(|node| {
+                self.llir_graph[node]
+                    .to_dialect::<dyn MetalKernelOp>()
+                    .map(|op| format!("{op:?}"))
+            })
+            .collect()
+    }
+
     pub fn set_data(&mut self, id: impl ToId, data: impl Into<NativeData>) {
         self.input_data.insert(id.to_id(), data.into());
     }
@@ -145,7 +239,7 @@ impl Runtime for MetalRuntime {
         self.buffers.clear();
         self.hlir_buffers.clear();
         self.node_dtypes.clear();
-        self.llir_graph = llir_graph.clone();
+        self.llir_graph = Self::fuse_matmuls(llir_graph);
 
         let topo_order = toposort(&self.llir_graph, None).expect("Graph has cycles!");
         for node in topo_order {

@@ -1,4 +1,4 @@
-use super::MetalKernelOp;
+use super::{MetalKernelOp, MetalMatmulFamily, MetalMulInfo, MetalSumReduceInfo};
 use luminal::{
     egglog_utils::{
         api::{app, eq, rule, sort, union, v, Rule, SortDef},
@@ -27,6 +27,8 @@ pub type MetalOps = (
     // Reduce ops
     MetalSumReduce,
     MetalMaxReduce,
+    // Matrix ops
+    MetalMatmul,
     // Data ops
     MetalConstant,
     MetalIota,
@@ -592,6 +594,15 @@ impl MetalKernelOp for MetalMul {
 
     // Performance metrics (binary: 2 reads, 1 write, 1 flop per element)
     impl_binary_metrics!(self, dyn_map, 1);
+
+    fn mul_info(&self) -> Option<MetalMulInfo> {
+        Some(MetalMulInfo {
+            shape: self.shape.clone(),
+            a_strides: self.a_strides.clone(),
+            b_strides: self.b_strides.clone(),
+            output_strides: self.output_strides.clone(),
+        })
+    }
 }
 
 // MetalMod: a % b using fmod
@@ -1045,6 +1056,15 @@ impl MetalKernelOp for MetalSumReduce {
 
     // Performance metrics for reduce ops
     impl_reduce_metrics!(self, dyn_map);
+
+    fn sum_reduce_info(&self) -> Option<MetalSumReduceInfo> {
+        Some(MetalSumReduceInfo {
+            shape: self.out_shape.clone(),
+            strides: self.out_stride.clone(),
+            iters: self.iters,
+            iter_stride: self.iter_stride,
+        })
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1214,6 +1234,217 @@ impl MetalKernelOp for MetalMaxReduce {
 
     // Performance metrics for reduce ops
     impl_reduce_metrics!(self, dyn_map);
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+struct MetalGemmParams {
+    m: u32,
+    n: u32,
+    k: u32,
+    lda: u32,
+    ldb: u32,
+    ldd: u32,
+    batch_size: u32,
+    batch_stride_a: u32,
+    batch_stride_b: u32,
+    batch_stride_d: u32,
+    flags: u32,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct MetalMatmul {
+    pub m: Expression,
+    pub n: Expression,
+    pub k: Expression,
+    pub lda: Expression,
+    pub ldb: Expression,
+    pub ldd: Expression,
+    pub family: MetalMatmulFamily,
+    pub threadgroup_width: u16,
+    pub threadgroup_height: u16,
+    pub batch_size: u32,
+    pub batch_stride_a: u32,
+    pub batch_stride_b: u32,
+    pub batch_stride_d: u32,
+}
+
+impl EgglogOp for MetalMatmul {
+    fn sort(&self) -> SortDef {
+        sort(
+            IR,
+            "MetalMatmul",
+            &[
+                ("m", EXPRESSION),
+                ("n", EXPRESSION),
+                ("k", EXPRESSION),
+                ("lhs", IR),
+                ("lda", EXPRESSION),
+                ("rhs", IR),
+                ("ldb", EXPRESSION),
+                ("ldd", EXPRESSION),
+            ],
+        )
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+}
+
+impl MetalKernelOp for MetalMatmul {
+    fn compile(
+        &self,
+        device: &Device,
+        input_dtypes: &[DType],
+        output_dtype: DType,
+    ) -> ComputePipelineState {
+        let lhs_dtype = input_dtypes.first().copied().unwrap_or(DType::F32);
+        let rhs_dtype = input_dtypes.get(1).copied().unwrap_or(lhs_dtype);
+        let lhs_ty = metal_buffer_type(lhs_dtype);
+        let rhs_ty = metal_buffer_type(rhs_dtype);
+        let out_ty = metal_buffer_type(output_dtype);
+        let lhs_read = metal_numeric_read(lhs_dtype, "lhs", "lhs_offset");
+        let rhs_read = metal_numeric_read(rhs_dtype, "rhs", "rhs_offset");
+        let out_write = metal_numeric_write(output_dtype, "acc");
+
+        let source = format!(
+            r#"
+            #include <metal_stdlib>
+            using namespace metal;
+
+            struct MetalGemmParams {{
+                uint m;
+                uint n;
+                uint k;
+                uint lda;
+                uint ldb;
+                uint ldd;
+                uint batch_size;
+                uint batch_stride_a;
+                uint batch_stride_b;
+                uint batch_stride_d;
+                uint flags;
+            }};
+
+            kernel void mkernel(
+                const device {lhs_ty} *lhs [[buffer(0)]],
+                const device {rhs_ty} *rhs [[buffer(1)]],
+                device {out_ty} *out [[buffer(2)]],
+                constant int *dyn [[buffer(3)]],
+                constant MetalGemmParams &params [[buffer(4)]],
+                uint2 gid [[thread_position_in_grid]]
+            ) {{
+                (void)dyn;
+                if (gid.x >= params.n || gid.y >= params.m) {{
+                    return;
+                }}
+
+                float acc = 0.0f;
+                uint row = gid.y;
+                uint col = gid.x;
+                for (uint kk = 0; kk < params.k; kk++) {{
+                    uint lhs_offset = row * params.lda + kk;
+                    uint rhs_offset = col + kk * params.ldb;
+                    acc += ({lhs_read}) * ({rhs_read});
+                }}
+
+                out[row * params.ldd + col] = {out_write};
+            }}
+            "#,
+            lhs_ty = lhs_ty,
+            rhs_ty = rhs_ty,
+            out_ty = out_ty,
+            lhs_read = lhs_read,
+            rhs_read = rhs_read,
+            out_write = out_write,
+        );
+        compile_shader(device, &source, "mkernel")
+    }
+
+    fn infer_output_dtype(&self, input_dtypes: &[DType]) -> DType {
+        input_dtypes.first().copied().unwrap_or(DType::F32)
+    }
+
+    fn output_size(&self) -> Expression {
+        self.m * self.n
+    }
+
+    fn encode(
+        &self,
+        encoder: &ComputeCommandEncoderRef,
+        pipeline: &ComputePipelineState,
+        inputs: &[&Buffer],
+        output: &Buffer,
+        dyn_map: &FxHashMap<char, usize>,
+    ) {
+        let stride_value = |expr: Expression| {
+            expr.substitute('z', Expression::from(1))
+                .exec(dyn_map)
+                .unwrap() as u32
+        };
+        let params = MetalGemmParams {
+            m: self.m.exec(dyn_map).unwrap() as u32,
+            n: self.n.exec(dyn_map).unwrap() as u32,
+            k: self.k.exec(dyn_map).unwrap() as u32,
+            lda: stride_value(self.lda),
+            ldb: stride_value(self.ldb),
+            ldd: stride_value(self.ldd),
+            batch_size: self.batch_size,
+            batch_stride_a: self.batch_stride_a,
+            batch_stride_b: self.batch_stride_b,
+            batch_stride_d: self.batch_stride_d,
+            flags: match self.family {
+                MetalMatmulFamily::Naive => 0,
+            },
+        };
+
+        encoder.set_compute_pipeline_state(pipeline);
+        encoder.set_buffer(0, Some(inputs[0]), 0);
+        encoder.set_buffer(1, Some(inputs[1]), 0);
+        encoder.set_buffer(2, Some(output), 0);
+        encoder.set_bytes(
+            4,
+            std::mem::size_of::<MetalGemmParams>() as u64,
+            &params as *const MetalGemmParams as *const _,
+        );
+
+        let thread_group_size = MTLSize::new(
+            self.threadgroup_width as u64,
+            self.threadgroup_height as u64,
+            1,
+        );
+        let thread_groups = MTLSize::new(
+            (params.n as u64).div_ceil(thread_group_size.width),
+            (params.m as u64).div_ceil(thread_group_size.height),
+            1,
+        );
+        encoder.dispatch_thread_groups(thread_groups, thread_group_size);
+    }
+
+    fn bytes_loaded(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let m = self.m.exec(dyn_map).unwrap_or(0);
+        let n = self.n.exec(dyn_map).unwrap_or(0);
+        let k = self.k.exec(dyn_map).unwrap_or(0);
+        2 * m * n * k * std::mem::size_of::<f32>()
+    }
+
+    fn bytes_stored(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let m = self.m.exec(dyn_map).unwrap_or(0);
+        let n = self.n.exec(dyn_map).unwrap_or(0);
+        m * n * std::mem::size_of::<f32>()
+    }
+
+    fn flops(&self, dyn_map: &FxHashMap<char, usize>) -> usize {
+        let m = self.m.exec(dyn_map).unwrap_or(0);
+        let n = self.n.exec(dyn_map).unwrap_or(0);
+        let k = self.k.exec(dyn_map).unwrap_or(0);
+        2 * m * n * k
+    }
+
+    fn is_matmul(&self) -> bool {
+        true
+    }
 }
 
 // ============================================================================
