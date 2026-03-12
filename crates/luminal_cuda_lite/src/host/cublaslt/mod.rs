@@ -45,6 +45,10 @@ pub struct CuBlasLt {
     lda: Expression,
     ldb: Expression,
     ldc: Expression,
+    batch_count: Expression,
+    stride_a: Expression,
+    stride_b: Expression,
+    stride_c: Expression,
     dtype: DType,
     cublaslt: OnceLock<Arc<CudaBlasLT>>,
 }
@@ -56,11 +60,15 @@ impl Default for CuBlasLt {
             m: Expression::default(),
             n: Expression::default(),
             k: Expression::default(),
-            a_layout: cublasOperation_t::CUBLAS_OP_N, // IGNORE NOT REAL
-            b_layout: cublasOperation_t::CUBLAS_OP_T, // IGNORE NOT REAL
+            a_layout: cublasOperation_t::CUBLAS_OP_N,
+            b_layout: cublasOperation_t::CUBLAS_OP_T,
             lda: Expression::default(),
             ldb: Expression::default(),
             ldc: Expression::default(),
+            batch_count: 1.into(),
+            stride_a: 0.into(),
+            stride_b: 0.into(),
+            stride_c: 0.into(),
             dtype: DType::F32,
             cublaslt: OnceLock::new(),
         }
@@ -81,6 +89,10 @@ impl EgglogOp for CuBlasLt {
                 ("lda", EXPRESSION),
                 ("ldb", EXPRESSION),
                 ("ldc", EXPRESSION),
+                ("batch_count", EXPRESSION),
+                ("stride_a", EXPRESSION),
+                ("stride_b", EXPRESSION),
+                ("stride_c", EXPRESSION),
                 ("dtype", DTYPE),
             ],
         )
@@ -96,6 +108,29 @@ impl EgglogOp for CuBlasLt {
             Rule::raw(include_str!["cublaslt_RmCm_rewrite.egg"]), // row col
             Rule::raw(include_str!["cublaslt_CmRm_rewrite.egg"]), // col row
             Rule::raw(include_str!["cublaslt_CmCm_rewrite.egg"]), // col col
+            // Delete KernelMul matmul broadcast intermediates when the Sum eclass
+            // has a cublaslt or KernelBatchMatMul alternative. This prevents OOM
+            // from O(m*k*n) intermediates at large seq_len. cuBLAS, TileMatmulFullSplit,
+            // KernelBatchMatVec, and KernelBatchMatMul all take original inputs
+            // (not the Mul eclass), so they survive the cascade.
+            Rule::raw("(rule
+                ((= ?mul (Op (KernelMul ?shape ?as ?bs ?os ?dt) ?inputs))
+                 (= (MNum 0) (nth_from_end ?as 1))
+                 (= (MNum 0) (nth_from_end ?bs 2))
+                 (= ?sum (Op (Sum ?sshape ?sk ?ssi ?sks ?sso) (ICons ?mul (INil))))
+                 (= ?sum (Op (cublaslt ?cm ?cn ?ck ?cta ?ctb ?clda ?cldb ?cldc ?cbc ?csa ?csb ?csc ?cdt) ?ci)))
+                ((delete (Op (KernelMul ?shape ?as ?bs ?os ?dt) ?inputs)))
+                :ruleset cleanup
+            )"),
+            Rule::raw("(rule
+                ((= ?mul (Op (KernelMul ?shape ?as ?bs ?os ?dt) ?inputs))
+                 (= (MNum 0) (nth_from_end ?as 1))
+                 (= (MNum 0) (nth_from_end ?bs 2))
+                 (= ?sum (Op (Sum ?sshape ?sk ?ssi ?sks ?sso) (ICons ?mul (INil))))
+                 (= ?sum (Op (KernelBatchMatMul ?bos ?bk ?bas ?baks ?bbs ?bbks ?bouts ?bdt) ?bi)))
+                ((delete (Op (KernelMul ?shape ?as ?bs ?os ?dt) ?inputs)))
+                :ruleset cleanup
+            )"),
         ]
     }
 
@@ -124,8 +159,14 @@ impl EgglogOp for CuBlasLt {
         let ldb = extract_expr(egraph, kind_children[6], expr_cache).unwrap();
         let ldc = extract_expr(egraph, kind_children[7], expr_cache).unwrap();
 
+        // Extract batch parameters
+        let batch_count = extract_expr(egraph, kind_children[8], expr_cache).unwrap();
+        let stride_a = extract_expr(egraph, kind_children[9], expr_cache).unwrap();
+        let stride_b = extract_expr(egraph, kind_children[10], expr_cache).unwrap();
+        let stride_c = extract_expr(egraph, kind_children[11], expr_cache).unwrap();
+
         // Extract dtype from egglog
-        let dtype = extract_dtype(egraph, kind_children[8]);
+        let dtype = extract_dtype(egraph, kind_children[12]);
 
         let extracted_state = Self {
             m,
@@ -136,6 +177,10 @@ impl EgglogOp for CuBlasLt {
             lda,
             ldb,
             ldc,
+            batch_count,
+            stride_a,
+            stride_b,
+            stride_c,
             dtype,
             cublaslt: OnceLock::new(),
         };
@@ -212,15 +257,26 @@ impl HostOp for CuBlasLt {
         buffers: &FxHashMap<NodeIndex, &CudaSlice<u8>>,
         dyn_map: &FxHashMap<char, usize>,
     ) -> anyhow::Result<()> {
-        // GEMM parameters
-        let m = self.m.exec(dyn_map).unwrap() as u64;
-        let n = self.n.exec(dyn_map).unwrap() as u64;
-        let k = self.k.exec(dyn_map).unwrap() as u64;
+        use crate::cudarc::cublaslt::sys::{
+            cublasLtMatrixLayoutAttribute_t, cublasLtMatrixLayoutSetAttribute,
+        };
+
+        // GEMM parameters — resolve z→1 for element stride before exec
+        let resolve = |e: &Expression| -> Expression {
+            e.substitute('z', Expression::from(1))
+        };
+        let m = resolve(&self.m).exec(dyn_map).unwrap() as u64;
+        let n = resolve(&self.n).exec(dyn_map).unwrap() as u64;
+        let k = resolve(&self.k).exec(dyn_map).unwrap() as u64;
         let a_layout = self.a_layout;
         let b_layout = self.b_layout;
-        let lda = self.lda.exec(dyn_map).unwrap() as i64;
-        let ldb = self.ldb.exec(dyn_map).unwrap() as i64;
-        let ldc = self.ldc.exec(dyn_map).unwrap() as i64;
+        let lda = resolve(&self.lda).exec(dyn_map).unwrap() as i64;
+        let ldb = resolve(&self.ldb).exec(dyn_map).unwrap() as i64;
+        let ldc = resolve(&self.ldc).exec(dyn_map).unwrap() as i64;
+        let batch_count = resolve(&self.batch_count).exec(dyn_map).unwrap() as i32;
+        let stride_a = resolve(&self.stride_a).exec(dyn_map).unwrap() as i64;
+        let stride_b = resolve(&self.stride_b).exec(dyn_map).unwrap() as i64;
+        let stride_c = resolve(&self.stride_c).exec(dyn_map).unwrap() as i64;
 
         // Get CUDA types based on dtype
         let (cuda_dtype, compute_type, scale_dtype) = dtype_to_cuda_types(self.dtype);
@@ -245,20 +301,20 @@ impl HostOp for CuBlasLt {
         let (b_ptr, _b_guard) = b_buf.device_ptr(stream);
         let (c_ptr, _c_guard) = c_buf.device_ptr(stream);
 
-        // Debug tracing
-        trace!(
-            "buffer_validation {}=={},{}=={},{}=={}",
-            a_buf.len(),
-            m * k * element_size,
-            b_buf.len(),
-            k * n * element_size,
-            c_buf.len(),
-            m * n * element_size
-        );
+        // Clamp leading dimensions to minimum valid values.
+        // When a dimension is 1 (e.g., k=1 outer product), the stride along that
+        // dimension may be 0 in the egglog representation, but cuBLAS requires
+        // lda >= rows_of_A and ldb >= rows_of_B.
+        let a_ld_min = if a_layout == cublasOperation_t::CUBLAS_OP_N { m } else { k };
+        let b_ld_min = if b_layout == cublasOperation_t::CUBLAS_OP_N { k } else { n };
+        let lda = std::cmp::max(lda, a_ld_min as i64);
+        let ldb = std::cmp::max(ldb, b_ld_min as i64);
+        let ldc = std::cmp::max(ldc, m as i64);
+
         let _span = span!(
             Level::TRACE,
             "cuBLASLT",
-            m, n, k, lda, ldb, ldc, ?a_layout, ?b_layout, ?self.dtype,
+            m, n, k, lda, ldb, ldc, batch_count, ?a_layout, ?b_layout, ?self.dtype,
         )
         .entered();
 
@@ -315,6 +371,30 @@ impl HostOp for CuBlasLt {
             cublasLtMatrixLayoutCreate(&mut b_desc, cuda_dtype, b_rows, b_cols, ldb).result()?;
             cublasLtMatrixLayoutCreate(&mut c_desc, cuda_dtype, m, n, ldc).result()?;
 
+            // Set batched GEMM attributes if batch_count > 1
+            if batch_count > 1 {
+                for (desc, stride) in [
+                    (a_desc, stride_a),
+                    (b_desc, stride_b),
+                    (c_desc, stride_c),
+                ] {
+                    cublasLtMatrixLayoutSetAttribute(
+                        desc,
+                        cublasLtMatrixLayoutAttribute_t::CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                        &batch_count as *const _ as *const std::ffi::c_void,
+                        std::mem::size_of::<i32>(),
+                    )
+                    .result()?;
+                    cublasLtMatrixLayoutSetAttribute(
+                        desc,
+                        cublasLtMatrixLayoutAttribute_t::CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+                        &stride as *const _ as *const std::ffi::c_void,
+                        std::mem::size_of::<i64>(),
+                    )
+                    .result()?;
+                }
+            }
+
             // Create preference and set workspace size
             cublasLtMatmulPreferenceCreate(&mut preference).result()?;
             cublasLtMatmulPreferenceSetAttribute(
@@ -341,7 +421,6 @@ impl HostOp for CuBlasLt {
             .result()?;
 
             if algo_count == 0 {
-                // Cleanup before returning error
                 cublasLtMatmulPreferenceDestroy(preference);
                 cublasLtMatrixLayoutDestroy(c_desc);
                 cublasLtMatrixLayoutDestroy(b_desc);
@@ -350,7 +429,6 @@ impl HostOp for CuBlasLt {
                 return Err(anyhow::anyhow!("No suitable cuBLASLT algorithm found"));
             }
 
-            // All dtypes use F32 scale type for alpha/beta
             let alpha_ptr = &alpha_f32 as *const _ as *const std::ffi::c_void;
             let beta_ptr = &beta_f32 as *const _ as *const std::ffi::c_void;
             cublasLtMatmul(
@@ -365,7 +443,7 @@ impl HostOp for CuBlasLt {
                 c_ptr as *const std::ffi::c_void,
                 c_desc,
                 c_ptr as *mut std::ffi::c_void,
-                c_desc, // D layout same as C
+                c_desc,
                 &heuristic.algo,
                 workspace_ptr as *mut std::ffi::c_void,
                 WORKSPACE_SIZE,
@@ -386,7 +464,10 @@ impl HostOp for CuBlasLt {
     }
 
     fn output_size(&self) -> Expression {
-        self.m * self.n
+        let resolve = |e: &Expression| -> Expression {
+            e.substitute('z', Expression::from(1))
+        };
+        resolve(&self.batch_count) * resolve(&self.m) * resolve(&self.n)
     }
 
     fn output_bytes(&self) -> Expression {

@@ -371,6 +371,13 @@ impl CudaRuntime {
         }
     }
 
+    /// Free all intermediate buffers to reclaim GPU memory.
+    /// They will be re-allocated on the next `execute()` call.
+    pub fn free_intermediate_buffers(&mut self) {
+        self.buffers.clear();
+        self.cached_buffer_ptrs.clear();
+    }
+
     #[tracing::instrument(skip_all)]
     fn allocate_intermediate_buffers(&mut self, dyn_dims: &FxHashMap<char, usize>) {
         let is_first_alloc = self.buffers.is_empty();
@@ -429,14 +436,7 @@ impl CudaRuntime {
             let ptr = self.buffers[&node].device_ptr(&self.cuda_stream).0;
             self.cached_buffer_ptrs.insert(node, ptr);
         }
-        if realloc_count > 0 {
-            tracing::debug!(
-                "[ALLOC] dyn_dims={:?} reallocated={} ({:.1}MB)",
-                dyn_dims,
-                realloc_count,
-                total_alloc as f64 / 1e6,
-            );
-        }
+        let _ = (realloc_count, total_alloc);
     }
 
     /// Pre-allocate buffers with the given dynamic dimension values.
@@ -1042,7 +1042,7 @@ impl Runtime for CudaRuntime {
         if self.profiling {
             return;
         }
-        let inputs_with_outputs: FxHashSet<NodeIndex> = self
+        let mut inputs_with_outputs: FxHashSet<NodeIndex> = self
             .llir_graph
             .node_indices()
             .filter(|n| self.llir_graph[*n].to_op::<Output>().is_some())
@@ -1053,6 +1053,22 @@ impl Runtime for CudaRuntime {
                     .and_then(|pred| self.llir_to_hlir.get(&pred).copied())
             })
             .collect();
+        // Also preserve alias targets: if a scatter output has .output(), the aliased
+        // input buffer must survive so remove_buffer can retrieve it.
+        let alias_preserved: Vec<NodeIndex> = self
+            .llir_graph
+            .node_indices()
+            .filter(|n| self.llir_graph[*n].to_op::<Output>().is_some())
+            .filter_map(|output_node| {
+                let pred = self
+                    .llir_graph
+                    .neighbors_directed(output_node, Direction::Incoming)
+                    .next()?;
+                let alias_target = self.output_alias_map.get(&pred)?;
+                self.llir_to_hlir.get(alias_target).copied()
+            })
+            .collect();
+        inputs_with_outputs.extend(alias_preserved);
 
         let to_consume: Vec<NodeIndex> = self
             .hlir_buffers

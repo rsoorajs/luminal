@@ -301,7 +301,9 @@ impl CudaGraphOp {
             for kernel in state.kernels.iter_mut() {
                 kernel.internal_bufs = kernel.kernel_op.allocate_internal_buffers(stream, dyn_map);
             }
-            // Internal buffer pointers changed, need to rebuild CUDA graph
+        }
+        // Force full rebuild when dims change (debug: testing if update_kernel_node is the issue)
+        if dyn_map_changed || needs_internal_realloc {
             state.cuda_graph = None;
             state.cuda_graph_exec = None;
             state.node_to_graph_node.clear();

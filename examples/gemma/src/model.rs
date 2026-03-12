@@ -321,7 +321,7 @@ fn hlir_attention(
     let k_full = k_cache_out.slice((.., ..total_seq, ..));
     let v_full = v_cache_out.slice((.., ..total_seq, ..));
 
-    // GQA expand
+    // GQA expand: [N_KV_HEADS, total_seq, HEAD_DIM] -> [N_HEADS, total_seq, HEAD_DIM]
     let k_3d = k_full.expand_dim(1, KV_GROUPS).merge_dims(0, 1);
     let v_3d = v_full.expand_dim(1, KV_GROUPS).merge_dims(0, 1);
 

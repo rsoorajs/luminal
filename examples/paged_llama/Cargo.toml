@@ -1,10 +1,10 @@
 [package]
-name = "llama"
+name = "paged_llama"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "llama"
+name = "paged_llama"
 path = "src/main.rs"
 
 [features]

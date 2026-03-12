@@ -4,7 +4,7 @@ use luminal::{
     prelude::{DType, GraphTensor},
     shape::{flatten_strides, Expression, ToShape},
 };
-use luminal_cuda::{
+use luminal_cuda_lite::{
     block::{cstruct::CStruct, BlockOp},
     cudarc::driver::{CudaSlice, CudaStream, DevicePtr},
 };

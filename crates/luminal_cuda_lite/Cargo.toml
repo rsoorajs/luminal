@@ -1,5 +1,5 @@
 [package]
-name = "luminal_cuda"
+name = "luminal_cuda_lite"
 version = "0.2.0"
 edition = "2024"
 description = "Cuda compiler for luminal"

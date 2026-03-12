@@ -3,7 +3,7 @@ mod model;
 
 use hf::prepare_hf_model;
 use luminal::prelude::*;
-use luminal_cuda::{cudarc::driver::CudaContext, runtime::CudaRuntime};
+use luminal_cuda_lite::{cudarc::driver::CudaContext, runtime::CudaRuntime};
 use luminal_tracing::*;
 use model::*;
 use rustc_hash::FxHashSet;
