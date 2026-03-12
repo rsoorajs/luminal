@@ -44,7 +44,7 @@ fn dtype_fixed_rule(sort: &SortDef, dtype_sort: &SortDef) -> Rule {
 }
 use num_traits::Float;
 use petgraph::{Direction, algo::toposort, prelude::StableGraph, visit::EdgeRef};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::info_span;
 
 pub type HLIROps = (
@@ -64,6 +64,7 @@ pub type HLIROps = (
     Mod,
     LessThan,
     Gather,
+    Scatter,
     SumReduce,
     MaxReduce,
 );
@@ -132,7 +133,7 @@ impl EgglogOp for Input {
 }
 
 impl HLIROp for Input {
-    fn to_egglog(&self, _: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, _: &[(NodeIndex, String)]) -> String {
         format!(
             "(Input {} \"{}\" ({:?}))",
             self.node, self.label, self.dtype
@@ -191,7 +192,7 @@ impl EgglogOp for Output {
 }
 
 impl HLIROp for Output {
-    fn to_egglog(&self, inp: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inp: &[(NodeIndex, String)]) -> String {
         format!("(Output {} {})", inp[0].1, self.node)
     }
 }
@@ -233,7 +234,7 @@ impl EgglogOp for CustomOpHLIR {
 }
 
 impl HLIROp for CustomOpHLIR {
-    fn to_egglog(&self, inp: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inp: &[(NodeIndex, String)]) -> String {
         format!(
             "(CustomOpHLIR {} {} ({:?}))",
             list_to_egglog(&inp.iter().map(|i| &i.1).collect_vec(), "ICons", "INil"),
@@ -265,7 +266,7 @@ impl Display for Constant {
 }
 
 impl HLIROp for Constant {
-    fn to_egglog(&self, _: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, _: &[(NodeIndex, String)]) -> String {
         format!("(Constant {:.6})", self.0)
     }
 }
@@ -315,7 +316,7 @@ impl Display for Iota {
     }
 }
 impl HLIROp for Iota {
-    fn to_egglog(&self, _: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, _: &[(NodeIndex, String)]) -> String {
         format!("(Iota {} {})", self.0.to_egglog(), self.1.to_egglog())
     }
 }
@@ -367,7 +368,7 @@ impl Display for Cast {
     }
 }
 impl HLIROp for Cast {
-    fn to_egglog(&self, inp: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inp: &[(NodeIndex, String)]) -> String {
         format!("(Cast {} {} ({:?}))", inp[0].1, self.0.to_egglog(), self.1)
     }
 }
@@ -453,8 +454,10 @@ impl NativeOp for Cast {
 }
 
 /// Graph break for chunking search graphs
-#[derive(Clone, PartialEq)]
-pub struct GraphBreak;
+#[derive(Clone, PartialEq, Default)]
+pub struct GraphBreak {
+    pub input_shape: ShapeTracker,
+}
 impl Debug for GraphBreak {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "GraphBreak")
@@ -467,7 +470,7 @@ impl Display for GraphBreak {
 }
 
 impl HLIROp for GraphBreak {
-    fn to_egglog(&self, _: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, _: &[(NodeIndex, String)]) -> String {
         panic!("Cannot turn GraphBreak into egglog op!");
     }
 }
@@ -497,6 +500,7 @@ fn unary_impl(
 pub struct Log2 {
     pub shape: Vec<Expression>,
     pub strides: Vec<Expression>,
+    pub input_shape: ShapeTracker,
 }
 impl Display for Log2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -504,13 +508,13 @@ impl Display for Log2 {
     }
 }
 impl HLIROp for Log2 {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
         format!(
             "(Log2 {} {} {} {})",
-            elist_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&self.input_shape.dims),
             inputs[0].1,
-            elist_to_egglog(&inputs[0].2.strides),
-            elist_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&self.input_shape.strides),
+            elist_to_egglog(&self.input_shape.contiguous().strides)
         )
     }
 }
@@ -535,6 +539,7 @@ impl EgglogOp for Log2 {
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
                 strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
+                ..Default::default()
             })),
             vec![children[1]],
         )
@@ -558,6 +563,7 @@ impl NativeOp for Log2 {
 pub struct Exp2 {
     pub shape: Vec<Expression>,
     pub strides: Vec<Expression>,
+    pub input_shape: ShapeTracker,
 }
 impl Display for Exp2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -565,13 +571,13 @@ impl Display for Exp2 {
     }
 }
 impl HLIROp for Exp2 {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
         format!(
             "(Exp2 {} {} {} {})",
-            elist_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&self.input_shape.dims),
             inputs[0].1,
-            elist_to_egglog(&inputs[0].2.strides),
-            elist_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&self.input_shape.strides),
+            elist_to_egglog(&self.input_shape.contiguous().strides)
         )
     }
 }
@@ -596,6 +602,7 @@ impl EgglogOp for Exp2 {
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
                 strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
+                ..Default::default()
             })),
             vec![children[1]],
         )
@@ -619,6 +626,7 @@ impl NativeOp for Exp2 {
 pub struct Sin {
     pub shape: Vec<Expression>,
     pub strides: Vec<Expression>,
+    pub input_shape: ShapeTracker,
 }
 impl Display for Sin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -626,13 +634,13 @@ impl Display for Sin {
     }
 }
 impl HLIROp for Sin {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
         format!(
             "(Sin {} {} {} {})",
-            elist_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&self.input_shape.dims),
             inputs[0].1,
-            elist_to_egglog(&inputs[0].2.strides),
-            elist_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&self.input_shape.strides),
+            elist_to_egglog(&self.input_shape.contiguous().strides)
         )
     }
 }
@@ -658,6 +666,7 @@ impl EgglogOp for Sin {
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
                 strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
+                ..Default::default()
             })),
             vec![children[1]],
         )
@@ -681,6 +690,7 @@ impl NativeOp for Sin {
 pub struct Recip {
     pub shape: Vec<Expression>,
     pub strides: Vec<Expression>,
+    pub input_shape: ShapeTracker,
 }
 impl Display for Recip {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -688,13 +698,13 @@ impl Display for Recip {
     }
 }
 impl HLIROp for Recip {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
         format!(
             "(Recip {} {} {} {})",
-            elist_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&self.input_shape.dims),
             inputs[0].1,
-            elist_to_egglog(&inputs[0].2.strides),
-            elist_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&self.input_shape.strides),
+            elist_to_egglog(&self.input_shape.contiguous().strides)
         )
     }
 }
@@ -720,6 +730,7 @@ impl EgglogOp for Recip {
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
                 strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
+                ..Default::default()
             })),
             vec![children[1]],
         )
@@ -743,6 +754,7 @@ impl NativeOp for Recip {
 pub struct Sqrt {
     pub shape: Vec<Expression>,
     pub strides: Vec<Expression>,
+    pub input_shape: ShapeTracker,
 }
 impl Display for Sqrt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -750,13 +762,13 @@ impl Display for Sqrt {
     }
 }
 impl HLIROp for Sqrt {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
         format!(
             "(Sqrt {} {} {} {})",
-            elist_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&self.input_shape.dims),
             inputs[0].1,
-            elist_to_egglog(&inputs[0].2.strides),
-            elist_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&self.input_shape.strides),
+            elist_to_egglog(&self.input_shape.contiguous().strides)
         )
     }
 }
@@ -782,6 +794,7 @@ impl EgglogOp for Sqrt {
             LLIROp::new::<dyn NativeOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
                 strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
+                ..Default::default()
             })),
             vec![children[1]],
         )
@@ -835,9 +848,10 @@ fn bin_fn<A: Copy>(
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Add {
-    shape: Vec<Expression>,
-    a_strides: Vec<Expression>,
-    b_strides: Vec<Expression>,
+    pub shape: Vec<Expression>,
+    pub a_strides: Vec<Expression>,
+    pub b_strides: Vec<Expression>,
+    pub input_shapes: Vec<ShapeTracker>,
 }
 impl Display for Add {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -845,15 +859,15 @@ impl Display for Add {
     }
 }
 impl HLIROp for Add {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
         format!(
             "(Add {} {} {} {} {} {})",
-            elist_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&self.input_shapes[0].dims),
             inputs[0].1,
-            elist_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&self.input_shapes[0].strides),
             inputs[1].1,
-            elist_to_egglog(&inputs[1].2.strides),
-            elist_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&self.input_shapes[1].strides),
+            elist_to_egglog(&self.input_shapes[0].contiguous().strides)
         )
     }
 }
@@ -880,6 +894,7 @@ impl EgglogOp for Add {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
                 a_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
                 b_strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
+                ..Default::default()
             })),
             vec![children[1], children[3]],
         )
@@ -913,9 +928,10 @@ impl NativeOp for Add {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mul {
-    shape: Vec<Expression>,
-    a_strides: Vec<Expression>,
-    b_strides: Vec<Expression>,
+    pub shape: Vec<Expression>,
+    pub a_strides: Vec<Expression>,
+    pub b_strides: Vec<Expression>,
+    pub input_shapes: Vec<ShapeTracker>,
 }
 impl Display for Mul {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -923,15 +939,15 @@ impl Display for Mul {
     }
 }
 impl HLIROp for Mul {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
         format!(
             "(Mul {} {} {} {} {} {})",
-            elist_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&self.input_shapes[0].dims),
             inputs[0].1,
-            elist_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&self.input_shapes[0].strides),
             inputs[1].1,
-            elist_to_egglog(&inputs[1].2.strides),
-            elist_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&self.input_shapes[1].strides),
+            elist_to_egglog(&self.input_shapes[0].contiguous().strides)
         )
     }
 }
@@ -958,6 +974,7 @@ impl EgglogOp for Mul {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
                 a_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
                 b_strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
+                ..Default::default()
             })),
             vec![children[1], children[3]],
         )
@@ -991,9 +1008,10 @@ impl NativeOp for Mul {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mod {
-    shape: Vec<Expression>,
-    a_strides: Vec<Expression>,
-    b_strides: Vec<Expression>,
+    pub shape: Vec<Expression>,
+    pub a_strides: Vec<Expression>,
+    pub b_strides: Vec<Expression>,
+    pub input_shapes: Vec<ShapeTracker>,
 }
 impl Display for Mod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1001,15 +1019,15 @@ impl Display for Mod {
     }
 }
 impl HLIROp for Mod {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
         format!(
             "(Mod {} {} {} {} {} {})",
-            elist_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&self.input_shapes[0].dims),
             inputs[0].1,
-            elist_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&self.input_shapes[0].strides),
             inputs[1].1,
-            elist_to_egglog(&inputs[1].2.strides),
-            elist_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&self.input_shapes[1].strides),
+            elist_to_egglog(&self.input_shapes[0].contiguous().strides)
         )
     }
 }
@@ -1036,6 +1054,7 @@ impl EgglogOp for Mod {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
                 a_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
                 b_strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
+                ..Default::default()
             })),
             vec![children[1], children[3]],
         )
@@ -1069,9 +1088,10 @@ impl NativeOp for Mod {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LessThan {
-    shape: Vec<Expression>,
-    a_strides: Vec<Expression>,
-    b_strides: Vec<Expression>,
+    pub shape: Vec<Expression>,
+    pub a_strides: Vec<Expression>,
+    pub b_strides: Vec<Expression>,
+    pub input_shapes: Vec<ShapeTracker>,
 }
 impl Display for LessThan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1079,15 +1099,15 @@ impl Display for LessThan {
     }
 }
 impl HLIROp for LessThan {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
         format!(
             "(LessThan {} {} {} {} {} {})",
-            elist_to_egglog(&inputs[0].2.dims),
+            elist_to_egglog(&self.input_shapes[0].dims),
             inputs[0].1,
-            elist_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&self.input_shapes[0].strides),
             inputs[1].1,
-            elist_to_egglog(&inputs[1].2.strides),
-            elist_to_egglog(&inputs[0].2.contiguous().strides)
+            elist_to_egglog(&self.input_shapes[1].strides),
+            elist_to_egglog(&self.input_shapes[0].contiguous().strides)
         )
     }
 }
@@ -1115,6 +1135,7 @@ impl EgglogOp for LessThan {
                 shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
                 a_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
                 b_strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
+                ..Default::default()
             })),
             vec![children[1], children[3]],
         )
@@ -1140,10 +1161,11 @@ impl NativeOp for LessThan {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Gather {
-    index_shape: Vec<Expression>,
-    data_shape: Vec<Expression>,
-    index_strides: Vec<Expression>,
-    data_strides: Vec<Expression>,
+    pub index_shape: Vec<Expression>,
+    pub data_shape: Vec<Expression>,
+    pub index_strides: Vec<Expression>,
+    pub data_strides: Vec<Expression>,
+    pub input_shapes: Vec<ShapeTracker>,
 }
 impl Display for Gather {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1151,15 +1173,15 @@ impl Display for Gather {
     }
 }
 impl HLIROp for Gather {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
         format!(
             "(Gather {} {} {} {} {} {})",
             inputs[0].1,
-            elist_to_egglog(&inputs[0].2.dims),
-            elist_to_egglog(&inputs[0].2.strides),
+            elist_to_egglog(&self.input_shapes[0].dims),
+            elist_to_egglog(&self.input_shapes[0].strides),
             inputs[1].1,
-            elist_to_egglog(&inputs[1].2.dims),
-            elist_to_egglog(&inputs[1].2.strides),
+            elist_to_egglog(&self.input_shapes[1].dims),
+            elist_to_egglog(&self.input_shapes[1].strides),
         )
     }
 }
@@ -1201,6 +1223,7 @@ impl EgglogOp for Gather {
                 data_shape: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
                 data_strides: extract_expr_list(egraph, children[5], list_cache, expr_cache)
                     .unwrap(),
+                ..Default::default()
             })),
             vec![children[0], children[3]],
         )
@@ -1245,6 +1268,117 @@ impl NativeOp for Gather {
     }
 }
 
+// Scatter Op (inverse of Gather)
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Scatter {
+    pub dest_shape: Vec<Expression>,
+    pub dest_strides: Vec<Expression>,
+    pub index_shape: Vec<Expression>,
+    pub index_strides: Vec<Expression>,
+    pub src_strides: Vec<Expression>,
+}
+impl Display for Scatter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Scatter")
+    }
+}
+impl HLIROp for Scatter {
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
+        format!(
+            "(Scatter {} {} {} {} {} {} {} {})",
+            inputs[0].1,
+            elist_to_egglog(&self.dest_shape),
+            elist_to_egglog(&self.dest_strides),
+            inputs[1].1,
+            elist_to_egglog(&self.index_shape),
+            elist_to_egglog(&self.index_strides),
+            inputs[2].1,
+            elist_to_egglog(&self.src_strides),
+        )
+    }
+}
+
+impl EgglogOp for Scatter {
+    fn sort(&self) -> SortDef {
+        sort(
+            IR,
+            "Scatter",
+            &[
+                ("dest", IR),
+                ("dest_shape", ELIST),
+                ("dest_strides", ELIST),
+                ("indexes", IR),
+                ("index_shape", ELIST),
+                ("index_strides", ELIST),
+                ("src", IR),
+                ("src_strides", ELIST),
+            ],
+        )
+    }
+    fn cleanup(&self) -> bool {
+        true
+    }
+    fn rewrites(&self) -> Vec<Rule> {
+        vec![dtype_propagation_rule(&self.sort(), "src")]
+    }
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        children: &[&'a ENodeId],
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        (
+            LLIROp::new::<dyn NativeOp>(Box::new(Self {
+                dest_shape: extract_expr_list(egraph, children[1], list_cache, expr_cache).unwrap(),
+                dest_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache)
+                    .unwrap(),
+                index_shape: extract_expr_list(egraph, children[4], list_cache, expr_cache)
+                    .unwrap(),
+                index_strides: extract_expr_list(egraph, children[5], list_cache, expr_cache)
+                    .unwrap(),
+                src_strides: extract_expr_list(egraph, children[7], list_cache, expr_cache)
+                    .unwrap(),
+            })),
+            vec![children[0], children[3], children[6]],
+        )
+    }
+}
+impl NativeOp for Scatter {
+    fn execute(&self, inputs: Vec<&NativeData>, dyn_map: &FxHashMap<char, usize>) -> NativeData {
+        let (dest, indexes, src) = (inputs[0], inputs[1], inputs[2]);
+        let dest_ind =
+            StridedIterator::new(&self.dest_shape, &self.dest_strides, dyn_map).collect_vec();
+        let index_ind = StridedIterator::new(&self.index_shape, &self.index_strides, dyn_map);
+        let src_ind =
+            StridedIterator::new(&self.index_shape, &self.src_strides, dyn_map).collect_vec();
+        let NativeData::Int(indexes) = indexes else {
+            panic!("indexes must be int!")
+        };
+        macro_rules! scatter_impl {
+            ($variant:ident, $dest_data:expr, $src_data:expr) => {{
+                let mut output: Vec<_> = dest_ind.iter().map(|&i| $dest_data[i]).collect();
+                for (src_idx, flat_i) in index_ind.enumerate() {
+                    let idx = indexes[flat_i] as usize;
+                    if idx < output.len() {
+                        output[idx] = $src_data[src_ind[src_idx]];
+                    }
+                }
+                NativeData::$variant(output)
+            }};
+        }
+        match (dest, src) {
+            (NativeData::F32(d), NativeData::F32(s)) => scatter_impl!(F32, d, s),
+            (NativeData::F16(d), NativeData::F16(s)) => scatter_impl!(F16, d, s),
+            (NativeData::Bf16(d), NativeData::Bf16(s)) => scatter_impl!(Bf16, d, s),
+            (NativeData::Int(d), NativeData::Int(s)) => scatter_impl!(Int, d, s),
+            (NativeData::Bool(d), NativeData::Bool(s)) => scatter_impl!(Bool, d, s),
+            _ => panic!("dest and src must have the same dtype!"),
+        }
+    }
+}
+
 // Reduce Ops (A -> B (different shape))
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -1254,6 +1388,7 @@ pub struct SumReduce {
     pub strides: Vec<Expression>,
     pub iters: Expression,
     pub iter_stride: Expression,
+    pub input_shape: ShapeTracker,
 }
 impl Display for SumReduce {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1261,12 +1396,12 @@ impl Display for SumReduce {
     }
 }
 impl HLIROp for SumReduce {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
-        let mut reduced_shape = inputs[0].2;
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
+        let mut reduced_shape = self.input_shape;
         reduced_shape.remove_dim(self.dim);
-        let reduced_dim = inputs[0].2.dims[self.dim];
-        let reduced_stride = inputs[0].2.strides[self.dim];
-        let mut reduced_strides = inputs[0].2.strides;
+        let reduced_dim = self.input_shape.dims[self.dim];
+        let reduced_stride = self.input_shape.strides[self.dim];
+        let mut reduced_strides = self.input_shape.strides;
         reduced_strides.remove(self.dim);
         format!(
             "(Sum {} {} {} {} {} {})",
@@ -1304,6 +1439,7 @@ impl EgglogOp for SumReduce {
                 strides: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
                 iters: extract_expr(egraph, children[1], expr_cache).unwrap(),
                 iter_stride: extract_expr(egraph, children[4], expr_cache).unwrap(),
+                ..Default::default()
             })),
             vec![children[2]],
         )
@@ -1364,6 +1500,7 @@ pub struct MaxReduce {
     pub strides: Vec<Expression>,
     pub iters: Expression,
     pub iter_stride: Expression,
+    pub input_shape: ShapeTracker,
 }
 impl Display for MaxReduce {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1371,12 +1508,12 @@ impl Display for MaxReduce {
     }
 }
 impl HLIROp for MaxReduce {
-    fn to_egglog(&self, inputs: &[(NodeIndex, String, ShapeTracker)]) -> String {
-        let mut reduced_shape = inputs[0].2;
+    fn to_egglog(&self, inputs: &[(NodeIndex, String)]) -> String {
+        let mut reduced_shape = self.input_shape;
         reduced_shape.remove_dim(self.dim);
-        let reduced_dim = inputs[0].2.dims[self.dim];
-        let reduced_stride = inputs[0].2.strides[self.dim];
-        let mut reduced_strides = inputs[0].2.strides;
+        let reduced_dim = self.input_shape.dims[self.dim];
+        let reduced_stride = self.input_shape.strides[self.dim];
+        let mut reduced_strides = self.input_shape.strides;
         reduced_strides.remove(self.dim);
         format!(
             "(Max {} {} {} {} {} {})",
@@ -1414,6 +1551,7 @@ impl EgglogOp for MaxReduce {
                 strides: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
                 iters: extract_expr(egraph, children[1], expr_cache).unwrap(),
                 iter_stride: extract_expr(egraph, children[4], expr_cache).unwrap(),
+                ..Default::default()
             })),
             vec![children[2]],
         )
@@ -1475,7 +1613,7 @@ pub trait NativeOp: Debug + AsAny + Send + Sync {
     fn execute(&self, inputs: Vec<&NativeData>, dyn_map: &FxHashMap<char, usize>) -> NativeData;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum NativeData {
     F32(Vec<f32>),
     F16(Vec<f16>),
@@ -1660,9 +1798,21 @@ impl Runtime for NativeRuntime {
 
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) -> Self::ExecReturn {
         for node in toposort(&self.graph, None).unwrap() {
-            if (**self.graph[node]).as_any().is::<Input>()
-                || (**self.graph[node]).as_any().is::<Output>()
-            {
+            if (**self.graph[node]).as_any().is::<Input>() {
+                continue;
+            }
+
+            if (**self.graph[node]).as_any().is::<Output>() {
+                // Copy source buffer into Output node's own slot
+                let source = self
+                    .graph
+                    .edges_directed(node, Direction::Incoming)
+                    .sorted_by_key(|e| e.id())
+                    .next()
+                    .unwrap()
+                    .source();
+                let data = self.buffers[&source].clone();
+                self.buffers.insert(node, data);
                 continue;
             }
 
@@ -1677,6 +1827,14 @@ impl Runtime for NativeRuntime {
             let output = self.graph[node].execute(inputs, dyn_map);
             self.buffers.insert(node, output);
         }
+
+        // Consume all non-Output buffers (inputs + intermediates)
+        let output_nodes: FxHashSet<NodeIndex> = self
+            .graph
+            .node_indices()
+            .filter(|n| (**self.graph[*n]).as_any().is::<Output>())
+            .collect();
+        self.buffers.retain(|k, _| output_nodes.contains(k));
     }
 }
 
@@ -1695,12 +1853,7 @@ impl NativeRuntime {
                 }
             })
             .unwrap();
-        let data_id = self
-            .graph
-            .neighbors_directed(output_id, Direction::Incoming)
-            .next()
-            .unwrap();
-        let NativeData::F32(f) = self.buffers.get(&data_id).unwrap() else {
+        let NativeData::F32(f) = self.buffers.get(&output_id).unwrap() else {
             panic!()
         };
         f

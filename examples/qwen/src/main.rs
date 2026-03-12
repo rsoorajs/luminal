@@ -14,8 +14,8 @@ const REPO_ID: &str = "Qwen/Qwen3-4B";
 
 fn main() {
     let max_seq_len = 4096;
-    let gen_tokens = 30;
-    let search_graphs = 500; // the number of graphs we want to search during compilation
+    let gen_tokens = 500;
+    let search_graphs: usize = 50;
     let prompt = "The capital of France is";
 
     // Set up cuda context and stream
@@ -65,8 +65,19 @@ fn main() {
     print!("{prompt}");
     std::io::stdout().flush().unwrap();
 
-    // Decode loop
+    // Process prompt one token at a time to avoid prefill
+    let prompt_tokens = sentence.clone();
     let mut prev_seq = 0;
+    for &tok in &prompt_tokens[..prompt_tokens.len() - 1] {
+        cx.set_dim('s', 1);
+        cx.set_dim('p', prev_seq);
+        runtime.set_data(input, vec![tok as i32]);
+        runtime.execute(&cx.dyn_map);
+        prev_seq += 1;
+    }
+    sentence = vec![*prompt_tokens.last().unwrap()];
+
+    // Decode loop
     let mut fwd_durations = vec![];
     for _ in 0..gen_tokens {
         let start = std::time::Instant::now();
@@ -85,7 +96,7 @@ fn main() {
         runtime.execute(&cx.dyn_map);
         let logits_data = runtime.get_f32(logits);
 
-        // Sample next token
+        // Sample next token (greedy)
         sentence = vec![*sample(&logits_data, VOCAB_SIZE).last().unwrap()];
         prev_seq += seq_len;
         print!("{}", tokenizer.decode(&sentence, true).unwrap());

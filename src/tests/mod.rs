@@ -3,6 +3,7 @@ use std::fmt::Debug;
 use crate::egglog_utils::{
     extract_generation, hash_choice_set, random_initial_choice, validate_choice_set,
 };
+use crate::hlir::Output;
 use crate::prelude::*;
 use candle_core::{Device, Tensor};
 use proptest::prelude::*;
@@ -425,4 +426,62 @@ fn fuzz_test_genome_execution() {
             mutable_eclasses
         );
     }
+}
+
+// --- Consumed-input semantics tests ---
+
+#[test]
+#[should_panic]
+fn test_inputs_consumed_after_execute() {
+    let mut cx = Graph::new();
+    let a = cx.tensor(3);
+    let _b = (a * 2.0).output();
+    cx.build_search_space::<NativeRuntime>();
+    let mut rt = cx.search(NativeRuntime::default(), 1);
+    rt.set_data(a.id, vec![1.0, 2.0, 3.0]);
+    rt.execute(&cx.dyn_map);
+    // Second execute should panic — input 'a' was consumed
+    rt.execute(&cx.dyn_map);
+}
+
+#[test]
+fn test_passthrough_preserves_weights() {
+    let mut cx = Graph::new();
+    let w = cx.tensor(3);
+    let x = cx.tensor(3);
+    let y = (w * x).output();
+    w.persist();
+
+    cx.build_search_space::<NativeRuntime>();
+    let mut rt = cx.search(NativeRuntime::default(), 1);
+
+    // Iteration 1
+    rt.set_data(w.id, vec![1.0, 2.0, 3.0]);
+    rt.set_data(x.id, vec![10.0, 20.0, 30.0]);
+    rt.execute(&cx.dyn_map);
+    assert_close(rt.get_f32(y.id), &[10.0, 40.0, 90.0]);
+
+    // Retrieve weight from passthrough output, refeed
+    let weights_back = rt.get_f32(w.id).clone();
+    rt.set_data(w.id, weights_back);
+    rt.set_data(x.id, vec![5.0, 5.0, 5.0]);
+    rt.execute(&cx.dyn_map);
+    assert_close(rt.get_f32(y.id), &[5.0, 10.0, 15.0]);
+}
+
+#[test]
+fn test_only_outputs_remain() {
+    let mut cx = Graph::new();
+    let a = cx.tensor(3);
+    let _b = (a * 2.0).output();
+    cx.build_search_space::<NativeRuntime>();
+    let mut rt = cx.search(NativeRuntime::default(), 1);
+    rt.set_data(a.id, vec![1.0, 2.0, 3.0]);
+    rt.execute(&cx.dyn_map);
+    let output_count = rt
+        .graph
+        .node_indices()
+        .filter(|n| (**rt.graph[*n]).as_any().is::<Output>())
+        .count();
+    assert_eq!(rt.buffers.len(), output_count);
 }

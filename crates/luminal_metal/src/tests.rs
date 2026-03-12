@@ -340,3 +340,66 @@ fn metal_simple_max_reduce() {
     let out = rt.get_f32(output);
     assert_close(&out, &[4.0, 8.0], 0.001);
 }
+
+#[test]
+fn test_scatter_basic() {
+    let mut cx = Graph::default();
+    let src = cx.tensor(3);
+    let indexes = cx.tensor(3).as_dtype(DType::Int);
+    let dest = cx.tensor(5);
+    let result = src.scatter(indexes, dest).output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    rt.set_data(src, &[10.0, 20.0, 30.0]);
+    rt.set_data(indexes, &[1i32, 3, 4]);
+    rt.set_data(dest, &[0.0, 0.0, 0.0, 0.0, 0.0]);
+    rt = cx.search(rt, 1);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(result);
+    assert_close(&out, &[0.0, 10.0, 0.0, 20.0, 30.0], 0.001);
+}
+
+#[test]
+fn test_scatter_into_nonzero_dest() {
+    let mut cx = Graph::default();
+    let src = cx.tensor(1);
+    let indexes = cx.tensor(1).as_dtype(DType::Int);
+    let dest = cx.tensor(5);
+    let result = src.scatter(indexes, dest).output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    rt.set_data(src, &[99.0]);
+    rt.set_data(indexes, &[2i32]);
+    rt.set_data(dest, &[1.0, 2.0, 3.0, 4.0, 5.0]);
+    rt = cx.search(rt, 1);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(result);
+    assert_close(&out, &[1.0, 2.0, 99.0, 4.0, 5.0], 0.001);
+}
+
+#[test]
+fn test_scatter_all_positions() {
+    let mut cx = Graph::default();
+    let src = cx.tensor(4);
+    let indexes = cx.tensor(4).as_dtype(DType::Int);
+    let dest = cx.tensor(4);
+    let result = src.scatter(indexes, dest).output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    rt.set_data(src, &[40.0, 30.0, 20.0, 10.0]);
+    rt.set_data(indexes, &[3i32, 2, 1, 0]);
+    rt.set_data(dest, &[1.0, 2.0, 3.0, 4.0]);
+    rt = cx.search(rt, 1);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    let out = rt.get_f32(result);
+    assert_close(&out, &[10.0, 20.0, 30.0, 40.0], 0.001);
+}

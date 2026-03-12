@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use rand::{Rng, distr::Alphanumeric};
-
 // ========== Core Types ==========
 
 /// A sort class (type) — either a builtin like `i64` or a user-defined datatype like `Expr`.
@@ -497,11 +495,11 @@ pub struct SortDef {
 impl SortDef {
     /// Call this sort on fresh variables, returning the args and the application term.
     pub fn new_call(&self) -> (Args, Term) {
-        let prefix = rand::rng()
-            .sample_iter(&Alphanumeric)
-            .take(5)
-            .map(char::from)
-            .collect::<String>();
+        let prefix = {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            format!("v{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+        };
         let mut args = Args::new();
         for f in &self.fields {
             args.add(&f.name, v(format!("{prefix}_{}", f.name)));
@@ -804,7 +802,10 @@ fn rule_to_egglog(rule: &Rule) -> String {
     let actions: Vec<_> = rule.actions.iter().map(action_to_egglog).collect();
     let mut out = format!("(rule ({}) ({})", facts.join(" "), actions.join(" "));
     if let Some(rs) = &rule.ruleset {
-        out.push_str(&format!(" :ruleset {}", rs));
+        out.push_str(&format!(" :ruleset {rs}"));
+    }
+    if let Some(name) = &rule.name {
+        out.push_str(&format!(" :name \"{name}\""));
     }
     out.push(')');
     out

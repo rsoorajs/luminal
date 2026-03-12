@@ -458,6 +458,7 @@ pub fn base_expression_egglog() -> String {
 
     // ---- Algebraic rewrites ----
     // Commutativity: (MMul a b) -> (MMul b a)
+    p.add_rule(rewrite("add-comm", add(v("a"), v("b")), add(v("b"), v("a"))).ruleset("expr"));
     p.add_rule(rewrite("mul-comm", mul(v("a"), v("b")), mul(v("b"), v("a"))).ruleset("expr"));
 
     // Constant folding: add
@@ -603,6 +604,14 @@ pub fn base_expression_egglog() -> String {
             pgte(v("?y"), v("?z")),
             peq(i64(0), pmod(v("?z"), v("?y"))),
         ])
+        .ruleset("expr"),
+    );
+    p.add_rule(
+        rewrite(
+            "merge-dims",
+            add(mul(div(v("?z"), v("?x")), v("?x")), modd(v("?z"), v("?x"))),
+            v("?z"),
+        )
         .ruleset("expr"),
     );
 

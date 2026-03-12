@@ -340,23 +340,24 @@ impl CudaGraphOp {
             }
         }
 
+        // Always call pre_execute for each kernel to reset internal state
+        // (e.g., MegakernelOps need work queue, head, barriers, lock reset every execution)
+        for idx in 0..state.kernels.len() {
+            let kernel = &mut state.kernels[idx];
+            kernel.kernel_op.pre_execute(
+                stream,
+                &mut kernel.internal_bufs,
+                &mut kernel.constants,
+                &current_buffer_ptrs,
+                dyn_map,
+            );
+        }
+
         // Check if we need to update the graph
         let buffer_ptrs_changed = current_buffer_ptrs != state.last_buffer_ptrs;
         let needs_update = dyn_map_changed || buffer_ptrs_changed;
 
         if needs_update {
-            // Call pre_execute for each kernel
-            for idx in 0..state.kernels.len() {
-                let kernel = &mut state.kernels[idx];
-                kernel.kernel_op.pre_execute(
-                    stream,
-                    &mut kernel.internal_bufs,
-                    &mut kernel.constants,
-                    &current_buffer_ptrs,
-                    dyn_map,
-                );
-            }
-
             // Update kernel params
             let dyn_dims_ptr = state
                 .dyn_dims_buffer
@@ -422,6 +423,34 @@ impl CudaGraphOp {
 
             state.last_dyn_values = dyn_map.clone();
             state.last_buffer_ptrs = current_buffer_ptrs;
+        }
+
+        // Call pre_launch for each kernel (e.g., KernelScatter copies dest→output before graph)
+        {
+            let dyn_dims_ptr = state
+                .dyn_dims_buffer
+                .as_ref()
+                .map(|buf| buf.device_ptr(stream).0)
+                .unwrap_or(0);
+            for kernel in state.kernels.iter() {
+                let output_ptr = state
+                    .last_buffer_ptrs
+                    .get(&kernel.node)
+                    .copied()
+                    .unwrap_or(0);
+                let input_ptrs: Vec<u64> = kernel
+                    .inputs
+                    .iter()
+                    .map(|inp| state.last_buffer_ptrs.get(inp).copied().unwrap_or(0))
+                    .collect();
+                kernel.kernel_op.pre_launch(
+                    stream,
+                    output_ptr,
+                    &input_ptrs,
+                    dyn_dims_ptr,
+                    dyn_map,
+                )?;
+            }
         }
 
         // Sync before launch

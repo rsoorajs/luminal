@@ -42,6 +42,7 @@ pub const N_TIMING_SLOTS: usize = 1000;
 #[allow(unused_variables)]
 pub trait BlockOp: Debug + as_any::AsAny {
     fn op_name(&self) -> &'static str;
+    /// Specify how many instances of this op should be launched
     fn launch_range(&self) -> Vec<Expression> {
         unimplemented!()
     }
@@ -1133,6 +1134,16 @@ impl crate::kernel::KernelOp for MegakernelOp {
             if let Some(&ptr) = all_buffer_ptrs.get(node) {
                 buffer_array[buffer_idx as usize] = ptr;
             }
+        }
+        // Validate: check for NULL buffer pointers that will cause CUDA_ERROR_ILLEGAL_ADDRESS
+        for (node, &buffer_idx) in &self.node_to_buffer_index {
+            assert!(
+                buffer_array[buffer_idx as usize] != 0,
+                "MegakernelOp: NULL buffer at index {buffer_idx} for node {node:?} \
+                 ({} available, {} needed)",
+                all_buffer_ptrs.len(),
+                self.node_to_buffer_index.len(),
+            );
         }
 
         let mut buffers_view = internal_bufs[6].as_view_mut();

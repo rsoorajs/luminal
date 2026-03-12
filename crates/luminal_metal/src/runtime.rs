@@ -30,8 +30,12 @@ pub struct MetalRuntime {
     pipelines: FxHashMap<NodeIndex, ComputePipelineState>,
 }
 
+pub trait MetalElem: Copy {}
+impl MetalElem for f32 {}
+impl MetalElem for i32 {}
+
 impl MetalRuntime {
-    pub fn set_data(&mut self, id: impl ToId, data: &[f32]) {
+    pub fn set_data<T: MetalElem>(&mut self, id: impl ToId, data: &[T]) {
         let buffer = self.device.new_buffer_with_data(
             data.as_ptr() as *const _,
             std::mem::size_of_val(data) as u64,
