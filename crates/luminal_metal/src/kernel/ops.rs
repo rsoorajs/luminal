@@ -83,6 +83,15 @@ fn metal_numeric_read(dtype: DType, buffer: &str, index: &str) -> String {
     }
 }
 
+fn metal_scalar_to_f32(dtype: DType, expr: &str) -> String {
+    match dtype {
+        DType::F32 => expr.to_string(),
+        DType::F16 => format!("float({expr})"),
+        DType::Int => format!("float({expr})"),
+        _ => panic!("Metal dtype {dtype:?} is not supported yet"),
+    }
+}
+
 fn metal_numeric_write(dtype: DType, expr: &str) -> String {
     match dtype {
         DType::F32 => expr.to_string(),
@@ -1263,6 +1272,7 @@ pub struct MetalMatmul {
     pub family: MetalMatmulFamily,
     pub threadgroup_width: u16,
     pub threadgroup_height: u16,
+    pub tile_k: u16,
     pub batch_size: u32,
     pub batch_stride_a: u32,
     pub batch_stride_b: u32,
@@ -1308,6 +1318,116 @@ impl MetalKernelOp for MetalMatmul {
         let rhs_read = metal_numeric_read(rhs_dtype, "rhs", "rhs_offset");
         let out_write = metal_numeric_write(output_dtype, "acc");
 
+        let kernel_body = match self.family {
+            MetalMatmulFamily::Naive => format!(
+                r#"
+                kernel void mkernel(
+                    const device {lhs_ty} *lhs [[buffer(0)]],
+                    const device {rhs_ty} *rhs [[buffer(1)]],
+                    device {out_ty} *out [[buffer(2)]],
+                    constant int *dyn [[buffer(3)]],
+                    constant MetalGemmParams &params [[buffer(4)]],
+                    uint2 gid [[thread_position_in_grid]]
+                ) {{
+                    (void)dyn;
+                    if (gid.x >= params.n || gid.y >= params.m) {{
+                        return;
+                    }}
+
+                    float acc = 0.0f;
+                    uint row = gid.y;
+                    uint col = gid.x;
+                    for (uint kk = 0; kk < params.k; kk++) {{
+                        uint lhs_offset = row * params.lda + kk;
+                        uint rhs_offset = col + kk * params.ldb;
+                        acc += ({lhs_read}) * ({rhs_read});
+                    }}
+
+                    out[row * params.ldd + col] = {out_write};
+                }}
+                "#,
+                lhs_ty = lhs_ty,
+                rhs_ty = rhs_ty,
+                out_ty = out_ty,
+                lhs_read = lhs_read,
+                rhs_read = rhs_read,
+                out_write = out_write,
+            ),
+            MetalMatmulFamily::Tiled => {
+                let tile_m = self.threadgroup_height;
+                let tile_n = self.threadgroup_width;
+                let tile_k = self.tile_k;
+                format!(
+                    r#"
+                    kernel void mkernel(
+                        const device {lhs_ty} *lhs [[buffer(0)]],
+                        const device {rhs_ty} *rhs [[buffer(1)]],
+                        device {out_ty} *out [[buffer(2)]],
+                        constant int *dyn [[buffer(3)]],
+                        constant MetalGemmParams &params [[buffer(4)]],
+                        uint2 tid [[thread_position_in_threadgroup]],
+                        uint2 tgid [[threadgroup_position_in_grid]]
+                    ) {{
+                        (void)dyn;
+                        constexpr uint TILE_M = {tile_m};
+                        constexpr uint TILE_N = {tile_n};
+                        constexpr uint TILE_K = {tile_k};
+
+                        threadgroup {lhs_ty} tile_a[TILE_M][TILE_K];
+                        threadgroup {rhs_ty} tile_b[TILE_K][TILE_N];
+
+                        uint row = tgid.y * TILE_M + tid.y;
+                        uint col = tgid.x * TILE_N + tid.x;
+                        float acc = 0.0f;
+
+                        for (uint kk0 = 0; kk0 < params.k; kk0 += TILE_K) {{
+                            uint a_col = kk0 + tid.x;
+                            uint b_row = kk0 + tid.y;
+
+                            if (row < params.m && a_col < params.k) {{
+                                uint lhs_offset = row * params.lda + a_col;
+                                tile_a[tid.y][tid.x] = lhs[lhs_offset];
+                            }} else {{
+                                tile_a[tid.y][tid.x] = ({lhs_ty})0;
+                            }}
+
+                            if (b_row < params.k && col < params.n) {{
+                                uint rhs_offset = col + b_row * params.ldb;
+                                tile_b[tid.y][tid.x] = rhs[rhs_offset];
+                            }} else {{
+                                tile_b[tid.y][tid.x] = ({rhs_ty})0;
+                            }}
+
+                            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                            if (row < params.m && col < params.n) {{
+                                for (uint kk = 0; kk < TILE_K && kk0 + kk < params.k; kk++) {{
+                                    {lhs_ty} lhs_val = tile_a[tid.y][kk];
+                                    {rhs_ty} rhs_val = tile_b[kk][tid.x];
+                                    acc += ({lhs_tile_read}) * ({rhs_tile_read});
+                                }}
+                            }}
+
+                            threadgroup_barrier(mem_flags::mem_threadgroup);
+                        }}
+
+                        if (row < params.m && col < params.n) {{
+                            out[row * params.ldd + col] = {out_write};
+                        }}
+                    }}
+                    "#,
+                    lhs_ty = lhs_ty,
+                    rhs_ty = rhs_ty,
+                    out_ty = out_ty,
+                    tile_m = tile_m,
+                    tile_n = tile_n,
+                    tile_k = tile_k,
+                    lhs_tile_read = metal_scalar_to_f32(lhs_dtype, "lhs_val"),
+                    rhs_tile_read = metal_scalar_to_f32(rhs_dtype, "rhs_val"),
+                    out_write = out_write,
+                )
+            }
+        };
         let source = format!(
             r#"
             #include <metal_stdlib>
@@ -1327,37 +1447,9 @@ impl MetalKernelOp for MetalMatmul {
                 uint flags;
             }};
 
-            kernel void mkernel(
-                const device {lhs_ty} *lhs [[buffer(0)]],
-                const device {rhs_ty} *rhs [[buffer(1)]],
-                device {out_ty} *out [[buffer(2)]],
-                constant int *dyn [[buffer(3)]],
-                constant MetalGemmParams &params [[buffer(4)]],
-                uint2 gid [[thread_position_in_grid]]
-            ) {{
-                (void)dyn;
-                if (gid.x >= params.n || gid.y >= params.m) {{
-                    return;
-                }}
-
-                float acc = 0.0f;
-                uint row = gid.y;
-                uint col = gid.x;
-                for (uint kk = 0; kk < params.k; kk++) {{
-                    uint lhs_offset = row * params.lda + kk;
-                    uint rhs_offset = col + kk * params.ldb;
-                    acc += ({lhs_read}) * ({rhs_read});
-                }}
-
-                out[row * params.ldd + col] = {out_write};
-            }}
+            {kernel_body}
             "#,
-            lhs_ty = lhs_ty,
-            rhs_ty = rhs_ty,
-            out_ty = out_ty,
-            lhs_read = lhs_read,
-            rhs_read = rhs_read,
-            out_write = out_write,
+            kernel_body = kernel_body,
         );
         compile_shader(device, &source, "mkernel")
     }
@@ -1396,6 +1488,7 @@ impl MetalKernelOp for MetalMatmul {
             batch_stride_d: self.batch_stride_d,
             flags: match self.family {
                 MetalMatmulFamily::Naive => 0,
+                MetalMatmulFamily::Tiled => 1,
             },
         };
 

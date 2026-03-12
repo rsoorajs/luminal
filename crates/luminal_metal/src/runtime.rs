@@ -97,6 +97,7 @@ impl MetalRuntime {
                     family: plan.family,
                     threadgroup_width: plan.threadgroup_width,
                     threadgroup_height: plan.threadgroup_height,
+                    tile_k: plan.tile_k,
                     batch_size: plan.batch_size,
                     batch_stride_a: plan.batch_stride_a,
                     batch_stride_b: plan.batch_stride_b,

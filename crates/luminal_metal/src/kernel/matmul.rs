@@ -5,6 +5,7 @@ use luminal::prelude::*;
 pub enum MetalMatmulFamily {
     #[default]
     Naive,
+    Tiled,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +77,7 @@ pub struct MatmulPlan {
     pub batch_stride_d: u32,
     pub threadgroup_width: u16,
     pub threadgroup_height: u16,
+    pub tile_k: u16,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -83,8 +85,17 @@ pub struct MetalMatmulPlanner;
 
 impl MetalMatmulPlanner {
     pub fn plan(&self, desc: &MatmulDescriptor) -> MatmulPlan {
+        let family = if desc.batch_shape.is_empty()
+            && desc.m.as_num().is_some_and(|m| m >= 32)
+            && desc.n.as_num().is_some_and(|n| n >= 32)
+            && desc.k.as_num().is_some_and(|k| k >= 32)
+        {
+            MetalMatmulFamily::Tiled
+        } else {
+            MetalMatmulFamily::Naive
+        };
         MatmulPlan {
-            family: MetalMatmulFamily::Naive,
+            family,
             m: desc.m,
             n: desc.n,
             k: desc.k,
@@ -97,6 +108,7 @@ impl MetalMatmulPlanner {
             batch_stride_d: 0,
             threadgroup_width: 16,
             threadgroup_height: 16,
+            tile_k: 16,
         }
     }
 }
@@ -143,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_keeps_first_version_small_and_stable() {
+    fn planner_keeps_small_problems_on_naive_path() {
         let desc = MatmulDescriptor {
             m: Expression::from(4),
             n: Expression::from(8),
@@ -169,8 +181,37 @@ mod tests {
         assert_eq!(plan.family, MetalMatmulFamily::Naive);
         assert_eq!(plan.threadgroup_width, 16);
         assert_eq!(plan.threadgroup_height, 16);
+        assert_eq!(plan.tile_k, 16);
         assert_eq!(plan.lda, Expression::from('z') * 16);
         assert_eq!(plan.ldb, Expression::from('z') * 8);
         assert_eq!(plan.ldd, Expression::from('z') * 8);
+    }
+
+    #[test]
+    fn planner_promotes_large_problems_to_tiled() {
+        let desc = MatmulDescriptor {
+            m: Expression::from(64),
+            n: Expression::from(64),
+            k: Expression::from(64),
+            batch_shape: Vec::new(),
+            lhs_strides: vec![
+                Expression::from('z') * 64,
+                Expression::from(0),
+                Expression::from('z'),
+            ],
+            rhs_strides: vec![
+                Expression::from(0),
+                Expression::from('z'),
+                Expression::from('z') * 64,
+            ],
+            out_strides: vec![Expression::from('z') * 64, Expression::from('z')],
+            transpose_lhs: false,
+            transpose_rhs: false,
+        };
+
+        let planner = MetalMatmulPlanner;
+        let plan = planner.plan(&desc);
+        assert_eq!(plan.family, MetalMatmulFamily::Tiled);
+        assert_eq!(plan.tile_k, 16);
     }
 }
