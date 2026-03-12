@@ -1397,6 +1397,17 @@ impl MetalKernelOp for MetalMatmul {
                         }}
 
                         template <typename U>
+                        static void load_tg(
+                            thread frag_type& dst,
+                            const threadgroup U* src,
+                            int str_x,
+                            int str_y
+                        ) {{
+                            dst[0] = static_cast<T>(src[0 * str_x + 0 * str_y]);
+                            dst[1] = static_cast<T>(src[0 * str_x + 1 * str_y]);
+                        }}
+
+                        template <typename U>
                         static void store_safe(
                             const thread frag_type& src,
                             device U* dst,
@@ -1439,6 +1450,7 @@ impl MetalKernelOp for MetalMatmul {
                         device {out_ty} *out [[buffer(2)]],
                         constant int *dyn [[buffer(3)]],
                         constant MetalGemmParams &params [[buffer(4)]],
+                        uint lid [[thread_index_in_threadgroup]],
                         ushort simd_lane_id [[thread_index_in_simdgroup]],
                         ushort simd_group_id [[simdgroup_index_in_threadgroup]],
                         uint3 tgid [[threadgroup_position_in_grid]]
@@ -1450,6 +1462,10 @@ impl MetalKernelOp for MetalMatmul {
                         constexpr uint WM = {warp_m};
                         constexpr uint WN = {warp_n};
                         constexpr uint FRAG = 8;
+                        constexpr uint THREADS_PER_TG = WM * WN * 32;
+
+                        threadgroup {lhs_ty} As[TILE_M * TILE_K];
+                        threadgroup {rhs_ty} Bs[TILE_K * TILE_N];
 
                         short2 lane_coord = Frag8x8<float>::get_coord(simd_lane_id);
                         uint sg_row = simd_group_id / WN;
@@ -1466,52 +1482,50 @@ impl MetalKernelOp for MetalMatmul {
                         int col_remain = col < params.n ? int(params.n - col) : 0;
 
                         for (uint kk0 = 0; kk0 < params.k; kk0 += TILE_K) {{
-                            uint k_remain = min(TILE_K, params.k - kk0);
+                            for (uint idx = lid; idx < TILE_M * TILE_K; idx += THREADS_PER_TG) {{
+                                uint local_row = idx / TILE_K;
+                                uint local_k = idx % TILE_K;
+                                uint global_row = tgid.y * TILE_M + local_row;
+                                uint global_k = kk0 + local_k;
+                                if (global_row < params.m && global_k < params.k) {{
+                                    As[idx] = lhs[global_row * params.lda + global_k];
+                                }} else {{
+                                    As[idx] = ({lhs_ty})0;
+                                }}
+                            }}
+
+                            for (uint idx = lid; idx < TILE_K * TILE_N; idx += THREADS_PER_TG) {{
+                                uint local_k = idx / TILE_N;
+                                uint local_col = idx % TILE_N;
+                                uint global_k = kk0 + local_k;
+                                uint global_col = tgid.x * TILE_N + local_col;
+                                if (global_k < params.k && global_col < params.n) {{
+                                    Bs[idx] = rhs[global_k * params.ldb + global_col];
+                                }} else {{
+                                    Bs[idx] = ({rhs_ty})0;
+                                }}
+                            }}
+
+                            threadgroup_barrier(mem_flags::mem_threadgroup);
 
                             for (uint kk = 0; kk < TILE_K; kk += FRAG) {{
-                                uint k_block = kk0 + kk;
-                                int frag_k = int(min(FRAG, k_remain > kk ? k_remain - kk : 0u));
-
-                                const device {lhs_ty}* a_ptr = lhs
-                                    + row * params.lda
-                                    + k_block
-                                    + lane_coord.y * params.lda
+                                const threadgroup {lhs_ty}* a_ptr = As
+                                    + (sg_row * FRAG + lane_coord.y) * TILE_K
+                                    + kk
                                     + lane_coord.x;
-                                const device {rhs_ty}* b_ptr = rhs
-                                    + k_block * params.ldb
-                                    + col
-                                    + lane_coord.y * params.ldb
+                                const threadgroup {rhs_ty}* b_ptr = Bs
+                                    + (kk + lane_coord.y) * TILE_N
+                                    + (sg_col * FRAG)
                                     + lane_coord.x;
 
-                                if (row_remain >= int(lane_coord.y) + 1 && frag_k >= int(lane_coord.x) + 2) {{
-                                    Frag8x8<float>::load(a_frag, a_ptr, params.lda, 1);
-                                }} else {{
-                                    Frag8x8<float>::load_safe(
-                                        a_frag,
-                                        a_ptr,
-                                        params.lda,
-                                        1,
-                                        max(0, row_remain - int(lane_coord.y)),
-                                        max(0, frag_k - int(lane_coord.x))
-                                    );
-                                }}
-
-                                if (frag_k >= int(lane_coord.y) + 1 && col_remain >= int(lane_coord.x) + 2) {{
-                                    Frag8x8<float>::load(b_frag, b_ptr, params.ldb, 1);
-                                }} else {{
-                                    Frag8x8<float>::load_safe(
-                                        b_frag,
-                                        b_ptr,
-                                        params.ldb,
-                                        1,
-                                        max(0, frag_k - int(lane_coord.y)),
-                                        max(0, col_remain - int(lane_coord.x))
-                                    );
-                                }}
+                                Frag8x8<float>::load_tg(a_frag, a_ptr, TILE_K, 1);
+                                Frag8x8<float>::load_tg(b_frag, b_ptr, TILE_N, 1);
 
                                 Frag8x8<float>::mma(d_frag, a_frag, b_frag, c_frag);
                                 c_frag = d_frag;
                             }}
+
+                            threadgroup_barrier(mem_flags::mem_threadgroup);
                         }}
 
                         if (row_remain > 0 && col_remain > 0) {{
