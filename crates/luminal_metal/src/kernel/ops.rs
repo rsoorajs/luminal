@@ -1,11 +1,14 @@
 use super::{MetalKernelOp, DYN_BUFFER_INDEX};
 use luminal::{
     egglog_utils::{
-        api::{app, eq, rule, sort, union, v, Rule, SortDef},
-        base::{dtype, DTYPE, ELIST, EXPRESSION, F64, IR, OP_SORTS, SORTS},
+        api::{app, eq, rule, sort, union, v, Args, Rule, SortDef, Term as EggTerm},
+        base::{dtype, new_op_call, op_term, DTYPE, ELIST, EXPRESSION, F64, IR, SORTS},
         SerializedEGraph,
     },
-    hlir::{Add, Cast, Constant, Gather, Iota, LessThan, MaxReduce, Mod, Mul, Scatter, SumReduce},
+    hlir::{
+        binary_sort, reduce_sort, unary_sort, Add, Cast, Constant, Gather, Iota, LessThan,
+        MaxReduce, Mod, Mul, Scatter, SumReduce,
+    },
     op::*,
     prelude::*,
     shape::flatten_strides,
@@ -61,6 +64,38 @@ fn lower_dynamic_consts(mut code: String) -> String {
 
 pub(crate) fn lower_expression_for_metal(expr: &Expression, index_var: &str) -> String {
     lower_dynamic_consts(expr.to_kernel().replace("const_z", index_var))
+}
+
+fn call_sort_from_args(sort: &SortDef, args: &Args) -> EggTerm {
+    let mut filtered_args = Args::new();
+    for field in &sort.fields {
+        filtered_args.add(&field.name, args[field.name.as_str()].clone());
+    }
+    sort.call(filtered_args)
+}
+
+fn unary_dtype_rewrite(hlir_sort: &SortDef, metal_sort: &SortDef) -> Rule {
+    let (args, hlir_match) = new_op_call(hlir_sort, &["inp"]);
+    let metal_op = op_term(
+        call_sort_from_args(metal_sort, &args),
+        args["__inputs"].clone(),
+    );
+    let dt = v("?__dt");
+    rule(union(hlir_match, metal_op.clone()))
+        .set(dtype(metal_op), dt.clone())
+        .fact(eq(dt, dtype(args["inp"].clone())))
+}
+
+fn binary_dtype_rewrite(hlir_sort: &SortDef, metal_sort: &SortDef) -> Rule {
+    let (args, hlir_match) = new_op_call(hlir_sort, &["inp_a", "inp_b"]);
+    let metal_op = op_term(
+        call_sort_from_args(metal_sort, &args),
+        args["__inputs"].clone(),
+    );
+    let dt = v("?__dt");
+    rule(union(hlir_match, metal_op.clone()))
+        .set(dtype(metal_op), dt.clone())
+        .fact(eq(dt, dtype(args["inp_a"].clone())))
 }
 
 // ============================================================================
@@ -138,18 +173,13 @@ macro_rules! metal_unary_op {
 
         impl EgglogOp for $name {
             fn sort(&self) -> SortDef {
-                OP_SORTS.unary($op_name)
+                unary_sort($op_name)
             }
 
             fn rewrites(&self) -> Vec<Rule> {
                 let hlir_name = ($op_name).strip_prefix("Metal").unwrap_or($op_name);
-                let hlir_sort = OP_SORTS.unary(hlir_name);
-                let (args, hlir_match) = hlir_sort.new_call();
-                let metal_op = self.sort().call(&args);
-                let dt = v("?__dt");
-                vec![rule(union(hlir_match, metal_op.clone()))
-                    .set(dtype(metal_op), dt.clone())
-                    .fact(eq(dt, dtype(args["inp"].clone())))]
+                let hlir_sort = unary_sort(hlir_name);
+                vec![unary_dtype_rewrite(&hlir_sort, &self.sort())]
             }
 
             fn cleanup(&self) -> bool {
@@ -159,31 +189,32 @@ macro_rules! metal_unary_op {
             fn extract<'a>(
                 &'a self,
                 egraph: &'a SerializedEGraph,
-                children: &[&'a ENodeId],
+                kind_children: &[&'a ENodeId],
+                input_enodes: Vec<&'a ENodeId>,
                 list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
                 expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
             ) -> (LLIROp, Vec<&'a ENodeId>) {
                 use luminal::egglog_utils::extract_expr_list;
                 (
                     LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
-                        shape: extract_expr_list(egraph, children[0], list_cache, expr_cache)
+                        shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
                             .unwrap(),
                         input_strides: extract_expr_list(
                             egraph,
-                            children[2],
+                            kind_children[1],
                             list_cache,
                             expr_cache,
                         )
                         .unwrap(),
                         output_strides: extract_expr_list(
                             egraph,
-                            children[3],
+                            kind_children[2],
                             list_cache,
                             expr_cache,
                         )
                         .unwrap(),
                     })),
-                    vec![children[1]],
+                    input_enodes,
                 )
             }
         }
@@ -277,21 +308,18 @@ pub struct MetalAdd {
 
 impl EgglogOp for MetalAdd {
     fn sort(&self) -> SortDef {
-        OP_SORTS.binary("MetalAdd")
+        binary_sort("MetalAdd")
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        let (args1, hlir_match1) = Add::default().sort().new_call();
-        let metal_op1 = self.sort().call(&args1);
-        let dt = v("?__dt");
-
-        let (args2, hlir_match2) = Add::default().sort().new_call();
-        let metal_op2 = self.sort().call(&args2);
+        let (args2, hlir_match2) = new_op_call(&Add::default().sort(), &["inp_a", "inp_b"]);
+        let metal_op2 = op_term(
+            call_sort_from_args(&self.sort(), &args2),
+            args2["__inputs"].clone(),
+        );
 
         vec![
-            rule(union(hlir_match1, metal_op1.clone()))
-                .set(dtype(metal_op1), dt.clone())
-                .fact(eq(dt, dtype(args1["inp_a"].clone()))),
+            binary_dtype_rewrite(&Add::default().sort(), &self.sort()),
             rule(union(hlir_match2, metal_op2.clone()))
                 .set(dtype(metal_op2), app(&SORTS.f32_dt, vec![])),
         ]
@@ -304,20 +332,23 @@ impl EgglogOp for MetalAdd {
     fn extract<'a>(
         &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
-                shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                a_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                b_strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                output_strides: extract_expr_list(egraph, children[5], list_cache, expr_cache)
+                shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
+                output_strides: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache)
                     .unwrap(),
             })),
-            vec![children[1], children[3]],
+            input_enodes,
         )
     }
 }
@@ -404,16 +435,11 @@ pub struct MetalMul {
 
 impl EgglogOp for MetalMul {
     fn sort(&self) -> SortDef {
-        OP_SORTS.binary("MetalMul")
+        binary_sort("MetalMul")
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        let (args, hlir_match) = Mul::default().sort().new_call();
-        let metal_op = self.sort().call(&args);
-        let dt = v("?__dt");
-        vec![rule(union(hlir_match, metal_op.clone()))
-            .set(dtype(metal_op), dt.clone())
-            .fact(eq(dt, dtype(args["inp_a"].clone())))]
+        vec![binary_dtype_rewrite(&Mul::default().sort(), &self.sort())]
     }
 
     fn cleanup(&self) -> bool {
@@ -423,20 +449,23 @@ impl EgglogOp for MetalMul {
     fn extract<'a>(
         &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
-                shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                a_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                b_strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                output_strides: extract_expr_list(egraph, children[5], list_cache, expr_cache)
+                shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
+                output_strides: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache)
                     .unwrap(),
             })),
-            vec![children[1], children[3]],
+            input_enodes,
         )
     }
 }
@@ -522,16 +551,11 @@ pub struct MetalMod {
 
 impl EgglogOp for MetalMod {
     fn sort(&self) -> SortDef {
-        OP_SORTS.binary("MetalMod")
+        binary_sort("MetalMod")
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        let (args, hlir_match) = Mod::default().sort().new_call();
-        let metal_op = self.sort().call(&args);
-        let dt = v("?__dt");
-        vec![rule(union(hlir_match, metal_op.clone()))
-            .set(dtype(metal_op), dt.clone())
-            .fact(eq(dt, dtype(args["inp_a"].clone())))]
+        vec![binary_dtype_rewrite(&Mod::default().sort(), &self.sort())]
     }
 
     fn cleanup(&self) -> bool {
@@ -541,20 +565,23 @@ impl EgglogOp for MetalMod {
     fn extract<'a>(
         &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
-                shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                a_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                b_strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                output_strides: extract_expr_list(egraph, children[5], list_cache, expr_cache)
+                shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
+                output_strides: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache)
                     .unwrap(),
             })),
-            vec![children[1], children[3]],
+            input_enodes,
         )
     }
 }
@@ -640,16 +667,14 @@ pub struct MetalLessThan {
 
 impl EgglogOp for MetalLessThan {
     fn sort(&self) -> SortDef {
-        OP_SORTS.binary("MetalLessThan")
+        binary_sort("MetalLessThan")
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        let (args, hlir_match) = LessThan::default().sort().new_call();
-        let metal_op = self.sort().call(&args);
-        let dt = v("?__dt");
-        vec![rule(union(hlir_match, metal_op.clone()))
-            .set(dtype(metal_op), dt.clone())
-            .fact(eq(dt, dtype(args["inp_a"].clone())))]
+        vec![binary_dtype_rewrite(
+            &LessThan::default().sort(),
+            &self.sort(),
+        )]
     }
 
     fn cleanup(&self) -> bool {
@@ -659,20 +684,23 @@ impl EgglogOp for MetalLessThan {
     fn extract<'a>(
         &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
-                shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                a_strides: extract_expr_list(egraph, children[2], list_cache, expr_cache).unwrap(),
-                b_strides: extract_expr_list(egraph, children[4], list_cache, expr_cache).unwrap(),
-                output_strides: extract_expr_list(egraph, children[5], list_cache, expr_cache)
+                shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                a_strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                b_strides: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
+                output_strides: extract_expr_list(egraph, kind_children[3], list_cache, expr_cache)
                     .unwrap(),
             })),
-            vec![children[1], children[3]],
+            input_enodes,
         )
     }
 }
@@ -762,16 +790,14 @@ pub struct MetalSumReduce {
 
 impl EgglogOp for MetalSumReduce {
     fn sort(&self) -> SortDef {
-        OP_SORTS.reduce("MetalSum")
+        reduce_sort("MetalSum")
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        let (args, hlir_match) = SumReduce::default().sort().new_call();
-        let metal_op = self.sort().call(&args);
-        let dt = v("?__dt");
-        vec![rule(union(hlir_match, metal_op.clone()))
-            .set(dtype(metal_op), dt.clone())
-            .fact(eq(dt, dtype(args["inp"].clone())))]
+        vec![unary_dtype_rewrite(
+            &SumReduce::default().sort(),
+            &self.sort(),
+        )]
     }
 
     fn cleanup(&self) -> bool {
@@ -781,7 +807,8 @@ impl EgglogOp for MetalSumReduce {
     fn extract<'a>(
         &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -789,13 +816,16 @@ impl EgglogOp for MetalSumReduce {
         use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                iters: extract_expr(egraph, children[1], expr_cache).unwrap(),
-                in_stride: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
-                iter_stride: extract_expr(egraph, children[4], expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
+                    .unwrap(),
+                iters: extract_expr(egraph, kind_children[1], expr_cache).unwrap(),
+                in_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
+                iter_stride: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[4], list_cache, expr_cache)
+                    .unwrap(),
             })),
-            vec![children[2]],
+            input_enodes,
         )
     }
 }
@@ -916,16 +946,14 @@ pub struct MetalMaxReduce {
 
 impl EgglogOp for MetalMaxReduce {
     fn sort(&self) -> SortDef {
-        OP_SORTS.reduce("MetalMax")
+        reduce_sort("MetalMax")
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        let (args, hlir_match) = MaxReduce::default().sort().new_call();
-        let metal_op = self.sort().call(&args);
-        let dt = v("?__dt");
-        vec![rule(union(hlir_match, metal_op.clone()))
-            .set(dtype(metal_op), dt.clone())
-            .fact(eq(dt, dtype(args["inp"].clone())))]
+        vec![unary_dtype_rewrite(
+            &MaxReduce::default().sort(),
+            &self.sort(),
+        )]
     }
 
     fn cleanup(&self) -> bool {
@@ -935,7 +963,8 @@ impl EgglogOp for MetalMaxReduce {
     fn extract<'a>(
         &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -943,13 +972,16 @@ impl EgglogOp for MetalMaxReduce {
         use luminal::egglog_utils::extract_expr_list;
         (
             LLIROp::new::<dyn MetalKernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, children[0], list_cache, expr_cache).unwrap(),
-                iters: extract_expr(egraph, children[1], expr_cache).unwrap(),
-                in_stride: extract_expr_list(egraph, children[3], list_cache, expr_cache).unwrap(),
-                iter_stride: extract_expr(egraph, children[4], expr_cache).unwrap(),
-                out_stride: extract_expr_list(egraph, children[5], list_cache, expr_cache).unwrap(),
+                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
+                    .unwrap(),
+                iters: extract_expr(egraph, kind_children[1], expr_cache).unwrap(),
+                in_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+                    .unwrap(),
+                iter_stride: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
+                out_stride: extract_expr_list(egraph, kind_children[4], list_cache, expr_cache)
+                    .unwrap(),
             })),
-            vec![children[2]],
+            input_enodes,
         )
     }
 }
@@ -1075,8 +1107,8 @@ impl EgglogOp for MetalConstant {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        let (args, const_match) = Constant::default().sort().new_call();
-        let metal_op = self.sort().call(&args);
+        let (args, const_match) = new_op_call(&Constant::default().sort(), &[]);
+        let metal_op = call_sort_from_args(&self.sort(), &args);
         vec![rule(union(const_match, metal_op.clone()))
             .set(dtype(metal_op), app(&SORTS.f32_dt, vec![]))]
     }
@@ -1089,6 +1121,7 @@ impl EgglogOp for MetalConstant {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         _: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -1173,8 +1206,8 @@ impl EgglogOp for MetalIota {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        let (args, iota_match) = Iota::default().sort().new_call();
-        let metal_op = self.sort().call(&args);
+        let (args, iota_match) = new_op_call(&Iota::default().sort(), &[]);
+        let metal_op = call_sort_from_args(&self.sort(), &args);
         vec![rule(union(iota_match, metal_op.clone()))
             .set(dtype(metal_op), app(&SORTS.int_dt, vec![]))]
     }
@@ -1187,6 +1220,7 @@ impl EgglogOp for MetalIota {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -1282,7 +1316,8 @@ impl EgglogOp for MetalGather {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        let (gather_args, gather_match) = Gather::default().sort().new_call();
+        let (gather_args, gather_match) =
+            new_op_call(&Gather::default().sort(), &["indexes", "data"]);
         let out_strides = SORTS
             .row_major
             .call([("list".to_string(), gather_args["index_shape"].clone())]);
@@ -1315,6 +1350,7 @@ impl EgglogOp for MetalGather {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -1469,7 +1505,8 @@ impl EgglogOp for MetalScatter {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        let (scatter_args, scatter_match) = Scatter::default().sort().new_call();
+        let (scatter_args, scatter_match) =
+            new_op_call(&Scatter::default().sort(), &["dest", "indexes", "src"]);
         let out_strides = SORTS
             .row_major
             .call([("list".to_string(), scatter_args["dest_shape"].clone())]);
@@ -1511,6 +1548,7 @@ impl EgglogOp for MetalScatter {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
@@ -1712,8 +1750,8 @@ impl EgglogOp for MetalCast {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        let (args, cast_match) = Cast::default().sort().new_call();
-        let metal_op = self.sort().call(&args);
+        let (args, cast_match) = new_op_call(&Cast::default().sort(), &["inp"]);
+        let metal_op = call_sort_from_args(&self.sort(), &args);
         vec![rule(union(cast_match, metal_op.clone())).set(dtype(metal_op), args["dtype"].clone())]
     }
 
@@ -1725,6 +1763,7 @@ impl EgglogOp for MetalCast {
         &'a self,
         egraph: &'a SerializedEGraph,
         children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
         _list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         _expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {

@@ -6,6 +6,7 @@ use crate::shape::{self, ToShape};
 // ---- Sort classes (pub const) ----
 
 pub const IR: SortClass = SortClass::new("IR");
+pub const OP_KIND: SortClass = SortClass::new("OpKind");
 pub const ILIST: SortClass = SortClass::new("IList");
 pub const EXPRESSION: SortClass = SortClass::new("Expression");
 pub const ELIST: SortClass = SortClass::new("EList");
@@ -368,72 +369,57 @@ impl BaseSorts {
     }
 }
 
-/// Convenience accessors for common op sort patterns.
-pub struct OpSorts;
-
 pub fn dtype(e: Term) -> Term {
     app(&func("dtype", &["inp"]), vec![e])
 }
 
-impl Default for OpSorts {
-    fn default() -> Self {
-        Self::new()
+// ---- Normalized Op helpers ----
+
+/// Build an `(Op kind inputs)` IR term.
+pub fn op_term(kind: Term, inputs: Term) -> Term {
+    Term::App {
+        variant: "Op".to_string(),
+        args: vec![kind, inputs],
     }
 }
 
-impl OpSorts {
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// Unary op: (shape: EList, inp: IR, strides: EList, out_strides: EList)
-    pub fn unary(&self, name: &str) -> SortDef {
-        sort(
-            IR,
-            name,
-            &[
-                ("shape", ELIST),
-                ("inp", IR),
-                ("strides", ELIST),
-                ("out_strides", ELIST),
-            ],
-        )
-    }
-
-    /// Binary op: (shape: EList, inp_a: IR, a_strides: EList, inp_b: IR, b_strides: EList, out_strides: EList)
-    pub fn binary(&self, name: &str) -> SortDef {
-        sort(
-            IR,
-            name,
-            &[
-                ("shape", ELIST),
-                ("inp_a", IR),
-                ("a_strides", ELIST),
-                ("inp_b", IR),
-                ("b_strides", ELIST),
-                ("out_strides", ELIST),
-            ],
-        )
-    }
-
-    /// Reduce op: (shape: EList, iters: Expression, inp: IR, strides: EList, iter_stride: Expression, out_strides: EList)
-    pub fn reduce(&self, name: &str) -> SortDef {
-        sort(
-            IR,
-            name,
-            &[
-                ("shape", ELIST),
-                ("iters", EXPRESSION),
-                ("inp", IR),
-                ("strides", ELIST),
-                ("iter_stride", EXPRESSION),
-                ("out_strides", ELIST),
-            ],
-        )
-    }
+/// Build an IList from IR terms: `(ICons t1 (ICons t2 (INil)))`.
+pub fn ilist(terms: Vec<Term>) -> Term {
+    terms.into_iter().rev().fold(
+        Term::App {
+            variant: "INil".to_string(),
+            args: vec![],
+        },
+        |tail, head| Term::App {
+            variant: "ICons".to_string(),
+            args: vec![head, tail],
+        },
+    )
 }
 
-pub static OP_SORTS: LazyLock<OpSorts> = LazyLock::new(OpSorts::new);
+/// Construct a normalized Op call from an OpKind SortDef + named args + input terms.
+/// Returns (args, full_op_term) where the op_term is `(Op (XxxKind ...) (ICons ...))`.
+pub fn new_op_call(kind_sort: &SortDef, input_names: &[&str]) -> (Args, Term) {
+    let (mut args, kind_term) = kind_sort.new_call();
+    // Create variables for each input
+    let prefix = {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        format!("inp{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+    };
+    let input_vars: Vec<Term> = input_names
+        .iter()
+        .map(|name| {
+            let var = v(format!("{prefix}_{name}"));
+            args.add(name, var.clone());
+            var
+        })
+        .collect();
+    let inputs_term = ilist(input_vars);
+    args.add("__inputs", inputs_term.clone());
+    let op = op_term(kind_term, inputs_term);
+    (args, op)
+}
 
 /// Generate the egglog program equivalent to `base.egg`.
 ///

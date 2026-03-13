@@ -35,6 +35,11 @@ pub trait Runtime {
     fn intermediate_buffer_bytes(&self) -> usize {
         0
     }
+    /// Check if the most recent execution produced NaN in any output buffer.
+    /// Used by the search to reject NaN-producing graph variants.
+    fn has_nan_outputs(&self, _llir_graph: &LLIRGraph, _dyn_map: &FxHashMap<char, usize>) -> bool {
+        false
+    }
 }
 
 /// Optional runtime instrumentation for collecting execution statistics.
@@ -147,11 +152,28 @@ pub trait EgglogOp: Debug {
         vec![]
     }
     fn cleanup(&self) -> bool;
+
+    /// Additional IR datatype variants this op needs (e.g. `"(ConsumedBuffer IR)"`).
+    /// These are injected into the IR datatype definition.
+    fn ir_defs(&self) -> Vec<String> {
+        vec![]
+    }
+
+    /// Number of IR inputs this op takes (from IList).
+    /// Used by generic IList walking during extraction.
+    fn n_inputs(&self) -> usize {
+        0
+    }
+
+    /// Extract this op from the egraph.
+    /// - `kind_children`: metadata fields from OpKind enode (shapes, strides, dtypes, etc.)
+    /// - `input_enodes`: IR inputs from IList, already walked and resolved
     #[allow(unused_variables)]
     fn extract<'a>(
         &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {

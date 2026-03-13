@@ -6,7 +6,7 @@ use crate::{
     egglog_utils::SerializedEGraph,
     op::{EgglogOp, IntoEgglogOp, LLIROp},
 };
-use crate::{hlir::CustomOpHLIR, op::*, prelude::*};
+use crate::{hlir::CustomOpKind, op::*, prelude::*};
 use colored::Colorize;
 use itertools::Itertools;
 use petgraph::{Direction, algo::toposort, stable_graph::StableGraph, visit::EdgeRef};
@@ -150,7 +150,7 @@ impl Graph {
         self.custom_ops.push(Box::new(op));
         let input_ids = inputs.to_ids();
         let id = self.add_op(
-            CustomOpHLIR {
+            CustomOpKind {
                 id: self.custom_ops.len() - 1,
                 dtype,
             },
@@ -371,11 +371,12 @@ impl Graph {
                     );
                     runtime.clear_intermediate_buffers();
                     let profile = runtime.profile(&graph, &self.dyn_map, Self::TRIALS_PER_PROFILE);
-                    (graph, profile)
+                    let has_nan = runtime.has_nan_outputs(&graph, &self.dyn_map);
+                    (graph, profile, has_nan)
                 }));
 
                 match result {
-                    Ok((graph, (metric, disp))) => {
+                    Ok((graph, (metric, disp), has_nan)) if !has_nan => {
                         best_genome = genome;
                         best_graph = graph;
                         best_metric = metric;
@@ -383,7 +384,7 @@ impl Graph {
                         n_graphs = 1;
                         break;
                     }
-                    Err(_) => {
+                    Ok(_) | Err(_) => {
                         list_cache.clear();
                         expr_cache.clear();
                         continue;
@@ -463,11 +464,32 @@ impl Graph {
                                 &self.dyn_map,
                                 Self::TRIALS_PER_PROFILE,
                             );
-                            (result, llir_graph)
+                            let has_nan = runtime.has_nan_outputs(&llir_graph, &self.dyn_map);
+                            (result, llir_graph, has_nan)
                         }));
 
                     let ((new_metric, display_metric), llir_graph) = match profile_result {
-                        Ok(result) => result,
+                        Ok((result, graph, false)) => (result, graph),
+                        Ok((_, _, true)) => {
+                            // NaN detected - skip this candidate
+                            if multi_chunk {
+                                print!(
+                                    "\x1b[1A\r\x1b[2K  {:>6}  {} {n_graphs}/{limit}\n\x1b[2K  {:>6}  {} {group_idx}/{n_groups}",
+                                    "Group".cyan().bold(),
+                                    make_bar(n_graphs, limit),
+                                    "Total".cyan().bold(),
+                                    make_bar(group_idx, n_groups)
+                                );
+                            } else {
+                                print!(
+                                    "\r\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
+                                    "Search".cyan().bold(),
+                                    make_bar(n_graphs, limit),
+                                );
+                            }
+                            std::io::stdout().flush().unwrap();
+                            continue;
+                        }
                         Err(_) => {
                             if multi_chunk {
                                 print!(
@@ -844,7 +866,7 @@ pub fn split_at_graph_breaks(graph: &Graph) -> Vec<SubgraphDescriptor> {
 ///
 /// Returns:
 /// - `node_remap`: maps rep HLIR node indices → target HLIR node indices (for Input/Output nodes)
-/// - `custom_op_id_remap`: maps rep CustomOpHLIR IDs → target CustomOpHLIR IDs
+/// - `custom_op_id_remap`: maps rep CustomOpKind IDs → target CustomOpKind IDs
 fn build_chunk_remaps(
     rep_desc: &SubgraphDescriptor,
     target_desc: &SubgraphDescriptor,
@@ -917,7 +939,47 @@ fn build_chunk_remaps(
         node_remap.insert(*r, *t);
     }
 
-    // 4. CustomOpHLIR ID remapping: match positionally by sorted HLIR node index
+    // 4. Internal Output nodes: Output nodes may reference internal computation nodes
+    //    (e.g., scatter results marked with .output()). These need remapping too.
+    //    Match positionally by sorted `node` value, skipping those already remapped.
+    let rep_output_refs: Vec<usize> = rep_desc
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            hlir_graph
+                .node_weight(*n)
+                .and_then(|w| w.as_any().downcast_ref::<crate::hlir::Output>())
+                .map(|o| o.node)
+        })
+        .filter(|n| !node_remap.contains_key(n))
+        .sorted()
+        .collect();
+    let target_output_refs: Vec<usize> = target_desc
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            hlir_graph
+                .node_weight(*n)
+                .and_then(|w| w.as_any().downcast_ref::<crate::hlir::Output>())
+                .map(|o| o.node)
+        })
+        .filter(|n| !node_remap.values().any(|v| v == n))
+        .sorted()
+        .collect();
+    assert_eq!(
+        rep_output_refs.len(),
+        target_output_refs.len(),
+        "Internal Output node count mismatch: rep has {}, target has {}",
+        rep_output_refs.len(),
+        target_output_refs.len()
+    );
+    for (r, t) in rep_output_refs.iter().zip(&target_output_refs) {
+        if r != t {
+            node_remap.insert(*r, *t);
+        }
+    }
+
+    // 5. CustomOpKind ID remapping: match positionally by sorted HLIR node index
     let mut custom_op_id_remap: FxHashMap<usize, usize> = FxHashMap::default();
     let rep_custom_ops: Vec<usize> = rep_desc
         .nodes
@@ -925,7 +987,7 @@ fn build_chunk_remaps(
         .filter_map(|n| {
             hlir_graph
                 .node_weight(*n)
-                .and_then(|w| w.as_any().downcast_ref::<crate::hlir::CustomOpHLIR>())
+                .and_then(|w| w.as_any().downcast_ref::<crate::hlir::CustomOpKind>())
                 .map(|op| op.id)
         })
         .sorted()
@@ -936,7 +998,7 @@ fn build_chunk_remaps(
         .filter_map(|n| {
             hlir_graph
                 .node_weight(*n)
-                .and_then(|w| w.as_any().downcast_ref::<crate::hlir::CustomOpHLIR>())
+                .and_then(|w| w.as_any().downcast_ref::<crate::hlir::CustomOpKind>())
                 .map(|op| op.id)
         })
         .sorted()
@@ -944,7 +1006,7 @@ fn build_chunk_remaps(
     assert_eq!(
         rep_custom_ops.len(),
         target_custom_ops.len(),
-        "CustomOpHLIR count mismatch: rep has {}, target has {}",
+        "CustomOpKind count mismatch: rep has {}, target has {}",
         rep_custom_ops.len(),
         target_custom_ops.len()
     );
@@ -1212,31 +1274,31 @@ mod tests {
 
     #[test]
     fn test_hash_egglog_normalized_custom_op_id() {
-        // CustomOpHLIR lines differ only in the integer ID (layer index)
+        // CustomOpKind lines differ only in the integer ID (layer index)
         let text_a = r#"(let t0 (Input 441 "boundary" (F32)))
-(let t1 (CustomOpHLIR (ICons t74 (ICons t120 (ICons t28 (INil)))) 1 (F32)))
+(let t1 (Op (CustomOpKind 1 (F32)) (ICons t74 (ICons t120 (ICons t28 (INil))))))
 (let t2 (Output t1 585))
 "#;
         let text_b = r#"(let t0 (Input 585 "boundary" (F32)))
-(let t1 (CustomOpHLIR (ICons t74 (ICons t120 (ICons t28 (INil)))) 2 (F32)))
+(let t1 (Op (CustomOpKind 2 (F32)) (ICons t74 (ICons t120 (ICons t28 (INil))))))
 (let t2 (Output t1 729))
 "#;
         assert_eq!(
             hash_egglog_normalized(text_a),
             hash_egglog_normalized(text_b),
-            "CustomOpHLIR with different IDs should hash the same"
+            "CustomOpKind with different IDs should hash the same"
         );
     }
 
     #[test]
     fn test_hash_egglog_normalized_custom_op_different_structure() {
-        // CustomOpHLIR lines with different input lists should hash differently
-        let text_a = "(let t1 (CustomOpHLIR (ICons t74 (ICons t120 (INil))) 1 (F32)))\n";
-        let text_b = "(let t1 (CustomOpHLIR (ICons t74 (ICons t99 (INil))) 1 (F32)))\n";
+        // CustomOpKind lines with different input lists should hash differently
+        let text_a = "(let t1 (Op (CustomOpKind 1 (F32)) (ICons t74 (ICons t120 (INil)))))\n";
+        let text_b = "(let t1 (Op (CustomOpKind 1 (F32)) (ICons t74 (ICons t99 (INil)))))\n";
         assert_ne!(
             hash_egglog_normalized(text_a),
             hash_egglog_normalized(text_b),
-            "CustomOpHLIR with different input lists should hash differently"
+            "CustomOpKind with different input lists should hash differently"
         );
     }
 }

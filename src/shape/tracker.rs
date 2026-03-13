@@ -314,14 +314,25 @@ impl ShapeTracker {
             self.dims.insert(axis1 + 1, dim);
             self.strides.insert(axis1 + 1, stride);
         }
-        let z = expr('z');
         let inner_dim = self.dims[axis1 + 1];
         let outer_stride = self.strides[axis1];
         let inner_stride = self.strides[axis1 + 1];
-        let merged_stride = outer_stride.substitute('z', z / inner_dim)
-            + inner_stride.substitute('z', z % inner_dim);
+        // When outer_stride == inner_stride * inner_dim, the dims are contiguous
+        // and the merged stride is just inner_stride (avoids complex z/N, z%N expressions
+        // that the e-graph simplifier can't always reduce).
+        let merged_stride = if (inner_stride * inner_dim)
+            .simplify()
+            .egglog_equal(outer_stride.simplify())
+        {
+            inner_stride
+        } else {
+            let z = expr('z');
+            (outer_stride.substitute('z', z / inner_dim)
+                + inner_stride.substitute('z', z % inner_dim))
+            .simplify()
+        };
         self.dims[axis1] = self.dims[axis1] * self.dims[axis1 + 1];
-        self.strides[axis1] = merged_stride.simplify();
+        self.strides[axis1] = merged_stride;
         self.dims.remove(axis1 + 1);
         self.strides.remove(axis1 + 1);
     }
