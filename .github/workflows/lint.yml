@@ -19,7 +19,7 @@ jobs:
         steps:
             - uses: actions/checkout@v6
             - name: Run clippy
-              run: rustup update; cargo clippy --workspace --exclude luminal_cuda --exclude luminal_metal --exclude luminal_bench --all-targets -- -D warnings
+              run: rustup update; cargo clippy --workspace --exclude luminal_cuda_lite --exclude luminal_metal --exclude luminal_bench --all-targets -- -D warnings
 
     fmt:
         name: Fmt
