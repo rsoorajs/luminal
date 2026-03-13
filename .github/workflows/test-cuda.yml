@@ -26,4 +26,4 @@ jobs:
                   CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
                   echo "CUDA_COMPUTE_CAP=${CAP}" >> "$GITHUB_ENV"
             - name: Run CUDA crate tests
-              run: cargo test -p luminal_cuda --verbose -- --test-threads=1
+              run: cargo test -p luminal_cuda_lite --verbose -- --test-threads=1
