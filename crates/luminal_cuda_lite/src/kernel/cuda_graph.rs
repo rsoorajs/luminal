@@ -498,6 +498,7 @@ mod tests {
         let data_b = random_f32_vec(size, 43, -0.5, 0.5);
         rt.set_data(a, data_a.clone());
         rt.set_data(b, data_b.clone());
+        cx.build_search_space::<CudaRuntime>();
         rt = cx.search(rt, 5);
         rt.execute(&cx.dyn_map);
         let result1 = rt.get_f32(c);
@@ -529,6 +530,7 @@ mod tests {
         let data_b = random_f32_vec(size, 43, -0.5, 0.5);
         rt.set_data(a, data_a.clone());
         rt.set_data(b, data_b.clone());
+        cx.build_search_space::<CudaRuntime>();
         rt = cx.search(rt, 5);
         let mut results = Vec::new();
         for _ in 0..5 {
@@ -566,6 +568,7 @@ mod tests {
         rt.set_data(a, data_a.clone());
         rt.set_data(b, data_b.clone());
         cx.set_dim('s', size);
+        cx.build_search_space::<CudaRuntime>();
         rt = cx.search(rt, 5);
         rt.execute(&cx.dyn_map);
         let expected: Vec<f32> = data_a
@@ -607,6 +610,7 @@ mod tests {
         let data_b = random_f32_vec(size, 43, -0.5, 0.5);
         rt.set_data(a, data_a.clone());
         rt.set_data(b, data_b.clone());
+        cx.build_search_space::<CudaRuntime>();
         rt = cx.search(rt, 5);
         rt.execute(&cx.dyn_map);
         let expected: Vec<f32> = data_a.iter().zip(&data_b).map(|(a, b)| a + b).collect();
@@ -637,6 +641,7 @@ mod tests {
         let data_b = random_f32_vec(size, 43, -0.5, 0.5);
         rt.set_data(a, data_a.clone());
         rt.set_data(b, data_b.clone());
+        cx.build_search_space::<CudaRuntime>();
         rt = cx.search(rt, 5);
         for _ in 0..10 {
             rt.execute(&cx.dyn_map);

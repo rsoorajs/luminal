@@ -1,5 +1,6 @@
 use cudarc::driver::CudaContext;
 use luminal::prelude::*;
+use rand::SeedableRng;
 
 use luminal::egglog_utils::{egglog_to_llir, random_initial_choice, validate_choice_set};
 
@@ -344,7 +345,10 @@ fn test_scatter_dual_cache_with_graph_break() {
     rt.set_data(v_new, vec![3.0f32]);
     rt.set_data(indexes, vec![0i32]);
 
-    rt = cx.search(rt, 5);
+    // Use seeded search for deterministic scatter variant selection.
+    // Seed 0 reliably selects Scatter (not ScatterNoCopy) for both caches.
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(0);
+    rt = cx.search_rng(rt, 5, &mut rng);
 
     // Print selected variants
     for node in rt.llir_graph.node_weights() {

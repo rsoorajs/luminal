@@ -1362,6 +1362,10 @@ extern \"C\" {{
         0.into()
     }
 
+    fn output_data_input(&self) -> Option<usize> {
+        Some(0) // output is derived from dest (input 0): copy dest→output then scatter
+    }
+
     fn kernel_name(&self) -> &'static str {
         "Scatter"
     }

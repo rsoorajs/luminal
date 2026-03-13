@@ -147,10 +147,8 @@ impl CudaRuntime {
         self.changed_hlir.insert(id);
     }
 
-    #[tracing::instrument(skip_all)]
-    /// Resolve the LLIR node that actually holds the data for an output tensor.
-    /// Follows output_aliases_input when the producing op aliases its output to an input.
-    fn resolve_data_node(&self, id: impl ToId) -> NodeIndex {
+    /// Find the LLIR producing node for an output tensor.
+    fn find_producer_node(&self, id: impl ToId) -> NodeIndex {
         let id = id.to_id();
         let output_id = self
             .llir_graph
@@ -163,24 +161,55 @@ impl CudaRuntime {
                 }
             })
             .expect("Cannot find output tensor!");
-        let mut data_id = self
-            .llir_graph
+        self.llir_graph
             .neighbors_directed(output_id, Direction::Incoming)
             .next()
-            .unwrap();
+            .unwrap()
+    }
 
-        // If the op aliases its output to an input, follow the alias
-        if let Some(kernel_op) = self.llir_graph[data_id].to_dialect::<dyn KernelOp>()
+    /// Follow `output_aliases_input` to find the node whose buffer actually contains
+    /// the output data. For in-place ops, data lives in the aliased input's buffer.
+    fn follow_aliases(&self, mut node: NodeIndex) -> NodeIndex {
+        while let Some(kernel_op) = self.llir_graph[node].to_dialect::<dyn KernelOp>()
             && let Some(input_idx) = kernel_op.output_aliases_input()
         {
-            data_id = self
+            node = self
                 .llir_graph
-                .neighbors_directed(data_id, Direction::Incoming)
-                .sorted_by_key(|n| self.llir_graph.find_edge(*n, data_id).unwrap())
+                .neighbors_directed(node, Direction::Incoming)
+                .sorted_by_key(|n| self.llir_graph.find_edge(*n, node).unwrap())
                 .nth(input_idx)
                 .expect("output_aliases_input index out of range");
         }
-        data_id
+        node
+    }
+
+    /// Follow `output_data_input` to trace data lineage back to the originating
+    /// HLIR input. Used by remove_buffer to find the correct buffer to extract
+    /// for the remove_buffer/set_buffer roundtrip pattern.
+    ///
+    /// For in-place ops (output_aliases_input), this traces to the aliased input.
+    /// For copy-then-modify ops (like Scatter), this traces through the copy source
+    /// to the HLIR input, so the roundtrip correctly swaps the HLIR buffer.
+    fn follow_data_lineage(&self, mut node: NodeIndex) -> NodeIndex {
+        while let Some(kernel_op) = self.llir_graph[node].to_dialect::<dyn KernelOp>()
+            && let Some(input_idx) = kernel_op.output_data_input()
+        {
+            node = self
+                .llir_graph
+                .neighbors_directed(node, Direction::Incoming)
+                .sorted_by_key(|n| self.llir_graph.find_edge(*n, node).unwrap())
+                .nth(input_idx)
+                .expect("output_data_input index out of range");
+        }
+        node
+    }
+
+    #[tracing::instrument(skip_all)]
+    /// Resolve the LLIR node that actually holds the data for an output tensor.
+    /// For in-place ops, follows output_aliases_input to the aliased input buffer.
+    fn resolve_data_node(&self, id: impl ToId) -> NodeIndex {
+        let producer = self.find_producer_node(id);
+        self.follow_aliases(producer)
     }
 
     fn get_output_data(&self, id: impl ToId) -> Vec<u8> {
@@ -226,22 +255,70 @@ impl CudaRuntime {
 
     /// Take a GPU buffer handle for an output tensor. This removes the buffer from
     /// the runtime, so the caller owns it. Use `set_buffer` to give it back.
+    ///
+    /// Uses `output_data_input` to trace data lineage back to the originating HLIR
+    /// input buffer. This ensures `remove_buffer` always extracts from `hlir_buffers`
+    /// (never from intermediate `self.buffers`), keeping intermediate allocations intact.
+    ///
+    /// For in-place ops (output_aliases_input), the output IS the HLIR buffer — simply
+    /// remove and return it. For copy-then-modify ops (like Scatter), the output data
+    /// lives in an intermediate buffer while the HLIR buffer has stale data — swap them
+    /// so the caller gets the updated data and the intermediate slot stays allocated.
     pub fn remove_buffer(&mut self, id: impl ToId) -> CudaSlice<u8> {
-        let data_id = self.resolve_data_node(id);
+        let producer = self.find_producer_node(id);
+        let alias_node = self.follow_aliases(producer);
+        let lineage_node = self.follow_data_lineage(producer);
 
-        if let Some(hlir_node) = self.llir_to_hlir.get(&data_id) {
-            match self
+        // If aliases and lineage agree, data is in-place — just remove the HLIR buffer.
+        // If they differ, data is in an intermediate buffer (copy-then-modify) — swap.
+        if alias_node == lineage_node {
+            // In-place or direct HLIR: remove and return
+            if let Some(hlir_node) = self.llir_to_hlir.get(&lineage_node) {
+                match self
+                    .hlir_buffers
+                    .remove(hlir_node)
+                    .expect("Cannot find input tensor in runtime!")
+                {
+                    CudaInput::Buffer(buf) => buf,
+                    CudaInput::Ptr(p) => panic!("Cannot take raw pointer input (ptr=0x{:x})", p),
+                }
+            } else {
+                self.buffers
+                    .remove(&lineage_node)
+                    .expect("Cannot find tensor in runtime!")
+            }
+        } else {
+            // Copy-then-modify: output data is in alias_node's buffer (intermediate),
+            // but we want to extract the lineage HLIR buffer so intermediates stay intact.
+            // Swap: put the intermediate (with correct data) into HLIR, take the HLIR
+            // (stale data) and put it into the intermediate slot, then return the buffer
+            // we put into HLIR (which has the correct data).
+            let hlir_node = self
+                .llir_to_hlir
+                .get(&lineage_node)
+                .expect("output_data_input lineage must reach an HLIR input node");
+
+            // Take the intermediate buffer (has the actual output data)
+            let output_buf = self
+                .buffers
+                .remove(&alias_node)
+                .expect("Cannot find intermediate output buffer in runtime!");
+
+            // Take the HLIR buffer (has stale pre-op data)
+            let hlir_buf = match self
                 .hlir_buffers
                 .remove(hlir_node)
-                .expect("Cannot find input tensor in runtime!")
+                .expect("Cannot find HLIR input buffer in runtime!")
             {
                 CudaInput::Buffer(buf) => buf,
                 CudaInput::Ptr(p) => panic!("Cannot take raw pointer input (ptr=0x{:x})", p),
-            }
-        } else {
-            self.buffers
-                .remove(&data_id)
-                .expect("Cannot find tensor in runtime!")
+            };
+
+            // Put stale HLIR buffer into intermediate slot (keeps allocation alive)
+            self.buffers.insert(alias_node, hlir_buf);
+
+            // Return the output buffer (has correct data)
+            output_buf
         }
     }
 

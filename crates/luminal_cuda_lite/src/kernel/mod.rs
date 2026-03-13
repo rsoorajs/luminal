@@ -257,6 +257,17 @@ pub trait KernelOp: std::fmt::Debug + as_any::AsAny {
         None
     }
 
+    /// If this kernel's output is derived from one of its inputs (copy-then-modify
+    /// or in-place write), return that input index. Used by `resolve_data_node` to
+    /// trace buffer ownership back to HLIR inputs for the remove_buffer/set_buffer
+    /// roundtrip pattern.
+    ///
+    /// Defaults to `output_aliases_input()`. Override for copy-then-modify ops
+    /// (like Scatter which copies dest→output then scatters into it).
+    fn output_data_input(&self) -> Option<usize> {
+        self.output_aliases_input()
+    }
+
     /// Returns indices of internal buffers containing timing data, if any.
     /// Returns (timings_idx, start_times_idx, sm_count).
     fn timing_buffer_indices(&self) -> Option<(usize, usize, usize)> {
