@@ -1944,6 +1944,44 @@ impl From<Vec<bool>> for NativeData {
     }
 }
 
+macro_rules! impl_native_data_from_ref {
+    ($ty:ty, $variant:ident) => {
+        impl From<&[$ty]> for NativeData {
+            fn from(value: &[$ty]) -> Self {
+                NativeData::$variant(value.to_vec())
+            }
+        }
+
+        impl From<&Vec<$ty>> for NativeData {
+            fn from(value: &Vec<$ty>) -> Self {
+                NativeData::$variant(value.clone())
+            }
+        }
+    };
+}
+
+macro_rules! impl_native_data_from_array_ref {
+    ($ty:ty, $variant:ident) => {
+        impl<const N: usize> From<&[$ty; N]> for NativeData {
+            fn from(value: &[$ty; N]) -> Self {
+                NativeData::$variant(value.to_vec())
+            }
+        }
+    };
+}
+
+impl_native_data_from_ref!(f32, F32);
+impl_native_data_from_ref!(f16, F16);
+impl_native_data_from_ref!(bf16, Bf16);
+impl_native_data_from_ref!(i32, Int);
+impl_native_data_from_ref!(bool, Bool);
+
+impl_native_data_from_array_ref!(f32, F32);
+impl_native_data_from_array_ref!(f16, F16);
+impl_native_data_from_array_ref!(bf16, Bf16);
+impl_native_data_from_array_ref!(i32, Int);
+impl_native_data_from_array_ref!(bool, Bool);
+
 #[derive(Default)]
 pub struct NativeRuntime {
     pub buffers: FxHashMap<NodeIndex, NativeData>,
