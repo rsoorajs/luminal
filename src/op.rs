@@ -23,8 +23,8 @@ pub trait Runtime {
     ) -> (Self::ProfileMetric, String);
     /// Allocate a dummy input buffer for a boundary node during per-chunk profiling.
     /// `node_index` is the HLIR node index used in the Input op's `node` field.
-    /// `num_elements` is the number of f32 elements to allocate.
-    fn allocate_dummy_input(&mut self, _node_index: usize, _num_elements: usize) {}
+    /// `num_bytes` is the number of bytes to allocate.
+    fn allocate_dummy_input(&mut self, _node_index: usize, _num_bytes: usize) {}
     /// Check if an HLIR buffer already exists for a given node index.
     fn has_hlir_buffer(&self, _node_index: usize) -> bool {
         false
@@ -34,6 +34,11 @@ pub trait Runtime {
     /// Total bytes of intermediate buffers currently allocated.
     fn intermediate_buffer_bytes(&self) -> usize {
         0
+    }
+    /// Check if the most recent execution produced NaN in any output buffer.
+    /// Used by the search to reject NaN-producing graph variants.
+    fn has_nan_outputs(&self, _llir_graph: &LLIRGraph, _dyn_map: &FxHashMap<char, usize>) -> bool {
+        false
     }
 }
 
@@ -147,11 +152,28 @@ pub trait EgglogOp: Debug {
         vec![]
     }
     fn cleanup(&self) -> bool;
+
+    /// Additional IR datatype variants this op needs (e.g. `"(ConsumedBuffer IR)"`).
+    /// These are injected into the IR datatype definition.
+    fn ir_defs(&self) -> Vec<String> {
+        vec![]
+    }
+
+    /// Number of IR inputs this op takes (from IList).
+    /// Used by generic IList walking during extraction.
+    fn n_inputs(&self) -> usize {
+        0
+    }
+
+    /// Extract this op from the egraph.
+    /// - `kind_children`: metadata fields from OpKind enode (shapes, strides, dtypes, etc.)
+    /// - `input_enodes`: IR inputs from IList, already walked and resolved
     #[allow(unused_variables)]
     fn extract<'a>(
         &'a self,
         egraph: &'a SerializedEGraph,
-        children: &[&'a ENodeId],
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {

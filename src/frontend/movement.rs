@@ -45,6 +45,12 @@ impl GraphTensor {
         self
     }
 
+    /// Tile a tensor along its existing dimensions without materializing a new buffer.
+    pub fn repeat(mut self, repeats: impl ToShape) -> GraphTensor {
+        self.shape.repeat(repeats);
+        self
+    }
+
     /// Broadcast tensor along new dimensions on the left-hand-side. For instance, if the original tensor is [5, 2] and you call .expand([4, 2, 3]), the final  tensor will be [5, 2, 4, 2, 3]
     pub fn expand_lhs(mut self, shape: impl ToShape) -> GraphTensor {
         for (i, s) in shape.to_shape().into_iter().enumerate() {
@@ -726,6 +732,7 @@ mod tests {
     use crate::{
         frontend::{binary::tests::test_binary, unary::tests::test_unary},
         prelude::*,
+        tests::assert_exact,
     };
     use candle_core::{IndexOp, Tensor};
     use proptest::prelude::*;
@@ -1082,6 +1089,41 @@ mod tests {
         rt.set_data(dest.id, vec![1., 2., 3., 4.]);
         rt.execute(&cx.dyn_map);
         assert_eq!(*rt.get_f32(result.id), vec![10., 20., 30., 40.]);
+    }
+
+    #[test]
+    fn test_repeat_is_view_only() {
+        let mut cx = Graph::new();
+        let a = cx.tensor((2, 3));
+        let repeated = a.repeat((2, 2));
+
+        assert_eq!(repeated.id, a.id);
+        assert_eq!(
+            repeated.dims(),
+            vec![Expression::from(4usize), Expression::from(6usize)]
+        );
+    }
+
+    #[test]
+    fn test_repeat_runtime_values() {
+        let mut cx = Graph::new();
+        let a = cx.tensor((2, 3));
+        let repeated = (a.repeat((2, 2)) * 1.0).output();
+
+        cx.build_search_space::<NativeRuntime>();
+        let mut rt = cx.search(NativeRuntime::default(), 1);
+        rt.set_data(a.id, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        rt.execute(&cx.dyn_map);
+
+        assert_exact(
+            rt.get_f32(repeated.id),
+            &[
+                1.0, 2.0, 3.0, 1.0, 2.0, 3.0, //
+                4.0, 5.0, 6.0, 4.0, 5.0, 6.0, //
+                1.0, 2.0, 3.0, 1.0, 2.0, 3.0, //
+                4.0, 5.0, 6.0, 4.0, 5.0, 6.0,
+            ],
+        );
     }
 
     //     // #[test]
