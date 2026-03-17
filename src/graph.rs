@@ -307,7 +307,8 @@ impl Graph {
                         .n_elements()
                         .exec(&self.dyn_map)
                         .expect("Failed to resolve boundary input shape");
-                    runtime.allocate_dummy_input(bi.break_node.index(), n_elements);
+                    let n_bytes = n_elements * bi.dtype.bits() / 8;
+                    runtime.allocate_dummy_input(bi.break_node.index(), n_bytes);
                 }
             }
         }

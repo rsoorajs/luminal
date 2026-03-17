@@ -2930,7 +2930,7 @@ pub fn generate_dyn_dims_defines(vars: &FxHashSet<char>) -> (String, Vec<char>) 
                     .iter()
                     .position(|d| d == dim)
                     .expect("Dim must be in global ordering after extension");
-                format!("#define const_{dim} (dyn_dims + {idx})")
+                format!("#define const_{dim} dyn_dims[{idx}]")
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -2942,7 +2942,7 @@ pub fn generate_dyn_dims_defines(vars: &FxHashSet<char>) -> (String, Vec<char>) 
     let defines = sorted_dims
         .iter()
         .enumerate()
-        .map(|(idx, dim)| format!("#define const_{dim} (dyn_dims + {idx})"))
+        .map(|(idx, dim)| format!("#define const_{dim} dyn_dims[{idx}]"))
         .collect::<Vec<_>>()
         .join("\n");
     (defines, sorted_dims)

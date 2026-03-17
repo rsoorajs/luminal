@@ -327,7 +327,7 @@ impl Expression {
         for term in self.terms.read().iter() {
             let new_symbol = match term {
                 Term::Num(n) => n.to_string(),
-                Term::Var(c) => format!("{}const_{c}", if *c == 'z' { "" } else { "*" }),
+                Term::Var(c) => format!("const_{c}"),
                 Term::Max => format!(
                     "max((int){}, (int){})",
                     symbols.pop().unwrap(),
