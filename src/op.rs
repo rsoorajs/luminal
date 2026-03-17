@@ -23,8 +23,8 @@ pub trait Runtime {
     ) -> (Self::ProfileMetric, String);
     /// Allocate a dummy input buffer for a boundary node during per-chunk profiling.
     /// `node_index` is the HLIR node index used in the Input op's `node` field.
-    /// `num_elements` is the number of f32 elements to allocate.
-    fn allocate_dummy_input(&mut self, _node_index: usize, _num_elements: usize) {}
+    /// `num_bytes` is the number of bytes to allocate.
+    fn allocate_dummy_input(&mut self, _node_index: usize, _num_bytes: usize) {}
     /// Check if an HLIR buffer already exists for a given node index.
     fn has_hlir_buffer(&self, _node_index: usize) -> bool {
         false
