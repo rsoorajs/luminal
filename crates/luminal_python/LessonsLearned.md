@@ -559,3 +559,63 @@ redefines what indices mean. A single permute from the original layout to the ta
 is easier to verify and less likely to confuse source/destination ordering. Also, ensure
 `split_dims` loop counts match: splitting N dims out of a product requires N-1 splits
 (the outermost dim is the quotient, not split out separately).
+
+---
+
+## 2026-03-18 — Dynamic Decode Loop Fails: HLIR Weight Buffers Consumed After First Execute
+
+### What the symptom was
+
+`test_hf_llama3_1b_decode_loop_dynamic` passed step 0 (seq_len=6) but panicked on step 1
+(seq_len=7) with `no entry found for key` at `cublaslt/mod.rs:294` — the CuBlasLt op couldn't
+find its weight input buffer.
+
+### What the actual root cause was
+
+**Two bugs:**
+
+1. **Missing `)` in egglog rule** (`luminal_cuda_lite/src/kernel/hlir.rs:3042`): The fourth
+   KernelEmbed rule ("kernel embed with mul reversed") had 3 closing parens after `INil` instead
+   of 4. The missing `)` failed to close the `(= ?mul_result ...)` form. This caused an egglog
+   parse error during search, caught by `catch_unwind`. The rule was dead code — it never fired,
+   but the parse error consumed a search iteration.
+
+2. **HLIR buffer consumption killed weight buffers** (`luminal_cuda_lite/src/runtime.rs:1010-1057`):
+   After each `execute()`, the runtime removed all HLIR buffers (weights, constants) except those
+   directly connected to Output nodes. This was intended to free one-shot input data, but it also
+   deleted all 168 weight buffers. On the next `graph.run()`, CuBlasLt couldn't find any of its
+   weight inputs — `hlir_buffers` had 1 entry (the just-set `input_ids`) instead of 169.
+
+### Why it was hard to find
+
+1. **Misdirection by the egglog syntax error**: The plan identified the missing `)` as THE cause.
+   Fixing it allowed the rule to parse correctly, but the real runtime failure was independent.
+2. **Step 0 always succeeds**: The weight consumption happens AFTER a successful execution. So
+   the first `graph.run()` works perfectly — all 169 HLIR buffers exist. The panic only occurs
+   on the second call, after consumption has cleared 168 of them.
+3. **The consumption code was deliberately designed**: Comments said "weight tensors must have
+   `.persist()` to survive." The ONNX pipeline didn't call `.persist()` on weights, but this
+   had never been a problem before because single-shot inference only calls `execute()` once.
+4. **Search phase panics masked by `catch_unwind`**: The same "no entry found for key" error
+   occurred during profiling of search candidates, but was silently caught. This made it look
+   like only certain LLIR variants had the issue, not all of them.
+5. **Debug output needed 4 iterations to find**: The first debug showed which NodeIndex was
+   missing, the second showed it was an Input node, the third showed the HLIR mapping, and
+   the fourth revealed `hlir_buffers_count` dropping from 169 to 1 between steps.
+
+### The fix
+
+1. Added missing `)` to the KernelEmbed egglog rule at `hlir.rs:3042`.
+2. In `compiled_graph.rs`, added `.persist()` calls on all weight/constant tensors (anything
+   not in `input_names`) after `process_onnx_nodes` completes. `.persist()` creates an Output
+   node connected to the Input, which the consumption code recognizes as "do not consume."
+   User inputs (like `input_ids`) are intentionally NOT persisted — they are consumed after
+   each `execute()` and re-set via `set_input()` before the next call.
+
+### General principle
+
+**Mark weight/constant tensors as persistent in the graph-building pipeline.** The runtime's
+`execute()` consumes all HLIR buffers not connected to Output nodes. This is correct behavior
+for one-shot user inputs, but weights must survive across calls. Always call `.persist()` on
+tensors that should outlive a single execution. In the ONNX pipeline, the distinction is clear:
+`input_names` (user-provided data per step) vs everything else (weights/constants loaded once).

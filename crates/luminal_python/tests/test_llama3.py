@@ -335,3 +335,34 @@ def test_hf_llama3_full(device: torch.device):
     assert torch.allclose(out.logits, ref.logits, atol=1e-3), (
         f"max_diff={torch.max(torch.abs(out.logits - ref.logits)).item():.2e}"
     )
+
+
+def test_hf_llama38b_full(device: torch.device):
+    """HuggingFace LlamaForCausalLM — full Llama3.2-1B with real pretrained weights.
+
+    No config alterations except use_cache=False and eager attention.
+    Loads actual weights from NousResearch/Llama-3.2-1B.
+    """
+    from transformers import AutoConfig, LlamaForCausalLM
+
+    config = AutoConfig.from_pretrained("NousResearch/Meta-Llama-3.1-8B-Instruct")
+    config.use_cache = False
+    config._attn_implementation = "eager"
+
+    model = (
+        LlamaForCausalLM.from_pretrained(
+            "NousResearch/Meta-Llama-3.1-8B-Instruct",
+            config=config,
+            torch_dtype=torch.float32,
+        )
+        .eval()
+        .to(device)
+    )
+    compiled = torch.compile(model, backend=luminal_backend)
+    input_ids = torch.tensor([[1, 2, 3, 4]], device=device)
+    with torch.no_grad():
+        ref = model(input_ids)
+        out = compiled(input_ids)
+    assert torch.allclose(out.logits, ref.logits, atol=1e-3), (
+        f"max_diff={torch.max(torch.abs(out.logits - ref.logits)).item():.2e}"
+    )

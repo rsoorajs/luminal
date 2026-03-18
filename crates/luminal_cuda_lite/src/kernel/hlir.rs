@@ -3039,7 +3039,7 @@ impl EgglogOp for KernelEmbed {
                     (= ?gather (Op (Gather ?idx_shape ?idx_stride ?embed_shape ?embed_stride) (ICons ?indices (ICons ?embed_table (INil)))))
                     (= (len ?idx_shape) 2)
                     (= ?indices (Op (Add ?add_shape ?iota_stride ?mul_stride ?add_out_stride) (ICons ?iota_result (ICons ?mul_result (INil)))))
-                    (= ?mul_result (Op (Mul ?mul_shape ?token_stride ?mul_const_stride ?mul_out_stride) (ICons ?token_ids (ICons ?mul_const (INil))))
+                    (= ?mul_result (Op (Mul ?mul_shape ?token_stride ?mul_const_stride ?mul_out_stride) (ICons ?token_ids (ICons ?mul_const (INil)))))
                     (= ?embed_dim (nth_from_end ?embed_shape 0))
                     (= ?batch_shape (RemoveNthFromEnd ?idx_shape 0))
                     (= ?out_stride_batch (RemoveNthFromEnd ?add_out_stride 0))

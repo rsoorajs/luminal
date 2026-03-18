@@ -145,6 +145,15 @@ impl OnnxGraphResult {
         )
         .map_err(|e| format!("process_onnx_nodes failed: {}", e))?;
 
+        // Mark weight/constant tensors as persistent so their buffers survive
+        // execute()'s input consumption. User inputs (like input_ids) are NOT persisted
+        // since they are re-set via set_input() before each execution.
+        for (name, gt) in &tensors {
+            if !input_names.contains(name) {
+                gt.persist();
+            }
+        }
+
         let has_dynamic = !dim_param_map.is_empty();
 
         // Mark graph outputs (must happen before build_search_space)
