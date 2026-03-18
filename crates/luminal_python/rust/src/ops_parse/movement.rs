@@ -1636,7 +1636,11 @@ pub fn parse_pad_node(
                 .iter()
                 .map(|&v| {
                     let a = v as i64;
-                    if a < 0 { (ndim as i64 + a) as usize } else { a as usize }
+                    if a < 0 {
+                        (ndim as i64 + a) as usize
+                    } else {
+                        a as usize
+                    }
                 })
                 .collect()
         } else {

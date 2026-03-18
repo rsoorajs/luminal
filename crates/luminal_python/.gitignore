@@ -1,0 +1,2 @@
+*.onnx
+tests/llama38b_ref_logits.pt

@@ -372,7 +372,10 @@ impl GraphTensor {
             let idx_k = indices_flat.slice_along(k_dim..k_dim + 1, indices_flat.dims().len() - 1);
             let idx_k = idx_k.squeeze(idx_k.dims().len() - 1);
 
-            let stride_tensor = self.graph().constant(data_strides[k_dim]).expand_rhs(idx_k.shape);
+            let stride_tensor = self
+                .graph()
+                .constant(data_strides[k_dim])
+                .expand_rhs(idx_k.shape);
             let contribution = idx_k * stride_tensor;
 
             flat_base = Some(match flat_base {

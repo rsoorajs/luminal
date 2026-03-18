@@ -57,7 +57,10 @@ pub fn parse_conv_node(
     let x_dims = x.dims();
     let w_dims = w.dims();
     let rank = x_dims.len();
-    assert!(rank >= 3, "Conv: input must be at least 3D (batch, channels, spatial...), got {rank}D");
+    assert!(
+        rank >= 3,
+        "Conv: input must be at least 3D (batch, channels, spatial...), got {rank}D"
+    );
 
     let spatial = rank - 2; // number of spatial dimensions
 
@@ -104,7 +107,10 @@ pub fn parse_conv_node(
     let mut padding: Vec<(Expression, Expression)> = vec![(0.into(), 0.into()); rank];
     for i in 0..spatial {
         let axis = 2 + i; // batch=0, channel=1, spatial starts at 2
-        padding[axis] = (Expression::from(pads_begin[i]), Expression::from(pads_end[i]));
+        padding[axis] = (
+            Expression::from(pads_begin[i]),
+            Expression::from(pads_end[i]),
+        );
     }
     let padded = x.pad(padding, 0.0);
 
@@ -133,8 +139,7 @@ pub fn parse_conv_node(
     let permuted = unfolded.permute(perm);
 
     // Step 2: Capture output spatial dimensions (win_spatial sizes)
-    let output_spatial_dims: Vec<Expression> =
-        permuted.dims()[1..1 + spatial].to_vec();
+    let output_spatial_dims: Vec<Expression> = permuted.dims()[1..1 + spatial].to_vec();
 
     // Step 3: Merge all channel+kernel dims into one (C_in * kernel_product)
     // From index (1+spatial) to end there are (1 + 2 + spatial) dims to merge

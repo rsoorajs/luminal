@@ -222,7 +222,7 @@ pub fn parse_cast_node(
         let one_expanded = broadcast_to_expr(one, &src_dims);
         input * one_expanded
     } else if input.dtype == DType::Int {
-        cast_result  // input.cast(DType::F32) produces a real Cast op; don't use *1.0 which creates mixed-dtype Mul
+        cast_result // input.cast(DType::F32) produces a real Cast op; don't use *1.0 which creates mixed-dtype Mul
     } else {
         cast_result
     };
@@ -390,14 +390,25 @@ pub fn parse_group_norm_node(
 
     let x_dims = x.dims();
     let ndim = x_dims.len();
-    assert!(ndim >= 3, "GroupNorm: input must be at least 3D [N, C, spatial...], got {ndim}D");
+    assert!(
+        ndim >= 3,
+        "GroupNorm: input must be at least 3D [N, C, spatial...], got {ndim}D"
+    );
 
     let num_groups = get_int_attr(node, "num_groups", 1) as usize;
     let epsilon = get_float_attr(node, "epsilon", 1e-5);
 
-    let n = x_dims[0].to_usize().expect("GroupNorm: batch must be concrete");
-    let c = x_dims[1].to_usize().expect("GroupNorm: channels must be concrete");
-    assert_eq!(c % num_groups, 0, "GroupNorm: channels {c} must be divisible by num_groups {num_groups}");
+    let n = x_dims[0]
+        .to_usize()
+        .expect("GroupNorm: batch must be concrete");
+    let c = x_dims[1]
+        .to_usize()
+        .expect("GroupNorm: channels must be concrete");
+    assert_eq!(
+        c % num_groups,
+        0,
+        "GroupNorm: channels {c} must be divisible by num_groups {num_groups}"
+    );
     let cpg = c / num_groups; // channels per group
 
     // Reshape X from [N, C, spatial...] to [N, G, C/G, spatial...]
@@ -406,7 +417,10 @@ pub fn parse_group_norm_node(
     let mut reshaped = x * 1.0;
     let mut new_shape = vec![n, num_groups, cpg];
     for d in &spatial_dims {
-        new_shape.push(d.to_usize().expect("GroupNorm: spatial dims must be concrete"));
+        new_shape.push(
+            d.to_usize()
+                .expect("GroupNorm: spatial dims must be concrete"),
+        );
     }
     reshaped.shape = ShapeTracker::new(new_shape.clone());
 
@@ -424,8 +438,8 @@ pub fn parse_group_norm_node(
 
     // Apply scale and bias (both shape [C], broadcast to [N, C, spatial...])
     let target_shape: Vec<Expression> = orig_shape.iter().map(|&d| Expression::from(d)).collect();
-    let result = normed * broadcast_to_expr(scale, &target_shape)
-        + broadcast_to_expr(bias, &target_shape);
+    let result =
+        normed * broadcast_to_expr(scale, &target_shape) + broadcast_to_expr(bias, &target_shape);
 
     tensors.insert(node.output[0].clone(), result);
     trace!("Finished parse: GroupNormalization Node");

@@ -297,14 +297,19 @@ impl OnnxGraphResult {
         // CUDA: Two-phase - set data BEFORE search for profiling
         let (mut cuda_rt, _stream) = prepare_cuda(context)?;
 
-        // Set dummy zero data for ALL input tensors
+        // Set dummy data for ALL input tensors using small non-zero values (ones).
+        // Zero inputs cause NaN for operations like fmod(0,0), recip(0), log(0), etc.
+        // which makes the search reject all candidate graphs. Using 1.0 avoids these
+        // numerical issues while preserving profiling accuracy.
+        // Note: torch.compile passes model weights as additional ONNX inputs (not
+        // initializers), so these dummy values also cover weight tensors.
         for (name, gt) in &mut *tensors {
             if !input_tensor_names.contains(name) {
                 continue;
             }
             let n_elements = compute_n_elements(name);
             if n_elements > 0 {
-                cuda_rt.set_data(gt.id, vec![0.0f32; n_elements]);
+                cuda_rt.set_data(gt.id, vec![1.0f32; n_elements]);
             }
         }
 

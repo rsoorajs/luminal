@@ -562,6 +562,60 @@ is easier to verify and less likely to confuse source/destination ordering. Also
 
 ---
 
+## 2026-03-18 — CUDA Search Rejects All Candidates: Zero Dummy Data Causes NaN for Div/Pow/Mod/Erf
+
+### What the symptom was
+
+6 CUDA tests (`test_pow`, `test_pow_broadcast`, `test_div`, `test_mod`, `test_mod_broadcast`,
+`test_erf`) consistently failed with `Failed to find a viable initial genome for group 0 after
+100 attempts`. All 6 passed on native backend.
+
+### What the actual root cause was
+
+The CUDA two-phase initialization in `build_cuda_backend` set ALL input tensor buffers to
+`0.0f32` as dummy data for profiling. When `torch.compile` decomposes a model, it passes
+model weights as additional ONNX graph inputs (not initializers). Since there were no ONNX
+initializers to overwrite the zeros, weight buffers stayed all-zero during search.
+
+Operations with zero inputs produced NaN:
+- `fmod(0, 0) = NaN` (Mod test)
+- `weight * recip(0) = weight * inf` → with any zero weight → `0 * inf = NaN` (Div test)
+- `abs(0).log() = log(0) = -inf` → downstream NaN (Pow test)
+- `sign(0)` chain → operations on zero inputs (Erf test)
+
+The `has_nan_outputs` check rejected every candidate genome, exhausting all 100 attempts.
+
+### Why it was hard to find
+
+1. **No panic, no crash — silent NaN rejection**: The error message said "Failed to find a
+   viable initial genome" which suggested an egglog rewrite issue, not a data issue.
+2. **Works on native**: `NativeRuntime::has_nan_outputs()` returns `false` by default (no NaN
+   check), so zero inputs never caused problems on native.
+3. **torch.compile vs direct export difference**: Directly exporting a model via
+   `torch.onnx.export(model, ...)` produces initializers. But `torch.compile`'s backend
+   receives a `GraphModule` where weights are graph inputs, not initializers. The ONNX file
+   from `torch.compile` has 0 initializers.
+4. **CudaRuntime's own `allocate_dummy_input` already uses 1.0**: The runtime knew zeros
+   were problematic (comment: "Zero inputs often hide numerical issues"), but the
+   `compiled_graph.rs` code used `0.0f32` independently.
+
+### The fix
+
+Changed dummy data from `vec![0.0f32; n_elements]` to `vec![1.0f32; n_elements]` in
+`build_cuda_backend`. Using 1.0 is numerically safe: `fmod(1,1)=0`, `recip(1)=1`,
+`log(1)=0`, `exp(1)≈2.7` — no NaN or inf. Profiling timing is unaffected (same number
+of FLOPs and memory accesses).
+
+### General principle
+
+**Use small non-zero values (1.0) for dummy profiling data, never zeros.** Zero is a
+singularity for many floating-point operations (division, log, fmod with zero divisor).
+The CUDA runtime's `allocate_dummy_input` already followed this principle — the ONNX
+pipeline's `build_cuda_backend` was inconsistent. When creating dummy data for GPU
+profiling, always match the runtime's safer default.
+
+---
+
 ## 2026-03-18 — Dynamic Decode Loop Fails: HLIR Weight Buffers Consumed After First Execute
 
 ### What the symptom was

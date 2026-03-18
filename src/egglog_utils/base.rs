@@ -510,10 +510,7 @@ pub fn base_expression_egglog() -> String {
     );
 
     // Division self-cancel: a/a → 1
-    p.add_rule(
-        rewrite("div-self", div(v("a"), v("a")), num(i64(1)))
-            .ruleset("expr"),
-    );
+    p.add_rule(rewrite("div-self", div(v("a"), v("a")), num(i64(1))).ruleset("expr"));
 
     // Constant folding: ceildiv
     p.add_rule(
