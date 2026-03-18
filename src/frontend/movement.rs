@@ -156,9 +156,9 @@ impl GraphTensor {
             .collect();
         let out_shape_expr: Vec<Expression> =
             out_shape.iter().map(|&s| Expression::from(s)).collect();
-        let non_axis_flat =
-            self.graph()
-                .iota(flatten_strides(&out_shape_expr, &axis_exprs), out_shape);
+        let non_axis_flat = self
+            .graph()
+            .iota(flatten_strides(&out_shape_expr, &axis_exprs), out_shape);
 
         // Axis contribution from the runtime index values
         let stride_tensor = self
@@ -233,9 +233,10 @@ impl GraphTensor {
             .collect();
         let idx_shape_expr: Vec<Expression> =
             idx_shape.iter().map(|&s| Expression::from(s)).collect();
-        let non_axis_flat =
-            self.graph()
-                .iota(flatten_strides(&idx_shape_expr, &axis_exprs), idx_shape.clone());
+        let non_axis_flat = self.graph().iota(
+            flatten_strides(&idx_shape_expr, &axis_exprs),
+            idx_shape.clone(),
+        );
 
         // Axis contribution from the runtime index values
         let stride_tensor = self
@@ -273,11 +274,7 @@ impl GraphTensor {
     /// For each batch element (s0, ..., sq-2):
     ///   multi_idx = indices[s0, ..., sq-2, :]
     ///   output[multi_idx[0], ..., multi_idx[K-1], :, ..] = updates[s0, ..., sq-2, :, ..]
-    pub fn scatter_nd(
-        self,
-        indices: GraphTensor,
-        updates: GraphTensor,
-    ) -> GraphTensor {
+    pub fn scatter_nd(self, indices: GraphTensor, updates: GraphTensor) -> GraphTensor {
         let indices = indices.cast(DType::Int);
         let data_dims = self.dims();
         let data_rank = data_dims.len();
