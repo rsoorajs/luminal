@@ -34,6 +34,8 @@ jobs:
     python_native_tests:
         name: Python Native Tests
         runs-on: ubuntu-latest
+        container:
+            image: ghcr.io/luminal-ai/luminal-docker:cpu
         timeout-minutes: 45
         defaults:
             run:

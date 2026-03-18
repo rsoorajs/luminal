@@ -1553,9 +1553,7 @@ pub fn parse_scatter_elements_node(
         axis_raw as usize
     };
 
-    let reduction = get_str_attr(node, "reduction", "none");
-
-    let result = data.scatter_elements(indices, updates, axis, &reduction) * 1.0;
+    let result = data.scatter_elements(indices, updates, axis) * 1.0;
     tensors.insert(node.output[0].clone(), result);
     Ok(())
 }
@@ -1578,10 +1576,9 @@ pub fn parse_scatter_nd_node(
         .get(&node.input[2])
         .ok_or_else(|| format!("ScatterND: missing updates '{}'", node.input[2]))?;
 
-    let reduction = get_str_attr(node, "reduction", "none");
     let indices = indices.cast(DType::Int);
 
-    let result = data.scatter_nd(indices, updates, &reduction) * 1.0;
+    let result = data.scatter_nd(indices, updates) * 1.0;
     tensors.insert(node.output[0].clone(), result);
     Ok(())
 }

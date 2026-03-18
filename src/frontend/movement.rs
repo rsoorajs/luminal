@@ -189,14 +189,12 @@ impl GraphTensor {
     /// `output[i0,..,i_{a-1}, indices[i0,..,ik], i_{a+1},..,ik] = updates[i0,..,ik]`
     ///
     /// indices and updates must have the same shape.
-    /// If `reduction` is "none", overlapping writes produce the sum of colliding values.
-    /// If `reduction` is "add", updates are added to existing data values.
+    /// Overlapping writes: last write wins.
     pub fn scatter_elements(
         self,
         indices: GraphTensor,
         updates: GraphTensor,
         axis: usize,
-        reduction: &str,
     ) -> GraphTensor {
         let data_dims = self.dims();
         let rank = data_dims.len();
@@ -265,7 +263,7 @@ impl GraphTensor {
             flat_dest += ar_shaped * s;
         }
 
-        // Flatten to 1D using materialize + reshape (merge_dims is unimplemented)
+        // Flatten to 1D using materialize + reshape
         let mut flat_dest_1d = flat_dest * 1;
         flat_dest_1d.shape = ShapeTracker::new(vec![idx_numel]);
 
@@ -275,31 +273,8 @@ impl GraphTensor {
         let mut flat_data = self * 1.0;
         flat_data.shape = ShapeTracker::new(vec![data_numel]);
 
-        // Match matrix: [idx_numel, data_numel]
-        // match[i, j] = (flat_dest[i] == j)
-        let dest_expanded = flat_dest_1d.expand_dim(1, data_numel);
-        let positions = self.graph().arange(data_numel).expand_dim(0, idx_numel);
-        let match_matrix = dest_expanded.eq(positions);
-
-        // scattered = sum over idx_numel of (flat_updates * match)
-        let match_f32 = match_matrix.cast(DType::F32);
-        let updates_expanded = flat_updates.expand_dim(1, data_numel);
-        let scattered = (updates_expanded * match_f32).sum(0);
-
-        // Blend with original data
-        let output_flat = match reduction {
-            "add" => flat_data + scattered,
-            _ => {
-                // reduction="none": replace where updated
-                let was_updated = match_matrix.cast(DType::F32).sum(0);
-                let zero_val = self
-                    .graph()
-                    .constant_float(0.0)
-                    .expand_rhs(was_updated.shape);
-                let mask = was_updated.gt(zero_val);
-                scattered.cond(mask, flat_data)
-            }
-        };
+        // Use HLIR Scatter: dest[indexes[i]] = src[i]
+        let output_flat = flat_updates.scatter(flat_dest_1d, flat_data);
 
         // Reshape back to data_shape
         let data_shape_usize: Vec<usize> =
@@ -321,7 +296,6 @@ impl GraphTensor {
         self,
         indices: GraphTensor,
         updates: GraphTensor,
-        reduction: &str,
     ) -> GraphTensor {
         let indices = indices.cast(DType::Int);
         let data_dims = self.dims();
@@ -433,29 +407,8 @@ impl GraphTensor {
         let mut flat_data = self * 1.0;
         flat_data.shape = ShapeTracker::new(vec![data_numel]);
 
-        // Match matrix: [update_numel, data_numel]
-        let dest_expanded = full_flat_dest.expand_dim(1, data_numel);
-        let positions = self.graph().arange(data_numel).expand_dim(0, update_numel);
-        let match_matrix = dest_expanded.eq(positions);
-
-        // scattered = sum over update_numel of (flat_updates * match)
-        let match_f32 = match_matrix.cast(DType::F32);
-        let updates_expanded = flat_updates.expand_dim(1, data_numel);
-        let scattered = (updates_expanded * match_f32).sum(0);
-
-        // Blend with original data
-        let output_flat = match reduction {
-            "add" => flat_data + scattered,
-            _ => {
-                let was_updated = match_matrix.cast(DType::F32).sum(0);
-                let zero_val = self
-                    .graph()
-                    .constant_float(0.0)
-                    .expand_rhs(was_updated.shape);
-                let mask = was_updated.gt(zero_val);
-                scattered.cond(mask, flat_data)
-            }
-        };
+        // Use HLIR Scatter: dest[indexes[i]] = src[i]
+        let output_flat = flat_updates.scatter(full_flat_dest, flat_data);
 
         // Reshape back to data_shape
         let mut result = output_flat * 1.0;
