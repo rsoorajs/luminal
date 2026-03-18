@@ -125,7 +125,6 @@ pub fn broadcast_to_expr(mut tensor: GraphTensor, target_shape: &[Expression]) -
     tensor
 }
 
-
 /// Convert inline data from a TensorProto to f32, based on data_type.
 /// Returns None if the tensor has no inline data (e.g. external storage).
 fn convert_inline_data(init: &onnx_protobuf::TensorProto) -> Option<Vec<f32>> {

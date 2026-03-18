@@ -1226,7 +1226,8 @@ pub fn parse_slice_node(
     };
 
     // Validate steps=1 if provided
-    if node.input.len() > 4 && !node.input[4].is_empty()
+    if node.input.len() > 4
+        && !node.input[4].is_empty()
         && let Some(steps) = known_values.get(&node.input[4])
     {
         for &s in steps {

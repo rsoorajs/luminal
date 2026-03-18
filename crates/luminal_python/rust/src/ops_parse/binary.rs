@@ -79,7 +79,8 @@ pub fn parse_binary_broadcast_op(
                 .map(|kv| kv.iter().map(|&v| Expression::from(v as usize)).collect())
         });
         if let (Some(se_a), Some(se_b)) = (se_a, se_b)
-            && se_a.len() == 1 && se_b.len() == 1
+            && se_a.len() == 1
+            && se_b.len() == 1
         {
             let result_expr = match op_name {
                 "Add" => Some(se_a[0] + se_b[0]),
@@ -124,7 +125,8 @@ pub fn parse_binary_broadcast_op(
                 .map(|kv| kv.iter().map(|&v| Expression::from(v as usize)).collect())
         });
         if let (Some(se_a), Some(se_b)) = (se_a, se_b)
-            && se_a.len() == 1 && se_b.len() == 1
+            && se_a.len() == 1
+            && se_b.len() == 1
         {
             let result_expr = match op_name {
                 "Add" => Some(se_a[0] + se_b[0]),
