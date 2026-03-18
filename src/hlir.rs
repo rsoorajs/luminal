@@ -1631,7 +1631,18 @@ impl EgglogOp for SumReduce {
         1
     }
     fn rewrites(&self) -> Vec<Rule> {
-        vec![dtype_propagation_op(&self.sort())]
+        vec![
+            dtype_propagation_op(&self.sort()),
+            // Batch-collapse rules: rewrite N-dim Mul+Sum → (N-1)-dim Mul+Sum
+            // so that 2D cuBLAS rules can match. Fires recursively.
+            Rule::raw(include_str!("egglog_utils/matmul_flattening/squeeze.egg")),
+            Rule::raw(include_str!(
+                "egglog_utils/matmul_flattening/batch_merge_a_contig.egg"
+            )),
+            Rule::raw(include_str!(
+                "egglog_utils/matmul_flattening/batch_merge_b_contig.egg"
+            )),
+        ]
     }
     fn extract<'a>(
         &'a self,
