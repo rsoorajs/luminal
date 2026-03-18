@@ -44,11 +44,6 @@ jobs:
         steps:
             - uses: actions/checkout@v6
             - name: Install system dependencies
-              run: sudo apt-get install -y protobuf-compiler
-            - name: Install uv
-              run: |
-                  curl -LsSf https://astral.sh/uv/install.sh | sh
-                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
             - name: Update Rust toolchain
               run: rustup update
             - name: Build maturin extension

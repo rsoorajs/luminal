@@ -144,41 +144,28 @@ impl GraphTensor {
         let is_neg = idx_f32.lt(zero).cast(DType::F32);
         let idx_normalized = (idx_f32 + (is_neg * adj)).cast(DType::Int);
 
-        // Axis contribution: flat_idx = indices * stride[axis]
-        let s = self
+        // Non-axis flat index via iota + flatten_strides
+        let axis_exprs: Vec<Expression> = (0..rank)
+            .map(|d| {
+                if d == axis {
+                    Expression::from(0)
+                } else {
+                    Expression::from('z') * strides[d]
+                }
+            })
+            .collect();
+        let out_shape_expr: Vec<Expression> =
+            out_shape.iter().map(|&s| Expression::from(s)).collect();
+        let non_axis_flat =
+            self.graph()
+                .iota(flatten_strides(&out_shape_expr, &axis_exprs), out_shape);
+
+        // Axis contribution from the runtime index values
+        let stride_tensor = self
             .graph()
             .constant(strides[axis])
             .expand_rhs(idx_normalized.shape);
-        let mut flat_idx = idx_normalized * s;
-
-        // Non-axis dimension contributions
-        for d in 0..rank {
-            if d == axis {
-                continue;
-            }
-            let ar = self.graph().arange(out_shape[d]); // shape [out_shape[d]], Int
-
-            // Place arange at dimension d by surrounding with size-1 dims,
-            // then broadcast to out_shape.
-            let mut ar_shaped = ar;
-            // Add trailing size-1 dims (for dimensions d+1..rank)
-            for _ in d + 1..rank {
-                let n = ar_shaped.dims().len();
-                ar_shaped = ar_shaped.expand_dim(n, 1);
-            }
-            // Add leading size-1 dims (for dimensions 0..d)
-            for _ in 0..d {
-                ar_shaped = ar_shaped.expand_dim(0, 1);
-            }
-            // Broadcast all size-1 dims to out_shape
-            ar_shaped.shape.expand(out_shape.clone());
-
-            let s = self
-                .graph()
-                .constant(strides[d])
-                .expand_rhs(ar_shaped.shape);
-            flat_idx += ar_shaped * s;
-        }
+        let flat_idx = non_axis_flat + idx_normalized * stride_tensor;
 
         self.gather(flat_idx)
     }
@@ -234,34 +221,28 @@ impl GraphTensor {
         let is_neg = idx_f32.lt(zero).cast(DType::F32);
         let idx_normalized = (idx_f32 + (is_neg * adj)).cast(DType::Int);
 
-        // Compute flat destination index (same logic as gather_elements)
-        let s = self
+        // Non-axis flat index via iota + flatten_strides
+        let axis_exprs: Vec<Expression> = (0..rank)
+            .map(|d| {
+                if d == axis {
+                    Expression::from(0)
+                } else {
+                    Expression::from('z') * strides[d]
+                }
+            })
+            .collect();
+        let idx_shape_expr: Vec<Expression> =
+            idx_shape.iter().map(|&s| Expression::from(s)).collect();
+        let non_axis_flat =
+            self.graph()
+                .iota(flatten_strides(&idx_shape_expr, &axis_exprs), idx_shape.clone());
+
+        // Axis contribution from the runtime index values
+        let stride_tensor = self
             .graph()
             .constant(strides[axis])
             .expand_rhs(idx_normalized.shape);
-        let mut flat_dest = idx_normalized * s;
-
-        for d in 0..rank {
-            if d == axis {
-                continue;
-            }
-            let ar = self.graph().arange(idx_shape[d]);
-            let mut ar_shaped = ar;
-            for _ in d + 1..rank {
-                let n = ar_shaped.dims().len();
-                ar_shaped = ar_shaped.expand_dim(n, 1);
-            }
-            for _ in 0..d {
-                ar_shaped = ar_shaped.expand_dim(0, 1);
-            }
-            ar_shaped.shape.expand(idx_shape.clone());
-
-            let s = self
-                .graph()
-                .constant(strides[d])
-                .expand_rhs(ar_shaped.shape);
-            flat_dest += ar_shaped * s;
-        }
+        let flat_dest = non_axis_flat + idx_normalized * stride_tensor;
 
         // Flatten to 1D using materialize + reshape
         let mut flat_dest_1d = flat_dest * 1;
