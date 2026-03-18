@@ -43,12 +43,12 @@ fn parse_onnx(path: &str, backend: &str) -> Result<OnnxGraphResult, String> {
         Some(20) => {}
         Some(v) => {
             return Err(format!(
-                "Unsupported ONNX opset version {v}. Only opset 25 is supported."
+                "Unsupported ONNX opset version {v}. Only opset 20 is supported."
             ));
         }
         None => {
             return Err(
-                "No ONNX opset version found in model. Only opset 25 is supported.".to_string(),
+                "No ONNX opset version found in model. Only opset 20 is supported.".to_string(),
             );
         }
     }

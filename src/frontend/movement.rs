@@ -368,13 +368,13 @@ impl GraphTensor {
 
         // For each k_dim, extract the slice and multiply by stride
         let mut flat_base: Option<GraphTensor> = None;
-        for k_dim in 0..k {
+        for (k_dim, &stride) in data_strides.iter().enumerate().take(k) {
             let idx_k = indices_flat.slice_along(k_dim..k_dim + 1, indices_flat.dims().len() - 1);
             let idx_k = idx_k.squeeze(idx_k.dims().len() - 1);
 
             let stride_tensor = self
                 .graph()
-                .constant(data_strides[k_dim])
+                .constant(stride)
                 .expand_rhs(idx_k.shape);
             let contribution = idx_k * stride_tensor;
 

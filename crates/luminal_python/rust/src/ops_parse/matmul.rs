@@ -52,7 +52,7 @@ pub fn parse_gemm_node(
 
     let mut result = a_mat.matmul(b_mat);
     if alpha != 1.0 {
-        result = result * alpha;
+        result *= alpha;
     }
 
     if node.input.len() > 2 && !node.input[2].is_empty() {
@@ -61,7 +61,7 @@ pub fn parse_gemm_node(
             .ok_or_else(|| format!("Gemm: missing bias C '{}'", node.input[2]))?;
         let c_scaled = if beta != 1.0 { c * beta } else { c };
         let result_shape = result.dims();
-        result = result + broadcast_to_expr(c_scaled, &result_shape);
+        result += broadcast_to_expr(c_scaled, &result_shape);
     }
 
     tensors.insert(node.output[0].clone(), result);

@@ -75,10 +75,8 @@ pub fn parse_conv_node(
     let mut pads_begin = vec![0usize; spatial];
     let mut pads_end = vec![0usize; spatial];
     if pads_flat.len() == 2 * spatial {
-        for i in 0..spatial {
-            pads_begin[i] = pads_flat[i];
-            pads_end[i] = pads_flat[spatial + i];
-        }
+        pads_begin[..spatial].copy_from_slice(&pads_flat[..spatial]);
+        pads_end[..spatial].copy_from_slice(&pads_flat[spatial..(spatial + spatial)]);
     }
 
     assert_eq!(
@@ -183,10 +181,10 @@ pub fn parse_conv_node(
         bias_expanded = bias_expanded.expand_dim(0, 1); // batch dim
         for i in 0..spatial {
             let out_dims = out.dims();
-            let spatial_size = out_dims[2 + i].clone();
+            let spatial_size = out_dims[2 + i];
             bias_expanded = bias_expanded.expand_dim(2 + i, spatial_size);
         }
-        out = out + bias_expanded;
+        out += bias_expanded;
     }
 
     let result = out * 1.0;

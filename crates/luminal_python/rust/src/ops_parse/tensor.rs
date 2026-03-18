@@ -251,7 +251,7 @@ pub fn parse_constant_of_shape(
             // resolved at runtime via ShapeTracker/dyn_map. Broadcast uses stride-0
             // expansion, so only 1 float is needed in the backing buffer.
             let scalar = cx.constant_float(fill_value);
-            let result = broadcast_to_expr(scalar, &se);
+            let result = broadcast_to_expr(scalar, se);
             // Force materialization so the broadcast creates a real graph node
             let result = result * 1.0;
             tensors.insert(output_name.clone(), result);
@@ -362,7 +362,7 @@ pub fn parse_range_node(
         // Simple arange case — most common for position indices
         if let Some(expr) = limit_expr {
             // Dynamic limit: create arange with symbolic length
-            let tensor = cx.arange(expr.clone());
+            let tensor = cx.arange(expr);
             // Cast to F32 (luminal arange returns Int dtype)
             let result = tensor.cast(DType::F32);
             tensors.insert(output_name.clone(), result);

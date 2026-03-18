@@ -73,12 +73,12 @@ pub fn parse_expand_node(
     let mut broadcast_shape = Vec::with_capacity(out_rank);
     for i in 0..out_rank {
         let in_dim = if i + input_rank >= out_rank {
-            input_dims[i + input_rank - out_rank].clone()
+            input_dims[i + input_rank - out_rank]
         } else {
             Expression::from(1usize)
         };
         let tgt_dim = if i + target_rank >= out_rank {
-            target_exprs[i + target_rank - out_rank].clone()
+            target_exprs[i + target_rank - out_rank]
         } else {
             Expression::from(1usize)
         };
@@ -204,13 +204,13 @@ pub fn parse_reshape_node(
     );
 
     // Shape-only path: if input is only in shape_exprs (not tensors), propagate
-    if !tensors.contains_key(&node.input[0]) {
-        if let Some(se) = shape_exprs.get(&node.input[0]).cloned() {
-            let output_name = &node.output[0];
-            shape_exprs.insert(output_name.clone(), se);
-            trace!("Finished parse: Reshape (shape-only)");
-            return Ok(());
-        }
+    if !tensors.contains_key(&node.input[0])
+        && let Some(se) = shape_exprs.get(&node.input[0]).cloned()
+    {
+        let output_name = &node.output[0];
+        shape_exprs.insert(output_name.clone(), se);
+        trace!("Finished parse: Reshape (shape-only)");
+        return Ok(());
     }
 
     let input = *tensors
@@ -227,7 +227,7 @@ pub fn parse_reshape_node(
         // Resolve 0 (copy from input at same position)
         for i in 0..result_shape.len() {
             if result_shape[i].to_usize() == Some(0) && i < input_dims.len() {
-                result_shape[i] = input_dims[i].clone();
+                result_shape[i] = input_dims[i];
             }
         }
 
@@ -246,7 +246,7 @@ pub fn parse_reshape_node(
                 .product::<Expression>();
             for d in result_shape.iter_mut() {
                 if d.to_usize() == Some(usize::MAX) {
-                    *d = (total_elements.clone() / known_product.clone()).simplify();
+                    *d = (total_elements / known_product).simplify();
                 }
             }
         }
@@ -330,13 +330,13 @@ pub fn parse_squeeze_node(
     );
 
     // Shape-only path: if input is only in shape_exprs (not tensors), propagate shape_exprs
-    if !tensors.contains_key(&node.input[0]) {
-        if let Some(se) = shape_exprs.get(&node.input[0]).cloned() {
-            let output_name = &node.output[0];
-            shape_exprs.insert(output_name.clone(), se);
-            trace!("Finished parse: Squeeze Node (shape-only)");
-            return Ok(());
-        }
+    if !tensors.contains_key(&node.input[0])
+        && let Some(se) = shape_exprs.get(&node.input[0]).cloned()
+    {
+        let output_name = &node.output[0];
+        shape_exprs.insert(output_name.clone(), se);
+        trace!("Finished parse: Squeeze Node (shape-only)");
+        return Ok(());
     }
 
     let input = *tensors
@@ -436,13 +436,13 @@ pub fn parse_unsqueeze_node(
     );
 
     // Shape-only path: if input is only in shape_exprs (not tensors), propagate
-    if !tensors.contains_key(&node.input[0]) {
-        if let Some(se) = shape_exprs.get(&node.input[0]).cloned() {
-            let output_name = &node.output[0];
-            shape_exprs.insert(output_name.clone(), se);
-            trace!("Finished parse: Unsqueeze Node (shape-only)");
-            return Ok(());
-        }
+    if !tensors.contains_key(&node.input[0])
+        && let Some(se) = shape_exprs.get(&node.input[0]).cloned()
+    {
+        let output_name = &node.output[0];
+        shape_exprs.insert(output_name.clone(), se);
+        trace!("Finished parse: Unsqueeze Node (shape-only)");
+        return Ok(());
     }
 
     let input = *tensors
@@ -640,40 +640,40 @@ pub fn parse_gather_node(
 
     // Shape expression gather: data is from a Shape node (shape_exprs), indices are known constants.
     // This happens in Shape→Gather chains that extract specific dimensions.
-    if let Some(se_data) = shape_exprs.get(&node.input[0]).cloned() {
-        if let Some(idx_vals) = known_values.get(&node.input[1]) {
-            let output_name = &node.output[0];
-            let result_exprs: Vec<Expression> = idx_vals
-                .iter()
-                .map(|&idx_f| {
-                    let idx = idx_f as i64;
-                    let idx = if idx < 0 {
-                        (se_data.len() as i64 + idx) as usize
-                    } else {
-                        idx as usize
-                    };
-                    se_data[idx].clone()
-                })
-                .collect();
-            shape_exprs.insert(output_name.clone(), result_exprs.clone());
+    if let Some(se_data) = shape_exprs.get(&node.input[0]).cloned()
+        && let Some(idx_vals) = known_values.get(&node.input[1])
+    {
+        let output_name = &node.output[0];
+        let result_exprs: Vec<Expression> = idx_vals
+            .iter()
+            .map(|&idx_f| {
+                let idx = idx_f as i64;
+                let idx = if idx < 0 {
+                    (se_data.len() as i64 + idx) as usize
+                } else {
+                    idx as usize
+                };
+                se_data[idx]
+            })
+            .collect();
+        shape_exprs.insert(output_name.clone(), result_exprs.clone());
 
-            // If all concrete, also store in known_values + weight_data + tensor
-            if let Some(concrete) = result_exprs
-                .iter()
-                .map(|e| e.to_usize())
-                .collect::<Option<Vec<usize>>>()
-            {
-                let floats: Vec<f32> = concrete.iter().map(|&v| v as f32).collect();
-                let tensor = cx.named_tensor(output_name.clone(), vec![floats.len()]);
-                tensors.insert(output_name.clone(), tensor);
-                known_values.insert(output_name.clone(), floats.clone());
-                weight_data.push((output_name.clone(), floats));
-            }
-            // For symbolic results, don't create a tensor — it's shape-only
-
-            trace!("Finished parse: Gather Node (shape_exprs folded)");
-            return Ok(());
+        // If all concrete, also store in known_values + weight_data + tensor
+        if let Some(concrete) = result_exprs
+            .iter()
+            .map(|e| e.to_usize())
+            .collect::<Option<Vec<usize>>>()
+        {
+            let floats: Vec<f32> = concrete.iter().map(|&v| v as f32).collect();
+            let tensor = cx.named_tensor(output_name.clone(), vec![floats.len()]);
+            tensors.insert(output_name.clone(), tensor);
+            known_values.insert(output_name.clone(), floats.clone());
+            weight_data.push((output_name.clone(), floats));
         }
+        // For symbolic results, don't create a tensor — it's shape-only
+
+        trace!("Finished parse: Gather Node (shape_exprs folded)");
+        return Ok(());
     }
 
     // If both inputs are known, fully constant-fold
@@ -1226,15 +1226,15 @@ pub fn parse_slice_node(
     };
 
     // Validate steps=1 if provided
-    if node.input.len() > 4 && !node.input[4].is_empty() {
-        if let Some(steps) = known_values.get(&node.input[4]) {
-            for &s in steps {
-                if s as i64 != 1 {
-                    return Err(format!(
-                        "Slice: step={} not supported (only step=1)",
-                        s as i64
-                    ));
-                }
+    if node.input.len() > 4 && !node.input[4].is_empty()
+        && let Some(steps) = known_values.get(&node.input[4])
+    {
+        for &s in steps {
+            if s as i64 != 1 {
+                return Err(format!(
+                    "Slice: step={} not supported (only step=1)",
+                    s as i64
+                ));
             }
         }
     }
@@ -1249,7 +1249,7 @@ pub fn parse_slice_node(
     // Build Expression-based ranges
     let mut ranges: Vec<(Expression, Expression)> = expr_dims
         .iter()
-        .map(|d| (Expression::from(0usize), d.clone()))
+        .map(|d| (Expression::from(0usize), *d))
         .collect();
 
     for (i, &ax) in axes.iter().enumerate() {
@@ -1262,7 +1262,7 @@ pub fn parse_slice_node(
             if let Some(dim_val) = dim_expr.to_usize() {
                 Expression::from((dim_val as i64 + starts[i]).max(0) as usize)
             } else {
-                dim_expr.clone() - Expression::from((-starts[i]) as usize)
+                *dim_expr - Expression::from((-starts[i]) as usize)
             }
         } else {
             Expression::from(starts[i] as usize)
@@ -1273,13 +1273,13 @@ pub fn parse_slice_node(
             // Detect INT64_MAX sentinel (from ONNX "to end" convention).
             // f32 can't represent INT64_MAX exactly, so check for very large values.
             if ev > 1_000_000_000 {
-                dim_expr.clone()
+                *dim_expr
             } else {
                 Expression::from(ev)
             }
         } else {
             // Symbolic end expression — use directly
-            e.clone()
+            *e
         };
 
         ranges[ax] = (start_expr, end_expr);
@@ -1309,14 +1309,14 @@ pub fn parse_slice_node(
             let mut index_expressions = vec![];
             let mut phys_size = Expression::from(1);
             for (dim, (start, end)) in dims.into_iter().zip(ranges.iter()).rev() {
-                index_expressions.push((Expression::from('z') + start.clone()) * phys_size.clone());
-                phys_size = phys_size * dim;
+                index_expressions.push((Expression::from('z') + *start) * phys_size);
+                phys_size *= dim;
                 // Direct end - start without min() clamping.
                 // .simplify() uses egglog to reduce expressions like (1+a)-1 → a.
                 let dim = match (start.to_usize(), end.to_usize()) {
                     (Some(s), Some(e)) => Expression::from(e.saturating_sub(s)),
-                    (Some(0), _) => end.clone(),
-                    _ => (end.clone() - start.clone()).simplify(),
+                    (Some(0), _) => *end,
+                    _ => (*end - *start).simplify(),
                 };
                 new_dims.push(dim);
             }
@@ -1749,7 +1749,7 @@ pub fn parse_resize_node(
         }
 
         assert!(
-            target >= input_size && target % input_size == 0,
+            target >= input_size && target.is_multiple_of(input_size),
             "Resize: only integer upsampling is supported (dim {dim_idx}: {input_size} -> {target})"
         );
 
@@ -1803,8 +1803,7 @@ pub fn parse_tile_node(
     );
 
     let mut result = data;
-    for dim in 0..ndim {
-        let r = repeats[dim];
+    for (dim, &r) in repeats.iter().enumerate().take(ndim) {
         if r > 1 {
             // Insert a new dim before the axis, expand to r, merge
             result = result.expand_dim(dim, r);
