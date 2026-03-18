@@ -177,7 +177,7 @@ impl GraphTensor {
                 .graph()
                 .constant(strides[d])
                 .expand_rhs(ar_shaped.shape);
-            flat_idx = flat_idx + (ar_shaped * s);
+            flat_idx += ar_shaped * s;
         }
 
         self.gather(flat_idx)
@@ -262,7 +262,7 @@ impl GraphTensor {
                 .graph()
                 .constant(strides[d])
                 .expand_rhs(ar_shaped.shape);
-            flat_dest = flat_dest + (ar_shaped * s);
+            flat_dest += ar_shaped * s;
         }
 
         // Flatten to 1D using materialize + reshape (merge_dims is unimplemented)
@@ -416,7 +416,7 @@ impl GraphTensor {
                     .graph()
                     .constant(data_strides[d])
                     .expand_rhs(ar_flat.shape);
-                base_expanded = base_expanded + (ar_flat * stride_tensor);
+                base_expanded += ar_flat * stride_tensor;
             }
             base_expanded
         };
