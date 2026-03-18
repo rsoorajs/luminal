@@ -8,8 +8,8 @@
 
 (rule
     (
-        (= ?mul (Mul ?mul_shape ?a ?a_stride ?b ?b_stride ?mul_out_stride))
-        (= ?sum (Sum ?sum_shape ?k ?mul ?sum_in_stride ?k_stride ?sum_out_stride))
+        (= ?mul (Op (Mul ?mul_shape ?a_stride ?b_stride ?mul_out_stride) (ICons ?a (ICons ?b (INil)))))
+        (= ?sum (Op (Sum ?sum_shape ?k ?sum_in_stride ?k_stride ?sum_out_stride) (ICons ?mul (INil))))
 
         ; Sum shape has >= 3 dims
         (= ?sum_shape (ECons ?sd0 (ECons ?sd1 ?rest_sum_shape)))
@@ -45,17 +45,19 @@
         (let ?new_sd (MMul ?sd0 ?sd1))
 
         ; Collapsed Mul: merged leading dim, A uses 0, B uses bs1
-        (let ?new_mul (Mul (ECons ?new_d ?rest_mul_shape)
-            ?a (ECons (MNum 0) ?rest_as)
-            ?b (ECons ?bs1 ?rest_bs)
-            (ECons ?mos1 ?rest_mos)))
+        (let ?new_mul (Op (Mul (ECons ?new_d ?rest_mul_shape)
+            (ECons (MNum 0) ?rest_as)
+            (ECons ?bs1 ?rest_bs)
+            (ECons ?mos1 ?rest_mos))
+            (ICons ?a (ICons ?b (INil)))))
 
         ; Collapsed Sum
-        (let ?new_sum (Sum (ECons ?new_sd ?rest_sum_shape)
-            ?k ?new_mul
+        (let ?new_sum (Op (Sum (ECons ?new_sd ?rest_sum_shape)
+            ?k
             (ECons ?sis1 ?rest_sis)
             ?k_stride
-            (ECons ?sos1 ?rest_sos)))
+            (ECons ?sos1 ?rest_sos))
+            (ICons ?new_mul (INil))))
 
         ; Direct union
         (union ?sum ?new_sum)
