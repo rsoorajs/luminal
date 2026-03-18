@@ -58,7 +58,7 @@ jobs:
         name: Python CUDA Tests
         runs-on: cuda_t4_runner
         container:
-            image: ghcr.io/luminal-ai/luminal-docker:latest
+            image: ghcr.io/luminal-ai/luminal-docker:gpu
             options: --gpus all
         timeout-minutes: 45
         defaults:
