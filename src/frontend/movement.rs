@@ -307,8 +307,6 @@ impl GraphTensor {
             .map(|i| data_shape[i + 1..].iter().product::<usize>().max(1))
             .collect();
 
-        let data_numel: usize = data_shape.iter().product();
-
         // Flatten batch dims of indices to [batch_numel, K] using materialize + reshape
         let mut indices_flat = indices;
         if idx_rank > 2 {
@@ -330,10 +328,7 @@ impl GraphTensor {
                 None => contribution,
             });
         }
-        let flat_base = flat_base.unwrap(); // [batch_numel], Int
-
-        // Compute update_numel
-        let update_numel = batch_numel * trailing_numel;
+        let flat_base = flat_base.unwrap();
 
         let mut full_flat_dest = if trailing_shape.is_empty() || trailing_numel == 1 {
             flat_base
@@ -368,20 +363,11 @@ impl GraphTensor {
             base_expanded
         };
 
-        // Flatten full_flat_dest to [update_numel]
-        if full_flat_dest.dims().len() > 1 {
-            let mut fd = full_flat_dest;
-            fd.shape = ShapeTracker::new(vec![update_numel]);
-            full_flat_dest = fd;
-        }
+        full_flat_dest = full_flat_dest.flatten();
 
-        // Flatten updates to [update_numel]
-        let mut flat_updates = updates;
-        flat_updates.shape = ShapeTracker::new(vec![update_numel]);
-
-        // Flatten data to [data_numel]
-        let mut flat_data = self;
-        flat_data.shape = ShapeTracker::new(vec![data_numel]);
+        // Flatten data out
+        let flat_updates = updates.flatten();
+        let flat_data = self.flatten();
 
         // Use HLIR Scatter: dest[indexes[i]] = src[i]
         let output_flat = flat_updates.scatter(full_flat_dest, flat_data);

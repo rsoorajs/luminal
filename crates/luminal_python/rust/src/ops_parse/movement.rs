@@ -976,9 +976,7 @@ pub fn parse_gathernd_node(
         let outer_size: usize = idx_shape[..k].iter().product::<usize>().max(1);
         let slice_size: usize = data_shape[q..].iter().product::<usize>().max(1);
 
-        // Flatten indices to [outer_size * q] for column extraction
-        let mut indices_flat = indices_raw;
-        indices_flat.shape = ShapeTracker::new(vec![outer_size * q]);
+        let indices_flat = indices_raw.flatten();
 
         // Stride of dim j in data's first q dimensions
         let data_strides: Vec<usize> = (0..q)
