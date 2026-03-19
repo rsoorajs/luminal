@@ -215,12 +215,8 @@ pub fn parse_cast_node(
     let cast_result = input.cast(dtype);
     let output_name = &node.output[0];
 
-    // Use the *1.0 workaround for no-op cast or Int→F32 cast
     let result = if cast_result.id == input.id {
-        let src_dims = input.dims();
-        let one = input.graph().constant_float(1.0);
-        let one_expanded = broadcast_to_expr(one, &src_dims);
-        input * one_expanded
+        input
     } else {
         cast_result
     };
@@ -410,9 +406,8 @@ pub fn parse_group_norm_node(
     let cpg = c / num_groups; // channels per group
 
     // Reshape X from [N, C, spatial...] to [N, G, C/G, spatial...]
-    // Use *1.0 + ShapeTracker to reshape
     let spatial_dims: Vec<Expression> = x_dims[2..].to_vec();
-    let mut reshaped = x * 1.0;
+    let mut reshaped = x;
     let mut new_shape = vec![n, num_groups, cpg];
     for d in &spatial_dims {
         new_shape.push(

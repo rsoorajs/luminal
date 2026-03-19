@@ -96,7 +96,7 @@ pub fn parse_conv_node(
 
     // Reshape weight from ONNX [C_out, C_in, *kernel] to [C_out, C_in * kernel_product]
     let w_reshaped = {
-        let mut wt = w * 1.0;
+        let mut wt = w;
         wt.shape = ShapeTracker::new(vec![ch_out, ch_in * kernel_product]);
         wt
     };
@@ -187,8 +187,7 @@ pub fn parse_conv_node(
         out += bias_expanded;
     }
 
-    let result = out * 1.0;
-    tensors.insert(node.output[0].clone(), result);
+    tensors.insert(node.output[0].clone(), out);
 
     trace!("Finished parse: Conv Node");
     Ok(())

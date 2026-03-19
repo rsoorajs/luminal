@@ -31,7 +31,7 @@ pub fn parse_gather_elements_node(
         axis_raw as usize
     };
 
-    let result = data.gather_elements(indices, axis) * 1.0;
+    let result = data.gather_elements(indices, axis);
     tensors.insert(node.output[0].clone(), result);
     Ok(())
 }
@@ -92,7 +92,7 @@ pub fn parse_expand_node(
         broadcast_shape.push(dim);
     }
 
-    let result = broadcast_to_expr(input, &broadcast_shape) * 1.0;
+    let result = broadcast_to_expr(input, &broadcast_shape);
     tensors.insert(node.output[0].clone(), result);
     Ok(())
 }
@@ -170,13 +170,7 @@ pub fn parse_transpose_node(
     };
 
     // Apply permute operation
-    let permuted = input.permute(perm);
-
-    // Force materialization by multiplying by 1.0
-    // This is necessary because permute is a view operation that doesn't
-    // rearrange data in memory. The multiplication adds a graph node that
-    // will read according to the permuted shape and write in contiguous order.
-    let result = permuted * 1.0;
+    let result = input.permute(perm);
 
     // Store output
     let output_name = &node.output[0];
@@ -292,11 +286,6 @@ pub fn parse_reshape_node(
     }
     result.shape = ShapeTracker::new(final_shape.clone());
 
-    // Force materialization
-    let one = result.graph().constant_float(1.0);
-    let one_expanded = broadcast_to_expr(one, &final_shape);
-    result *= one_expanded;
-
     let output_name = &node.output[0];
     tensors.insert(output_name.clone(), result);
 
@@ -393,17 +382,10 @@ pub fn parse_squeeze_node(
         result = result.squeeze(axis);
     }
 
-    // Force materialization using Expression-aware broadcast
-    let output_dims = result.dims();
-    let dims: Vec<Expression> = if output_dims.is_empty() {
+    // Handle scalar output (0-dim tensor)
+    if result.dims().is_empty() {
         result.shape = ShapeTracker::new(vec![1usize]);
-        vec![Expression::from(1usize)]
-    } else {
-        output_dims
-    };
-    let one = result.graph().constant_float(1.0);
-    let one_expanded = broadcast_to_expr(one, &dims);
-    result *= one_expanded;
+    }
 
     let output_name = &node.output[0];
     tensors.insert(output_name.clone(), result);
@@ -473,18 +455,10 @@ pub fn parse_unsqueeze_node(
         result = result.unsqueeze(axis);
     }
 
-    // Force materialization using Expression-aware broadcast
-    let output_dims = result.dims();
-    let dims: Vec<Expression> = if output_dims.is_empty() {
+    // Handle scalar output (0-dim tensor)
+    if result.dims().is_empty() {
         result.shape = ShapeTracker::new(vec![1usize]);
-        vec![Expression::from(1usize)]
-    } else {
-        output_dims
-    };
-
-    let one = result.graph().constant_float(1.0);
-    let one_expanded = broadcast_to_expr(one, &dims);
-    result *= one_expanded;
+    }
 
     let output_name = &node.output[0];
     tensors.insert(output_name.clone(), result);
@@ -1462,7 +1436,7 @@ pub fn parse_onehot_node(
     // Elsewhere:           1.0 * (off - on) + on = off_value
     let ne_mask = idx.cast(DType::F32).ne(ar.cast(DType::F32));
 
-    let result = (ne_mask * (off_value - on_value) + on_value) * 1.0;
+    let result = ne_mask * (off_value - on_value) + on_value;
     tensors.insert(node.output[0].clone(), result);
     Ok(())
 }
@@ -1553,7 +1527,7 @@ pub fn parse_scatter_elements_node(
         axis_raw as usize
     };
 
-    let result = data.scatter_elements(indices, updates, axis) * 1.0;
+    let result = data.scatter_elements(indices, updates, axis);
     tensors.insert(node.output[0].clone(), result);
     Ok(())
 }
@@ -1578,7 +1552,7 @@ pub fn parse_scatter_nd_node(
 
     let indices = indices.cast(DType::Int);
 
-    let result = data.scatter_nd(indices, updates) * 1.0;
+    let result = data.scatter_nd(indices, updates);
     tensors.insert(node.output[0].clone(), result);
     Ok(())
 }
@@ -1665,7 +1639,7 @@ pub fn parse_pad_node(
         );
     }
 
-    let result = data.pad(padding, constant_value) * 1.0;
+    let result = data.pad(padding, constant_value);
     tensors.insert(node.output[0].clone(), result);
 
     trace!("Finished parse: Pad Node");
@@ -1758,7 +1732,6 @@ pub fn parse_resize_node(
         // No net change to current_axis_offset since we added 1 and merged 1
     }
 
-    let result = result * 1.0;
     tensors.insert(node.output[0].clone(), result);
 
     trace!("Finished parse: Resize Node");
@@ -1809,7 +1782,6 @@ pub fn parse_tile_node(
         }
     }
 
-    let result = result * 1.0;
     tensors.insert(node.output[0].clone(), result);
 
     trace!("Finished parse: Tile Node");

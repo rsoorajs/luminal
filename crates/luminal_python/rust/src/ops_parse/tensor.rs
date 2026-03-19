@@ -252,8 +252,6 @@ pub fn parse_constant_of_shape(
             // expansion, so only 1 float is needed in the backing buffer.
             let scalar = cx.constant_float(fill_value);
             let result = broadcast_to_expr(scalar, se);
-            // Force materialization so the broadcast creates a real graph node
-            let result = result * 1.0;
             tensors.insert(output_name.clone(), result);
         }
     } else {
