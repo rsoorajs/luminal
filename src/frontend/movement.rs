@@ -79,6 +79,12 @@ impl GraphTensor {
         self
     }
 
+    /// Flatten all dimensions into a single 1D tensor.
+    pub fn flatten(mut self) -> GraphTensor {
+        self.shape.flatten();
+        self
+    }
+
     //// Split a dim into 2 dims, new dim is placed directly after original dim
     pub fn split_dims(mut self, axis: usize, new_dim_size: impl Into<Expression>) -> GraphTensor {
         self.shape.split_dims(axis, new_dim_size);
@@ -204,9 +210,6 @@ impl GraphTensor {
             })
             .collect();
 
-        let data_numel: usize = data_dims.iter().map(|d| d.to_usize().unwrap()).product();
-        let idx_numel: usize = idx_shape.iter().product();
-
         // Normalize negative indices for axis dim
         let axis_dim = data_dims[axis].to_usize().unwrap();
         let idx_f32 = indices.cast(DType::F32);
@@ -246,14 +249,9 @@ impl GraphTensor {
         let flat_dest = non_axis_flat + idx_normalized * stride_tensor;
 
         // Flatten to 1D using materialize + reshape
-        let mut flat_dest_1d = flat_dest;
-        flat_dest_1d.shape = ShapeTracker::new(vec![idx_numel]);
-
-        let mut flat_updates = updates;
-        flat_updates.shape = ShapeTracker::new(vec![idx_numel]);
-
-        let mut flat_data = self;
-        flat_data.shape = ShapeTracker::new(vec![data_numel]);
+        let flat_dest_1d = flat_dest.flatten();
+        let flat_updates = updates.flatten();
+        let flat_data = self.flatten();
 
         // Use HLIR Scatter: dest[indexes[i]] = src[i]
         let output_flat = flat_updates.scatter(flat_dest_1d, flat_data);
