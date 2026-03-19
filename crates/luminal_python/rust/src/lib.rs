@@ -4,7 +4,15 @@ mod ops_parse;
 mod runtime;
 mod util;
 
+// PT2 modules
+mod pt2_compiled_model;
+mod pt2_parser;
+mod pt2_schema;
+mod pt2_util;
+mod translator;
+
 use compiled_graph::OnnxGraphResult;
+use pt2_compiled_model::{compile_pt2, Pt2CompiledModel};
 use onnx_protobuf::ModelProto;
 use protobuf::Message;
 use pyo3::prelude::*;
@@ -59,6 +67,8 @@ fn parse_onnx(path: &str, backend: &str) -> Result<OnnxGraphResult, String> {
 #[pymodule]
 fn luminal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(process_onnx, m)?)?;
+    m.add_function(wrap_pyfunction!(compile_pt2, m)?)?;
     m.add_class::<OnnxGraphResult>()?;
+    m.add_class::<Pt2CompiledModel>()?;
     Ok(())
 }

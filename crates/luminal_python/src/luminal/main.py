@@ -83,11 +83,50 @@ def _register_cache_serialization(verbose: int = 0):
     return dict(DynamicCache=unregistered_dynamic_cache)
 
 
-def luminal_backend(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]):
+def luminal_backend(gm=None, example_inputs=None, *, export_mode="onnx", opset=None):
+    """Luminal torch.compile backend.
+
+    Direct use (ONNX, backward compat):
+        torch.compile(model, backend=luminal_backend)
+
+    Factory use with kwargs:
+        torch.compile(model, backend=luminal_backend(export_mode="pt2"))
+        torch.compile(model, backend=luminal_backend(export_mode="onnx", opset=18))
+
+    Args:
+        export_mode: "onnx" (default) or "pt2"
+        opset: Version control. For ONNX: opset_version passed to torch.onnx.export
+               (default 20). For PT2: expected schema_version major from the .pt2 file
+               (default None = accept any version).
+    """
+    # Env var override
+    env_mode = os.getenv("LUMINAL_EXPORT_MODE", "").lower()
+    if env_mode in ("pt2", "onnx"):
+        export_mode = env_mode
+
+    # Factory call: luminal_backend(export_mode="pt2") -> returns closure
+    if gm is None or not isinstance(gm, torch.fx.GraphModule):
+        def _backend(gm, example_inputs):
+            return _compile(gm, example_inputs, export_mode=export_mode, opset=opset)
+        return _backend
+
+    # Direct call from torch.compile
+    return _compile(gm, example_inputs, export_mode=export_mode, opset=opset)
+
+
+def _compile(gm, example_inputs, export_mode="onnx", opset=None):
+    """Internal dispatch to ONNX or PT2 compilation."""
     _register_cache_serialization()
     device = example_inputs[0].device if example_inputs else torch.device("cpu")
     backend = "cuda" if device.type == "cuda" else "native"
 
+    if export_mode == "pt2":
+        return _compile_pt2(gm, example_inputs, backend)
+    return _compile_onnx(gm, example_inputs, backend, opset=opset or 20)
+
+
+def _compile_onnx(gm, example_inputs, backend, opset=20):
+    """ONNX compilation path — existing behavior."""
     tmp = tempfile.NamedTemporaryFile(suffix=".onnx", delete=False)
     tmp_path = tmp.name
     tmp.close()
@@ -97,7 +136,7 @@ def luminal_backend(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]
             gm,
             tuple(example_inputs),
             tmp_path,
-            opset_version=20,
+            opset_version=opset,
             input_names=[f"input_{i}" for i in range(len(example_inputs))],
         )
 
@@ -106,3 +145,9 @@ def luminal_backend(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]
         os.unlink(tmp_path)
     compiled = CompiledModel(result)
     return compiled
+
+
+def _compile_pt2(gm, example_inputs, backend):
+    """PT2/torch.export path — delegates to pt2.pt2_backend."""
+    from .pt2 import pt2_backend
+    return pt2_backend(gm, example_inputs)
