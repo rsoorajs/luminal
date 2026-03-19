@@ -246,13 +246,13 @@ impl GraphTensor {
         let flat_dest = non_axis_flat + idx_normalized * stride_tensor;
 
         // Flatten to 1D using materialize + reshape
-        let mut flat_dest_1d = flat_dest * 1;
+        let mut flat_dest_1d = flat_dest;
         flat_dest_1d.shape = ShapeTracker::new(vec![idx_numel]);
 
-        let mut flat_updates = updates * 1.0;
+        let mut flat_updates = updates;
         flat_updates.shape = ShapeTracker::new(vec![idx_numel]);
 
-        let mut flat_data = self * 1.0;
+        let mut flat_data = self;
         flat_data.shape = ShapeTracker::new(vec![data_numel]);
 
         // Use HLIR Scatter: dest[indexes[i]] = src[i]
@@ -261,7 +261,7 @@ impl GraphTensor {
         // Reshape back to data_shape
         let data_shape_usize: Vec<usize> =
             data_dims.iter().map(|d| d.to_usize().unwrap()).collect();
-        let mut result = output_flat * 1.0;
+        let mut result = output_flat;
         result.shape = ShapeTracker::new(data_shape_usize);
 
         result
@@ -312,7 +312,7 @@ impl GraphTensor {
         let data_numel: usize = data_shape.iter().product();
 
         // Flatten batch dims of indices to [batch_numel, K] using materialize + reshape
-        let mut indices_flat = indices * 1;
+        let mut indices_flat = indices;
         if idx_rank > 2 {
             indices_flat.shape = ShapeTracker::new(vec![batch_numel, k]);
         }
@@ -356,7 +356,7 @@ impl GraphTensor {
                 }
                 ar_shaped.shape.expand(trailing_shape.clone());
                 // Flatten trailing dims using materialize + reshape
-                let mut ar_flat = ar_shaped * 1;
+                let mut ar_flat = ar_shaped;
                 ar_flat.shape = ShapeTracker::new(vec![trailing_numel]);
                 // Expand to [batch_numel, trailing_numel]
                 ar_flat = ar_flat.expand_dim(0, batch_numel);
@@ -372,24 +372,24 @@ impl GraphTensor {
 
         // Flatten full_flat_dest to [update_numel]
         if full_flat_dest.dims().len() > 1 {
-            let mut fd = full_flat_dest * 1;
+            let mut fd = full_flat_dest;
             fd.shape = ShapeTracker::new(vec![update_numel]);
             full_flat_dest = fd;
         }
 
         // Flatten updates to [update_numel]
-        let mut flat_updates = updates * 1.0;
+        let mut flat_updates = updates;
         flat_updates.shape = ShapeTracker::new(vec![update_numel]);
 
         // Flatten data to [data_numel]
-        let mut flat_data = self * 1.0;
+        let mut flat_data = self;
         flat_data.shape = ShapeTracker::new(vec![data_numel]);
 
         // Use HLIR Scatter: dest[indexes[i]] = src[i]
         let output_flat = flat_updates.scatter(full_flat_dest, flat_data);
 
         // Reshape back to data_shape
-        let mut result = output_flat * 1.0;
+        let mut result = output_flat;
         result.shape = ShapeTracker::new(data_shape);
 
         result

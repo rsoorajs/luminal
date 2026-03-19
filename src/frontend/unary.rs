@@ -379,7 +379,7 @@ impl GraphTensor {
         let cmp = primary.cast(DType::F32) + val_eq * idx_cmp.cast(DType::F32);
 
         // Scatter original indices into rank positions to get sort indices
-        let ranks = (cmp * 1.0).sum(axis).cast(DType::Int);
+        let ranks = cmp.sum(axis).cast(DType::Int);
         scatter_ranks_to_sort_indices(ranks, dims, axis, self.graph())
     }
 
