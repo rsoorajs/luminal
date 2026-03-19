@@ -15,6 +15,9 @@ Cargo.lock
 *.gguf
 
 
+.claude-project
+.claude-memory
+
 *.pftrace
 *.safetensors
 *.safetensors.index.json
