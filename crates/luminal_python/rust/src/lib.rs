@@ -11,15 +11,38 @@ use pyo3::prelude::*;
 use std::fs;
 use std::path::Path;
 
+fn validate_backend(backend: &str) -> PyResult<()> {
+    match backend {
+        "native" => Ok(()),
+        #[cfg(feature = "cuda")]
+        "cuda" => Ok(()),
+        #[cfg(not(feature = "cuda"))]
+        "cuda" => Err(pyo3::exceptions::PyValueError::new_err(
+            "CUDA backend requested, but this luminal extension was built without the `cuda` feature. Rebuild with `maturin develop --features cuda -r` or use backend='native'.",
+        )),
+        _ => {
+            #[cfg(feature = "cuda")]
+            {
+                Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid backend '{}'. Must be 'native' or 'cuda'",
+                    backend
+                )))
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid backend '{}'. This build only supports 'native'. Rebuild with the `cuda` feature to enable 'cuda'.",
+                    backend
+                )))
+            }
+        }
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (path, backend="native"))]
 fn process_onnx(path: &str, backend: &str) -> PyResult<OnnxGraphResult> {
-    if backend != "native" && backend != "cuda" {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Invalid backend '{}'. Must be 'native' or 'cuda'",
-            backend
-        )));
-    }
+    validate_backend(backend)?;
 
     parse_onnx(path, backend).map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
