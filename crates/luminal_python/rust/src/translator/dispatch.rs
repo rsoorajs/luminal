@@ -158,6 +158,9 @@ impl<'a> Translator<'a> {
                 a.softmax(dim)
             }
 
+            // LayerNorm
+            "torch.ops.aten.layer_norm.default" => self.translate_layer_norm(node)?,
+
             // Where
             "torch.ops.aten.where.self" => self.translate_where(node)?,
             "torch.ops.aten.where.ScalarOther" => self.translate_where_scalar_other(node)?,
@@ -171,6 +174,7 @@ impl<'a> Translator<'a> {
             "torch.ops.aten.pow.Tensor_Tensor" => {
                 let a = self.get_input_tensor(node, 0)?;
                 let b = self.get_input_tensor(node, 1)?;
+                let (a, b) = broadcast_binary(a, b);
                 (b * a.log2()).exp2()
             }
 
@@ -225,6 +229,31 @@ impl<'a> Translator<'a> {
                 let a = a.cast(DType::F32);
                 let b = b.cast(DType::F32);
                 (a * b).cast(DType::Bool)
+            }
+            "torch.ops.aten.logical_and.default" => {
+                let a = self.get_input_tensor(node, 0)?;
+                let b = self.get_input_tensor(node, 1)?;
+                let (a, b) = broadcast_binary(a, b);
+                let a = a.cast(DType::F32);
+                let b = b.cast(DType::F32);
+                (a * b).cast(DType::Bool)
+            }
+            "torch.ops.aten.logical_or.default" => {
+                let a = self.get_input_tensor(node, 0)?;
+                let b = self.get_input_tensor(node, 1)?;
+                let (a, b) = broadcast_binary(a, b);
+                let a = a.cast(DType::F32);
+                let b = b.cast(DType::F32);
+                let one = self.graph.constant_float(1.0).expand_rhs(a.shape);
+                (one - (one - a) * (one - b)).cast(DType::Bool)
+            }
+            "torch.ops.aten.logical_xor.default" => {
+                let a = self.get_input_tensor(node, 0)?;
+                let b = self.get_input_tensor(node, 1)?;
+                let (a, b) = broadcast_binary(a, b);
+                let a = a.cast(DType::F32);
+                let b = b.cast(DType::F32);
+                a.ne(b)
             }
 
             // Clamp

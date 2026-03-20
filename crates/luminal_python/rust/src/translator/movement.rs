@@ -301,7 +301,16 @@ impl<'a> Translator<'a> {
         let mut flat_idx: Option<GraphTensor> = None;
         for (dim_idx, idx_name) in index_names.iter().enumerate() {
             let idx_tensor = self.get_tensor(&idx_name.name)?;
-            let idx_int = idx_tensor.cast(DType::Int);
+
+            // Normalize negative indices for this dimension
+            let axis_size = src_shape[dim_idx]
+                .to_usize()
+                .ok_or_else(|| anyhow::anyhow!("index.Tensor: dim {} must be concrete for negative index normalization", dim_idx))?;
+            let idx_f32 = idx_tensor.cast(DType::F32);
+            let zero = self.graph.constant_float(0.0).expand_rhs(idx_f32.shape);
+            let adjustment = self.graph.constant_float(axis_size as f32).expand_rhs(idx_f32.shape);
+            let is_negative = idx_f32.lt(zero).cast(DType::F32);
+            let idx_int = (idx_f32 + is_negative * adjustment).cast(DType::Int);
 
             let stride = &strides[dim_idx];
             let weighted = if stride.to_usize() == Some(1) {
@@ -366,7 +375,18 @@ impl<'a> Translator<'a> {
         let dim = self.get_int_arg(node, 1)?;
         let dim = normalize_dim(dim, a.shape.len());
         let indices = self.get_input_tensor(node, 2)?;
-        Ok(a.gather_elements(indices.cast(DType::Int), dim))
+
+        // Normalize negative indices: -1 → last, -2 → second-to-last, etc.
+        let axis_dim = a.shape.dims[dim]
+            .to_usize()
+            .ok_or_else(|| anyhow::anyhow!("Gather: axis dim must be concrete for negative index normalization"))?;
+        let indices_f32 = indices.cast(DType::F32);
+        let zero = self.graph.constant_float(0.0).expand_rhs(indices_f32.shape);
+        let adjustment = self.graph.constant_float(axis_dim as f32).expand_rhs(indices_f32.shape);
+        let is_negative = indices_f32.lt(zero).cast(DType::F32);
+        let normalized = (indices_f32 + is_negative * adjustment).cast(DType::Int);
+
+        Ok(a.gather_elements(normalized, dim))
     }
 
     pub(crate) fn translate_scatter_src(&mut self, node: &Node) -> Result<GraphTensor> {

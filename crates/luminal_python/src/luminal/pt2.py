@@ -201,51 +201,72 @@ def pt2_backend(gm: torch.fx.GraphModule, example_inputs: list):
 
     gm = gm.eval()
 
-    # Detect buffer/param inputs lifted by torch.compile
-    n_buffer = 0
+    # Classify each placeholder as a lifted param or user input.
+    # Lifted params may be interleaved with user inputs in the FX graph,
+    # so we track positions explicitly rather than assuming they come first.
+    buffer_indices = []  # positions in example_inputs that are lifted params
+    user_indices = []    # positions in example_inputs that are user inputs
+    buffer_nodes = []    # FX nodes to replace with get_attr
+    placeholder_idx = 0
     for node in gm.graph.nodes:
         if node.op == "placeholder":
             name = node.name
             if name.startswith("l_self_") or name.startswith("l_model_"):
-                n_buffer += 1
+                buffer_indices.append(placeholder_idx)
+                buffer_nodes.append(node)
+            else:
+                user_indices.append(placeholder_idx)
+            placeholder_idx += 1
 
-    if n_buffer > 0:
-        captured_buffers = [inp.detach().clone() for inp in example_inputs[:n_buffer]]
+    if buffer_nodes:
+        # Re-internalize lifted params: register as buffers, replace placeholders
+        # with get_attr nodes so torch.export sees them as model state, not inputs.
+        for i, node in enumerate(buffer_nodes):
+            attr_name = f"_luminal_param_{i}"
+            gm.register_buffer(attr_name, example_inputs[buffer_indices[i]].detach().clone())
+            with gm.graph.inserting_before(node):
+                new_node = gm.graph.create_node("get_attr", attr_name)
+                new_node.meta = node.meta.copy()
+                node.replace_all_uses_with(new_node)
+            gm.graph.erase_node(node)
+        gm.graph.lint()
+        gm.recompile()
 
-        def wrapper(*args):
-            return gm(*captured_buffers, *args[n_buffer:])
+    user_inputs = [example_inputs[i] for i in user_indices] if user_indices else list(example_inputs)
 
-        return wrapper
+    import inspect
+
+    from safetensors.torch import save_file
+
+    export_kwargs_extra = dict(strict=False)
+    if (
+        "prefer_deferred_runtime_asserts_over_guards"
+        in inspect.signature(torch.export.export).parameters
+    ):
+        export_kwargs_extra["prefer_deferred_runtime_asserts_over_guards"] = True
+
+    ep = torch.export.export(gm, tuple(user_inputs), **export_kwargs_extra)
+
+    tmpdir = tempfile.mkdtemp(prefix="luminal_backend_")
+    atexit.register(shutil.rmtree, tmpdir, ignore_errors=True)
+    pt2_path = os.path.join(tmpdir, "model.pt2")
+    weights_path = os.path.join(tmpdir, "weights.safetensors")
+
+    torch.export.save(ep, pt2_path)
+
+    state_dict = {k: v.float().clone() for k, v in ep.state_dict.items()}
+    if state_dict:
+        save_file(state_dict, weights_path)
     else:
-        import inspect
+        weights_path = ""
 
-        from safetensors.torch import save_file
+    compiled_inner = _compile_pt2(pt2_path, weights_path, backend_name, 0)
+    lm = LuminalModel(compiled_inner)
 
-        export_kwargs_extra = dict(strict=False)
-        if (
-            "prefer_deferred_runtime_asserts_over_guards"
-            in inspect.signature(torch.export.export).parameters
-        ):
-            export_kwargs_extra["prefer_deferred_runtime_asserts_over_guards"] = True
+    def wrapper(*args):
+        # After re-internalizing lifted params, dynamo only passes user inputs
+        # to the wrapper at runtime (lifted params are no longer part of the
+        # calling convention).
+        return (lm(args[0]),)
 
-        ep = torch.export.export(gm, tuple(example_inputs), **export_kwargs_extra)
-
-        tmpdir = tempfile.mkdtemp(prefix="luminal_backend_")
-        atexit.register(shutil.rmtree, tmpdir, ignore_errors=True)
-        pt2_path = os.path.join(tmpdir, "model.pt2")
-        torch.export.save(ep, pt2_path)
-
-        compiled_inner = _compile_pt2(pt2_path, "", backend_name, 0)
-        lm = LuminalModel(compiled_inner)
-
-        def wrapper(*args):
-            if len(args) > 1:
-                import warnings
-                warnings.warn(
-                    f"LuminalModel only processes the first tensor input, "
-                    f"but received {len(args)} inputs. Extra inputs are ignored.",
-                    stacklevel=2,
-                )
-            return (lm(args[0]),)
-
-        return wrapper
+    return wrapper
