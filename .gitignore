@@ -13,6 +13,7 @@ Cargo.lock
 *.npz
 *.model
 *.gguf
+.cargo-local
 
 
 .claude-project
