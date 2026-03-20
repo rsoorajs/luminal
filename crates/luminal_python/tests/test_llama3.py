@@ -104,9 +104,11 @@ def _run_hf_llama_test(config, device: torch.device, atol: float):
     """Run a HuggingFace LlamaForCausalLM test with the given config."""
     from transformers import LlamaForCausalLM
 
-    # CUDA uses optimized kernels (tiled matmul, etc.) with larger rounding error
+    # CUDA uses optimized kernels (tiled matmul, etc.) with larger rounding error.
+    # Precision scales with model complexity: 256-hidden Llama accumulates ~5e-2
+    # max_diff through attention on both ONNX and PT2 paths.
     if device.type == "cuda":
-        atol = max(atol, 1e-2)
+        atol = max(atol, 6e-2)
 
     model = LlamaForCausalLM(config).eval().to(device)
     compiled = torch.compile(model, backend=luminal_backend)
@@ -132,7 +134,6 @@ def test_hf_llama_tiny(device: torch.device):
     _run_hf_llama_test(config, device, atol=1e-5)
 
 
-'''
 def test_hf_llama_small(device: torch.device):
     """HuggingFace LlamaForCausalLM — small (256 hidden, 1 layer, ~1.1M params)."""
     config = _make_llama_config(
@@ -307,7 +308,9 @@ def test_hf_llama3_1b_decode_loop_dynamic():
             os.unlink(tmp_path)
         print("Exported Model")
         assert graph.has_dynamic_dims, "Graph should have dynamic dims"
-        assert "seq_len" in graph.dim_params, f"Expected 'seq_len' in {graph.dim_params}"
+        assert "seq_len" in graph.dim_params, (
+            f"Expected 'seq_len' in {graph.dim_params}"
+        )
 
         for step in range(num_generate):
             seq_len = len(tokens)
@@ -468,4 +471,3 @@ def test_hf_llama38b_cached():
     assert torch.allclose(logits, ref_logits, atol=1e-3), (
         f"max_diff={torch.max(torch.abs(logits - ref_logits)).item():.2e}"
     )
-'''

@@ -512,7 +512,10 @@ fn load_constants_impl(
             entry,
         ) {
             Ok(b) => b,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!("[luminal] Warning: failed to load constant '{}': {:#}", name, e);
+                continue;
+            }
         };
         let f32_data = constant_bytes_to_f32(&raw_bytes, entry.tensor_meta.dtype);
 

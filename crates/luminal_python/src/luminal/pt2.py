@@ -260,7 +260,7 @@ def pt2_backend(gm: torch.fx.GraphModule, example_inputs: list):
     else:
         weights_path = ""
 
-    compiled_inner = _compile_pt2(pt2_path, weights_path, backend_name, 0)
+    compiled_inner = _compile_pt2(pt2_path, weights_path, backend_name, 10)
     lm = LuminalModel(compiled_inner)
 
     def wrapper(*args):
