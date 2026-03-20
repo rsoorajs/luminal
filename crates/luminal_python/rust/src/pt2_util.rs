@@ -138,7 +138,10 @@ pub fn resolve_neg1_dim(target: &[i64], current_dims: &[Expression]) -> Vec<Expr
 }
 
 /// Resolve -1 in a reshape target shape that contains Expression values.
-pub fn resolve_neg1_dim_exprs(target: &[Expression], current_dims: &[Expression]) -> Vec<Expression> {
+pub fn resolve_neg1_dim_exprs(
+    target: &[Expression],
+    current_dims: &[Expression],
+) -> Vec<Expression> {
     let neg1_expr = Expression::from(-1i32);
     let neg1_idx = target.iter().position(|e| *e == neg1_expr);
 
@@ -158,7 +161,9 @@ pub fn resolve_neg1_dim_exprs(target: &[Expression], current_dims: &[Expression]
         let mut target_concrete: i64 = 1;
         let mut target_symbolic: Vec<Expression> = Vec::new();
         for (i, e) in target.iter().enumerate() {
-            if i == idx { continue; }
+            if i == idx {
+                continue;
+            }
             if let Some(v) = e.to_usize() {
                 target_concrete *= v as i64;
             } else {

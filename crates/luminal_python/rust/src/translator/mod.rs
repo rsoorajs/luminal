@@ -92,24 +92,38 @@ impl<'a> Translator<'a> {
         let inputs = self.parsed.classify_inputs();
         for input in &inputs {
             match input {
-                InputKind::Parameter { graph_name, original_name } => {
-                    let meta = self.parsed.tensor_meta(graph_name)
+                InputKind::Parameter {
+                    graph_name,
+                    original_name,
+                } => {
+                    let meta = self
+                        .parsed
+                        .tensor_meta(graph_name)
                         .with_context(|| format!("Missing tensor meta for param {graph_name}"))?;
                     let shape = self.tensor_meta_to_shape(meta)?;
                     let tensor = self.graph.named_tensor(original_name, shape);
-                    self.param_ids.push((graph_name.clone(), original_name.clone(), tensor.id));
+                    self.param_ids
+                        .push((graph_name.clone(), original_name.clone(), tensor.id));
                     self.tensors.insert(graph_name.clone(), tensor);
                 }
-                InputKind::Buffer { graph_name, original_name } => {
-                    let meta = self.parsed.tensor_meta(graph_name)
+                InputKind::Buffer {
+                    graph_name,
+                    original_name,
+                } => {
+                    let meta = self
+                        .parsed
+                        .tensor_meta(graph_name)
                         .with_context(|| format!("Missing tensor meta for buffer {graph_name}"))?;
                     let shape = self.tensor_meta_to_shape(meta)?;
                     let tensor = self.graph.named_tensor(original_name, shape);
-                    self.param_ids.push((graph_name.clone(), original_name.clone(), tensor.id));
+                    self.param_ids
+                        .push((graph_name.clone(), original_name.clone(), tensor.id));
                     self.tensors.insert(graph_name.clone(), tensor);
                 }
                 InputKind::UserInput { graph_name } => {
-                    let meta = self.parsed.tensor_meta(graph_name)
+                    let meta = self
+                        .parsed
+                        .tensor_meta(graph_name)
                         .with_context(|| format!("Missing tensor meta for input {graph_name}"))?;
                     let shape = self.tensor_meta_to_shape(meta)?;
                     let tensor = self.graph.named_tensor(graph_name, shape);
@@ -148,16 +162,21 @@ impl<'a> Translator<'a> {
     }
 
     pub(crate) fn get_input_tensor(&self, node: &Node, idx: usize) -> Result<GraphTensor> {
-        let arg = &node.inputs.get(idx)
+        let arg = &node
+            .inputs
+            .get(idx)
             .with_context(|| format!("Node {} missing input {idx}", node.target))?
             .arg;
-        let name = arg.as_tensor_name()
-            .with_context(|| format!("Input {idx} of {} is not a tensor: {:?}", node.target, arg))?;
+        let name = arg.as_tensor_name().with_context(|| {
+            format!("Input {idx} of {} is not a tensor: {:?}", node.target, arg)
+        })?;
         self.get_tensor(name)
     }
 
     pub(crate) fn get_int_arg(&self, node: &Node, idx: usize) -> Result<i64> {
-        let arg = &node.inputs.get(idx)
+        let arg = &node
+            .inputs
+            .get(idx)
             .with_context(|| format!("Node {} missing input {idx}", node.target))?
             .arg;
         arg.as_int()
@@ -165,7 +184,9 @@ impl<'a> Translator<'a> {
     }
 
     pub(crate) fn get_float_arg(&self, node: &Node, idx: usize) -> Result<f64> {
-        let arg = &node.inputs.get(idx)
+        let arg = &node
+            .inputs
+            .get(idx)
             .with_context(|| format!("Node {} missing input {idx}", node.target))?
             .arg;
         if let Some(f) = arg.as_float() {
@@ -178,7 +199,9 @@ impl<'a> Translator<'a> {
     }
 
     pub(crate) fn get_ints_arg(&self, node: &Node, idx: usize) -> Result<Vec<i64>> {
-        let arg = &node.inputs.get(idx)
+        let arg = &node
+            .inputs
+            .get(idx)
             .with_context(|| format!("Node {} missing input {idx}", node.target))?
             .arg;
         arg.as_ints()
@@ -187,37 +210,51 @@ impl<'a> Translator<'a> {
     }
 
     pub(crate) fn get_expr_arg(&self, node: &Node, idx: usize) -> Result<Expression> {
-        let arg = &node.inputs.get(idx)
+        let arg = &node
+            .inputs
+            .get(idx)
             .with_context(|| format!("Node {} missing input {idx}", node.target))?
             .arg;
-        self.resolve_arg_as_expression(arg)
-            .with_context(|| format!("Input {idx} of {} cannot be resolved to Expression: {:?}", node.target, arg))
+        self.resolve_arg_as_expression(arg).with_context(|| {
+            format!(
+                "Input {idx} of {} cannot be resolved to Expression: {:?}",
+                node.target, arg
+            )
+        })
     }
 
     pub(crate) fn get_exprs_arg(&self, node: &Node, idx: usize) -> Result<Vec<Expression>> {
         use crate::pt2_schema::SymIntEntry;
-        let arg = &node.inputs.get(idx)
+        let arg = &node
+            .inputs
+            .get(idx)
             .with_context(|| format!("Node {} missing input {idx}", node.target))?
             .arg;
         if let Some(ints) = arg.as_ints() {
             return Ok(ints.iter().map(|&v| Expression::from(v as usize)).collect());
         }
         if let Some(entries) = arg.as_sym_ints() {
-            return entries.iter().map(|entry| {
-                match entry {
+            return entries
+                .iter()
+                .map(|entry| match entry {
                     SymIntEntry::Int(i) => Ok(Expression::from(i.as_int as usize)),
-                    SymIntEntry::Name(s) => {
-                        self.resolve_sym_int(&s.as_name)
-                            .with_context(|| format!("Cannot resolve sym_int: {}", s.as_name))
-                    }
-                }
-            }).collect();
+                    SymIntEntry::Name(s) => self
+                        .resolve_sym_int(&s.as_name)
+                        .with_context(|| format!("Cannot resolve sym_int: {}", s.as_name)),
+                })
+                .collect();
         }
-        anyhow::bail!("Input {idx} of {} is not int list or sym_int list: {:?}", node.target, arg)
+        anyhow::bail!(
+            "Input {idx} of {} is not int list or sym_int list: {:?}",
+            node.target,
+            arg
+        )
     }
 
     pub(crate) fn get_bool_arg(&self, node: &Node, idx: usize) -> Result<bool> {
-        let arg = &node.inputs.get(idx)
+        let arg = &node
+            .inputs
+            .get(idx)
             .with_context(|| format!("Node {} missing input {idx}", node.target))?
             .arg;
         arg.as_bool()
@@ -237,7 +274,10 @@ impl<'a> Translator<'a> {
             DimSize::Expr(e) => {
                 let sym_name = crate::pt2_parser::extract_symbol_name_pub(&e.as_expr.expr_str)
                     .with_context(|| format!("Cannot parse symbol: {}", e.as_expr.expr_str))?;
-                let c = self.sym_map.sym_to_char.get(&sym_name)
+                let c = self
+                    .sym_map
+                    .sym_to_char
+                    .get(&sym_name)
                     .with_context(|| format!("Unknown symbol: {sym_name}"))?;
                 Ok(Expression::from(*c))
             }
@@ -247,14 +287,23 @@ impl<'a> Translator<'a> {
     pub(crate) fn resolve_sym_int(&self, name: &str) -> Option<Expression> {
         let sym_int_values = &self.parsed.program.graph_module.graph.sym_int_values;
         if let Some(val) = sym_int_values.get(name) {
-            if let Some(expr_str) = val.get("as_expr").and_then(|e| e.get("expr_str")).and_then(|s| s.as_str()) {
+            if let Some(expr_str) = val
+                .get("as_expr")
+                .and_then(|e| e.get("expr_str"))
+                .and_then(|s| s.as_str())
+            {
                 if let Some(sym) = crate::pt2_parser::extract_symbol_name_pub(expr_str) {
                     if let Some(&c) = self.sym_map.sym_to_char.get(&sym) {
                         return Some(Expression::from(c));
                     }
                 }
             }
-            if let Some(hint) = val.get("as_expr").and_then(|e| e.get("hint")).and_then(|h| h.get("as_int")).and_then(|v| v.as_i64()) {
+            if let Some(hint) = val
+                .get("as_expr")
+                .and_then(|e| e.get("hint"))
+                .and_then(|h| h.get("as_int"))
+                .and_then(|v| v.as_i64())
+            {
                 return Some(Expression::from(hint as usize));
             }
         }

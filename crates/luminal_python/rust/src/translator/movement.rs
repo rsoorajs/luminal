@@ -17,9 +17,12 @@ impl<'a> Translator<'a> {
             resolve_neg1_dim_exprs(&exprs, &a.shape.dims)
         };
 
-        let has_broadcast = a.shape.dims.iter().zip(a.shape.strides.iter()).any(|(d, s)| {
-            s.to_usize() == Some(0) && d.to_usize() != Some(1)
-        });
+        let has_broadcast = a
+            .shape
+            .dims
+            .iter()
+            .zip(a.shape.strides.iter())
+            .any(|(d, s)| s.to_usize() == Some(0) && d.to_usize() != Some(1));
 
         let a = if has_broadcast || !a.shape.is_contiguous() {
             a + 0.0
@@ -39,7 +42,10 @@ impl<'a> Translator<'a> {
     pub(crate) fn translate_permute(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         let dims = self.get_ints_arg(node, 1)?;
-        let axes: Vec<usize> = dims.iter().map(|&d| normalize_dim(d, a.shape.len())).collect();
+        let axes: Vec<usize> = dims
+            .iter()
+            .map(|&d| normalize_dim(d, a.shape.len()))
+            .collect();
         Ok(a.permute(axes))
     }
 
@@ -56,13 +62,23 @@ impl<'a> Translator<'a> {
         let mut a = self.get_input_tensor(node, 0)?;
         let neg1_expr = Expression::from(-1i32);
         let target_shape: Vec<Expression> = if let Ok(sizes) = self.get_ints_arg(node, 1) {
-            sizes.iter().enumerate().map(|(i, &s)| {
-                if s == -1 { a.shape.dims[i] } else { Expression::from(s as usize) }
-            }).collect()
+            sizes
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| {
+                    if s == -1 {
+                        a.shape.dims[i]
+                    } else {
+                        Expression::from(s as usize)
+                    }
+                })
+                .collect()
         } else {
-            self.get_exprs_arg(node, 1)?.into_iter().enumerate().map(|(i, e)| {
-                if e == neg1_expr { a.shape.dims[i] } else { e }
-            }).collect()
+            self.get_exprs_arg(node, 1)?
+                .into_iter()
+                .enumerate()
+                .map(|(i, e)| if e == neg1_expr { a.shape.dims[i] } else { e })
+                .collect()
         };
         a.shape.expand(target_shape);
         Ok(a)
@@ -74,7 +90,8 @@ impl<'a> Translator<'a> {
         let dim = normalize_dim(dim, a.shape.len());
 
         let start: Expression = if node.inputs.len() > 2 {
-            self.get_expr_arg(node, 2).unwrap_or_else(|_| Expression::from(0usize))
+            self.get_expr_arg(node, 2)
+                .unwrap_or_else(|_| Expression::from(0usize))
         } else {
             Expression::from(0usize)
         };
@@ -83,7 +100,8 @@ impl<'a> Translator<'a> {
             return Ok(a);
         }
 
-        let end_is_sentinel = self.get_int_arg(node, 3)
+        let end_is_sentinel = self
+            .get_int_arg(node, 3)
             .map(|e| e == i64::MAX || e == 9223372036854775807)
             .unwrap_or(false);
 
@@ -122,7 +140,10 @@ impl<'a> Translator<'a> {
 
     pub(crate) fn translate_cat(&mut self, node: &Node) -> Result<GraphTensor> {
         let tensors: Vec<GraphTensor> = if let Some(names) = node.inputs[0].arg.as_tensors() {
-            names.iter().map(|n| self.get_tensor(&n.name)).collect::<Result<_>>()?
+            names
+                .iter()
+                .map(|n| self.get_tensor(&n.name))
+                .collect::<Result<_>>()?
         } else {
             let mut ts = Vec::new();
             for input in &node.inputs {
@@ -139,14 +160,17 @@ impl<'a> Translator<'a> {
             bail!("cat: no tensor inputs found");
         }
 
-        let dim = node.inputs.iter()
+        let dim = node
+            .inputs
+            .iter()
             .find(|i| i.arg.as_int().is_some() && i.name != "tensors")
             .and_then(|i| i.arg.as_int())
             .unwrap_or(0);
 
-        let tensors: Vec<GraphTensor> = tensors.into_iter().filter(|t| {
-            !t.shape.dims.iter().any(|d| d.to_usize() == Some(0))
-        }).collect();
+        let tensors: Vec<GraphTensor> = tensors
+            .into_iter()
+            .filter(|t| !t.shape.dims.iter().any(|d| d.to_usize() == Some(0)))
+            .collect();
 
         if tensors.is_empty() {
             bail!("cat: all tensor inputs are empty");
@@ -163,9 +187,26 @@ impl<'a> Translator<'a> {
     pub(crate) fn translate_index_select(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         let dim = self.get_int_arg(node, 1)?;
-        let _dim = normalize_dim(dim, a.shape.len());
-        let indices = self.get_input_tensor(node, 2)?;
-        Ok(a.gather(indices))
+        let dim = normalize_dim(dim, a.shape.len());
+        let indices = self.get_input_tensor(node, 2)?.cast(DType::Int);
+        let src_dims = a.shape.dims.clone();
+        let idx_len = indices.shape.dims[0];
+
+        // Reshape 1D indices [K] → [1,..,K,..,1] with K at position `dim`
+        let mut idx = indices;
+        for _ in 0..dim {
+            idx = idx.unsqueeze(0);
+        }
+        for _ in (dim + 1)..src_dims.len() {
+            idx = idx.expand_dim(idx.shape.len(), Expression::from(1usize));
+        }
+
+        // Expand to output shape: src_dims with dim replaced by idx_len
+        let mut target: Vec<Expression> = src_dims.to_vec();
+        target[dim] = idx_len;
+        idx.shape.expand(target);
+
+        Ok(a.gather_elements(idx, dim))
     }
 
     pub(crate) fn translate_embedding(&mut self, node: &Node) -> Result<GraphTensor> {
@@ -176,8 +217,7 @@ impl<'a> Translator<'a> {
         let seq_shape = indices.shape.dims.clone();
 
         let indices_int = indices.cast(DType::Int);
-        let ids_expanded = (indices_int * hidden_dim)
-            .expand_dim(seq_shape.len(), hidden_dim);
+        let ids_expanded = (indices_int * hidden_dim).expand_dim(seq_shape.len(), hidden_dim);
 
         let arange = self.graph.arange(hidden_dim);
         let mut arange_expanded = arange;
@@ -202,7 +242,9 @@ impl<'a> Translator<'a> {
 
             // Check if it's a single tensor (1D indexing)
             if let Some(name) = indices_arg.as_tensor_name() {
-                index_names = vec![crate::pt2_schema::TensorName { name: name.to_string() }];
+                index_names = vec![crate::pt2_schema::TensorName {
+                    name: name.to_string(),
+                }];
             } else if let Some(opt_tensors) = indices_arg.as_optional_tensors() {
                 // Optional tensors list: [None, tensor, None, ...] for selective dim indexing
                 use crate::pt2_schema::OptionalTensorEntry;
@@ -239,7 +281,10 @@ impl<'a> Translator<'a> {
                     return Ok(source.gather_elements(expanded, first_non_none_dim));
                 }
             } else {
-                bail!("index.Tensor: unsupported indices format: {:?}", indices_arg);
+                bail!(
+                    "index.Tensor: unsupported indices format: {:?}",
+                    indices_arg
+                );
             }
         }
 
@@ -335,7 +380,9 @@ impl<'a> Translator<'a> {
 
     pub(crate) fn translate_index_put(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
-        let index_names = node.inputs[1].arg.as_tensors()
+        let index_names = node.inputs[1]
+            .arg
+            .as_tensors()
             .context("index_put: indices not as_tensors")?;
         let values = self.get_input_tensor(node, 2)?;
 
@@ -367,11 +414,14 @@ impl<'a> Translator<'a> {
         let dim_size = a.shape.dims[dim];
         if let Some(total) = dim_size.to_usize() {
             // Collect output names from as_tensors (multi-output) or as_tensor (single)
-            let output_names: Vec<String> = node.outputs.first()
+            let output_names: Vec<String> = node
+                .outputs
+                .first()
                 .and_then(|o| o.as_tensors.as_ref())
                 .map(|ts| ts.iter().map(|t| t.name.clone()).collect())
                 .unwrap_or_else(|| {
-                    node.outputs.iter()
+                    node.outputs
+                        .iter()
                         .filter_map(|o| o.as_tensor.as_ref().map(|t| t.name.clone()))
                         .collect()
                 });

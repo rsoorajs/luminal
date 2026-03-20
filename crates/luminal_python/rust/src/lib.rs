@@ -12,9 +12,9 @@ mod pt2_util;
 mod translator;
 
 use compiled_graph::OnnxGraphResult;
-use pt2_compiled_model::{compile_pt2, Pt2CompiledModel};
 use onnx_protobuf::ModelProto;
 use protobuf::Message;
+use pt2_compiled_model::{Pt2CompiledModel, compile_pt2};
 use pyo3::prelude::*;
 use std::fs;
 use std::path::Path;

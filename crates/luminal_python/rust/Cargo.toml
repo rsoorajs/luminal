@@ -24,7 +24,6 @@ anyhow = "1"
 memmap2 = "0.9"
 safetensors = "0.5"
 half = "2"
-petgraph = "0.6"
 
 [dependencies.pyo3]
 version = "0.28.0"

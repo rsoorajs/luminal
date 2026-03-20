@@ -7,7 +7,11 @@ use crate::pt2_util::*;
 use super::Translator;
 
 impl<'a> Translator<'a> {
-    pub(crate) fn translate_reduction(&mut self, node: &Node, op: ReductionOp) -> Result<GraphTensor> {
+    pub(crate) fn translate_reduction(
+        &mut self,
+        node: &Node,
+        op: ReductionOp,
+    ) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         let dims = self.get_ints_arg(node, 1)?;
         let keepdim = if node.inputs.len() > 2 {

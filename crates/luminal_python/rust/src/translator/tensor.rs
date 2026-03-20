@@ -8,7 +8,9 @@ use super::Translator;
 
 impl<'a> Translator<'a> {
     pub(crate) fn translate_arange(&mut self, node: &Node) -> Result<GraphTensor> {
-        let positional_args: Vec<Expression> = node.inputs.iter()
+        let positional_args: Vec<Expression> = node
+            .inputs
+            .iter()
             .filter(|i| i.kind <= 1)
             .filter_map(|i| self.resolve_arg_as_expression(&i.arg))
             .collect();
@@ -16,11 +18,9 @@ impl<'a> Translator<'a> {
         match positional_args.len() {
             0 => anyhow::bail!("arange: no positional args found"),
             1 => Ok(self.graph.arange(positional_args[0])),
-            _ => Ok(self.graph.arange_options(
-                positional_args[0],
-                positional_args[1],
-                1,
-            )),
+            _ => Ok(self
+                .graph
+                .arange_options(positional_args[0], positional_args[1], 1)),
         }
     }
 
@@ -31,33 +31,42 @@ impl<'a> Translator<'a> {
     }
 
     pub(crate) fn translate_zeros(&mut self, node: &Node) -> Result<GraphTensor> {
-        let output_name = node.outputs.first()
+        let output_name = node
+            .outputs
+            .first()
             .and_then(|o| o.as_tensor.as_ref())
             .map(|t| t.name.clone())
             .unwrap_or_default();
-        let meta = self.tensor_meta(&output_name)
+        let meta = self
+            .tensor_meta(&output_name)
             .context("Missing tensor meta for zeros output")?;
         let shape = self.tensor_meta_to_shape(meta)?;
         Ok(self.graph.constant_float(0.0).expand_rhs(shape))
     }
 
     pub(crate) fn translate_ones(&mut self, node: &Node) -> Result<GraphTensor> {
-        let output_name = node.outputs.first()
+        let output_name = node
+            .outputs
+            .first()
             .and_then(|o| o.as_tensor.as_ref())
             .map(|t| t.name.clone())
             .unwrap_or_default();
-        let meta = self.tensor_meta(&output_name)
+        let meta = self
+            .tensor_meta(&output_name)
             .context("Missing tensor meta for ones output")?;
         let shape = self.tensor_meta_to_shape(meta)?;
         Ok(self.graph.constant_float(1.0).expand_rhs(shape))
     }
 
     pub(crate) fn translate_new_ones(&mut self, node: &Node) -> Result<GraphTensor> {
-        let output_name = node.outputs.first()
+        let output_name = node
+            .outputs
+            .first()
             .and_then(|o| o.as_tensor.as_ref())
             .map(|t| t.name.clone())
             .unwrap_or_default();
-        let meta = self.tensor_meta(&output_name)
+        let meta = self
+            .tensor_meta(&output_name)
             .context("Missing tensor meta for new_ones output")?;
         let shape = self.tensor_meta_to_shape(meta)?;
         if shape.is_empty() {
@@ -71,24 +80,25 @@ impl<'a> Translator<'a> {
         let cond = self.get_input_tensor(node, 0)?;
         let x = self.get_input_tensor(node, 1)?;
         let y = self.get_input_tensor(node, 2)?;
-        let cond_f32 = cond.cast(DType::F32);
-        let (cond_f32_x, x_b) = broadcast_binary(cond_f32, x);
-        let one = self.graph.constant_float(1.0).expand_rhs(cond_f32.shape);
-        let inv_cond = one - cond_f32;
-        let (inv_cond_y, y_b) = broadcast_binary(inv_cond, y);
-        Ok(cond_f32_x * x_b + inv_cond_y * y_b)
+        // Broadcast all three tensors to a common shape first
+        let (cond_b, x_b) = broadcast_binary(cond, x);
+        let (cond_bc, y_b) = broadcast_binary(cond_b, y);
+        let (x_bc, y_bc) = broadcast_binary(x_b, y_b);
+        let c = cond_bc.cast(DType::F32);
+        let one = self.graph.constant_float(1.0).expand_rhs(c.shape);
+        Ok(c * x_bc + (one - c) * y_bc)
     }
 
     pub(crate) fn translate_where_scalar_other(&mut self, node: &Node) -> Result<GraphTensor> {
         let cond = self.get_input_tensor(node, 0)?;
         let x = self.get_input_tensor(node, 1)?;
         let other_val = self.get_float_arg(node, 2)? as f32;
-        let cond_f32 = cond.cast(DType::F32);
-        let (c, x_b) = broadcast_binary(cond_f32, x);
-        let one = self.graph.constant_float(1.0).expand_rhs(cond_f32.shape);
-        let inv = one - cond_f32;
-        let other = self.graph.constant_float(other_val).expand_rhs(inv.shape);
-        Ok(c * x_b + inv * other)
+        // Broadcast cond and x to a common shape
+        let (cond_b, x_b) = broadcast_binary(cond, x);
+        let c = cond_b.cast(DType::F32);
+        let one = self.graph.constant_float(1.0).expand_rhs(c.shape);
+        let other = self.graph.constant_float(other_val).expand_rhs(c.shape);
+        Ok(c * x_b + (one - c) * other)
     }
 
     pub(crate) fn translate_diff(&mut self, node: &Node) -> Result<GraphTensor> {
@@ -193,15 +203,18 @@ impl<'a> Translator<'a> {
         let dim = normalize_dim(dim, a.shape.len());
 
         // Determine output names
-        let values_name = node.outputs.first()
+        let values_name = node
+            .outputs
+            .first()
             .and_then(|o| o.as_tensor.as_ref().map(|t| t.name.clone()));
-        let indices_name = if let Some(ts) = node.outputs.first().and_then(|o| o.as_tensors.as_ref()) {
-            ts.get(1).map(|t| t.name.clone())
-        } else if node.outputs.len() > 1 {
-            node.outputs[1].as_tensor.as_ref().map(|t| t.name.clone())
-        } else {
-            None
-        };
+        let indices_name =
+            if let Some(ts) = node.outputs.first().and_then(|o| o.as_tensors.as_ref()) {
+                ts.get(1).map(|t| t.name.clone())
+            } else if node.outputs.len() > 1 {
+                node.outputs[1].as_tensor.as_ref().map(|t| t.name.clone())
+            } else {
+                None
+            };
 
         // Use full argsort then slice, rather than topk_indexes/topk_values directly.
         // This avoids a CUDA gather kernel bug when data and index shapes differ
@@ -242,7 +255,9 @@ impl<'a> Translator<'a> {
     }
 
     pub(crate) fn translate_wrap_set_grad(&mut self, node: &Node) -> Result<()> {
-        let subgraph = node.inputs[1].arg.as_graph()
+        let subgraph = node.inputs[1]
+            .arg
+            .as_graph()
             .context("wrap_with_set_grad: missing subgraph")?
             .clone();
 
@@ -268,10 +283,9 @@ impl<'a> Translator<'a> {
         }
 
         for (main_out, sg_out) in node.outputs.iter().zip(subgraph.graph.outputs.iter()) {
-            if let (Some(main_name), Some(sg_name)) = (
-                main_out.as_tensor.as_ref(),
-                sg_out.as_tensor.as_ref(),
-            ) {
+            if let (Some(main_name), Some(sg_name)) =
+                (main_out.as_tensor.as_ref(), sg_out.as_tensor.as_ref())
+            {
                 if main_name.name != sg_name.name {
                     let tensor = self.get_tensor(&sg_name.name)?;
                     self.tensors.insert(main_name.name.clone(), tensor);

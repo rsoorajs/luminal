@@ -13,8 +13,11 @@ impl<'a> Translator<'a> {
             .outputs
             .first()
             .and_then(|o| {
-                o.as_tensor.as_ref().map(|t| t.name.clone())
-                    .or_else(|| o.as_tensors.as_ref().and_then(|ts| ts.first().map(|t| t.name.clone())))
+                o.as_tensor.as_ref().map(|t| t.name.clone()).or_else(|| {
+                    o.as_tensors
+                        .as_ref()
+                        .and_then(|ts| ts.first().map(|t| t.name.clone()))
+                })
             })
             .unwrap_or_default();
 
@@ -28,13 +31,18 @@ impl<'a> Translator<'a> {
             _ => {}
         }
 
-        let has_tensor_output = node.outputs.iter().any(|o| o.as_tensor.is_some() || o.as_tensors.is_some());
+        let has_tensor_output = node
+            .outputs
+            .iter()
+            .any(|o| o.as_tensor.is_some() || o.as_tensors.is_some());
         if !has_tensor_output {
             return Ok(());
         }
 
         let result = match target.as_str() {
             // Binary ops
+            // Note: rsub/rdiv are not handled here because torch.export decomposes them
+            // into sub/div with swapped operands before emission.
             "torch.ops.aten.add.Tensor" => self.translate_binary_op(node, BinaryOp::Add)?,
             "torch.ops.aten.add.Scalar" => self.translate_binary_scalar_op(node, BinaryOp::Add)?,
             "torch.ops.aten.mul.Tensor" => self.translate_binary_op(node, BinaryOp::Mul)?,
@@ -266,8 +274,13 @@ impl<'a> Translator<'a> {
                 let x2 = a * a;
                 let t = (ax * 0.3275911_f32 + 1.0).reciprocal();
                 // Horner: t*(a1 + t*(a2 + t*(a3 + t*(a4 + t*a5))))
-                let poly = t * (t * (t * (t * (t * 1.061405429_f32 + (-1.453152027_f32)) + 1.421413741_f32) + (-0.284496736_f32)) + 0.254829592_f32);
-                let result_abs = self.graph.constant_float(1.0).expand_rhs(a.shape) - poly * (x2 * (-1.0)).exp();
+                let poly = t
+                    * (t * (t
+                        * (t * (t * 1.061405429_f32 + (-1.453152027_f32)) + 1.421413741_f32)
+                        + (-0.284496736_f32))
+                        + 0.254829592_f32);
+                let result_abs =
+                    self.graph.constant_float(1.0).expand_rhs(a.shape) - poly * (x2 * (-1.0)).exp();
                 // sign(x) = 2*(x >= 0) - 1
                 let zero = self.graph.constant_float(0.0).expand_rhs(a.shape);
                 let sign = a.ge(zero).cast(DType::F32) * 2.0 - 1.0;

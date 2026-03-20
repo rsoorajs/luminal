@@ -31,9 +31,15 @@ pub struct ParsedPT2 {
 #[derive(Debug, Clone)]
 pub enum InputKind {
     /// A model parameter (e.g., "fc1.weight")
-    Parameter { graph_name: String, original_name: String },
+    Parameter {
+        graph_name: String,
+        original_name: String,
+    },
     /// A model buffer (e.g., "running_mean")
-    Buffer { graph_name: String, original_name: String },
+    Buffer {
+        graph_name: String,
+        original_name: String,
+    },
     /// A user-provided input tensor (e.g., "x")
     UserInput { graph_name: String },
 }
@@ -55,29 +61,28 @@ impl ParsedPT2 {
             .signature
             .input_specs
             .iter()
-            .filter_map(|spec| {
-                match spec {
-                    InputSpec::Parameter(p) => Some(InputKind::Parameter {
-                        graph_name: p.parameter.arg.name.clone(),
-                        original_name: p.parameter.parameter_name.clone(),
-                    }),
-                    InputSpec::Buffer(b) => Some(InputKind::Buffer {
-                        graph_name: b.buffer.arg.name.clone(),
-                        original_name: b.buffer.buffer_name.clone(),
-                    }),
-                    InputSpec::TensorConstant(tc) => Some(InputKind::Buffer {
-                        graph_name: tc.tensor_constant.arg.name.clone(),
-                        original_name: tc.tensor_constant.tensor_constant_name.clone(),
-                    }),
-                    InputSpec::UserInput(u) => {
-                        u.user_input.arg.as_tensor_name().map(|name| {
-                            InputKind::UserInput {
-                                graph_name: name.to_string(),
-                            }
+            .filter_map(|spec| match spec {
+                InputSpec::Parameter(p) => Some(InputKind::Parameter {
+                    graph_name: p.parameter.arg.name.clone(),
+                    original_name: p.parameter.parameter_name.clone(),
+                }),
+                InputSpec::Buffer(b) => Some(InputKind::Buffer {
+                    graph_name: b.buffer.arg.name.clone(),
+                    original_name: b.buffer.buffer_name.clone(),
+                }),
+                InputSpec::TensorConstant(tc) => Some(InputKind::Buffer {
+                    graph_name: tc.tensor_constant.arg.name.clone(),
+                    original_name: tc.tensor_constant.tensor_constant_name.clone(),
+                }),
+                InputSpec::UserInput(u) => {
+                    u.user_input
+                        .arg
+                        .as_tensor_name()
+                        .map(|name| InputKind::UserInput {
+                            graph_name: name.to_string(),
                         })
-                    }
-                    InputSpec::ConstantInput(_) | InputSpec::Other(_) => None,
                 }
+                InputSpec::ConstantInput(_) | InputSpec::Other(_) => None,
             })
             .collect()
     }
@@ -104,21 +109,18 @@ impl ParsedPT2 {
         let mut next_char = b'a';
 
         // Collect all symbolic dimension names from tensor_values
-        let mut sym_names: Vec<String> = Vec::new();
+        let mut sym_set = std::collections::HashSet::new();
         for meta in self.program.graph_module.graph.tensor_values.values() {
             for size in &meta.sizes {
                 if let Some(sym_str) = size.symbol_name() {
-                    // Extract the symbol name from "Symbol('s77', ...)"
                     if let Some(name) = extract_symbol_name(sym_str) {
-                        if !sym_names.contains(&name) {
-                            sym_names.push(name);
-                        }
+                        sym_set.insert(name);
                     }
                 }
             }
         }
 
-        // Sort for deterministic mapping
+        let mut sym_names: Vec<String> = sym_set.into_iter().collect();
         sym_names.sort();
 
         for name in &sym_names {
@@ -167,11 +169,7 @@ pub fn parse_pt2(path: &str) -> Result<ParsedPT2> {
             .next()
             .context("Empty PT2 archive")?
             .to_string();
-        first
-            .split('/')
-            .next()
-            .unwrap_or(&first)
-            .to_string()
+        first.split('/').next().unwrap_or(&first).to_string()
     };
 
     // Read model.json
@@ -182,8 +180,7 @@ pub fn parse_pt2(path: &str) -> Result<ParsedPT2> {
             .with_context(|| format!("Missing {model_json_path} in PT2 archive"))?;
         let mut buf = String::new();
         entry.read_to_string(&mut buf)?;
-        serde_json::from_str(&buf)
-            .with_context(|| "Failed to parse model.json")?
+        serde_json::from_str(&buf).with_context(|| "Failed to parse model.json")?
     };
 
     // Read weights config
@@ -194,12 +191,12 @@ pub fn parse_pt2(path: &str) -> Result<ParsedPT2> {
             .with_context(|| format!("Missing {weights_config_path}"))?;
         let mut buf = String::new();
         entry.read_to_string(&mut buf)?;
-        serde_json::from_str(&buf)
-            .with_context(|| "Failed to parse model_weights_config.json")?
+        serde_json::from_str(&buf).with_context(|| "Failed to parse model_weights_config.json")?
     };
 
     // Read constants config (optional — not all models have constants)
-    let constants_config_path = format!("{archive_prefix}/data/constants/model_constants_config.json");
+    let constants_config_path =
+        format!("{archive_prefix}/data/constants/model_constants_config.json");
     let constants_config: Option<WeightsConfig> = archive
         .by_name(&constants_config_path)
         .ok()
@@ -219,7 +216,11 @@ pub fn parse_pt2(path: &str) -> Result<ParsedPT2> {
 }
 
 /// Read raw weight bytes from the PT2 archive for a given weight entry.
-pub fn read_weight_bytes(pt2_path: &str, archive_prefix: &str, weight_entry: &WeightEntry) -> Result<Vec<u8>> {
+pub fn read_weight_bytes(
+    pt2_path: &str,
+    archive_prefix: &str,
+    weight_entry: &WeightEntry,
+) -> Result<Vec<u8>> {
     let file = File::open(pt2_path)?;
     let mut archive = ZipArchive::new(file)?;
     let weight_path = format!("{archive_prefix}/data/weights/{}", weight_entry.path_name);
@@ -232,7 +233,11 @@ pub fn read_weight_bytes(pt2_path: &str, archive_prefix: &str, weight_entry: &We
 }
 
 /// Read raw constant bytes from the PT2 archive for a given constant entry.
-pub fn read_constant_bytes(pt2_path: &str, archive_prefix: &str, entry: &WeightEntry) -> Result<Vec<u8>> {
+pub fn read_constant_bytes(
+    pt2_path: &str,
+    archive_prefix: &str,
+    entry: &WeightEntry,
+) -> Result<Vec<u8>> {
     let file = File::open(pt2_path)?;
     let mut archive = ZipArchive::new(file)?;
     let path = format!("{archive_prefix}/data/constants/{}", entry.path_name);
@@ -292,8 +297,14 @@ mod tests {
         assert_eq!(parsed.program.graph_module.graph.nodes.len(), 3);
 
         let inputs = parsed.classify_inputs();
-        let params: Vec<_> = inputs.iter().filter(|i| matches!(i, InputKind::Parameter { .. })).collect();
-        let user_inputs: Vec<_> = inputs.iter().filter(|i| matches!(i, InputKind::UserInput { .. })).collect();
+        let params: Vec<_> = inputs
+            .iter()
+            .filter(|i| matches!(i, InputKind::Parameter { .. }))
+            .collect();
+        let user_inputs: Vec<_> = inputs
+            .iter()
+            .filter(|i| matches!(i, InputKind::UserInput { .. }))
+            .collect();
         assert_eq!(params.len(), 3); // fc1.weight, fc2.weight, fc2.bias
         assert_eq!(user_inputs.len(), 1);
 

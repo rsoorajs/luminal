@@ -25,14 +25,27 @@ impl<'a> Translator<'a> {
         }
     }
 
-    pub(crate) fn translate_binary_scalar_op(&mut self, node: &Node, op: BinaryOp) -> Result<GraphTensor> {
+    pub(crate) fn translate_binary_scalar_op(
+        &mut self,
+        node: &Node,
+        op: BinaryOp,
+    ) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         let val = self.get_float_arg(node, 1)? as f32;
         Ok(self.apply_scalar_op(a, val, op))
     }
 
-    pub(crate) fn apply_scalar_op(&mut self, a: GraphTensor, val: f32, op: BinaryOp) -> GraphTensor {
-        let scalar = self.graph.constant_float(val).cast(a.dtype).expand_rhs(a.shape);
+    pub(crate) fn apply_scalar_op(
+        &mut self,
+        a: GraphTensor,
+        val: f32,
+        op: BinaryOp,
+    ) -> GraphTensor {
+        let scalar = self
+            .graph
+            .constant_float(val)
+            .cast(a.dtype)
+            .expand_rhs(a.shape);
         match op {
             BinaryOp::Add => a + scalar,
             BinaryOp::Mul => a * scalar,

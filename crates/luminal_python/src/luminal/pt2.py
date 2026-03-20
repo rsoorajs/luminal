@@ -6,7 +6,9 @@ Provides:
   - LuminalModel                       — wrapper for compiled models
 """
 
+import atexit
 import os
+import shutil
 import tempfile
 
 import torch
@@ -27,9 +29,6 @@ class LuminalModel:
         shape = list(arr.shape)
         result_data, result_shape = self._compiled.execute(data, shape)
         return torch.tensor(result_data, dtype=torch.float32).reshape(result_shape).to(input_device)
-
-
-_pytree_registered = False
 
 
 def _get_cache_dict(cache):
@@ -175,6 +174,7 @@ def compile(
         )
 
     tmpdir = tempfile.mkdtemp(prefix="luminal_")
+    atexit.register(shutil.rmtree, tmpdir, ignore_errors=True)
     pt2_path = os.path.join(tmpdir, "model.pt2")
     weights_path = os.path.join(tmpdir, "weights.safetensors")
 
@@ -213,7 +213,7 @@ def pt2_backend(gm: torch.fx.GraphModule, example_inputs: list):
         captured_buffers = [inp.detach().clone() for inp in example_inputs[:n_buffer]]
 
         def wrapper(*args):
-            return gm(*captured_buffers, args[n_buffer])
+            return gm(*captured_buffers, *args[n_buffer:])
 
         return wrapper
     else:
@@ -231,6 +231,7 @@ def pt2_backend(gm: torch.fx.GraphModule, example_inputs: list):
         ep = torch.export.export(gm, tuple(example_inputs), **export_kwargs_extra)
 
         tmpdir = tempfile.mkdtemp(prefix="luminal_backend_")
+        atexit.register(shutil.rmtree, tmpdir, ignore_errors=True)
         pt2_path = os.path.join(tmpdir, "model.pt2")
         torch.export.save(ep, pt2_path)
 
@@ -238,6 +239,13 @@ def pt2_backend(gm: torch.fx.GraphModule, example_inputs: list):
         lm = LuminalModel(compiled_inner)
 
         def wrapper(*args):
+            if len(args) > 1:
+                import warnings
+                warnings.warn(
+                    f"LuminalModel only processes the first tensor input, "
+                    f"but received {len(args)} inputs. Extra inputs are ignored.",
+                    stacklevel=2,
+                )
             return (lm(args[0]),)
 
         return wrapper

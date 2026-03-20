@@ -24,7 +24,8 @@ pub(crate) struct Pt2CompiledModelInner {
     output_shapes: Vec<Vec<Expression>>,
 }
 
-// Safety: All access is guarded by Mutex.
+// Safety: Send is safe because all fields are logically Send (Graph, RuntimeBackend, Vec,
+// etc.) and all access is serialized through the Mutex in Pt2CompiledModel.
 unsafe impl Send for Pt2CompiledModelInner {}
 
 #[pyclass]
@@ -41,6 +42,21 @@ impl Pt2CompiledModel {
     ) -> PyResult<(Vec<f32>, Vec<usize>)> {
         let mut inner = self.inner.lock().unwrap();
 
+        if inner.user_input_ids.len() > 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Model has {} user inputs, but execute() only supports single-input models. \
+                 Use a wrapper to handle multiple inputs.",
+                inner.user_input_ids.len()
+            )));
+        }
+        if inner.output_ids.len() > 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Model has {} outputs, but execute() only returns the first. \
+                 Multi-output support is not yet implemented.",
+                inner.output_ids.len()
+            )));
+        }
+
         let input_id = *inner
             .user_input_ids
             .first()
@@ -51,7 +67,10 @@ impl Pt2CompiledModel {
         }
 
         let dyn_map = inner.graph.dyn_map.clone();
-        let output_id = *inner.output_ids.first().unwrap();
+        let output_id = *inner
+            .output_ids
+            .first()
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("No outputs in graph"))?;
         let output_shape_exprs = inner.output_shapes[0].clone();
 
         inner.runtime.set_data(input_id, input_data);
@@ -61,13 +80,25 @@ impl Pt2CompiledModel {
         let shape = resolve_shape(&output_shape_exprs, &dyn_map);
         let total_elements: usize = shape.iter().product();
         let mut result = result;
-        result.resize(total_elements, 0.0);
+        if result.len() != total_elements {
+            eprintln!(
+                "[luminal] Warning: output buffer size ({}) differs from expected shape size ({}). \
+                 Resizing to match.",
+                result.len(),
+                total_elements
+            );
+            result.resize(total_elements, 0.0);
+        }
 
         Ok((result, shape))
     }
 }
 
-fn set_dyn_dims_from_input(graph: &mut LuminalGraph, shape_exprs: &[Expression], input_shape: &[usize]) {
+fn set_dyn_dims_from_input(
+    graph: &mut LuminalGraph,
+    shape_exprs: &[Expression],
+    input_shape: &[usize],
+) {
     for (i, dim_expr) in shape_exprs.iter().enumerate() {
         if i < input_shape.len() {
             if let Some(c) = expr_single_var(dim_expr) {
@@ -77,6 +108,10 @@ fn set_dyn_dims_from_input(graph: &mut LuminalGraph, shape_exprs: &[Expression],
     }
 }
 
+/// Detect if an expression is a bare single symbolic variable (e.g., just 'a').
+/// Uses brute-force probing: evaluates the expression with each variable set to 42 and checks
+/// if the result equals 42. This only detects bare symbol variables, not compound expressions
+/// like `a + 1` or `a * b`.
 fn expr_single_var(expr: &Expression) -> Option<char> {
     if expr.to_usize().is_some() {
         return None;
@@ -91,6 +126,31 @@ fn expr_single_var(expr: &Expression) -> Option<char> {
         }
     }
     None
+}
+
+fn resolve_dim_sizes(
+    sizes: &[pt2_schema::DimSize],
+    sym_to_char: &std::collections::HashMap<String, char>,
+) -> Vec<Expression> {
+    sizes
+        .iter()
+        .map(|s| match s {
+            pt2_schema::DimSize::Int(i) => Expression::from(i.as_int as usize),
+            pt2_schema::DimSize::Expr(e) => {
+                if let Some(sym) =
+                    pt2_parser::extract_symbol_name_pub(&e.as_expr.expr_str)
+                {
+                    if let Some(c) = sym_to_char.get(&sym) {
+                        Expression::from(*c)
+                    } else {
+                        Expression::from(1usize)
+                    }
+                } else {
+                    Expression::from(1usize)
+                }
+            }
+        })
+        .collect()
 }
 
 fn resolve_shape(exprs: &[Expression], dyn_map: &FxHashMap<char, usize>) -> Vec<usize> {
@@ -136,27 +196,7 @@ fn compile_pt2_inner(
         .map(|(name, _id)| {
             parsed
                 .tensor_meta(name)
-                .map(|meta| {
-                    meta.sizes
-                        .iter()
-                        .map(|s| match s {
-                            pt2_schema::DimSize::Int(i) => Expression::from(i.as_int as usize),
-                            pt2_schema::DimSize::Expr(e) => {
-                                if let Some(sym) =
-                                    pt2_parser::extract_symbol_name_pub(&e.as_expr.expr_str)
-                                {
-                                    if let Some(c) = translated.sym_map.sym_to_char.get(&sym) {
-                                        Expression::from(*c)
-                                    } else {
-                                        Expression::from(1usize)
-                                    }
-                                } else {
-                                    Expression::from(1usize)
-                                }
-                            }
-                        })
-                        .collect()
-                })
+                .map(|meta| resolve_dim_sizes(&meta.sizes, &translated.sym_map.sym_to_char))
                 .unwrap_or_default()
         })
         .collect();
@@ -174,27 +214,7 @@ fn compile_pt2_inner(
         .map(|(name, _id)| {
             parsed
                 .tensor_meta(name)
-                .map(|meta| {
-                    meta.sizes
-                        .iter()
-                        .map(|s| match s {
-                            pt2_schema::DimSize::Int(i) => Expression::from(i.as_int as usize),
-                            pt2_schema::DimSize::Expr(e) => {
-                                if let Some(sym) =
-                                    pt2_parser::extract_symbol_name_pub(&e.as_expr.expr_str)
-                                {
-                                    if let Some(c) = translated.sym_map.sym_to_char.get(&sym) {
-                                        Expression::from(*c)
-                                    } else {
-                                        Expression::from(1usize)
-                                    }
-                                } else {
-                                    Expression::from(1usize)
-                                }
-                            }
-                        })
-                        .collect()
-                })
+                .map(|meta| resolve_dim_sizes(&meta.sizes, &translated.sym_map.sym_to_char))
                 .unwrap_or_default()
         })
         .collect();
@@ -226,15 +246,13 @@ fn compile_pt2_inner(
             load_constants_native(&mut rt, &graph, &parsed)?;
             RuntimeBackend::Native(rt)
         }
-        "cuda" | "gpu" => {
-            init_cuda_runtime(
-                &mut graph,
-                weights_path,
-                &parsed,
-                &user_input_sizes,
-                search_iters,
-            )?
-        }
+        "cuda" | "gpu" => init_cuda_runtime(
+            &mut graph,
+            weights_path,
+            &parsed,
+            &user_input_sizes,
+            search_iters,
+        )?,
         other => {
             anyhow::bail!("Unknown backend: {other}. Use 'cpu' or 'cuda'.");
         }
@@ -300,10 +318,10 @@ fn init_cuda_runtime(
 // Weight loading
 // ---------------------------------------------------------------------------
 
-fn load_safetensors_native(
-    rt: &mut NativeRuntime,
+fn load_safetensors_impl(
     cx: &LuminalGraph,
     file_path: &str,
+    mut set_data: impl FnMut(NodeIndex, Vec<f32>),
 ) -> anyhow::Result<()> {
     use memmap2::MmapOptions;
     use safetensors::SafeTensors;
@@ -321,12 +339,20 @@ fn load_safetensors_native(
         {
             if let Ok(tensor) = st.tensor(&input.label) {
                 let f32s = safetensor_bytes_to_f32(tensor.data(), tensor.dtype());
-                rt.set_data(node, f32s);
+                set_data(node, f32s);
             }
         }
     }
 
     Ok(())
+}
+
+fn load_safetensors_native(
+    rt: &mut NativeRuntime,
+    cx: &LuminalGraph,
+    file_path: &str,
+) -> anyhow::Result<()> {
+    load_safetensors_impl(cx, file_path, |node, data| rt.set_data(node, data))
 }
 
 #[cfg(feature = "cuda")]
@@ -335,28 +361,7 @@ fn load_safetensors_cuda(
     cx: &LuminalGraph,
     file_path: &str,
 ) -> anyhow::Result<()> {
-    use memmap2::MmapOptions;
-    use safetensors::SafeTensors;
-    use std::fs::File;
-
-    let f = File::open(file_path)?;
-    let mmap = unsafe { MmapOptions::new().map(&f)? };
-    let st = SafeTensors::deserialize(&mmap)
-        .map_err(|e| anyhow::anyhow!("SafeTensors deserialize error: {e}"))?;
-
-    for node in cx.graph.node_indices() {
-        if let Some(input) = (*cx.graph[node])
-            .as_any()
-            .downcast_ref::<luminal::hlir::Input>()
-        {
-            if let Ok(tensor) = st.tensor(&input.label) {
-                let f32s = safetensor_bytes_to_f32(tensor.data(), tensor.dtype());
-                rt.set_data(node, f32s);
-            }
-        }
-    }
-
-    Ok(())
+    load_safetensors_impl(cx, file_path, |node, data| rt.set_data(node, data))
 }
 
 fn safetensor_bytes_to_f32(bytes: &[u8], dtype: safetensors::Dtype) -> Vec<f32> {
@@ -402,9 +407,7 @@ fn constant_bytes_to_f32(bytes: &[u8], dtype: u32) -> Vec<f32> {
             .collect(),
         5 => bytes
             .chunks_exact(8)
-            .map(|b| {
-                i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
-            })
+            .map(|b| i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32)
             .collect(),
         4 => bytes
             .chunks_exact(4)
@@ -416,7 +419,10 @@ fn constant_bytes_to_f32(bytes: &[u8], dtype: u32) -> Vec<f32> {
             .collect(),
         2 => bytes.iter().map(|&b| (b as i8) as f32).collect(),
         1 => bytes.iter().map(|&b| b as f32).collect(),
-        12 => bytes.iter().map(|&b| if b != 0 { 1.0 } else { 0.0 }).collect(),
+        12 => bytes
+            .iter()
+            .map(|&b| if b != 0 { 1.0 } else { 0.0 })
+            .collect(),
         _ => bytes
             .chunks_exact(4)
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
@@ -424,10 +430,10 @@ fn constant_bytes_to_f32(bytes: &[u8], dtype: u32) -> Vec<f32> {
     }
 }
 
-fn load_constants_native(
-    rt: &mut NativeRuntime,
+fn load_constants_impl(
     cx: &LuminalGraph,
     parsed: &pt2_parser::ParsedPT2,
+    mut set_data: impl FnMut(NodeIndex, Vec<f32>),
 ) -> anyhow::Result<()> {
     let constants_config = match &parsed.constants_config {
         Some(c) => c,
@@ -451,12 +457,20 @@ fn load_constants_native(
                 .downcast_ref::<luminal::hlir::Input>()
             {
                 if input.label == *name {
-                    rt.set_data(node_id, f32_data.clone());
+                    set_data(node_id, f32_data.clone());
                 }
             }
         }
     }
     Ok(())
+}
+
+fn load_constants_native(
+    rt: &mut NativeRuntime,
+    cx: &LuminalGraph,
+    parsed: &pt2_parser::ParsedPT2,
+) -> anyhow::Result<()> {
+    load_constants_impl(cx, parsed, |node, data| rt.set_data(node, data))
 }
 
 #[cfg(feature = "cuda")]
@@ -465,32 +479,5 @@ fn load_constants_cuda(
     cx: &LuminalGraph,
     parsed: &pt2_parser::ParsedPT2,
 ) -> anyhow::Result<()> {
-    let constants_config = match &parsed.constants_config {
-        Some(c) => c,
-        None => return Ok(()),
-    };
-
-    for (name, entry) in &constants_config.config {
-        let raw_bytes = match pt2_parser::read_constant_bytes(
-            &parsed.pt2_path,
-            &parsed.archive_prefix,
-            entry,
-        ) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let f32_data = constant_bytes_to_f32(&raw_bytes, entry.tensor_meta.dtype);
-
-        for node_id in cx.graph.node_indices() {
-            if let Some(input) = (*cx.graph[node_id])
-                .as_any()
-                .downcast_ref::<luminal::hlir::Input>()
-            {
-                if input.label == *name {
-                    rt.set_data(node_id, f32_data.clone());
-                }
-            }
-        }
-    }
-    Ok(())
+    load_constants_impl(cx, parsed, |node, data| rt.set_data(node, data))
 }
