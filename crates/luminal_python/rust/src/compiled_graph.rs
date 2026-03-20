@@ -244,10 +244,26 @@ impl OnnxGraphResult {
                 &input_tensor_names,
             )?,
             _ => {
-                return Err(format!(
-                    "Invalid backend '{}'. Must be 'native' or 'cuda'",
-                    backend
-                ));
+                #[cfg(feature = "cuda")]
+                {
+                    return Err(format!(
+                        "Invalid backend '{}'. Must be 'native' or 'cuda'",
+                        backend
+                    ));
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    if backend == "cuda" {
+                        return Err(
+                            "CUDA backend requested, but this luminal extension was built without the `cuda` feature. Rebuild with `maturin develop --features cuda -r` or use backend='native'."
+                                .to_string(),
+                        );
+                    }
+                    return Err(format!(
+                        "Invalid backend '{}'. This build only supports 'native'. Rebuild with the `cuda` feature to enable 'cuda'.",
+                        backend
+                    ));
+                }
             }
         };
 
