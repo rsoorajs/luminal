@@ -328,25 +328,35 @@ impl<'a> Translator<'a> {
             }
 
             // Reductions without dim arg (full reduce)
+            // Flatten to [1, N] and reduce axis 1 to avoid multi-step HLIR
+            // that CUDA can't schedule (grid (0,1,1) invalid launch).
             "torch.ops.aten.sum.default" => {
                 let a = self.get_input_tensor(node, 0)?;
-                let axes: Vec<usize> = (0..a.shape.len()).collect();
-                a.sum(axes)
+                let total: usize = a.dims().iter().map(|d| d.to_usize().unwrap()).product();
+                let mut flat = a;
+                flat.shape = ShapeTracker::new(vec![1, total]);
+                flat.sum(vec![1])
             }
             "torch.ops.aten.mean.default" => {
                 let a = self.get_input_tensor(node, 0)?;
-                let axes: Vec<usize> = (0..a.shape.len()).collect();
-                a.mean(axes)
+                let total: usize = a.dims().iter().map(|d| d.to_usize().unwrap()).product();
+                let mut flat = a;
+                flat.shape = ShapeTracker::new(vec![1, total]);
+                flat.sum(vec![1]) / total as f32
             }
             "torch.ops.aten.max.default" => {
                 let a = self.get_input_tensor(node, 0)?;
-                let axes: Vec<usize> = (0..a.shape.len()).collect();
-                a.max(axes)
+                let total: usize = a.dims().iter().map(|d| d.to_usize().unwrap()).product();
+                let mut flat = a;
+                flat.shape = ShapeTracker::new(vec![1, total]);
+                flat.max(vec![1])
             }
             "torch.ops.aten.min.default" => {
                 let a = self.get_input_tensor(node, 0)?;
-                let axes: Vec<usize> = (0..a.shape.len()).collect();
-                a.min(axes)
+                let total: usize = a.dims().iter().map(|d| d.to_usize().unwrap()).product();
+                let mut flat = a;
+                flat.shape = ShapeTracker::new(vec![1, total]);
+                flat.min(vec![1])
             }
             "torch.ops.aten.amin.default" => self.translate_reduction(node, ReductionOp::Min)?,
 
@@ -361,8 +371,11 @@ impl<'a> Translator<'a> {
             "torch.ops.aten.tril.default" => self.translate_tril(node)?,
             "torch.ops.aten.triu.default" => self.translate_triu(node)?,
 
-            // TopK
-            "torch.ops.aten.topk.default" => self.translate_topk(node)?,
+            // TopK — handles its own output storage, returns early
+            "torch.ops.aten.topk.default" => {
+                self.translate_topk(node)?;
+                return Ok(());
+            }
 
             // Split
             "torch.ops.aten.split.Tensor" | "torch.ops.aten.split_with_sizes.default" => {

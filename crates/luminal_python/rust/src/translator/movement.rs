@@ -221,8 +221,22 @@ impl<'a> Translator<'a> {
                 index_names = found_tensors;
                 // Simple case: single non-None index on a specific dim → gather_elements
                 if first_non_none_dim > 0 && index_names.len() == 1 {
-                    let idx = self.get_tensor(&index_names[0].name)?;
-                    return Ok(source.gather_elements(idx.cast(DType::Int), first_non_none_dim));
+                    let idx = self.get_tensor(&index_names[0].name)?.cast(DType::Int);
+                    // gather_elements requires indices to have the same rank as data.
+                    // PyTorch fancy indexing gives 1D indices that broadcast across other dims.
+                    // Add unit leading dims to match rank, then broadcast to output shape.
+                    let src_dims = source.shape.dims.clone();
+                    let src_rank = src_dims.len();
+                    let mut expanded = idx;
+                    for _ in 0..(src_rank - expanded.shape.len()) {
+                        expanded = expanded.expand_dim(0, Expression::from(1usize));
+                    }
+                    // Build target shape: source dims everywhere except the indexed dim
+                    let idx_dim_size = expanded.shape.dims[first_non_none_dim];
+                    let mut target: Vec<Expression> = src_dims.to_vec();
+                    target[first_non_none_dim] = idx_dim_size;
+                    expanded.shape.expand(target);
+                    return Ok(source.gather_elements(expanded, first_non_none_dim));
                 }
             } else {
                 bail!("index.Tensor: unsupported indices format: {:?}", indices_arg);
@@ -326,8 +340,15 @@ impl<'a> Translator<'a> {
         let values = self.get_input_tensor(node, 2)?;
 
         if index_names.len() == 1 {
-            let indices = self.get_tensor(&index_names[0].name)?;
-            Ok(a.scatter_nd(indices.cast(DType::Int), values))
+            let indices = self.get_tensor(&index_names[0].name)?.cast(DType::Int);
+            // scatter_nd expects indices of shape [batch, K] where K = number of index dims.
+            // PT2's index_put gives 1D indices [batch]; reshape to [batch, 1].
+            let indices = if indices.shape.len() == 1 {
+                indices.expand_dim(1, Expression::from(1usize))
+            } else {
+                indices
+            };
+            Ok(a.scatter_nd(indices, values))
         } else {
             bail!("index_put with multiple index tensors not yet supported");
         }

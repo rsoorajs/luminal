@@ -182,7 +182,7 @@ impl<'a> Translator<'a> {
         Ok(a * mask_expanded)
     }
 
-    pub(crate) fn translate_topk(&mut self, node: &Node) -> Result<GraphTensor> {
+    pub(crate) fn translate_topk(&mut self, node: &Node) -> Result<()> {
         let a = self.get_input_tensor(node, 0)?;
         let k = self.get_int_arg(node, 1)? as usize;
         let dim = if node.inputs.len() > 2 {
@@ -192,21 +192,38 @@ impl<'a> Translator<'a> {
         };
         let dim = normalize_dim(dim, a.shape.len());
 
-        let values = a.topk_values(k, dim);
-        let indices = a.topk_indexes(k, dim);
-
-        // Store second output (indices) — check as_tensors (multi-output) or as_tensor
-        if let Some(ts) = node.outputs.first().and_then(|o| o.as_tensors.as_ref()) {
-            if ts.len() > 1 {
-                self.tensors.insert(ts[1].name.clone(), indices);
-            }
+        // Determine output names
+        let values_name = node.outputs.first()
+            .and_then(|o| o.as_tensor.as_ref().map(|t| t.name.clone()));
+        let indices_name = if let Some(ts) = node.outputs.first().and_then(|o| o.as_tensors.as_ref()) {
+            ts.get(1).map(|t| t.name.clone())
         } else if node.outputs.len() > 1 {
-            if let Some(idx_name) = node.outputs[1].as_tensor.as_ref() {
-                self.tensors.insert(idx_name.name.clone(), indices);
+            node.outputs[1].as_tensor.as_ref().map(|t| t.name.clone())
+        } else {
+            None
+        };
+
+        // Use full argsort then slice, rather than topk_indexes/topk_values directly.
+        // This avoids a CUDA gather kernel bug when data and index shapes differ
+        // along the gather axis (topk_indexes returns a sliced tensor).
+        let full_argsort = a.argsort(dim, true);
+
+        // Only build each branch when its output is consumed.
+        // Dead nodes in the graph can confuse the CUDA optimizer.
+        if let Some(val_name) = values_name {
+            if !val_name.is_empty() {
+                let values = a.gather_elements(full_argsort, dim).slice_along(..k, dim);
+                self.tensors.insert(val_name, values);
             }
         }
+        if let Some(idx_name) = indices_name {
+            // Materialize Int indices as F32 with `* 1.0` to force a contiguous copy.
+            // Without this, CUDA can't correctly read the sliced Int view.
+            let indices = full_argsort.slice_along(..k, dim) * 1.0;
+            self.tensors.insert(idx_name, indices);
+        }
 
-        Ok(values)
+        Ok(())
     }
 
     pub(crate) fn translate_one_hot(&mut self, node: &Node) -> Result<GraphTensor> {
