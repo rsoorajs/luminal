@@ -1,2 +1,2 @@
 luminal_artifacts
-*.lock
+**/uv.lock
