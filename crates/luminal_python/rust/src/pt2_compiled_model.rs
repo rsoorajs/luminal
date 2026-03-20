@@ -137,9 +137,7 @@ fn resolve_dim_sizes(
         .map(|s| match s {
             pt2_schema::DimSize::Int(i) => Expression::from(i.as_int as usize),
             pt2_schema::DimSize::Expr(e) => {
-                if let Some(sym) =
-                    pt2_parser::extract_symbol_name_pub(&e.as_expr.expr_str)
-                {
+                if let Some(sym) = pt2_parser::extract_symbol_name_pub(&e.as_expr.expr_str) {
                     if let Some(c) = sym_to_char.get(&sym) {
                         Expression::from(*c)
                     } else {
