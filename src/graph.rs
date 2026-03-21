@@ -383,8 +383,7 @@ impl Graph {
             // Bucketed search: compile one LLIR per bucket combination
             let bucket_combos = self.bucket_combinations();
             let n_combos = bucket_combos.len();
-            let mut bucket_llirs: Vec<BucketLLIR> =
-                Vec::with_capacity(n_combos);
+            let mut bucket_llirs: Vec<BucketLLIR> = Vec::with_capacity(n_combos);
 
             for (combo_idx, (bucket_indices, representative_dyn_map)) in
                 bucket_combos.into_iter().enumerate()
