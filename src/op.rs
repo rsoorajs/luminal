@@ -40,6 +40,20 @@ pub trait Runtime {
     fn has_nan_outputs(&self, _llir_graph: &LLIRGraph, _dyn_map: &FxHashMap<char, usize>) -> bool {
         false
     }
+    /// Load multiple compiled LLIR graphs, one per bucket combination.
+    /// Each entry is (bucket_indices, representative_dyn_map, stitched_llir).
+    /// The runtime dispatches between them in execute() based on dyn_map values.
+    fn load_llir_buckets(
+        &mut self,
+        _dim_buckets: &FxHashMap<char, Vec<DimBucket>>,
+        bucket_llirs: &[BucketLLIR],
+    ) {
+        if bucket_llirs.len() == 1 {
+            self.load_llir(&bucket_llirs[0].2);
+        } else {
+            panic!("This runtime does not support bucketed compilation");
+        }
+    }
 }
 
 /// Optional runtime instrumentation for collecting execution statistics.

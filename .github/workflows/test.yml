@@ -43,7 +43,6 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
-            - name: Install system dependencies
             - name: Update Rust toolchain
               run: rustup update
             - name: Build maturin extension
