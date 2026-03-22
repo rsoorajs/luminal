@@ -14,7 +14,7 @@ uv run maturin develop --manifest-path rust/Cargo.toml --features cuda -r
 
 # Run pytest with CUDA backend and PT2 export mode
 echo "Step 3: Running pytest with CUDA backend + PT2 export mode..."
-RUST_BACKTRACE=1 LUMINAL_BACKEND=cuda LUMINAL_EXPORT_MODE=pt2 uv run pytest tests/test_llama3.py::test_hf_llama_tiny -v -s
+RUST_BACKTRACE=1 LUMINAL_BACKEND=cuda LUMINAL_EXPORT_MODE=pt2 uv run pytest tests/test_llama3.py::test_hf_llama3_real_config_1layer -v
 
 echo ""
 echo "=== Tests Complete ==="

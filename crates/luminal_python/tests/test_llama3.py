@@ -104,12 +104,6 @@ def _run_hf_llama_test(config, device: torch.device, atol: float):
     """Run a HuggingFace LlamaForCausalLM test with the given config."""
     from transformers import LlamaForCausalLM
 
-    # CUDA uses optimized kernels (tiled matmul, etc.) with larger rounding error.
-    # Precision scales with model complexity: 256-hidden Llama accumulates ~5e-2
-    # max_diff through attention on both ONNX and PT2 paths.
-    if device.type == "cuda":
-        atol = max(atol, 6e-2)
-
     model = LlamaForCausalLM(config).eval().to(device)
     compiled = torch.compile(model, backend=luminal_backend)
     input_ids = torch.tensor([[1, 2, 3, 4]], device=device)
@@ -144,7 +138,7 @@ def test_hf_llama_small(device: torch.device):
         intermediate_size=512,
         vocab_size=1024,
     )
-    _run_hf_llama_test(config, device, atol=1e-4)
+    _run_hf_llama_test(config, device, atol=1e-5)
 
 
 def test_hf_llama_medium(device: torch.device):
@@ -157,7 +151,7 @@ def test_hf_llama_medium(device: torch.device):
         intermediate_size=512,
         vocab_size=1024,
     )
-    _run_hf_llama_test(config, device, atol=1e-4)
+    _run_hf_llama_test(config, device, atol=1e-5)
 
 
 def test_hf_llama_large(device: torch.device):
@@ -170,7 +164,7 @@ def test_hf_llama_large(device: torch.device):
         intermediate_size=2048,
         vocab_size=4096,
     )
-    _run_hf_llama_test(config, device, atol=1e-3)
+    _run_hf_llama_test(config, device, atol=1e-5)
 
 
 def test_hf_llama3_real_config_1layer(device: torch.device):
@@ -192,7 +186,7 @@ def test_hf_llama3_real_config_1layer(device: torch.device):
     with torch.no_grad():
         ref = model(input_ids)
         out = compiled(input_ids)
-    assert torch.allclose(out.logits, ref.logits, atol=1e-3), (
+    assert torch.allclose(out.logits, ref.logits, atol=1e-5), (
         f"max_diff={torch.max(torch.abs(out.logits - ref.logits)).item():.2e}"
     )
 

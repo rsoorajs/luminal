@@ -25,8 +25,6 @@ pub struct TranslatedGraph {
     pub graph: Graph,
     /// Node IDs for user inputs (in order).
     pub user_input_ids: Vec<(String, NodeIndex)>,
-    /// Node IDs for parameter/buffer inputs (graph_name -> (original_name, node_id)).
-    pub param_ids: Vec<(String, String, NodeIndex)>,
     /// Node IDs for outputs (in order).
     pub output_ids: Vec<(String, NodeIndex)>,
     /// Symbolic dimension mapping.
@@ -47,7 +45,6 @@ pub(crate) struct Translator<'a> {
     pub(crate) tensors: HashMap<String, GraphTensor>,
     pub(crate) sym_map: SymDimMap,
     pub(crate) user_input_ids: Vec<(String, NodeIndex)>,
-    pub(crate) param_ids: Vec<(String, String, NodeIndex)>,
     pub(crate) output_ids: Vec<(String, NodeIndex)>,
     /// Extra tensor metadata from inlined subgraphs.
     pub(crate) extra_tensor_values: HashMap<String, TensorMeta>,
@@ -62,7 +59,6 @@ impl<'a> Translator<'a> {
             tensors: HashMap::new(),
             sym_map,
             user_input_ids: Vec::new(),
-            param_ids: Vec::new(),
             output_ids: Vec::new(),
             extra_tensor_values: HashMap::new(),
         })
@@ -102,8 +98,6 @@ impl<'a> Translator<'a> {
                         .with_context(|| format!("Missing tensor meta for param {graph_name}"))?;
                     let shape = self.tensor_meta_to_shape(meta)?;
                     let tensor = self.graph.named_tensor(original_name, shape);
-                    self.param_ids
-                        .push((graph_name.clone(), original_name.clone(), tensor.id));
                     self.tensors.insert(graph_name.clone(), tensor);
                 }
                 InputKind::Buffer {
@@ -116,8 +110,6 @@ impl<'a> Translator<'a> {
                         .with_context(|| format!("Missing tensor meta for buffer {graph_name}"))?;
                     let shape = self.tensor_meta_to_shape(meta)?;
                     let tensor = self.graph.named_tensor(original_name, shape);
-                    self.param_ids
-                        .push((graph_name.clone(), original_name.clone(), tensor.id));
                     self.tensors.insert(graph_name.clone(), tensor);
                 }
                 InputKind::UserInput { graph_name } => {
@@ -139,7 +131,6 @@ impl<'a> Translator<'a> {
         TranslatedGraph {
             graph: self.graph,
             user_input_ids: self.user_input_ids,
-            param_ids: self.param_ids,
             output_ids: self.output_ids,
             sym_map: self.sym_map,
         }

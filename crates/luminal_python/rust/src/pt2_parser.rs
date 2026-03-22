@@ -17,8 +17,6 @@ use crate::pt2_schema::*;
 pub struct ParsedPT2 {
     /// The exported program (graph, signature, etc.)
     pub program: ExportedProgram,
-    /// Weight config: original param name -> (file path in zip, tensor metadata)
-    pub weight_config: WeightsConfig,
     /// Constants config: tensor constant name -> (file path in zip, tensor metadata)
     pub constants_config: Option<WeightsConfig>,
     /// Archive name prefix (e.g., "luminal_mlp")
@@ -82,7 +80,7 @@ impl ParsedPT2 {
                             graph_name: name.to_string(),
                         })
                 }
-                InputSpec::ConstantInput(_) | InputSpec::Other(_) => None,
+                InputSpec::Other(_) => None,
             })
             .collect()
     }
@@ -183,17 +181,6 @@ pub fn parse_pt2(path: &str) -> Result<ParsedPT2> {
         serde_json::from_str(&buf).with_context(|| "Failed to parse model.json")?
     };
 
-    // Read weights config
-    let weights_config_path = format!("{archive_prefix}/data/weights/model_weights_config.json");
-    let weight_config: WeightsConfig = {
-        let mut entry = archive
-            .by_name(&weights_config_path)
-            .with_context(|| format!("Missing {weights_config_path}"))?;
-        let mut buf = String::new();
-        entry.read_to_string(&mut buf)?;
-        serde_json::from_str(&buf).with_context(|| "Failed to parse model_weights_config.json")?
-    };
-
     // Read constants config (optional — not all models have constants)
     let constants_config_path =
         format!("{archive_prefix}/data/constants/model_constants_config.json");
@@ -208,28 +195,10 @@ pub fn parse_pt2(path: &str) -> Result<ParsedPT2> {
 
     Ok(ParsedPT2 {
         program,
-        weight_config,
         constants_config,
         archive_prefix,
         pt2_path: path.to_string(),
     })
-}
-
-/// Read raw weight bytes from the PT2 archive for a given weight entry.
-pub fn read_weight_bytes(
-    pt2_path: &str,
-    archive_prefix: &str,
-    weight_entry: &WeightEntry,
-) -> Result<Vec<u8>> {
-    let file = File::open(pt2_path)?;
-    let mut archive = ZipArchive::new(file)?;
-    let weight_path = format!("{archive_prefix}/data/weights/{}", weight_entry.path_name);
-    let mut entry = archive
-        .by_name(&weight_path)
-        .with_context(|| format!("Missing weight file: {weight_path}"))?;
-    let mut buf = Vec::new();
-    entry.read_to_end(&mut buf)?;
-    Ok(buf)
 }
 
 /// Read raw constant bytes from the PT2 archive for a given constant entry.
@@ -307,11 +276,6 @@ mod tests {
             .collect();
         assert_eq!(params.len(), 3); // fc1.weight, fc2.weight, fc2.bias
         assert_eq!(user_inputs.len(), 1);
-
-        // Verify weight config
-        assert!(parsed.weight_config.config.contains_key("fc1.weight"));
-        assert!(parsed.weight_config.config.contains_key("fc2.weight"));
-        assert!(parsed.weight_config.config.contains_key("fc2.bias"));
     }
 
     #[test]

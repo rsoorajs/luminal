@@ -11,19 +11,11 @@ pub struct ExportedProgram {
     pub graph_module: GraphModule,
     #[serde(default)]
     pub range_constraints: HashMap<String, RangeConstraint>,
-    pub schema_version: SchemaVersion,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SchemaVersion {
-    pub major: u32,
-    pub minor: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RangeConstraint {
     pub min_val: i64,
-    pub max_val: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,9 +53,6 @@ pub struct Node {
     pub target: String,
     pub inputs: Vec<NodeInput>,
     pub outputs: Vec<TensorRef>,
-    #[serde(default)]
-    pub metadata: HashMap<String, serde_json::Value>,
-    pub is_hop_single_tensor_return: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,8 +74,6 @@ pub enum Argument {
     Float(FloatArg),
     Bool(BoolArg),
     Ints(IntsArg),
-    Floats(FloatsArg),
-    Str(StrArg),
     SymInts(SymIntsArg),
     SymInt(SymIntArg),
     Expr(ExprArg),
@@ -94,11 +81,9 @@ pub enum Argument {
     Tensors(TensorsArg),
     OptionalTensors(OptionalTensorsArg),
     Graph(GraphArg),
-    Layout(LayoutArg),
-    OptionalTensor(OptionalTensorArg),
-    None(NoneArg),
-    Device(DeviceArg),
-    /// Fallback for anything we don't handle
+    /// Fallback for anything we don't handle (Floats, Str, Layout,
+    /// OptionalTensor, None, Device, etc.)
+    #[allow(dead_code)]
     Other(serde_json::Value),
 }
 
@@ -127,27 +112,12 @@ pub struct IntsArg {
     pub as_ints: Vec<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct FloatsArg {
-    pub as_floats: Vec<f64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct StrArg {
-    pub as_string: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OptionalTensorArg {
-    pub as_optional_tensor: Option<TensorName>,
-}
-
 /// An entry in an optional_tensors list — either a tensor ref or None.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum OptionalTensorEntry {
     Tensor(TensorArg),
+    #[allow(dead_code)] // NoneArg needed as serde discriminant for untagged enum
     None(NoneArg),
 }
 
@@ -193,6 +163,7 @@ pub struct ExprValue {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NoneArg {
+    #[allow(dead_code)] // Serde discriminating key for OptionalTensorEntry untagged enum
     pub as_none: serde_json::Value,
 }
 
@@ -211,20 +182,9 @@ pub struct GraphArg {
     pub as_graph: SubGraph,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct DeviceArg {
-    pub as_device: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct LayoutArg {
-    pub as_layout: u32,
-}
-
 /// A subgraph embedded in a higher-order op (e.g. wrap_with_set_grad_enabled).
 #[derive(Debug, Clone, Deserialize)]
 pub struct SubGraph {
-    pub name: String,
     pub graph: Graph,
 }
 
@@ -260,13 +220,6 @@ impl Argument {
     pub fn as_ints(&self) -> Option<&[i64]> {
         match self {
             Argument::Ints(i) => Some(&i.as_ints),
-            _ => None,
-        }
-    }
-
-    pub fn as_floats(&self) -> Option<&[f64]> {
-        match self {
-            Argument::Floats(f) => Some(&f.as_floats),
             _ => None,
         }
     }
@@ -319,12 +272,6 @@ impl Argument {
 pub struct TensorMeta {
     pub dtype: u32,
     pub sizes: Vec<DimSize>,
-    #[serde(default)]
-    pub requires_grad: bool,
-    #[serde(default)]
-    pub strides: Vec<DimSize>,
-    #[serde(default)]
-    pub storage_offset: Option<DimSize>,
 }
 
 /// A dimension size — either a concrete integer or a symbolic expression.
@@ -346,13 +293,6 @@ pub struct DimExpr {
 }
 
 impl DimSize {
-    pub fn as_int(&self) -> Option<i64> {
-        match self {
-            DimSize::Int(i) => Some(i.as_int),
-            DimSize::Expr(_) => None,
-        }
-    }
-
     pub fn symbol_name(&self) -> Option<&str> {
         match self {
             DimSize::Expr(e) => Some(&e.as_expr.expr_str),
@@ -372,7 +312,6 @@ impl DimSize {
 #[derive(Debug, Deserialize)]
 pub struct Signature {
     pub input_specs: Vec<InputSpec>,
-    pub output_specs: Vec<OutputSpec>,
 }
 
 /// An input spec — tagged enum via JSON key.
@@ -382,8 +321,8 @@ pub enum InputSpec {
     Parameter(ParameterInput),
     Buffer(BufferInput),
     TensorConstant(TensorConstantInput),
-    ConstantInput(ConstantInputSpec),
     UserInput(UserInputSpec),
+    #[allow(dead_code)] // Serde catch-all for untagged enum
     Other(serde_json::Value),
 }
 
@@ -426,11 +365,6 @@ pub struct TensorConstantDetail {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ConstantInputSpec {
-    pub constant_input: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct UserInputSpec {
     pub user_input: UserInputDetail,
 }
@@ -438,80 +372,6 @@ pub struct UserInputSpec {
 #[derive(Debug, Deserialize)]
 pub struct UserInputDetail {
     pub arg: Argument,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum OutputSpec {
-    UserOutput(UserOutputSpec),
-    Other(serde_json::Value),
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UserOutputSpec {
-    pub user_output: UserOutputDetail,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UserOutputDetail {
-    pub arg: Argument,
-}
-
-impl InputSpec {
-    /// Get the graph-level input tensor name (e.g., "p_fc1_weight" or "x").
-    pub fn graph_input_name(&self) -> Option<&str> {
-        match self {
-            InputSpec::Parameter(p) => Some(&p.parameter.arg.name),
-            InputSpec::Buffer(b) => Some(&b.buffer.arg.name),
-            InputSpec::TensorConstant(tc) => Some(&tc.tensor_constant.arg.name),
-            InputSpec::UserInput(u) => u.user_input.arg.as_tensor_name(),
-            InputSpec::ConstantInput(_) | InputSpec::Other(_) => None,
-        }
-    }
-
-    /// Get the original parameter/buffer name (e.g., "fc1.weight").
-    pub fn original_name(&self) -> Option<&str> {
-        match self {
-            InputSpec::Parameter(p) => Some(&p.parameter.parameter_name),
-            InputSpec::Buffer(b) => Some(&b.buffer.buffer_name),
-            InputSpec::TensorConstant(tc) => Some(&tc.tensor_constant.tensor_constant_name),
-            _ => None,
-        }
-    }
-
-    pub fn is_user_input(&self) -> bool {
-        matches!(self, InputSpec::UserInput(_))
-    }
-
-    pub fn is_parameter(&self) -> bool {
-        matches!(self, InputSpec::Parameter(_))
-    }
-
-    pub fn is_buffer(&self) -> bool {
-        matches!(self, InputSpec::Buffer(_))
-    }
-
-    pub fn is_tensor_constant(&self) -> bool {
-        matches!(self, InputSpec::TensorConstant(_))
-    }
-}
-
-/// Torch dtype integers (PT2 format, torch 2.10+).
-/// 1=uint8, 2=int8, 3=int16, 4=int32, 5=int64, 6=float16, 7=float32, 8=float64, 12=bool, 13=bfloat16
-pub fn torch_dtype_to_str(dtype: u32) -> &'static str {
-    match dtype {
-        1 => "uint8",
-        2 => "int8",
-        3 => "int16",
-        4 => "int32",
-        5 => "int64",
-        6 => "float16",
-        7 => "float32",
-        8 => "float64",
-        12 => "bool",
-        13 => "bfloat16",
-        _ => "unknown",
-    }
 }
 
 /// Weights configuration from model_weights_config.json.
@@ -523,8 +383,5 @@ pub struct WeightsConfig {
 #[derive(Debug, Deserialize)]
 pub struct WeightEntry {
     pub path_name: String,
-    pub is_param: bool,
-    #[serde(default)]
-    pub use_pickle: bool,
     pub tensor_meta: TensorMeta,
 }
