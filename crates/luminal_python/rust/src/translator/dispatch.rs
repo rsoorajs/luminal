@@ -424,17 +424,11 @@ impl<'a> Translator<'a> {
                 let b = self.get_input_tensor(node, 1)?;
                 let (a, b) = broadcast_binary(a, b);
                 a % b
-                /*
-                let trunc = (a / b).cast(DType::Int).cast(DType::F32);
-                a - trunc * b
-                */
             }
             "torch.ops.aten.fmod.Scalar" | "torch.ops.aten.remainder.Scalar" => {
                 let a = self.get_input_tensor(node, 0)?;
                 let val = self.get_float_arg(node, 1)? as f32;
                 let b = self.graph.constant_float(val).expand_rhs(a.shape);
-                //let trunc = (a / b).cast(DType::Int).cast(DType::F32);
-                //                a - trunc * b
                 a % b
             }
 

@@ -11,17 +11,17 @@ mod pt2_schema;
 mod pt2_util;
 mod translator;
 
-use compiled_graph::OnnxGraphResult;
+use compiled_graph::CompiledGraph;
 use onnx_protobuf::ModelProto;
 use protobuf::Message;
-use pt2_compiled_model::{Pt2CompiledModel, compile_pt2};
+use pt2_compiled_model::compile_pt2;
 use pyo3::prelude::*;
 use std::fs;
 use std::path::Path;
 
 #[pyfunction]
 #[pyo3(signature = (path, backend="native"))]
-fn process_onnx(path: &str, backend: &str) -> PyResult<OnnxGraphResult> {
+fn process_onnx(path: &str, backend: &str) -> PyResult<CompiledGraph> {
     if backend != "native" && backend != "cuda" {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "Invalid backend '{}'. Must be 'native' or 'cuda'",
@@ -32,7 +32,7 @@ fn process_onnx(path: &str, backend: &str) -> PyResult<OnnxGraphResult> {
     parse_onnx(path, backend).map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
-fn parse_onnx(path: &str, backend: &str) -> Result<OnnxGraphResult, String> {
+fn parse_onnx(path: &str, backend: &str) -> Result<CompiledGraph, String> {
     let data = fs::read(path)
         .map_err(|e| format!("Failed to read file: {}", e))
         .unwrap();
@@ -61,14 +61,13 @@ fn parse_onnx(path: &str, backend: &str) -> Result<OnnxGraphResult, String> {
         }
     }
 
-    OnnxGraphResult::parse_graph(model, model_directory, backend)
+    CompiledGraph::parse_graph(model, model_directory, backend)
 }
 
 #[pymodule]
 fn luminal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(process_onnx, m)?)?;
     m.add_function(wrap_pyfunction!(compile_pt2, m)?)?;
-    m.add_class::<OnnxGraphResult>()?;
-    m.add_class::<Pt2CompiledModel>()?;
+    m.add_class::<CompiledGraph>()?;
     Ok(())
 }

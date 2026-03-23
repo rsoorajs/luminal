@@ -269,7 +269,7 @@ def test_hf_llama3_1b_decode_loop_dynamic():
 
         for step in range(num_generate):
             input_ids = torch.tensor([tokens])
-            logits = compiled(input_ids)
+            logits = compiled(input_ids)[0]
 
             with torch.no_grad():
                 ref = model(input_ids)
@@ -427,7 +427,7 @@ def test_hf_llama38b_cached():
     print(f"Loaded reference logits: {ref_logits.shape}")
 
     if export_mode == "pt2":
-        from luminal.pt2 import LuminalModel
+        from luminal import CompiledModel
 
         pt2_path = tests_dir / "llama38b.pt2"
         weights_path = tests_dir / "llama38b_weights.safetensors"
@@ -443,11 +443,11 @@ def test_hf_llama38b_cached():
         compiled_inner = luminal.compile_pt2(
             str(pt2_path), str(weights_path), backend_name, 0
         )
-        lm = LuminalModel(compiled_inner)
+        compiled = CompiledModel(compiled_inner)
         print("Compiled luminal PT2 graph")
 
         input_ids = torch.tensor([[1, 2, 3, 4]])
-        logits = lm(input_ids)
+        logits = compiled(input_ids)[0]
     else:
         onnx_path = tests_dir / "llama38b.onnx"
 

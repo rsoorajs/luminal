@@ -1,126 +1,23 @@
-use std::sync::Mutex;
-
 use luminal::graph::Graph as LuminalGraph;
 use luminal::prelude::*;
 use pyo3::prelude::*;
-use rustc_hash::FxHashMap;
+use std::collections::HashMap;
 
 #[cfg(feature = "cuda")]
 use luminal_cuda_lite::cudarc::driver::CudaContext;
 #[cfg(feature = "cuda")]
 use luminal_cuda_lite::runtime::CudaRuntime;
 
+use crate::compiled_graph::CompiledGraph;
 use crate::pt2_parser;
 use crate::pt2_schema;
 use crate::runtime::RuntimeBackend;
 use crate::translator;
-
-pub(crate) struct Pt2CompiledModelInner {
-    runtime: RuntimeBackend,
-    graph: LuminalGraph,
-    user_input_ids: Vec<NodeIndex>,
-    user_input_shapes: Vec<Vec<Expression>>,
-    output_ids: Vec<NodeIndex>,
-    output_shapes: Vec<Vec<Expression>>,
-}
-
-// Safety: Graph contains Vec<Box<dyn CustomOp>> where CustomOp is not Send.
-// In practice, the PT2 pipeline never adds custom ops, and all access is
-// serialized through the Mutex in Pt2CompiledModel.
-unsafe impl Send for Pt2CompiledModelInner {}
-
-#[pyclass]
-pub struct Pt2CompiledModel {
-    inner: Mutex<Pt2CompiledModelInner>,
-}
-
-#[pymethods]
-impl Pt2CompiledModel {
-    pub fn execute(
-        &self,
-        input_data: Vec<f32>,
-        input_shape: Vec<usize>,
-    ) -> PyResult<(Vec<f32>, Vec<usize>)> {
-        let mut inner = self.inner.lock().unwrap();
-
-        if inner.user_input_ids.len() > 1 {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Model has {} user inputs, but execute() only supports single-input models. \
-                 Use a wrapper to handle multiple inputs.",
-                inner.user_input_ids.len()
-            )));
-        }
-        if inner.output_ids.len() > 1 {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Model has {} outputs, but execute() only returns the first. \
-                 Multi-output support is not yet implemented.",
-                inner.output_ids.len()
-            )));
-        }
-
-        let input_id = *inner
-            .user_input_ids
-            .first()
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("No user inputs"))?;
-
-        if let Some(input_shape_exprs) = inner.user_input_shapes.first().cloned() {
-            set_dyn_dims_from_input(&mut inner.graph, &input_shape_exprs, &input_shape);
-        }
-
-        let dyn_map = inner.graph.dyn_map.clone();
-        let output_id = *inner
-            .output_ids
-            .first()
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("No outputs in graph"))?;
-        let output_shape_exprs = inner.output_shapes[0].clone();
-
-        inner.runtime.set_data(input_id, input_data);
-        inner.runtime.execute(&dyn_map);
-        let result = inner.runtime.get_f32(output_id);
-
-        let shape = resolve_shape(&output_shape_exprs, &dyn_map);
-        let total_elements: usize = shape.iter().product();
-        if result.len() != total_elements {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Output buffer size ({}) differs from expected shape size ({:?} = {})",
-                result.len(),
-                shape,
-                total_elements
-            )));
-        }
-
-        Ok((result, shape))
-    }
-}
-
-fn set_dyn_dims_from_input(
-    graph: &mut LuminalGraph,
-    shape_exprs: &[Expression],
-    input_shape: &[usize],
-) {
-    for (i, dim_expr) in shape_exprs.iter().enumerate() {
-        if i < input_shape.len()
-            && let Some(c) = expr_single_var(dim_expr)
-        {
-            graph.set_dim(c, input_shape[i]);
-        }
-    }
-}
-
-/// Detect if an expression is a bare single symbolic variable (e.g., just 'a').
-fn expr_single_var(expr: &Expression) -> Option<char> {
-    let terms = expr.terms.read();
-    if terms.len() == 1
-        && let Term::Var(c) = terms[0]
-    {
-        return Some(c);
-    }
-    None
-}
+use crate::util::DimParamMap;
 
 fn resolve_dim_sizes(
     sizes: &[pt2_schema::DimSize],
-    sym_to_char: &std::collections::HashMap<String, char>,
+    sym_to_char: &HashMap<String, char>,
 ) -> Vec<Expression> {
     sizes
         .iter()
@@ -141,23 +38,13 @@ fn resolve_dim_sizes(
         .collect()
 }
 
-fn resolve_shape(exprs: &[Expression], dyn_map: &FxHashMap<char, usize>) -> Vec<usize> {
-    exprs
-        .iter()
-        .map(|e| {
-            e.exec(dyn_map)
-                .unwrap_or_else(|| panic!("Cannot resolve shape expression: {e:?}"))
-        })
-        .collect()
-}
-
 #[pyfunction]
 pub fn compile_pt2(
     pt2_path: &str,
     weights_path: &str,
     backend: &str,
     search_iters: usize,
-) -> PyResult<Pt2CompiledModel> {
+) -> PyResult<CompiledGraph> {
     compile_pt2_inner(pt2_path, weights_path, backend, search_iters)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:#}")))
 }
@@ -167,7 +54,7 @@ fn compile_pt2_inner(
     weights_path: &str,
     backend: &str,
     search_iters: usize,
-) -> anyhow::Result<Pt2CompiledModel> {
+) -> anyhow::Result<CompiledGraph> {
     let parsed = pt2_parser::parse_pt2(pt2_path)?;
     let translated = translator::translate(&parsed)?;
     let mut graph = translated.graph;
@@ -178,7 +65,7 @@ fn compile_pt2_inner(
         }
     }
 
-    let output_shapes: Vec<Vec<Expression>> = translated
+    let output_shape_exprs: Vec<Vec<Expression>> = translated
         .output_ids
         .iter()
         .map(|(name, _id)| {
@@ -189,14 +76,18 @@ fn compile_pt2_inner(
         })
         .collect();
 
-    let user_input_ids: Vec<NodeIndex> = translated
+    let input_names: Vec<String> = translated
         .user_input_ids
         .iter()
-        .map(|(_, id)| *id)
+        .map(|(name, _)| name.clone())
         .collect();
-    let output_ids: Vec<NodeIndex> = translated.output_ids.iter().map(|(_, id)| *id).collect();
+    let output_names: Vec<String> = translated
+        .output_ids
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
 
-    let user_input_shapes: Vec<Vec<Expression>> = translated
+    let input_shape_exprs: Vec<Vec<Expression>> = translated
         .user_input_ids
         .iter()
         .map(|(name, _id)| {
@@ -246,15 +137,39 @@ fn compile_pt2_inner(
         }
     };
 
-    Ok(Pt2CompiledModel {
-        inner: Mutex::new(Pt2CompiledModelInner {
-            runtime,
-            graph,
-            user_input_ids,
-            user_input_shapes,
-            output_ids,
-            output_shapes,
-        }),
+    // Build tensor_ids from user inputs and outputs
+    let mut tensor_ids: HashMap<String, NodeIndex> = HashMap::new();
+    for (name, id) in &translated.user_input_ids {
+        tensor_ids.insert(name.clone(), *id);
+    }
+    for (name, id) in &translated.output_ids {
+        tensor_ids.insert(name.clone(), *id);
+    }
+
+    // Resolve concrete output shapes
+    let output_shapes: Vec<Vec<usize>> = output_shape_exprs
+        .iter()
+        .map(|exprs| {
+            exprs
+                .iter()
+                .map(|e| e.to_usize().unwrap_or(1))
+                .collect()
+        })
+        .collect();
+
+    // Build dim_param_map from sym_map
+    let dim_param_map: DimParamMap = translated.sym_map.sym_to_char;
+
+    Ok(CompiledGraph {
+        graph,
+        runtime,
+        tensor_ids,
+        input_names,
+        output_names,
+        output_shapes,
+        output_shape_exprs,
+        input_shape_exprs,
+        dim_param_map,
     })
 }
 
@@ -351,11 +266,6 @@ fn load_safetensors_cuda(
 }
 
 /// Set ALL input nodes to dummy 1.0 data for safe CUDA search profiling.
-///
-/// Real weights/constants may contain -inf (e.g. causal attention masks) which
-/// produce NaN in intermediate computations during profiling. We compute the
-/// element count for each Input node from the safetensors metadata and constants
-/// config, then fill with 1.0.
 #[cfg(feature = "cuda")]
 fn set_all_inputs_dummy_cuda(
     rt: &mut CudaRuntime,
@@ -366,10 +276,8 @@ fn set_all_inputs_dummy_cuda(
 ) -> anyhow::Result<()> {
     use memmap2::MmapOptions;
     use safetensors::SafeTensors;
-    use std::collections::HashMap;
     use std::fs::File;
 
-    // Build a map: label -> n_elements from safetensors metadata (shapes only, no data copy)
     let mut label_sizes: HashMap<String, usize> = HashMap::new();
 
     if !weights_path.is_empty() {
@@ -383,7 +291,6 @@ fn set_all_inputs_dummy_cuda(
         }
     }
 
-    // Add constants from the .pt2 archive
     if let Some(cc) = &parsed.constants_config {
         for (name, entry) in &cc.config {
             let n: usize = entry
@@ -396,7 +303,6 @@ fn set_all_inputs_dummy_cuda(
         }
     }
 
-    // Set all Input nodes whose label matches a known weight/constant to 1.0
     for node_id in cx.graph.node_indices() {
         if let Some(input) = (*cx.graph[node_id])
             .as_any()
@@ -410,7 +316,6 @@ fn set_all_inputs_dummy_cuda(
         }
     }
 
-    // Set user input nodes
     for &(id, n_elements) in user_input_sizes {
         rt.set_data(id, vec![1.0f32; n_elements]);
     }
@@ -436,7 +341,6 @@ fn safetensors_dtype_to_pt2(dtype: safetensors::Dtype) -> u32 {
 }
 
 /// Convert raw bytes to f32 using PT2 dtype numbering.
-/// 1=uint8, 2=int8, 3=int16, 4=int32, 5=int64, 6=float16, 7=float32, 8=float64, 12=bool, 13=bfloat16
 fn bytes_to_f32(bytes: &[u8], dtype: u32) -> Vec<f32> {
     match dtype {
         7 => bytes
