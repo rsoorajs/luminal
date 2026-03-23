@@ -282,12 +282,10 @@ impl<'a> Translator<'a> {
                 .get("as_expr")
                 .and_then(|e| e.get("expr_str"))
                 .and_then(|s| s.as_str())
+                && let Some(sym) = crate::pt2_parser::extract_symbol_name_pub(expr_str)
+                && let Some(&c) = self.sym_map.sym_to_char.get(&sym)
             {
-                if let Some(sym) = crate::pt2_parser::extract_symbol_name_pub(expr_str) {
-                    if let Some(&c) = self.sym_map.sym_to_char.get(&sym) {
-                        return Some(Expression::from(c));
-                    }
-                }
+                return Some(Expression::from(c));
             }
             if let Some(hint) = val
                 .get("as_expr")
@@ -309,10 +307,10 @@ impl<'a> Translator<'a> {
             return self.resolve_sym_int(name);
         }
         if let Argument::Expr(e) = arg {
-            if let Some(sym) = crate::pt2_parser::extract_symbol_name_pub(&e.as_expr.expr_str) {
-                if let Some(&c) = self.sym_map.sym_to_char.get(&sym) {
-                    return Some(Expression::from(c));
-                }
+            if let Some(sym) = crate::pt2_parser::extract_symbol_name_pub(&e.as_expr.expr_str)
+                && let Some(&c) = self.sym_map.sym_to_char.get(&sym)
+            {
+                return Some(Expression::from(c));
             }
             if let Some(hint) = e.as_expr.hint.as_ref().and_then(|h| h.as_int()) {
                 return Some(Expression::from(hint as usize));

@@ -19,11 +19,11 @@ impl<'a> Translator<'a> {
     pub(crate) fn translate_to_copy(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         for input in &node.inputs {
-            if input.name == "dtype" {
-                if let Some(dtype_int) = input.arg.as_int() {
-                    let dtype = torch_dtype_int_to_luminal(dtype_int as u32);
-                    return Ok(a.cast(dtype));
-                }
+            if input.name == "dtype"
+                && let Some(dtype_int) = input.arg.as_int()
+            {
+                let dtype = torch_dtype_int_to_luminal(dtype_int as u32);
+                return Ok(a.cast(dtype));
             }
         }
         Ok(a)

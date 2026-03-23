@@ -110,10 +110,10 @@ impl ParsedPT2 {
         let mut sym_set = std::collections::HashSet::new();
         for meta in self.program.graph_module.graph.tensor_values.values() {
             for size in &meta.sizes {
-                if let Some(sym_str) = size.symbol_name() {
-                    if let Some(name) = extract_symbol_name(sym_str) {
-                        sym_set.insert(name);
-                    }
+                if let Some(sym_str) = size.symbol_name()
+                    && let Some(name) = extract_symbol_name(sym_str)
+                {
+                    sym_set.insert(name);
                 }
             }
         }

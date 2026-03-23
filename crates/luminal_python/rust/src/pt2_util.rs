@@ -111,7 +111,7 @@ pub fn resolve_neg1_dim(target: &[i64], current_dims: &[Expression]) -> Vec<Expr
     if let Some(idx) = neg1_idx {
         let mut total = Expression::from(1usize);
         for d in current_dims {
-            total = total * *d;
+            total *= *d;
         }
         if let (Some(total_val), Some(_)) = (
             {
@@ -182,7 +182,7 @@ pub fn resolve_neg1_dim_exprs(
         } else {
             let mut expr = Expression::from((input_concrete / target_concrete) as usize);
             for s in &input_symbolic {
-                expr = expr * *s;
+                expr *= *s;
             }
             result[idx] = expr;
         }
@@ -202,7 +202,7 @@ pub fn torch_dtype_int_to_luminal(dtype: u32) -> DType {
         8 => DType::F32, // float64 → F32 (no F64 in luminal)
         13 => DType::Bf16,
         12 => DType::Bool,
-        1 | 2 | 3 | 4 | 5 => DType::Int, // uint8, int8, int16, int32, int64
+        1..=5 => DType::Int, // uint8, int8, int16, int32, int64
         _ => DType::F32,
     }
 }

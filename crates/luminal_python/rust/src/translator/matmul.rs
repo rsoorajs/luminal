@@ -12,11 +12,11 @@ impl<'a> Translator<'a> {
         let weight = self.get_input_tensor(node, 1)?;
         let result = input.matmul(weight.t());
 
-        if node.inputs.len() > 2 {
-            if let Ok(bias) = self.get_input_tensor(node, 2) {
-                let (result, bias) = broadcast_binary(result, bias);
-                return Ok(result + bias);
-            }
+        if node.inputs.len() > 2
+            && let Ok(bias) = self.get_input_tensor(node, 2)
+        {
+            let (result, bias) = broadcast_binary(result, bias);
+            return Ok(result + bias);
         }
         Ok(result)
     }

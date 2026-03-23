@@ -127,7 +127,7 @@ impl<'a> Translator<'a> {
         } else {
             0
         };
-        let dims = a.shape.dims.clone();
+        let dims = a.shape.dims;
         let rows = dims[dims.len() - 2];
         let cols = dims[dims.len() - 1];
         let (r_val, c_val) = match (rows.to_usize(), cols.to_usize()) {
@@ -184,11 +184,11 @@ impl<'a> Translator<'a> {
 
         // Only build each branch when its output is consumed.
         // Dead nodes in the graph can confuse the CUDA optimizer.
-        if let Some(val_name) = values_name {
-            if !val_name.is_empty() {
-                let values = a.gather_elements(full_argsort, dim).slice_along(..k, dim);
-                self.tensors.insert(val_name, values);
-            }
+        if let Some(val_name) = values_name
+            && !val_name.is_empty()
+        {
+            let values = a.gather_elements(full_argsort, dim).slice_along(..k, dim);
+            self.tensors.insert(val_name, values);
         }
         if let Some(idx_name) = indices_name {
             // Materialize Int indices as F32 with `* 1.0` to force a contiguous copy.
@@ -225,11 +225,11 @@ impl<'a> Translator<'a> {
         let sg_inputs = &subgraph.graph.inputs;
         let forwarded_args = &node.inputs[2..];
         for (sg_input, fwd_arg) in sg_inputs.iter().zip(forwarded_args) {
-            if let Some(sg_name) = sg_input.as_tensor.as_ref() {
-                if let Some(main_name) = fwd_arg.arg.as_tensor_name() {
-                    let tensor = self.get_tensor(main_name)?;
-                    self.tensors.insert(sg_name.name.clone(), tensor);
-                }
+            if let Some(sg_name) = sg_input.as_tensor.as_ref()
+                && let Some(main_name) = fwd_arg.arg.as_tensor_name()
+            {
+                let tensor = self.get_tensor(main_name)?;
+                self.tensors.insert(sg_name.name.clone(), tensor);
             }
         }
 
@@ -246,11 +246,10 @@ impl<'a> Translator<'a> {
         for (main_out, sg_out) in node.outputs.iter().zip(subgraph.graph.outputs.iter()) {
             if let (Some(main_name), Some(sg_name)) =
                 (main_out.as_tensor.as_ref(), sg_out.as_tensor.as_ref())
+                && main_name.name != sg_name.name
             {
-                if main_name.name != sg_name.name {
-                    let tensor = self.get_tensor(&sg_name.name)?;
-                    self.tensors.insert(main_name.name.clone(), tensor);
-                }
+                let tensor = self.get_tensor(&sg_name.name)?;
+                self.tensors.insert(main_name.name.clone(), tensor);
             }
         }
 

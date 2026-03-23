@@ -115,10 +115,10 @@ impl<'a> Translator<'a> {
 
         let end: Expression = self.get_expr_arg(node, 3)?;
 
-        if let Some(s) = start.to_usize() {
-            if let Some(e) = end.to_usize() {
-                return Ok(a.slice_along(s..e, dim));
-            }
+        if let Some(s) = start.to_usize()
+            && let Some(e) = end.to_usize()
+        {
+            return Ok(a.slice_along(s..e, dim));
         }
 
         Ok(a.slice_along(start..end, dim))
@@ -147,10 +147,10 @@ impl<'a> Translator<'a> {
         } else {
             let mut ts = Vec::new();
             for input in &node.inputs {
-                if let Some(name) = input.arg.as_tensor_name() {
-                    if let Ok(t) = self.get_tensor(name) {
-                        ts.push(t);
-                    }
+                if let Some(name) = input.arg.as_tensor_name()
+                    && let Ok(t) = self.get_tensor(name)
+                {
+                    ts.push(t);
                 }
             }
             ts
@@ -189,7 +189,7 @@ impl<'a> Translator<'a> {
         let dim = self.get_int_arg(node, 1)?;
         let dim = normalize_dim(dim, a.shape.len());
         let indices = self.get_input_tensor(node, 2)?.cast(DType::Int);
-        let src_dims = a.shape.dims.clone();
+        let src_dims = a.shape.dims;
         let idx_len = indices.shape.dims[0];
 
         // Reshape 1D indices [K] → [1,..,K,..,1] with K at position `dim`
@@ -214,7 +214,7 @@ impl<'a> Translator<'a> {
         let indices = self.get_input_tensor(node, 1)?;
 
         let hidden_dim = weight.shape.dims[1];
-        let seq_shape = indices.shape.dims.clone();
+        let seq_shape = indices.shape.dims;
 
         let indices_int = indices.cast(DType::Int);
         let ids_expanded = (indices_int * hidden_dim).expand_dim(seq_shape.len(), hidden_dim);
@@ -267,7 +267,7 @@ impl<'a> Translator<'a> {
                     // gather_elements requires indices to have the same rank as data.
                     // PyTorch fancy indexing gives 1D indices that broadcast across other dims.
                     // Add unit leading dims to match rank, then broadcast to output shape.
-                    let src_dims = source.shape.dims.clone();
+                    let src_dims = source.shape.dims;
                     let src_rank = src_dims.len();
                     let mut expanded = idx;
                     for _ in 0..(src_rank - expanded.shape.len()) {
@@ -290,7 +290,7 @@ impl<'a> Translator<'a> {
 
         let index_names = &index_names;
 
-        let src_shape = source.shape.dims.clone();
+        let src_shape = source.shape.dims;
         let n_indexed = index_names.len();
 
         let mut strides: Vec<Expression> = vec![Expression::from(1usize); n_indexed];
@@ -322,7 +322,7 @@ impl<'a> Translator<'a> {
             let weighted = if stride.to_usize() == Some(1) {
                 idx_int
             } else {
-                idx_int * stride.clone()
+                idx_int * *stride
             };
 
             flat_idx = Some(match flat_idx {
@@ -336,11 +336,11 @@ impl<'a> Translator<'a> {
 
         let mut indexed_size = Expression::from(1usize);
         for i in 0..n_indexed {
-            indexed_size = indexed_size * src_shape[i];
+            indexed_size *= src_shape[i];
         }
         let remaining_dims: Vec<Expression> = src_shape[n_indexed..].to_vec();
 
-        let mut flat_shape = vec![indexed_size.clone()];
+        let mut flat_shape = vec![indexed_size];
         flat_shape.extend_from_slice(&remaining_dims);
         let flat_source = reshape_tensor(source, flat_shape);
 
@@ -351,15 +351,15 @@ impl<'a> Translator<'a> {
         } else {
             let mut remaining_size = Expression::from(1usize);
             for d in &remaining_dims {
-                remaining_size = remaining_size * d.clone();
+                remaining_size *= *d;
             }
 
-            let idx_shape = flat_idx.shape.dims.clone();
-            let mut expanded_idx = flat_idx * remaining_size.clone();
+            let idx_shape = flat_idx.shape.dims;
+            let mut expanded_idx = flat_idx * remaining_size;
 
-            expanded_idx = expanded_idx.expand_dim(idx_shape.len(), remaining_size.clone());
+            expanded_idx = expanded_idx.expand_dim(idx_shape.len(), remaining_size);
 
-            let arange = self.graph.arange(remaining_size.clone());
+            let arange = self.graph.arange(remaining_size);
             let mut arange_expanded = arange;
             for d in idx_shape.iter().rev() {
                 arange_expanded = arange_expanded.expand_dim(0, *d);

@@ -106,7 +106,7 @@ impl<'a> Translator<'a> {
                     a.squeeze(dim)
                 } else {
                     let mut result = a;
-                    let dims = a.shape.dims.clone();
+                    let dims = a.shape.dims;
                     let mut offset = 0;
                     for (i, d) in dims.iter().enumerate() {
                         if d.to_usize() == Some(1) {
@@ -296,9 +296,9 @@ impl<'a> Translator<'a> {
                 // Horner: t*(a1 + t*(a2 + t*(a3 + t*(a4 + t*a5))))
                 let poly = t
                     * (t * (t
-                        * (t * (t * 1.061405429_f32 + (-1.453152027_f32)) + 1.421413741_f32)
-                        + (-0.284496736_f32))
-                        + 0.254829592_f32);
+                        * (t * (t * 1.061_405_4_f32 + (-1.453_152_1_f32)) + 1.421_413_8_f32)
+                        + (-0.284_496_72_f32))
+                        + 0.254_829_6_f32);
                 let result_abs =
                     self.graph.constant_float(1.0).expand_rhs(a.shape) - poly * (x2 * (-1.0)).exp();
                 // sign(x) = 2*(x >= 0) - 1

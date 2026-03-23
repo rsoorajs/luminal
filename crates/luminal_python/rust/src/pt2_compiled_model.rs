@@ -99,10 +99,10 @@ fn set_dyn_dims_from_input(
     input_shape: &[usize],
 ) {
     for (i, dim_expr) in shape_exprs.iter().enumerate() {
-        if i < input_shape.len() {
-            if let Some(c) = expr_single_var(dim_expr) {
-                graph.set_dim(c, input_shape[i]);
-            }
+        if i < input_shape.len()
+            && let Some(c) = expr_single_var(dim_expr)
+        {
+            graph.set_dim(c, input_shape[i]);
         }
     }
 }
@@ -110,10 +110,10 @@ fn set_dyn_dims_from_input(
 /// Detect if an expression is a bare single symbolic variable (e.g., just 'a').
 fn expr_single_var(expr: &Expression) -> Option<char> {
     let terms = expr.terms.read();
-    if terms.len() == 1 {
-        if let Term::Var(c) = terms[0] {
-            return Some(c);
-        }
+    if terms.len() == 1
+        && let Term::Var(c) = terms[0]
+    {
+        return Some(c);
     }
     None
 }
@@ -323,11 +323,10 @@ fn load_safetensors_impl(
         if let Some(input) = (*cx.graph[node])
             .as_any()
             .downcast_ref::<luminal::hlir::Input>()
+            && let Ok(tensor) = st.tensor(&input.label)
         {
-            if let Ok(tensor) = st.tensor(&input.label) {
-                let f32s = bytes_to_f32(tensor.data(), safetensors_dtype_to_pt2(tensor.dtype()));
-                set_data(node, f32s);
-            }
+            let f32s = bytes_to_f32(tensor.data(), safetensors_dtype_to_pt2(tensor.dtype()));
+            set_data(node, f32s);
         }
     }
 
@@ -515,10 +514,9 @@ fn load_constants_impl(
             if let Some(input) = (*cx.graph[node_id])
                 .as_any()
                 .downcast_ref::<luminal::hlir::Input>()
+                && input.label == *name
             {
-                if input.label == *name {
-                    set_data(node_id, f32_data.clone());
-                }
+                set_data(node_id, f32_data.clone());
             }
         }
     }
