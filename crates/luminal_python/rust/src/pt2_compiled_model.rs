@@ -502,7 +502,10 @@ fn load_constants_impl(
         ) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("[luminal] Warning: failed to load constant '{}': {:#}", name, e);
+                eprintln!(
+                    "[luminal] Warning: failed to load constant '{}': {:#}",
+                    name, e
+                );
                 continue;
             }
         };

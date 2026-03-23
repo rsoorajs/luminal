@@ -102,7 +102,7 @@ impl<'a> Translator<'a> {
 
         let end_is_sentinel = self
             .get_int_arg(node, 3)
-            .map(|e| e == i64::MAX || e == 9223372036854775807)
+            .map(|e| e == i64::MAX)
             .unwrap_or(false);
 
         if end_is_sentinel {
@@ -303,12 +303,18 @@ impl<'a> Translator<'a> {
             let idx_tensor = self.get_tensor(&idx_name.name)?;
 
             // Normalize negative indices for this dimension
-            let axis_size = src_shape[dim_idx]
-                .to_usize()
-                .ok_or_else(|| anyhow::anyhow!("index.Tensor: dim {} must be concrete for negative index normalization", dim_idx))?;
+            let axis_size = src_shape[dim_idx].to_usize().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "index.Tensor: dim {} must be concrete for negative index normalization",
+                    dim_idx
+                )
+            })?;
             let idx_f32 = idx_tensor.cast(DType::F32);
             let zero = self.graph.constant_float(0.0).expand_rhs(idx_f32.shape);
-            let adjustment = self.graph.constant_float(axis_size as f32).expand_rhs(idx_f32.shape);
+            let adjustment = self
+                .graph
+                .constant_float(axis_size as f32)
+                .expand_rhs(idx_f32.shape);
             let is_negative = idx_f32.lt(zero).cast(DType::F32);
             let idx_int = (idx_f32 + is_negative * adjustment).cast(DType::Int);
 
@@ -377,12 +383,15 @@ impl<'a> Translator<'a> {
         let indices = self.get_input_tensor(node, 2)?;
 
         // Normalize negative indices: -1 → last, -2 → second-to-last, etc.
-        let axis_dim = a.shape.dims[dim]
-            .to_usize()
-            .ok_or_else(|| anyhow::anyhow!("Gather: axis dim must be concrete for negative index normalization"))?;
+        let axis_dim = a.shape.dims[dim].to_usize().ok_or_else(|| {
+            anyhow::anyhow!("Gather: axis dim must be concrete for negative index normalization")
+        })?;
         let indices_f32 = indices.cast(DType::F32);
         let zero = self.graph.constant_float(0.0).expand_rhs(indices_f32.shape);
-        let adjustment = self.graph.constant_float(axis_dim as f32).expand_rhs(indices_f32.shape);
+        let adjustment = self
+            .graph
+            .constant_float(axis_dim as f32)
+            .expand_rhs(indices_f32.shape);
         let is_negative = indices_f32.lt(zero).cast(DType::F32);
         let normalized = (indices_f32 + is_negative * adjustment).cast(DType::Int);
 
