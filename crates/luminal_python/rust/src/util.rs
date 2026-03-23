@@ -83,12 +83,12 @@ pub fn compute_broadcast_shape_expr(a: &[Expression], b: &[Expression]) -> Vec<E
         let a_dim = if i < max_rank - a.len() {
             Expression::from(1usize)
         } else {
-            a[i - (max_rank - a.len())].clone()
+            a[i - (max_rank - a.len())]
         };
         let b_dim = if i < max_rank - b.len() {
             Expression::from(1usize)
         } else {
-            b[i - (max_rank - b.len())].clone()
+            b[i - (max_rank - b.len())]
         };
 
         // If both are concrete, use max. If one is 1, use the other.
@@ -121,54 +121,6 @@ pub fn broadcast_to_expr(mut tensor: GraphTensor, target_shape: &[Expression]) -
         tensor = tensor.expand_dim(0, 1);
     }
 
-    tensor.shape.expand(target_shape.to_vec());
-    tensor
-}
-
-/// Compute the broadcast output shape for two tensors (numpy rules: element-wise max).
-pub fn compute_broadcast_shape(a: &[Expression], b: &[Expression]) -> Vec<usize> {
-    let max_rank = a.len().max(b.len());
-    let mut result = vec![1usize; max_rank];
-
-    for i in 0..max_rank {
-        let a_dim = if i < max_rank - a.len() {
-            1
-        } else {
-            a[i - (max_rank - a.len())]
-                .to_usize()
-                .expect("broadcast: dim must be concrete")
-        };
-        let b_dim = if i < max_rank - b.len() {
-            1
-        } else {
-            b[i - (max_rank - b.len())]
-                .to_usize()
-                .expect("broadcast: dim must be concrete")
-        };
-        result[i] = a_dim.max(b_dim);
-    }
-    result
-}
-
-/// Broadcast a tensor's shape to match a target shape (numpy-style broadcasting).
-/// Left-pads with size-1 dims, then expands dims that are 1 to match target.
-pub fn broadcast_to(mut tensor: GraphTensor, target_shape: &[usize]) -> GraphTensor {
-    let src_dims = tensor.dims();
-    let src_len = src_dims.len();
-    let tgt_len = target_shape.len();
-
-    if src_len == tgt_len {
-        // Same rank: just expand dims that are 1
-        tensor.shape.expand(target_shape.to_vec());
-        return tensor;
-    }
-
-    // Left-pad with size-1 dims using expand_dim (adds dim with stride 0)
-    for _ in 0..(tgt_len - src_len) {
-        tensor = tensor.expand_dim(0, 1);
-    }
-
-    // Now expand each dim that is 1 to match target
     tensor.shape.expand(target_shape.to_vec());
     tensor
 }
@@ -314,7 +266,8 @@ pub fn load_all_tensor_floats(
 
     // Pending external data entries: (result_index, offset, length, data_type)
     // grouped by file location
-    let mut external_pending: HashMap<String, Vec<(usize, u64, Option<u64>, i32)>> = HashMap::new();
+    type ExternalEntry = (usize, u64, Option<u64>, i32);
+    let mut external_pending: HashMap<String, Vec<ExternalEntry>> = HashMap::new();
 
     for (i, init) in inits.iter().enumerate() {
         // Try inline data first

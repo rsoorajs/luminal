@@ -559,3 +559,117 @@ redefines what indices mean. A single permute from the original layout to the ta
 is easier to verify and less likely to confuse source/destination ordering. Also, ensure
 `split_dims` loop counts match: splitting N dims out of a product requires N-1 splits
 (the outermost dim is the quotient, not split out separately).
+
+---
+
+## 2026-03-18 — CUDA Search Rejects All Candidates: Zero Dummy Data Causes NaN for Div/Pow/Mod/Erf
+
+### What the symptom was
+
+6 CUDA tests (`test_pow`, `test_pow_broadcast`, `test_div`, `test_mod`, `test_mod_broadcast`,
+`test_erf`) consistently failed with `Failed to find a viable initial genome for group 0 after
+100 attempts`. All 6 passed on native backend.
+
+### What the actual root cause was
+
+The CUDA two-phase initialization in `build_cuda_backend` set ALL input tensor buffers to
+`0.0f32` as dummy data for profiling. When `torch.compile` decomposes a model, it passes
+model weights as additional ONNX graph inputs (not initializers). Since there were no ONNX
+initializers to overwrite the zeros, weight buffers stayed all-zero during search.
+
+Operations with zero inputs produced NaN:
+- `fmod(0, 0) = NaN` (Mod test)
+- `weight * recip(0) = weight * inf` → with any zero weight → `0 * inf = NaN` (Div test)
+- `abs(0).log() = log(0) = -inf` → downstream NaN (Pow test)
+- `sign(0)` chain → operations on zero inputs (Erf test)
+
+The `has_nan_outputs` check rejected every candidate genome, exhausting all 100 attempts.
+
+### Why it was hard to find
+
+1. **No panic, no crash — silent NaN rejection**: The error message said "Failed to find a
+   viable initial genome" which suggested an egglog rewrite issue, not a data issue.
+2. **Works on native**: `NativeRuntime::has_nan_outputs()` returns `false` by default (no NaN
+   check), so zero inputs never caused problems on native.
+3. **torch.compile vs direct export difference**: Directly exporting a model via
+   `torch.onnx.export(model, ...)` produces initializers. But `torch.compile`'s backend
+   receives a `GraphModule` where weights are graph inputs, not initializers. The ONNX file
+   from `torch.compile` has 0 initializers.
+4. **CudaRuntime's own `allocate_dummy_input` already uses 1.0**: The runtime knew zeros
+   were problematic (comment: "Zero inputs often hide numerical issues"), but the
+   `compiled_graph.rs` code used `0.0f32` independently.
+
+### The fix
+
+Changed dummy data from `vec![0.0f32; n_elements]` to `vec![1.0f32; n_elements]` in
+`build_cuda_backend`. Using 1.0 is numerically safe: `fmod(1,1)=0`, `recip(1)=1`,
+`log(1)=0`, `exp(1)≈2.7` — no NaN or inf. Profiling timing is unaffected (same number
+of FLOPs and memory accesses).
+
+### General principle
+
+**Use small non-zero values (1.0) for dummy profiling data, never zeros.** Zero is a
+singularity for many floating-point operations (division, log, fmod with zero divisor).
+The CUDA runtime's `allocate_dummy_input` already followed this principle — the ONNX
+pipeline's `build_cuda_backend` was inconsistent. When creating dummy data for GPU
+profiling, always match the runtime's safer default.
+
+---
+
+## 2026-03-18 — Dynamic Decode Loop Fails: HLIR Weight Buffers Consumed After First Execute
+
+### What the symptom was
+
+`test_hf_llama3_1b_decode_loop_dynamic` passed step 0 (seq_len=6) but panicked on step 1
+(seq_len=7) with `no entry found for key` at `cublaslt/mod.rs:294` — the CuBlasLt op couldn't
+find its weight input buffer.
+
+### What the actual root cause was
+
+**Two bugs:**
+
+1. **Missing `)` in egglog rule** (`luminal_cuda_lite/src/kernel/hlir.rs:3042`): The fourth
+   KernelEmbed rule ("kernel embed with mul reversed") had 3 closing parens after `INil` instead
+   of 4. The missing `)` failed to close the `(= ?mul_result ...)` form. This caused an egglog
+   parse error during search, caught by `catch_unwind`. The rule was dead code — it never fired,
+   but the parse error consumed a search iteration.
+
+2. **HLIR buffer consumption killed weight buffers** (`luminal_cuda_lite/src/runtime.rs:1010-1057`):
+   After each `execute()`, the runtime removed all HLIR buffers (weights, constants) except those
+   directly connected to Output nodes. This was intended to free one-shot input data, but it also
+   deleted all 168 weight buffers. On the next `graph.run()`, CuBlasLt couldn't find any of its
+   weight inputs — `hlir_buffers` had 1 entry (the just-set `input_ids`) instead of 169.
+
+### Why it was hard to find
+
+1. **Misdirection by the egglog syntax error**: The plan identified the missing `)` as THE cause.
+   Fixing it allowed the rule to parse correctly, but the real runtime failure was independent.
+2. **Step 0 always succeeds**: The weight consumption happens AFTER a successful execution. So
+   the first `graph.run()` works perfectly — all 169 HLIR buffers exist. The panic only occurs
+   on the second call, after consumption has cleared 168 of them.
+3. **The consumption code was deliberately designed**: Comments said "weight tensors must have
+   `.persist()` to survive." The ONNX pipeline didn't call `.persist()` on weights, but this
+   had never been a problem before because single-shot inference only calls `execute()` once.
+4. **Search phase panics masked by `catch_unwind`**: The same "no entry found for key" error
+   occurred during profiling of search candidates, but was silently caught. This made it look
+   like only certain LLIR variants had the issue, not all of them.
+5. **Debug output needed 4 iterations to find**: The first debug showed which NodeIndex was
+   missing, the second showed it was an Input node, the third showed the HLIR mapping, and
+   the fourth revealed `hlir_buffers_count` dropping from 169 to 1 between steps.
+
+### The fix
+
+1. Added missing `)` to the KernelEmbed egglog rule at `hlir.rs:3042`.
+2. In `compiled_graph.rs`, added `.persist()` calls on all weight/constant tensors (anything
+   not in `input_names`) after `process_onnx_nodes` completes. `.persist()` creates an Output
+   node connected to the Input, which the consumption code recognizes as "do not consume."
+   User inputs (like `input_ids`) are intentionally NOT persisted — they are consumed after
+   each `execute()` and re-set via `set_input()` before the next call.
+
+### General principle
+
+**Mark weight/constant tensors as persistent in the graph-building pipeline.** The runtime's
+`execute()` consumes all HLIR buffers not connected to Output nodes. This is correct behavior
+for one-shot user inputs, but weights must survive across calls. Always call `.persist()` on
+tensors that should outlive a single execution. In the ONNX pipeline, the distinction is clear:
+`input_names` (user-provided data per step) vs everything else (weights/constants loaded once).

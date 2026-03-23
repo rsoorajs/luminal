@@ -215,14 +215,8 @@ pub fn parse_cast_node(
     let cast_result = input.cast(dtype);
     let output_name = &node.output[0];
 
-    // Use the *1.0 workaround for no-op cast or Int→F32 cast
     let result = if cast_result.id == input.id {
-        let src_dims = input.dims();
-        let one = input.graph().constant_float(1.0);
-        let one_expanded = broadcast_to_expr(one, &src_dims);
-        input * one_expanded
-    } else if input.dtype == DType::Int {
-        cast_result // input.cast(DType::F32) produces a real Cast op; don't use *1.0 which creates mixed-dtype Mul
+        input
     } else {
         cast_result
     };
@@ -300,10 +294,10 @@ pub fn parse_erf_node(
         let t = (1.0_f32 + 0.3275911_f32 * a).reciprocal();
         // Horner evaluation of a1*t + a2*t² + a3*t³ + a4*t⁴ + a5*t⁵
         // poly = t*(a1 + t*(a2 + t*(a3 + t*(a4 + a5*t))))
-        let h = t * 1.061405429_f32 - 1.453152027_f32; // a4 + a5*t
-        let h = t * h + 1.421413741_f32;
-        let h = t * h - 0.284496736_f32;
-        let h = t * h + 0.254829592_f32;
+        let h = t * 1.061_405_4_f32 - 1.453_152_1_f32; // a4 + a5*t
+        let h = t * h + 1.421_413_8_f32;
+        let h = t * h - 0.284_496_72_f32;
+        let h = t * h + 0.254_829_6_f32;
         let poly = t * h;
         let erf_abs = 1.0_f32 - poly * (-a * a).exp();
         x.sign() * erf_abs
@@ -343,14 +337,14 @@ pub fn parse_layernorm_node(
 
     // Apply scale (broadcast to input shape using Expression-aware broadcast)
     let input_shape = input.dims();
-    result = result * broadcast_to_expr(scale, &input_shape);
+    result *= broadcast_to_expr(scale, &input_shape);
 
     // Apply optional bias
     if node.input.len() > 2 && !node.input[2].is_empty() {
         let bias = *tensors
             .get(&node.input[2])
             .ok_or_else(|| format!("LayerNorm: missing bias '{}'", node.input[2]))?;
-        result = result + broadcast_to_expr(bias, &input_shape);
+        result += broadcast_to_expr(bias, &input_shape);
     }
 
     tensors.insert(node.output[0].clone(), result);
@@ -412,9 +406,8 @@ pub fn parse_group_norm_node(
     let cpg = c / num_groups; // channels per group
 
     // Reshape X from [N, C, spatial...] to [N, G, C/G, spatial...]
-    // Use *1.0 + ShapeTracker to reshape
     let spatial_dims: Vec<Expression> = x_dims[2..].to_vec();
-    let mut reshaped = x * 1.0;
+    let mut reshaped = x;
     let mut new_shape = vec![n, num_groups, cpg];
     for d in &spatial_dims {
         new_shape.push(
@@ -433,7 +426,7 @@ pub fn parse_group_norm_node(
     for d in &spatial_dims {
         orig_shape.push(d.to_usize().unwrap());
     }
-    normed = normed * 1.0;
+    normed *= 1.0;
     normed.shape = ShapeTracker::new(orig_shape.clone());
 
     // Apply scale and bias (both shape [C], broadcast to [N, C, spatial...])

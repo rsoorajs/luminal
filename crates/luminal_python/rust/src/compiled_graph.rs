@@ -145,13 +145,21 @@ impl OnnxGraphResult {
         )
         .map_err(|e| format!("process_onnx_nodes failed: {}", e))?;
 
+        // Mark weight/constant tensors as persistent so their buffers survive
+        // execute()'s input consumption. User inputs (like input_ids) are NOT persisted
+        // since they are re-set via set_input() before each execution.
+        for (name, gt) in &tensors {
+            if !input_names.contains(name) {
+                gt.persist();
+            }
+        }
+
         let has_dynamic = !dim_param_map.is_empty();
 
         // Mark graph outputs (must happen before build_search_space)
         let mut output_names = Vec::new();
         let mut output_shapes = Vec::new();
         let mut output_shape_exprs = Vec::new();
-        println!("Filling output");
         for output_vi in &onnx_graph.output {
             if let Some(&gt) = tensors.get(&output_vi.name) {
                 // Force contiguous if the shape tracker is a non-contiguous view
@@ -182,7 +190,6 @@ impl OnnxGraphResult {
                 output_shapes.push(shape);
             }
         }
-        println!("Hnadling Dynamic hsaoes");
         // If we have dynamic dims, set initial values in the graph's dyn_map
         // based on the concrete shapes from the example input used during export
         if has_dynamic {
@@ -207,7 +214,6 @@ impl OnnxGraphResult {
                 }
             }
         }
-        println!("Loading Data");
         // Extract weight data from initializers (handles inline + external storage)
         // Batch load reads each external file only once instead of per-tensor
         for (name, floats) in load_all_tensor_floats(&onnx_graph.initializer, model_directory) {
@@ -304,14 +310,23 @@ impl OnnxGraphResult {
         // CUDA: Two-phase - set data BEFORE search for profiling
         let (mut cuda_rt, _stream) = prepare_cuda(context)?;
 
-        // Set dummy zero data for ALL input tensors
+        // Set dummy data for ALL input tensors using small non-zero values (ones).
+        // IMPORTANT: Must use 1.0, NOT 0.0. Zero inputs cause NaN in many ops:
+        //   - fmod(0, 0) = NaN  (Mod)
+        //   - recip(0) = inf → weight * inf = NaN  (Div)
+        //   - log(0) = -inf  (Pow)
+        //   - chain ops with zero produce NaN  (Erf)
+        // The search's has_nan_outputs check then rejects ALL candidates, causing
+        // "Failed to find viable genome" errors. See LessonsLearned.md entry #1.
+        // Note: torch.compile passes model weights as additional ONNX inputs (not
+        // initializers), so these dummy values also cover weight tensors.
         for (name, gt) in &mut *tensors {
             if !input_tensor_names.contains(name) {
                 continue;
             }
             let n_elements = compute_n_elements(name);
             if n_elements > 0 {
-                cuda_rt.set_data(gt.id, vec![0.0f32; n_elements]);
+                cuda_rt.set_data(gt.id, vec![1.0f32; n_elements]);
             }
         }
 

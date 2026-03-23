@@ -1,8 +1,8 @@
 use luminal::prelude::*;
 #[cfg(feature = "cuda")]
-use luminal_cuda::cudarc::driver::{CudaContext, CudaStream};
+use luminal_cuda_lite::cudarc::driver::{CudaContext, CudaStream};
 #[cfg(feature = "cuda")]
-use luminal_cuda::runtime::CudaRuntime;
+use luminal_cuda_lite::runtime::CudaRuntime;
 use rustc_hash::FxHashMap;
 #[cfg(feature = "cuda")]
 use std::sync::Arc;

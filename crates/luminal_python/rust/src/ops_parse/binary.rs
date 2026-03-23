@@ -78,18 +78,19 @@ pub fn parse_binary_broadcast_op(
                 .get(&node.input[1])
                 .map(|kv| kv.iter().map(|&v| Expression::from(v as usize)).collect())
         });
-        if let (Some(se_a), Some(se_b)) = (se_a, se_b) {
-            if se_a.len() == 1 && se_b.len() == 1 {
-                let result_expr = match op_name {
-                    "Add" => Some(se_a[0].clone() + se_b[0].clone()),
-                    "Sub" => Some(se_a[0].clone() - se_b[0].clone()),
-                    "Mul" => Some(se_a[0].clone() * se_b[0].clone()),
-                    "Div" => Some(se_a[0].clone() / se_b[0].clone()),
-                    _ => None,
-                };
-                if let Some(expr) = result_expr {
-                    shape_exprs.insert(node.output[0].clone(), vec![expr]);
-                }
+        if let (Some(se_a), Some(se_b)) = (se_a, se_b)
+            && se_a.len() == 1
+            && se_b.len() == 1
+        {
+            let result_expr = match op_name {
+                "Add" => Some(se_a[0] + se_b[0]),
+                "Sub" => Some(se_a[0] - se_b[0]),
+                "Mul" => Some(se_a[0] * se_b[0]),
+                "Div" => Some(se_a[0] / se_b[0]),
+                _ => None,
+            };
+            if let Some(expr) = result_expr {
+                shape_exprs.insert(node.output[0].clone(), vec![expr]);
             }
         }
         trace!("Finished parse: {} Node (shape-only)", op_name);
@@ -123,18 +124,19 @@ pub fn parse_binary_broadcast_op(
                 .get(&node.input[1])
                 .map(|kv| kv.iter().map(|&v| Expression::from(v as usize)).collect())
         });
-        if let (Some(se_a), Some(se_b)) = (se_a, se_b) {
-            if se_a.len() == 1 && se_b.len() == 1 {
-                let result_expr = match op_name {
-                    "Add" => Some(se_a[0].clone() + se_b[0].clone()),
-                    "Sub" => Some(se_a[0].clone() - se_b[0].clone()),
-                    "Mul" => Some(se_a[0].clone() * se_b[0].clone()),
-                    "Div" => Some(se_a[0].clone() / se_b[0].clone()),
-                    _ => None,
-                };
-                if let Some(expr) = result_expr {
-                    shape_exprs.insert(node.output[0].clone(), vec![expr]);
-                }
+        if let (Some(se_a), Some(se_b)) = (se_a, se_b)
+            && se_a.len() == 1
+            && se_b.len() == 1
+        {
+            let result_expr = match op_name {
+                "Add" => Some(se_a[0] + se_b[0]),
+                "Sub" => Some(se_a[0] - se_b[0]),
+                "Mul" => Some(se_a[0] * se_b[0]),
+                "Div" => Some(se_a[0] / se_b[0]),
+                _ => None,
+            };
+            if let Some(expr) = result_expr {
+                shape_exprs.insert(node.output[0].clone(), vec![expr]);
             }
         }
     }
