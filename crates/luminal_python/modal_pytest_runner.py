@@ -9,25 +9,27 @@ import argparse
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import modal
 
 app = modal.App("luminal-tests")
 
+LOCAL_PROJECT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = "/root/luminal/crates/luminal_python"
 VENV_PATH = f"{PROJECT_DIR}/.venv"
-SRC_PATH = f"{PROJECT_DIR}/src"
 
 image = (
     modal.Image.from_registry("ghcr.io/luminal-ai/luminal-docker:cuda")
     .uv_sync(
-        ".",
+        str(LOCAL_PROJECT_DIR),
+        frozen=False,
         groups=["dev"],
         env={"UV_PROJECT_ENVIRONMENT": VENV_PATH},
     )
     .workdir(PROJECT_DIR)
     .add_local_dir(
-        "../..",
+        str(LOCAL_PROJECT_DIR.parent.parent),
         remote_path="/root/luminal",
         ignore=[
             ".git",
@@ -50,30 +52,20 @@ class TestRunner:
     def run(self, pytest_args: list[str], pytest_addopts: str = "") -> int:
         env = os.environ.copy()
         existing = env.get("PYTHONPATH")
-        env["PYTHONPATH"] = f"{SRC_PATH}:{existing}" if existing else SRC_PATH
+        env["PYTHONPATH"] = f"src:{existing}" if existing else "src"
         env["LUMINAL_BACKEND"] = "cuda"
         env["UV_PROJECT_ENVIRONMENT"] = VENV_PATH
         env["MATURIN_PEP517_ARGS"] = "--features cuda --profile release"
         if pytest_addopts:
             env["PYTEST_ADDOPTS"] = pytest_addopts
 
-        sync_cmd = [
+        cmd = [
             "uv",
-            "sync",
-            "--frozen",
+            "run",
             "--group",
             "dev",
             "--reinstall-package",
             "luminal_python",
-        ]
-        sync_result = subprocess.run(sync_cmd, env=env)
-        if sync_result.returncode != 0:
-            return sync_result.returncode
-
-        cmd = [
-            "uv",
-            "run",
-            "--no-sync",
             "python",
             "-m",
             "pytest",
