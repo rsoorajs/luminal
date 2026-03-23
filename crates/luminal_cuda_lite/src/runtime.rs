@@ -773,7 +773,7 @@ impl Runtime for CudaRuntime {
     fn has_nan_outputs(&self, llir_graph: &LLIRGraph, _dyn_map: &FxHashMap<char, usize>) -> bool {
         let _ = self.cuda_stream.synchronize();
         let bucket = self.active();
-        for buf in bucket.buffers.values() {
+        for (node_id, buf) in &bucket.buffers {
             let n_bytes = buf.len();
             if n_bytes == 0 || n_bytes % 4 != 0 {
                 continue;
