@@ -149,12 +149,7 @@ fn compile_pt2_inner(
     // Resolve concrete output shapes
     let output_shapes: Vec<Vec<usize>> = output_shape_exprs
         .iter()
-        .map(|exprs| {
-            exprs
-                .iter()
-                .map(|e| e.to_usize().unwrap_or(1))
-                .collect()
-        })
+        .map(|exprs| exprs.iter().map(|e| e.to_usize().unwrap_or(1)).collect())
         .collect();
 
     // Build dim_param_map from sym_map
