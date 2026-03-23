@@ -1,4 +1,3 @@
-luminal_artifacts
 *.onnx
 tests/llama38b_ref_logits.pt
 __pycache__/
