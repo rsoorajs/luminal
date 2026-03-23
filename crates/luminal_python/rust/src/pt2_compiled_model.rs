@@ -24,8 +24,9 @@ pub(crate) struct Pt2CompiledModelInner {
     output_shapes: Vec<Vec<Expression>>,
 }
 
-// Safety: Send is safe because all fields are logically Send (Graph, RuntimeBackend, Vec,
-// etc.) and all access is serialized through the Mutex in Pt2CompiledModel.
+// Safety: Graph contains Vec<Box<dyn CustomOp>> where CustomOp is not Send.
+// In practice, the PT2 pipeline never adds custom ops, and all access is
+// serialized through the Mutex in Pt2CompiledModel.
 unsafe impl Send for Pt2CompiledModelInner {}
 
 #[pyclass]
@@ -79,15 +80,13 @@ impl Pt2CompiledModel {
 
         let shape = resolve_shape(&output_shape_exprs, &dyn_map);
         let total_elements: usize = shape.iter().product();
-        let mut result = result;
         if result.len() != total_elements {
-            eprintln!(
-                "[luminal] Warning: output buffer size ({}) differs from expected shape size ({}). \
-                 Resizing to match.",
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Output buffer size ({}) differs from expected shape size ({:?} = {})",
                 result.len(),
+                shape,
                 total_elements
-            );
-            result.resize(total_elements, 0.0);
+            )));
         }
 
         Ok((result, shape))
@@ -109,20 +108,11 @@ fn set_dyn_dims_from_input(
 }
 
 /// Detect if an expression is a bare single symbolic variable (e.g., just 'a').
-/// Uses brute-force probing: evaluates the expression with each variable set to 42 and checks
-/// if the result equals 42. This only detects bare symbol variables, not compound expressions
-/// like `a + 1` or `a * b`.
 fn expr_single_var(expr: &Expression) -> Option<char> {
-    if expr.to_usize().is_some() {
-        return None;
-    }
-    for c in 'a'..='z' {
-        let mut map = FxHashMap::default();
-        map.insert(c, 42);
-        if let Some(result) = expr.exec(&map) {
-            if result == 42 {
-                return Some(c);
-            }
+    let terms = expr.terms.read();
+    if terms.len() == 1 {
+        if let Term::Var(c) = terms[0] {
+            return Some(c);
         }
     }
     None
@@ -335,7 +325,7 @@ fn load_safetensors_impl(
             .downcast_ref::<luminal::hlir::Input>()
         {
             if let Ok(tensor) = st.tensor(&input.label) {
-                let f32s = safetensor_bytes_to_f32(tensor.data(), tensor.dtype());
+                let f32s = bytes_to_f32(tensor.data(), safetensors_dtype_to_pt2(tensor.dtype()));
                 set_data(node, f32s);
             }
         }
@@ -429,30 +419,26 @@ fn set_all_inputs_dummy_cuda(
     Ok(())
 }
 
-fn safetensor_bytes_to_f32(bytes: &[u8], dtype: safetensors::Dtype) -> Vec<f32> {
+/// Convert safetensors Dtype to PT2 dtype number.
+fn safetensors_dtype_to_pt2(dtype: safetensors::Dtype) -> u32 {
     match dtype {
-        safetensors::Dtype::F32 => bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect(),
-        safetensors::Dtype::F16 => bytes
-            .chunks_exact(2)
-            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
-            .collect(),
-        safetensors::Dtype::BF16 => bytes
-            .chunks_exact(2)
-            .map(|b| half::bf16::from_le_bytes([b[0], b[1]]).to_f32())
-            .collect(),
-        _ => bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect(),
+        safetensors::Dtype::BOOL => 12,
+        safetensors::Dtype::U8 => 1,
+        safetensors::Dtype::I8 => 2,
+        safetensors::Dtype::I16 => 3,
+        safetensors::Dtype::I32 => 4,
+        safetensors::Dtype::I64 => 5,
+        safetensors::Dtype::F16 => 6,
+        safetensors::Dtype::F32 => 7,
+        safetensors::Dtype::F64 => 8,
+        safetensors::Dtype::BF16 => 13,
+        _ => 7, // default to f32
     }
 }
 
 /// Convert raw bytes to f32 using PT2 dtype numbering.
 /// 1=uint8, 2=int8, 3=int16, 4=int32, 5=int64, 6=float16, 7=float32, 8=float64, 12=bool, 13=bfloat16
-fn constant_bytes_to_f32(bytes: &[u8], dtype: u32) -> Vec<f32> {
+fn bytes_to_f32(bytes: &[u8], dtype: u32) -> Vec<f32> {
     match dtype {
         7 => bytes
             .chunks_exact(4)
@@ -488,10 +474,13 @@ fn constant_bytes_to_f32(bytes: &[u8], dtype: u32) -> Vec<f32> {
             .iter()
             .map(|&b| if b != 0 { 1.0 } else { 0.0 })
             .collect(),
-        _ => bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect(),
+        _ => {
+            eprintln!("[luminal] Warning: unrecognized dtype {dtype}, interpreting as f32");
+            bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect()
+        }
     }
 }
 
@@ -517,7 +506,7 @@ fn load_constants_impl(
                 continue;
             }
         };
-        let f32_data = constant_bytes_to_f32(&raw_bytes, entry.tensor_meta.dtype);
+        let f32_data = bytes_to_f32(&raw_bytes, entry.tensor_meta.dtype);
 
         for node_id in cx.graph.node_indices() {
             if let Some(input) = (*cx.graph[node_id])

@@ -222,15 +222,7 @@ impl<'a> Translator<'a> {
                 let (a, b) = broadcast_binary(a, b);
                 a.le(b)
             }
-            "torch.ops.aten.__and__.Tensor" => {
-                let a = self.get_input_tensor(node, 0)?;
-                let b = self.get_input_tensor(node, 1)?;
-                let (a, b) = broadcast_binary(a, b);
-                let a = a.cast(DType::F32);
-                let b = b.cast(DType::F32);
-                (a * b).cast(DType::Bool)
-            }
-            "torch.ops.aten.logical_and.default" => {
+            "torch.ops.aten.__and__.Tensor" | "torch.ops.aten.logical_and.default" => {
                 let a = self.get_input_tensor(node, 0)?;
                 let b = self.get_input_tensor(node, 1)?;
                 let (a, b) = broadcast_binary(a, b);
@@ -244,8 +236,7 @@ impl<'a> Translator<'a> {
                 let (a, b) = broadcast_binary(a, b);
                 let a = a.cast(DType::F32);
                 let b = b.cast(DType::F32);
-                let one = self.graph.constant_float(1.0).expand_rhs(a.shape);
-                (one - (one - a) * (one - b)).cast(DType::Bool)
+                (a + b - a * b).cast(DType::Bool)
             }
             "torch.ops.aten.logical_xor.default" => {
                 let a = self.get_input_tensor(node, 0)?;
@@ -374,28 +365,28 @@ impl<'a> Translator<'a> {
             // that CUDA can't schedule (grid (0,1,1) invalid launch).
             "torch.ops.aten.sum.default" => {
                 let a = self.get_input_tensor(node, 0)?;
-                let total: usize = a.dims().iter().map(|d| d.to_usize().unwrap()).product();
+                let total = concrete_numel(&a)?;
                 let mut flat = a;
                 flat.shape = ShapeTracker::new(vec![1, total]);
                 flat.sum(vec![1])
             }
             "torch.ops.aten.mean.default" => {
                 let a = self.get_input_tensor(node, 0)?;
-                let total: usize = a.dims().iter().map(|d| d.to_usize().unwrap()).product();
+                let total = concrete_numel(&a)?;
                 let mut flat = a;
                 flat.shape = ShapeTracker::new(vec![1, total]);
                 flat.sum(vec![1]) / total as f32
             }
             "torch.ops.aten.max.default" => {
                 let a = self.get_input_tensor(node, 0)?;
-                let total: usize = a.dims().iter().map(|d| d.to_usize().unwrap()).product();
+                let total = concrete_numel(&a)?;
                 let mut flat = a;
                 flat.shape = ShapeTracker::new(vec![1, total]);
                 flat.max(vec![1])
             }
             "torch.ops.aten.min.default" => {
                 let a = self.get_input_tensor(node, 0)?;
-                let total: usize = a.dims().iter().map(|d| d.to_usize().unwrap()).product();
+                let total = concrete_numel(&a)?;
                 let mut flat = a;
                 flat.shape = ShapeTracker::new(vec![1, total]);
                 flat.min(vec![1])
@@ -432,15 +423,19 @@ impl<'a> Translator<'a> {
                 let a = self.get_input_tensor(node, 0)?;
                 let b = self.get_input_tensor(node, 1)?;
                 let (a, b) = broadcast_binary(a, b);
+                a % b
+                /*
                 let trunc = (a / b).cast(DType::Int).cast(DType::F32);
                 a - trunc * b
+                */
             }
             "torch.ops.aten.fmod.Scalar" | "torch.ops.aten.remainder.Scalar" => {
                 let a = self.get_input_tensor(node, 0)?;
                 let val = self.get_float_arg(node, 1)? as f32;
                 let b = self.graph.constant_float(val).expand_rhs(a.shape);
-                let trunc = (a / b).cast(DType::Int).cast(DType::F32);
-                a - trunc * b
+                //let trunc = (a / b).cast(DType::Int).cast(DType::F32);
+                //                a - trunc * b
+                a % b
             }
 
             other => {
@@ -453,7 +448,18 @@ impl<'a> Translator<'a> {
         }
         Ok(())
     }
+}
 
+/// Compute total element count, returning an error if any dimension is symbolic.
+fn concrete_numel(a: &GraphTensor) -> Result<usize> {
+    a.dims().iter().try_fold(1usize, |acc, d| {
+        d.to_usize().map(|v| acc * v).ok_or_else(|| {
+            anyhow::anyhow!("Full reduction requires concrete dimensions, got symbolic dim")
+        })
+    })
+}
+
+impl<'a> Translator<'a> {
     fn translate_scalar_comparison(
         &mut self,
         node: &Node,

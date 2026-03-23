@@ -7,6 +7,7 @@ through the PyTorch -> ONNX -> luminal pipeline via torch.compile.
 
 from typing import Callable
 
+import pytest
 import torch
 import torch._dynamo
 from test_models import (
@@ -216,13 +217,14 @@ def test_hf_llama_decode_loop_static(device: torch.device):
         with torch.no_grad():
             ref = model(input_ids)
             out = compiled(input_ids)
-        assert torch.allclose(out.logits, ref.logits, atol=1e-4), (
+        assert torch.allclose(out.logits, ref.logits, atol=1e-5), (
             f"step {step}: max_diff={torch.max(torch.abs(out.logits - ref.logits)).item():.2e}"
         )
         next_token = ref.logits[0, -1, :].argmax().item()
         tokens.append(next_token)
 
 
+@pytest.mark.slow
 def test_hf_llama3_1b_decode_loop_dynamic():
     """Decode loop with dynamic shapes on real Llama3.2-1B — compile once, run with varying seq_len.
 
@@ -333,6 +335,7 @@ def test_hf_llama3_1b_decode_loop_dynamic():
             print(f"Step {step}: '{tokenizer.decode(tokens)}'")
 
 
+@pytest.mark.slow
 def test_hf_llama3_full(device: torch.device):
     """HuggingFace LlamaForCausalLM — full Llama3.2-1B with real pretrained weights.
 
@@ -364,6 +367,7 @@ def test_hf_llama3_full(device: torch.device):
     )
 
 
+@pytest.mark.slow
 def test_hf_llama38b_full(device: torch.device):
     """HuggingFace LlamaForCausalLM — full Llama3.2-1B with real pretrained weights.
 
@@ -395,6 +399,7 @@ def test_hf_llama38b_full(device: torch.device):
     )
 
 
+@pytest.mark.slow
 def test_hf_llama38b_cached():
     """Llama 3.1-8B via pre-generated artifacts + reference logits.
 

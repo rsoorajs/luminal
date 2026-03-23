@@ -31,34 +31,18 @@ impl<'a> Translator<'a> {
     }
 
     pub(crate) fn translate_zeros(&mut self, node: &Node) -> Result<GraphTensor> {
-        let output_name = node
-            .outputs
-            .first()
-            .and_then(|o| o.as_tensor.as_ref())
-            .map(|t| t.name.clone())
-            .unwrap_or_default();
-        let meta = self
-            .tensor_meta(&output_name)
-            .context("Missing tensor meta for zeros output")?;
-        let shape = self.tensor_meta_to_shape(meta)?;
-        Ok(self.graph.constant_float(0.0).expand_rhs(shape))
+        self.translate_constant_fill(node, 0.0)
     }
 
     pub(crate) fn translate_ones(&mut self, node: &Node) -> Result<GraphTensor> {
-        let output_name = node
-            .outputs
-            .first()
-            .and_then(|o| o.as_tensor.as_ref())
-            .map(|t| t.name.clone())
-            .unwrap_or_default();
-        let meta = self
-            .tensor_meta(&output_name)
-            .context("Missing tensor meta for ones output")?;
-        let shape = self.tensor_meta_to_shape(meta)?;
-        Ok(self.graph.constant_float(1.0).expand_rhs(shape))
+        self.translate_constant_fill(node, 1.0)
     }
 
     pub(crate) fn translate_new_ones(&mut self, node: &Node) -> Result<GraphTensor> {
+        self.translate_constant_fill(node, 1.0)
+    }
+
+    fn translate_constant_fill(&mut self, node: &Node, val: f32) -> Result<GraphTensor> {
         let output_name = node
             .outputs
             .first()
@@ -67,12 +51,12 @@ impl<'a> Translator<'a> {
             .unwrap_or_default();
         let meta = self
             .tensor_meta(&output_name)
-            .context("Missing tensor meta for new_ones output")?;
+            .context("Missing tensor meta for constant fill output")?;
         let shape = self.tensor_meta_to_shape(meta)?;
         if shape.is_empty() {
-            Ok(self.graph.constant_float(1.0))
+            Ok(self.graph.constant_float(val))
         } else {
-            Ok(self.graph.constant_float(1.0).expand_rhs(shape))
+            Ok(self.graph.constant_float(val).expand_rhs(shape))
         }
     }
 
@@ -129,40 +113,14 @@ impl<'a> Translator<'a> {
     }
 
     pub(crate) fn translate_tril(&mut self, node: &Node) -> Result<GraphTensor> {
-        let a = self.get_input_tensor(node, 0)?;
-        let diagonal = if node.inputs.len() > 1 {
-            self.get_int_arg(node, 1).unwrap_or(0) as i32
-        } else {
-            0
-        };
-        let dims = a.shape.dims.clone();
-        let rows = dims[dims.len() - 2];
-        let cols = dims[dims.len() - 1];
-        // tril mask: row >= col - diagonal
-        let size = if let (Some(r), Some(c)) = (rows.to_usize(), cols.to_usize()) {
-            r.max(c)
-        } else {
-            // fallback
-            return Ok(a);
-        };
-        let mask = self.graph.tril(size, diagonal).cast(DType::F32);
-        // Slice mask to [rows, cols] if not square
-        let mask = if rows != cols {
-            let r = rows.to_usize().unwrap();
-            let c = cols.to_usize().unwrap();
-            mask.slice_along(0..r, 0).slice_along(0..c, 1)
-        } else {
-            mask
-        };
-        // Broadcast mask to match batch dims
-        let mut mask_expanded = mask;
-        for i in (0..dims.len() - 2).rev() {
-            mask_expanded = mask_expanded.expand_dim(0, dims[i]);
-        }
-        Ok(a * mask_expanded)
+        self.translate_triangular(node, false)
     }
 
     pub(crate) fn translate_triu(&mut self, node: &Node) -> Result<GraphTensor> {
+        self.translate_triangular(node, true)
+    }
+
+    fn translate_triangular(&mut self, node: &Node, upper: bool) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
         let diagonal = if node.inputs.len() > 1 {
             self.get_int_arg(node, 1).unwrap_or(0) as i32
@@ -172,16 +130,19 @@ impl<'a> Translator<'a> {
         let dims = a.shape.dims.clone();
         let rows = dims[dims.len() - 2];
         let cols = dims[dims.len() - 1];
-        let size = if let (Some(r), Some(c)) = (rows.to_usize(), cols.to_usize()) {
-            r.max(c)
-        } else {
-            return Ok(a);
+        let (r_val, c_val) = match (rows.to_usize(), cols.to_usize()) {
+            (Some(r), Some(c)) => (r, c),
+            _ => anyhow::bail!("tril/triu requires concrete matrix dimensions"),
         };
-        let mask = self.graph.triu(size, diagonal).cast(DType::F32);
+        let size = r_val.max(c_val);
+        let mask = if upper {
+            self.graph.triu(size, diagonal)
+        } else {
+            self.graph.tril(size, diagonal)
+        }
+        .cast(DType::F32);
         let mask = if rows != cols {
-            let r = rows.to_usize().unwrap();
-            let c = cols.to_usize().unwrap();
-            mask.slice_along(0..r, 0).slice_along(0..c, 1)
+            mask.slice_along(0..r_val, 0).slice_along(0..c_val, 1)
         } else {
             mask
         };

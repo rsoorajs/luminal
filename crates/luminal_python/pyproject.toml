@@ -21,6 +21,11 @@ build-backend = "maturin"
 python-source = "src"
 manifest-path = "rust/Cargo.toml"
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: tests that download large models or require pre-generated artifacts",
+]
+
 [dependency-groups]
 dev = [
     "maturin>=1.0,<2.0",
