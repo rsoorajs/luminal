@@ -15,6 +15,7 @@ import modal
 
 app = modal.App("luminal-tests")
 
+DEFAULT_TIMEOUT = 30 * 60
 LOCAL_PROJECT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = "/root/luminal/crates/luminal_python"
 VENV_PATH = f"{PROJECT_DIR}/.venv"
@@ -46,7 +47,7 @@ image = (
 )
 
 
-@app.cls(image=image, timeout=30 * 60)
+@app.cls(image=image, timeout=DEFAULT_TIMEOUT)
 class TestRunner:
     @modal.method()
     def run(self, pytest_args: list[str], pytest_addopts: str = "") -> int:
@@ -74,16 +75,22 @@ class TestRunner:
         return subprocess.run(cmd, env=env).returncode
 
 
-def _parse_cli_args(cli_args: tuple[str, ...]) -> tuple[str, list[str]]:
+def _parse_cli_args(cli_args: tuple[str, ...]) -> tuple[str, int | None, list[str]]:
     parser = argparse.ArgumentParser(
         prog="modal run modal_pytest_runner.py",
         add_help=False,
         allow_abbrev=False,
+        description="Run pytest on Modal with a dynamically selected GPU.",
     )
     parser.add_argument(
         "--gpu",
         required=True,
         help="GPU type to request from Modal (for example: A100, T4, H100).",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        help="Optional Modal execution timeout in seconds. Defaults to 1800 seconds.",
     )
     parsed, pytest_args = parser.parse_known_args(cli_args)
 
@@ -92,14 +99,17 @@ def _parse_cli_args(cli_args: tuple[str, ...]) -> tuple[str, list[str]]:
     if not pytest_args:
         pytest_args = ["tests/"]
 
-    return parsed.gpu, pytest_args
+    return parsed.gpu, parsed.timeout, pytest_args
 
 
 @app.local_entrypoint()
 def main(*cli_args: str):
-    gpu, pytest_args = _parse_cli_args(cli_args)
+    gpu, timeout, pytest_args = _parse_cli_args(cli_args)
     pytest_addopts = os.environ.get("PYTEST_ADDOPTS", "")
-    runner = TestRunner.with_options(gpu=gpu)()
+    runner_options = {"gpu": gpu}
+    if timeout is not None:
+        runner_options["timeout"] = timeout
+    runner = TestRunner.with_options(**runner_options)()
     sys.exit(
         runner.run.remote(
             pytest_args=pytest_args,
