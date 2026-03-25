@@ -509,6 +509,115 @@ impl CompiledGraph {
         Ok(())
     }
 
+    /// Set input tensor data from a CPU host memory pointer (avoids Python list conversion).
+    /// The pointer must point to contiguous f32 data (from tensor.data_ptr() on a CPU float32 tensor).
+    fn set_input_from_ptr(&mut self, name: &str, ptr: u64, n_elements: usize) -> PyResult<()> {
+        let node_id = self.tensor_ids.get(name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Unknown input tensor: {}", name))
+        })?;
+        let data: Vec<f32> =
+            unsafe { std::slice::from_raw_parts(ptr as *const f32, n_elements).to_vec() };
+        self.runtime.set_data(*node_id, data);
+        Ok(())
+    }
+
+    /// Set input from a CUDA device pointer. Zero-copy on device.
+    /// The pointer must be a valid CUDA device allocation with at least n_bytes bytes.
+    #[cfg(feature = "cuda")]
+    fn set_input_device_ptr(
+        &mut self,
+        name: &str,
+        device_ptr: u64,
+        n_bytes: usize,
+    ) -> PyResult<()> {
+        let node_id = self.tensor_ids.get(name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Unknown input tensor: {}", name))
+        })?;
+        match &mut self.runtime {
+            RuntimeBackend::Cuda(rt) => unsafe { rt.set_device_ptr(*node_id, device_ptr, n_bytes) },
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "set_input_device_ptr requires CUDA backend",
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    /// Mark an input tensor as persistent (survives execute() calls).
+    /// Call this for weight tensors that should not be consumed after each execution.
+    fn persist_input(&mut self, name: &str) -> PyResult<()> {
+        let _node_id = *self.tensor_ids.get(name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Unknown input tensor: {}", name))
+        })?;
+        match &mut self.runtime {
+            #[cfg(feature = "cuda")]
+            RuntimeBackend::Cuda(rt) => rt.persist_hlir_node(_node_id),
+            RuntimeBackend::Native(_) => {} // Native: persist is handled at graph level
+        }
+        Ok(())
+    }
+
+    /// Set a weight tensor from a CUDA device pointer, matching by Input node label.
+    /// Also marks the weight as persistent. For PT2 weights (e.g. "fc1.weight").
+    #[cfg(feature = "cuda")]
+    fn set_weight_device_ptr(
+        &mut self,
+        label: &str,
+        device_ptr: u64,
+        n_bytes: usize,
+    ) -> PyResult<()> {
+        for node_id in self.graph.graph.node_indices() {
+            if let Some(input) = (*self.graph.graph[node_id])
+                .as_any()
+                .downcast_ref::<luminal::hlir::Input>()
+                && input.label == label
+            {
+                match &mut self.runtime {
+                    RuntimeBackend::Cuda(rt) => {
+                        unsafe { rt.set_device_ptr(node_id, device_ptr, n_bytes) };
+                        rt.persist_hlir_node(node_id);
+                        return Ok(());
+                    }
+                    _ => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "set_weight_device_ptr requires CUDA backend",
+                        ))
+                    }
+                }
+            }
+        }
+        Err(pyo3::exceptions::PyKeyError::new_err(format!(
+            "No Input node with label: {}",
+            label
+        )))
+    }
+
+    /// Set a weight tensor from a CPU host pointer, matching by Input node label.
+    fn set_weight_from_ptr(
+        &mut self,
+        label: &str,
+        ptr: u64,
+        n_elements: usize,
+    ) -> PyResult<()> {
+        let data: Vec<f32> =
+            unsafe { std::slice::from_raw_parts(ptr as *const f32, n_elements).to_vec() };
+        for node_id in self.graph.graph.node_indices() {
+            if let Some(input) = (*self.graph.graph[node_id])
+                .as_any()
+                .downcast_ref::<luminal::hlir::Input>()
+                && input.label == label
+            {
+                self.runtime.set_data(node_id, data);
+                return Ok(());
+            }
+        }
+        Err(pyo3::exceptions::PyKeyError::new_err(format!(
+            "No Input node with label: {}",
+            label
+        )))
+    }
+
     /// Execute the graph.
     fn run(&mut self) {
         self.runtime.execute(&self.graph.dyn_map);

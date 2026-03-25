@@ -8,17 +8,22 @@ import torch
 class CompiledModel:
     """Wrapper around CompiledGraph that handles PyTorch tensor conversion."""
 
-    def __init__(self, graph_result):
+    def __init__(self, graph_result, weight_refs=None, user_indices=None):
         """Initialize with a compiled CompiledGraph from Rust.
 
         Args:
             graph_result: The CompiledGraph from luminal_python.process_onnx() or compile_pt2()
+            weight_refs: List of PyTorch tensors to keep alive (prevents GC of shared weights)
+            user_indices: Indices of actual user inputs in __call__ args (None = all are user inputs)
         """
         self._graph = graph_result
         self._input_names = graph_result.input_names
         self._output_names = graph_result.output_names
         self._output_shapes = graph_result.output_shapes
         self._has_dynamic_dims = getattr(graph_result, 'has_dynamic_dims', False)
+        self._weight_refs = weight_refs or []
+        self._user_indices = user_indices
+        self._is_cuda = (graph_result.backend == "cuda")
 
     def set_dim(self, param_name: str, value: int) -> None:
         """Set a dynamic dimension value by its param name."""
@@ -41,24 +46,35 @@ class CompiledModel:
         Returns:
             Tuple of PyTorch tensors containing the model outputs
         """
-        if len(inputs) != len(self._input_names):
-            raise ValueError(
-                f"Expected {len(self._input_names)} inputs, got {len(inputs)}"
-            )
+        # Determine which inputs are user inputs vs pre-loaded weights
+        if self._user_indices is not None:
+            user_inputs = [inputs[i] for i in self._user_indices]
+            user_names = [self._input_names[i] for i in self._user_indices]
+        else:
+            if len(inputs) != len(self._input_names):
+                raise ValueError(
+                    f"Expected {len(self._input_names)} inputs, got {len(inputs)}"
+                )
+            user_inputs = inputs
+            user_names = self._input_names
 
         input_device = inputs[0].device if inputs else torch.device("cpu")
 
         # Auto-detect dynamic dims from input shapes
         if self._has_dynamic_dims:
-            input_shapes = [list(t.shape) for t in inputs]
+            input_shapes = [list(t.shape) for t in user_inputs]
             self._graph.auto_set_dims_from_input_shapes(input_shapes)
 
-        # Set input data
-        for name, tensor in zip(self._input_names, inputs):
-            # Convert to contiguous float32 numpy array (move to CPU first for CUDA tensors)
-            arr = tensor.detach().cpu().contiguous().float().numpy()
-            data = arr.flatten().tolist()
-            self._graph.set_input(name, data)
+        # Set user input data via pointer (avoids Python list conversion)
+        for name, tensor in zip(user_names, user_inputs):
+            if self._is_cuda and tensor.is_cuda:
+                # Zero-copy: pass CUDA device pointer directly
+                t = tensor.detach().contiguous().float()
+                self._graph.set_input_device_ptr(name, t.data_ptr(), t.numel() * 4)
+            else:
+                # Copy from host pointer (still avoids .tolist() overhead)
+                t = tensor.detach().cpu().contiguous().float()
+                self._graph.set_input_from_ptr(name, t.data_ptr(), t.numel())
 
         # Run the graph
         self._graph.run()

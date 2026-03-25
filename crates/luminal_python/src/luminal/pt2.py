@@ -11,8 +11,6 @@ import shutil
 import tempfile
 
 import torch
-from safetensors.torch import save_file
-
 from .cache_utils import _register_cache_serialization
 from .compiled_model import CompiledModel
 from .luminal import compile_pt2 as _compile_pt2_rust
@@ -38,18 +36,27 @@ def _save_and_compile(ep, backend, search_iterations):
     tmpdir = tempfile.mkdtemp(prefix="luminal_")
     try:
         pt2_path = os.path.join(tmpdir, "model.pt2")
-        weights_path = os.path.join(tmpdir, "weights.safetensors")
-
         torch.export.save(ep, pt2_path)
 
-        state_dict = {k: v.float().clone() for k, v in ep.state_dict.items()}
-        if state_dict:
-            save_file(state_dict, weights_path)
-        else:
-            weights_path = ""
+        # Compile with no safetensors — weights loaded via pointer below
+        compiled = _compile_pt2_rust(pt2_path, "", backend, search_iterations)
 
-        compiled = _compile_pt2_rust(pt2_path, weights_path, backend, search_iterations)
-        return CompiledModel(compiled)
+        # Load weights via device pointer (zero-copy) or host pointer (copy-once)
+        keep_alive = []
+        for name, param in ep.state_dict.items():
+            if backend in ("cuda", "gpu") and param.is_cuda:
+                t = param.detach().contiguous().float()
+                keep_alive.append(t)
+                # set_weight_device_ptr also persists automatically
+                compiled.set_weight_device_ptr(name, t.data_ptr(), t.numel() * 4)
+            else:
+                t = param.detach().cpu().contiguous().float()
+                keep_alive.append(t)
+                compiled.set_weight_from_ptr(name, t.data_ptr(), t.numel())
+
+        model = CompiledModel(compiled)
+        model._weight_refs = keep_alive
+        return model
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

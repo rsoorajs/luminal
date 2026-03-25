@@ -275,6 +275,7 @@ fn set_all_inputs_dummy_cuda(
 
     let mut label_sizes: HashMap<String, usize> = HashMap::new();
 
+    // Get weight sizes from safetensors file (if provided)
     if !weights_path.is_empty() {
         let f = File::open(weights_path)?;
         let mmap = unsafe { MmapOptions::new().map(&f)? };
@@ -283,6 +284,32 @@ fn set_all_inputs_dummy_cuda(
         for (name, info) in st.tensors() {
             let n: usize = info.shape().iter().product();
             label_sizes.insert(name.to_string(), n);
+        }
+    }
+
+    // Also get weight sizes from the PT2 model metadata (covers case when
+    // safetensors is skipped — weights loaded via device pointers after search).
+    for input_kind in parsed.classify_inputs() {
+        let (graph_name, original_name) = match &input_kind {
+            pt2_parser::InputKind::Parameter {
+                graph_name,
+                original_name,
+            } => (graph_name.as_str(), original_name.as_str()),
+            pt2_parser::InputKind::Buffer {
+                graph_name,
+                original_name,
+            } => (graph_name.as_str(), original_name.as_str()),
+            pt2_parser::InputKind::UserInput { .. } => continue,
+        };
+        if !label_sizes.contains_key(original_name) {
+            if let Some(meta) = parsed.tensor_meta(graph_name) {
+                let n: usize = meta
+                    .sizes
+                    .iter()
+                    .map(|s| s.hint().unwrap_or(1) as usize)
+                    .product();
+                label_sizes.insert(original_name.to_string(), n);
+            }
         }
     }
 
