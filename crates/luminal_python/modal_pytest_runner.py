@@ -57,6 +57,7 @@ class TestRunner:
         env["LUMINAL_BACKEND"] = "cuda"
         env["UV_PROJECT_ENVIRONMENT"] = VENV_PATH
         env["MATURIN_PEP517_ARGS"] = "--features cuda --profile release"
+        env["CUDARC_CUDA_VERSION"] = "12080"
         if pytest_addopts:
             env["PYTEST_ADDOPTS"] = pytest_addopts
 
