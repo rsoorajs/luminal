@@ -17,6 +17,8 @@ import pytest
 import torch
 import torch._dynamo
 
+torch.set_float32_matmul_precision("highest")
+
 
 @pytest.fixture
 def device() -> torch.device:
