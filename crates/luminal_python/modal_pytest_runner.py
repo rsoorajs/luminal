@@ -49,8 +49,7 @@ image = (
         str(LOCAL_PROJECT_DIR),
         frozen=False,
         groups=["dev"],
-        env={
-            "UV_PROJECT_ENVIRONMENT": VENV_PATH},
+        env={"UV_PROJECT_ENVIRONMENT": VENV_PATH},
     )
     .workdir(PROJECT_DIR)
     .add_local_dir(
@@ -330,7 +329,9 @@ def _parse_cli_args(
 
 @app.local_entrypoint()
 def main(*cli_args: str):
-    gpu, timeout, cli_profile, profile_output_dir, pytest_args = _parse_cli_args(cli_args)
+    gpu, timeout, cli_profile, profile_output_dir, pytest_args = _parse_cli_args(
+        cli_args
+    )
     profile_enabled = _profiling_enabled(cli_profile, pytest_args)
     pytest_addopts = os.environ.get("PYTEST_ADDOPTS", "")
     runner_options = {"gpu": gpu}

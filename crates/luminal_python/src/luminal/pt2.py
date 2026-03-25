@@ -22,6 +22,7 @@ from .luminal import compile_pt2 as _compile_pt2_rust
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _export_kwargs():
     """Build common kwargs for torch.export.export()."""
     kwargs = dict(strict=False)
@@ -82,7 +83,9 @@ def _reinternalize_lifted_params(gm, example_inputs):
     if buffer_nodes:
         for i, node in enumerate(buffer_nodes):
             attr_name = f"_luminal_param_{i}"
-            gm.register_buffer(attr_name, example_inputs[buffer_indices[i]].detach().clone())
+            gm.register_buffer(
+                attr_name, example_inputs[buffer_indices[i]].detach().clone()
+            )
             with gm.graph.inserting_before(node):
                 new_node = gm.graph.create_node("get_attr", attr_name)
                 new_node.meta = node.meta.copy()
@@ -91,13 +94,18 @@ def _reinternalize_lifted_params(gm, example_inputs):
         gm.graph.lint()
         gm.recompile()
 
-    user_inputs = [example_inputs[i] for i in user_indices] if user_indices else list(example_inputs)
+    user_inputs = (
+        [example_inputs[i] for i in user_indices]
+        if user_indices
+        else list(example_inputs)
+    )
     return gm, user_inputs
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def compile(
     model,
@@ -168,7 +176,11 @@ def compile(
 
     if ep is None:
         ep = torch.export.export(
-            model, (example_input,), kwargs=kwargs, dynamic_shapes=None, **extra,
+            model,
+            (example_input,),
+            kwargs=kwargs,
+            dynamic_shapes=None,
+            **extra,
         )
 
     return _save_and_compile(ep, backend, search_iterations)
