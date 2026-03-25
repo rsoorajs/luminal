@@ -21,16 +21,18 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
-            - name: Install pre-commit
-              run: python3 -m pip install pre-commit
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
             - name: Update Rust toolchain
               run: rustup update
             - name: Detect GPU compute capability
               run: |
                   CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
                   echo "CUDA_COMPUTE_CAP=${CAP}" >> "$GITHUB_ENV"
-            - name: Run CUDA clippy hook
-              run: pre-commit run --hook-stage manual cargo-clippy-cuda-lite --all-files
+            - uses: pre-commit/action@v3.0.1
+              with:
+                  extra_args: --hook-stage manual cargo-clippy-cuda-lite --all-files
 
     cuda_unit_test:
         name: Cuda Unit Tests

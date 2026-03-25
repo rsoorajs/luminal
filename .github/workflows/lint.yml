@@ -18,10 +18,12 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
-            - name: Install pre-commit
-              run: python3 -m pip install pre-commit
-            - name: Run ruff lint hook
-              run: pre-commit run ruff-check --all-files
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+            - uses: pre-commit/action@v3.0.1
+              with:
+                  extra_args: ruff-check --all-files
 
     ruff_format:
         name: Ruff Format
@@ -30,10 +32,12 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
-            - name: Install pre-commit
-              run: python3 -m pip install pre-commit
-            - name: Run ruff format hook
-              run: pre-commit run ruff-format --all-files
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+            - uses: pre-commit/action@v3.0.1
+              with:
+                  extra_args: ruff-format --all-files
 
     clippy:
         name: Clippy
@@ -42,12 +46,14 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
-            - name: Install pre-commit
-              run: python3 -m pip install pre-commit
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
             - name: Update Rust toolchain
               run: rustup update
-            - name: Run clippy hook
-              run: pre-commit run cargo-clippy --all-files
+            - uses: pre-commit/action@v3.0.1
+              with:
+                  extra_args: cargo-clippy --all-files
 
     metal_clippy:
         name: Metal Clippy
@@ -56,12 +62,14 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
-            - name: Install pre-commit
-              run: python3 -m pip install pre-commit
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
             - name: Update Rust toolchain
               run: rustup update
-            - name: Run metal clippy hook
-              run: pre-commit run --hook-stage manual cargo-clippy-metal --all-files
+            - uses: pre-commit/action@v3.0.1
+              with:
+                  extra_args: --hook-stage manual cargo-clippy-metal --all-files
 
     fmt:
         name: Fmt
@@ -70,7 +78,9 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
-            - name: Install pre-commit
-              run: python3 -m pip install pre-commit
-            - name: Run fmt hook
-              run: pre-commit run cargo-fmt --all-files
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+            - uses: pre-commit/action@v3.0.1
+              with:
+                  extra_args: cargo-fmt --all-files
