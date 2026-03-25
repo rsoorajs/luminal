@@ -32,7 +32,15 @@ PROFILE_VOLUME_NAME = "luminal-pytest-profiling"
 PROFILE_VOLUME_PATH = "/root/pytest-profile-artifacts"
 PROFILE_LOCAL_DEFAULT_ROOT = "luminal_artifacts/pytest-profiling"
 PROFILE_SCRATCH_ROOT = "/tmp/luminal-pytest-profiling"
+HF_CACHE_VOLUME_NAME = "luminal-hf-cache-v2"
+HF_CACHE_PATH = "/root/.cache/huggingface"
+HF_TOKEN_ENV_KEY = "HF_TOKEN"
 PROFILE_VOLUME = modal.Volume.from_name(PROFILE_VOLUME_NAME, create_if_missing=True)
+HF_CACHE_VOLUME = modal.Volume.from_name(
+    HF_CACHE_VOLUME_NAME,
+    create_if_missing=True,
+    version=2,
+)
 
 image = (
     modal.Image.from_registry("ghcr.io/luminal-ai/luminal-docker:cuda")
@@ -48,6 +56,7 @@ image = (
     .add_local_dir(
         str(LOCAL_PROJECT_DIR.parent.parent),
         remote_path="/root/luminal",
+        copy=True,
         ignore=[
             ".git",
             ".claude-project",
@@ -65,6 +74,13 @@ image = (
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _hf_token_secret() -> modal.Secret | None:
+    hf_token = os.environ.get(HF_TOKEN_ENV_KEY)
+    if not hf_token:
+        return None
+    return modal.Secret.from_dict({HF_TOKEN_ENV_KEY: hf_token})
 
 
 def _has_pytest_flag(pytest_args: list[str], flag: str) -> bool:
@@ -175,6 +191,7 @@ class TestRunner:
         env["UV_PROJECT_ENVIRONMENT"] = VENV_PATH
         env["MATURIN_PEP517_ARGS"] = "--features cuda --profile release"
         env["CUDARC_CUDA_VERSION"] = CUDARC_CUDA_VERSION
+        env["HF_HOME"] = HF_CACHE_PATH
         if pytest_addopts:
             env["PYTEST_ADDOPTS"] = pytest_addopts
 
@@ -214,6 +231,7 @@ class TestRunner:
             env=env,
             cwd=str(scratch_dir) if scratch_dir is not None else PROJECT_DIR,
         ).returncode
+        HF_CACHE_VOLUME.commit()
         finished_at = _utc_now()
 
         if not profile_enabled:
@@ -316,10 +334,15 @@ def main(*cli_args: str):
     profile_enabled = _profiling_enabled(cli_profile, pytest_args)
     pytest_addopts = os.environ.get("PYTEST_ADDOPTS", "")
     runner_options = {"gpu": gpu}
+    hf_token_secret = _hf_token_secret()
+    runner_volumes = {HF_CACHE_PATH: HF_CACHE_VOLUME}
     if timeout is not None:
         runner_options["timeout"] = timeout
     if profile_enabled:
-        runner_options["volumes"] = {PROFILE_VOLUME_PATH: PROFILE_VOLUME}
+        runner_volumes[PROFILE_VOLUME_PATH] = PROFILE_VOLUME
+    runner_options["volumes"] = runner_volumes
+    if hf_token_secret is not None:
+        runner_options["secrets"] = [hf_token_secret]
     runner = TestRunner.with_options(**runner_options)()
     result = runner.run.remote(
         pytest_args=pytest_args,
