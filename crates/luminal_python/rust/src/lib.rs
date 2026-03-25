@@ -49,13 +49,13 @@ fn validate_backend(backend: &str) -> PyResult<()> {
 
 #[pyfunction]
 #[pyo3(signature = (path, backend="native"))]
-fn process_onnx(path: &str, backend: &str) -> PyResult<crate::compiled_graph::OnnxGraphResult> {
+fn process_onnx(path: &str, backend: &str) -> PyResult<CompiledGraph> {
     validate_backend(backend)?;
 
     parse_onnx(path, backend).map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
-fn parse_onnx(path: &str, backend: &str) -> Result<crate::compiled_graph::OnnxGraphResult, String> {
+fn parse_onnx(path: &str, backend: &str) -> Result<CompiledGraph, String> {
     let data = fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
     let model_directory = Path::new(path).parent().unwrap_or(Path::new("."));
     let model = ModelProto::parse_from_bytes(&data)
