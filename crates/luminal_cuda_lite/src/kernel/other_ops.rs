@@ -1,14 +1,11 @@
 use std::sync::Arc;
 
 use crate::{
-    cuda_dtype,
+    compile_module_image_for_current_device, cuda_dtype,
     kernel::KernelOp,
-    kernel::hlir::{compile_kernel, dtype_includes, generate_dyn_dims_defines},
+    kernel::hlir::{dtype_includes, generate_dyn_dims_defines},
 };
-use cudarc::{
-    driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream},
-    nvrtc::{CompileOptions, compile_ptx},
-};
+use cudarc::driver::{CudaFunction, CudaModule, CudaSlice, CudaStream};
 use itertools::Itertools;
 use luminal::{
     egglog_utils::{
@@ -172,7 +169,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("reduce_mean_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -439,7 +436,8 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&scatter_kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&scatter_kernel, &[self.dtype]);
+            let ptx =
+                compile_module_image_for_current_device(stream.context(), &scatter_kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("scatter_nocopy").unwrap();
             compile_cache.insert(scatter_kernel.clone(), (module.clone(), func.clone()));
@@ -794,7 +792,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_ptx(&kernel).unwrap();
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("batch_matvec").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -1064,7 +1062,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_ptx(&kernel).unwrap();
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("batch_matmul").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -1312,7 +1310,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_ptx(&kernel).unwrap();
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("fused_softmax").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));

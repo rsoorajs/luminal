@@ -1,13 +1,10 @@
 use std::sync::Arc;
 
 use crate::{
-    cuda_dtype,
+    compile_module_image_for_current_device, cuda_dtype,
     kernel::{CudaFunctionExt, KernelOp},
 };
-use cudarc::{
-    driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream},
-    nvrtc::{CompileOptions, compile_ptx, compile_ptx_with_opts},
-};
+use cudarc::driver::{CudaFunction, CudaModule, CudaSlice, CudaStream};
 use itertools::Itertools;
 use luminal::{
     egglog_utils::{
@@ -48,39 +45,6 @@ pub fn dtype_includes(dtypes: &[DType]) -> String {
         s.push_str("#include <cuda_fp4.h>\n");
     }
     s
-}
-
-/// Compiles a CUDA kernel with proper include paths for special types
-pub fn compile_kernel(kernel: &str, dtypes: &[DType]) -> cudarc::nvrtc::Ptx {
-    let needs_special_types = dtypes.iter().any(|d| {
-        matches!(
-            d,
-            DType::F16
-                | DType::Bf16
-                | DType::F8E4M3
-                | DType::F8E5M2
-                | DType::F8UE8M0
-                | DType::F6E2M3
-                | DType::F6E3M2
-                | DType::F4E2M1
-        )
-    });
-
-    if needs_special_types {
-        compile_ptx_with_opts(
-            kernel,
-            CompileOptions {
-                include_paths: vec![
-                    "/usr/local/cuda/include".to_string(),
-                    "/usr/include".to_string(),
-                ],
-                ..Default::default()
-            },
-        )
-        .unwrap()
-    } else {
-        compile_ptx(kernel).unwrap()
-    }
 }
 
 pub type Ops = (
@@ -277,7 +241,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("reduce_max_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -486,7 +450,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("reduce_sum_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -646,7 +610,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype, self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("add_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -806,7 +770,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype, self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("mul_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -1000,7 +964,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("gather").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -1262,7 +1226,8 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&scatter_kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&scatter_kernel, &[self.dtype]);
+            let ptx =
+                compile_module_image_for_current_device(stream.context(), &scatter_kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("scatter").unwrap();
             compile_cache.insert(scatter_kernel.clone(), (module.clone(), func.clone()));
@@ -1453,7 +1418,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[DType::Int]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("iota_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -1607,7 +1572,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("exp2_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -1757,7 +1722,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("log2_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -1907,7 +1872,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("sin_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -2057,7 +2022,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("recip_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -2207,7 +2172,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("sqrt_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -2364,7 +2329,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("mod_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -2535,7 +2500,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype, self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("less_than_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -2667,7 +2632,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[DType::F32]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("constant_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -2824,7 +2789,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.in_dtype, self.out_dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("cast_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -3135,7 +3100,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_ptx(&kernel).unwrap();
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("embed").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
