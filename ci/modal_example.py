@@ -4,6 +4,7 @@ import os
 
 example = os.environ.get("EXAMPLE", "llama")
 gpu_type = os.environ.get("GPU_TYPE", "A100-80GB")
+CUDARC_CUDA_VERSION = "12080"
 
 app = modal.App(f"luminal-ci-{example}")
 
@@ -19,7 +20,12 @@ cuda_image = (
     .run_commands(
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
     )
-    .env({"PATH": "/root/.cargo/bin:$PATH"})
+    .env(
+        {
+            "PATH": "/root/.cargo/bin:$PATH",
+            "CUDARC_CUDA_VERSION": CUDARC_CUDA_VERSION,
+        }
+    )
     .add_local_dir(".", remote_path=WORKDIR)
 )
 
@@ -41,6 +47,7 @@ def run_example(example: str):
         cwd=f"{WORKDIR}/examples/{example}",
         env={
             **os.environ,
+            "CUDARC_CUDA_VERSION": CUDARC_CUDA_VERSION,
             "HF_HOME": "/root/.cache/huggingface",
         },
         check=True,
