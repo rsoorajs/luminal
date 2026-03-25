@@ -71,4 +71,12 @@ jobs:
               env:
                   MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
                   MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-              run: modal run modal_pytest_runner.py --gpu A100 --timeout 3300 tests/ -v -s
+              run: modal run modal_pytest_runner.py --gpu A100 --timeout 3300 --profile --profile-output-dir luminal_artifacts/pytest-profiling/github-${{ github.run_id }}-${{ github.run_attempt }} tests/ -v -s
+            - name: Upload Modal pytest profiling artifacts
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: python-cuda-pytest-profiling-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: crates/luminal_python/luminal_artifacts/pytest-profiling/github-${{ github.run_id }}-${{ github.run_attempt }}
+                  retention-days: 7
+                  if-no-files-found: warn
