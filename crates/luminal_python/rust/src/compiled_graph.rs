@@ -65,6 +65,7 @@ impl CompiledGraph {
         weight_data: WeightData,
         backend: &str,
         search_iters: usize,
+        weight_device_ptrs: HashMap<String, (u64, usize)>,
     ) -> Result<CompiledGraph, String> {
         let GraphTranslation {
             mut graph,
@@ -79,7 +80,12 @@ impl CompiledGraph {
         let rt = match backend {
             #[cfg(feature = "cuda")]
             "cuda" | "gpu" => {
-                CompiledGraph::build_cuda_backend(&mut graph, &weight_data, search_iters)?
+                CompiledGraph::build_cuda_backend(
+                    &mut graph,
+                    &weight_data,
+                    search_iters,
+                    &weight_device_ptrs,
+                )?
             }
             "native" | "cpu" => {
                 CompiledGraph::build_native_backend(&mut graph, &weight_data, search_iters)?
@@ -131,6 +137,7 @@ impl CompiledGraph {
         graph: &mut Graph,
         weight_data: &WeightData,
         search_iters: usize,
+        device_ptrs: &HashMap<String, (u64, usize)>,
     ) -> Result<RuntimeBackend, String> {
         use luminal_cuda_lite::cudarc::driver::CudaContext;
         use luminal_cuda_lite::runtime::CudaRuntime;
@@ -142,38 +149,95 @@ impl CompiledGraph {
         graph.build_search_space::<CudaRuntime>();
         let mut rt = CudaRuntime::initialize(stream);
 
-        // Set dummy 1.0 data for ALL Input nodes for safe search profiling.
+        // Build label → NodeIndex map for device pointer matching.
+        let label_map = CompiledGraph::build_label_map(graph);
+
+        // For weights with device pointers: use them directly (zero-copy).
+        // This avoids allocating ~N GB of dummy data during search.
+        // The pointers survive search because profiling mode skips buffer consumption,
+        // and persist_hlir_node ensures they survive post-search execution too.
+        let mut device_ptr_nodes: HashSet<NodeIndex> = HashSet::new();
+        let mut matched_count = 0usize;
+        let mut missed_labels: Vec<String> = Vec::new();
+        for (label, &(ptr, n_bytes)) in device_ptrs {
+            if let Some(&node_id) = label_map.get(label) {
+                unsafe { rt.set_device_ptr(node_id, ptr, n_bytes) };
+                rt.persist_hlir_node(node_id);
+                device_ptr_nodes.insert(node_id);
+                matched_count += 1;
+            } else {
+                missed_labels.push(label.clone());
+            }
+        }
+        let total_device_bytes: usize = device_ptrs.values().map(|(_, n)| *n).sum();
+        eprintln!(
+            "[CUDA BUILD] Device pointers: {} matched, {} missed out of {} total ({:.3} GiB)",
+            matched_count,
+            missed_labels.len(),
+            device_ptrs.len(),
+            total_device_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+        );
+        if !missed_labels.is_empty() {
+            eprintln!("[CUDA BUILD] Missed device-ptr labels (first 10): {:?}", &missed_labels[..missed_labels.len().min(10)]);
+            // Show available label_map keys for debugging
+            let available: Vec<&String> = label_map.keys().take(10).collect();
+            eprintln!("[CUDA BUILD] Available label_map keys (first 10): {:?}", available);
+        }
+
+        // Set dummy 1.0 data for remaining Input nodes (user inputs, constants without
+        // device pointers) for safe search profiling.
         // IMPORTANT: Must use 1.0, NOT 0.0. Zero inputs cause NaN in many ops:
         //   - fmod(0, 0) = NaN  (Mod)
         //   - recip(0) = inf → weight * inf = NaN  (Div)
         //   - log(0) = -inf  (Pow)
         //   - chain ops with zero produce NaN  (Erf)
-        // Real weights may also contain -inf (e.g. causal attention masks) which
-        // produce NaN in intermediate computations (softmax decomposition).
-        // We load real data only AFTER the search completes.
+        let mut dummy_total_elements = 0usize;
+        let mut dummy_count = 0usize;
         for node_id in graph.graph.node_indices() {
+            if device_ptr_nodes.contains(&node_id) {
+                continue;
+            }
             if let Some(input) = (*graph.graph[node_id])
                 .as_any()
                 .downcast_ref::<luminal::hlir::Input>()
             {
                 if let Some(&n) = weight_data.tensor_sizes.get(&input.label) {
                     if n > 0 {
+                        dummy_total_elements += n;
+                        dummy_count += 1;
                         rt.set_data(node_id, vec![1.0f32; n]);
                     }
                 }
             }
         }
+        eprintln!(
+            "[CUDA BUILD] Dummy data: {} nodes, {} elements ({:.3} GiB as f32)",
+            dummy_count,
+            dummy_total_elements,
+            (dummy_total_elements * 4) as f64 / (1024.0 * 1024.0 * 1024.0),
+        );
 
-        // Search with dummy data (safe profiling)
+        // Search (device-pointer weights are used directly; dummy data for the rest)
         let mut rt = graph.search(rt, search_iters);
 
-        // Load real weight data after search
-        let label_map = CompiledGraph::build_label_map(graph);
+        // Load real weight data for non-device-ptr weights (constants from PT2 archive, etc.)
+        let mut loaded_weight_elements = 0usize;
+        let mut loaded_weight_count = 0usize;
         for (label, data) in &weight_data.weights {
-            if let Some(&node_id) = label_map.get(label) {
-                rt.set_data(node_id, data.clone());
+            if !device_ptrs.contains_key(label) {
+                if let Some(&node_id) = label_map.get(label) {
+                    loaded_weight_elements += data.len();
+                    loaded_weight_count += 1;
+                    rt.set_data(node_id, data.clone());
+                }
             }
         }
+        eprintln!(
+            "[CUDA BUILD] Post-search weight load: {} weights, {} elements ({:.3} GiB as f32)",
+            loaded_weight_count,
+            loaded_weight_elements,
+            (loaded_weight_elements * 4) as f64 / (1024.0 * 1024.0 * 1024.0),
+        );
 
         Ok(RuntimeBackend::Cuda(Box::new(rt)))
     }

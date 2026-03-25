@@ -11,14 +11,15 @@ import shutil
 import tempfile
 
 import torch
+
 from .cache_utils import _register_cache_serialization
 from .compiled_model import CompiledModel
-from .luminal import compile_pt2 as _compile_pt2_rust
-
+from .luminal import process_pt2
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _export_kwargs():
     """Build common kwargs for torch.export.export()."""
@@ -31,46 +32,87 @@ def _export_kwargs():
     return kwargs
 
 
-def _save_and_compile(ep, backend, search_iterations):
-    """Save ExportedProgram + weights to temp files, compile via Rust, return CompiledModel."""
-    tmpdir = tempfile.mkdtemp(prefix="luminal_")
+def _gpu_mem_pt2(label):
+    if torch.cuda.is_available():
+        alloc = torch.cuda.memory_allocated() / (1024**3)
+        peak = torch.cuda.max_memory_allocated() / (1024**3)
+        print(f"[GPU MEM pt2] {label}: allocated={alloc:.3f} GiB, peak={peak:.3f} GiB")
+
+
+def _save_and_compile(ep_or_path, backend, search_iterations, original_weights=None):
+    """Compile a PT2 model via Rust, return CompiledModel.
+
+    Args:
+        ep_or_path: Either an ExportedProgram (will be saved to a temp file) or
+            a path to an already-saved .pt2 file.
+        original_weights: Optional dict mapping state_dict key -> original PyTorch tensor.
+            When provided, device pointers are taken from these tensors instead of
+            ep.state_dict (which torch.export may have cloned), enabling true zero-copy
+            sharing with the original model's GPU memory.
+    """
+    owns_tmpdir = not isinstance(ep_or_path, str)
+    tmpdir = tempfile.mkdtemp(prefix="luminal_") if owns_tmpdir else None
     try:
-        pt2_path = os.path.join(tmpdir, "model.pt2")
-        torch.export.save(ep, pt2_path)
+        if owns_tmpdir:
+            pt2_path = os.path.join(tmpdir, "model.pt2")
+            torch.export.save(ep_or_path, pt2_path)
+            weight_source = (
+                original_weights if original_weights else ep_or_path.state_dict
+            )
+        else:
+            pt2_path = ep_or_path
+            weight_source = original_weights or {}
 
-        # Compile with no safetensors — weights loaded via pointer below
-        compiled = _compile_pt2_rust(pt2_path, "", backend, search_iterations)
-
-        # Load weights via device pointer (zero-copy) or host pointer (copy-once)
+        # Collect weight pointers upfront so Rust can use them during search
+        # (avoids allocating dummy GPU data for weights)
         keep_alive = []
-        for name, param in ep.state_dict.items():
+        weight_device_ptrs = {}  # name -> (device_ptr, n_bytes)
+        cpu_weights = {}         # name -> (host_ptr, n_elements)
+        for name, param in weight_source.items():
             if backend in ("cuda", "gpu") and param.is_cuda:
                 t = param.detach().contiguous().float()
                 keep_alive.append(t)
-                # set_weight_device_ptr also persists automatically
-                compiled.set_weight_device_ptr(name, t.data_ptr(), t.numel() * 4)
+                weight_device_ptrs[name] = (t.data_ptr(), t.numel() * 4)
             else:
                 t = param.detach().cpu().contiguous().float()
                 keep_alive.append(t)
-                compiled.set_weight_from_ptr(name, t.data_ptr(), t.numel())
+                cpu_weights[name] = (t.data_ptr(), t.numel())
+        print(f"[PT2] weight_device_ptrs keys ({len(weight_device_ptrs)}): {list(weight_device_ptrs.keys())[:5]}...")
+        total_device_bytes = sum(nb for _, nb in weight_device_ptrs.values())
+        print(f"[PT2] Total device ptr bytes: {total_device_bytes / 1024**3:.3f} GiB")
+
+        # Compile with device pointers — search uses actual weight memory (zero-copy)
+        _gpu_mem_pt2("before process_pt2 (Rust compilation)")
+        compiled = process_pt2(
+            pt2_path, "", backend, search_iterations, weight_device_ptrs
+        )
+        _gpu_mem_pt2("after process_pt2 (Rust compilation)")
+
+        # Set CPU weights after compilation (host→device copy)
+        for name, (ptr, n_elements) in cpu_weights.items():
+            compiled.set_weight_from_ptr(name, ptr, n_elements)
+        _gpu_mem_pt2("after CPU weight loading")
 
         model = CompiledModel(compiled)
         model._weight_refs = keep_alive
         return model
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        if owns_tmpdir and tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _reinternalize_lifted_params(gm, example_inputs):
     """Re-internalize lifted params as buffers so torch.export sees them as model state.
 
     torch.compile lifts model parameters out of the module and passes them as
-    extra elements in example_inputs.  The Rust PT2 compiler expects weights in
+    extra elements in example_inputs.  The Rust PT2 compiler may expect weights in
     the .pt2 state dict, not as runtime inputs.  This function reverses the
     lifting by registering them as buffers and replacing the placeholder nodes
     with get_attr nodes.
 
-    Returns (gm, user_inputs) where user_inputs contains only the real inputs.
+    Returns (gm, user_inputs, original_weights) where:
+      - user_inputs contains only the real inputs
+      - original_weights maps buffer name -> original tensor (for zero-copy device pointers)
     """
     buffer_indices = []
     user_indices = []
@@ -86,10 +128,17 @@ def _reinternalize_lifted_params(gm, example_inputs):
                 user_indices.append(placeholder_idx)
             placeholder_idx += 1
 
+    original_weights = {}
     if buffer_nodes:
         for i, node in enumerate(buffer_nodes):
             attr_name = f"_luminal_param_{i}"
-            gm.register_buffer(attr_name, example_inputs[buffer_indices[i]].detach().clone())
+            # Keep a reference to the original tensor for zero-copy device pointers.
+            # torch.export.export may clone the registered buffer, so we bypass
+            # the EP's state_dict and use the originals directly.
+            original_weights[attr_name] = example_inputs[buffer_indices[i]]
+            gm.register_buffer(
+                attr_name, example_inputs[buffer_indices[i]].detach()
+            )
             with gm.graph.inserting_before(node):
                 new_node = gm.graph.create_node("get_attr", attr_name)
                 new_node.meta = node.meta.copy()
@@ -98,13 +147,18 @@ def _reinternalize_lifted_params(gm, example_inputs):
         gm.graph.lint()
         gm.recompile()
 
-    user_inputs = [example_inputs[i] for i in user_indices] if user_indices else list(example_inputs)
-    return gm, user_inputs
+    user_inputs = (
+        [example_inputs[i] for i in user_indices]
+        if user_indices
+        else list(example_inputs)
+    )
+    return gm, user_inputs, original_weights
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def compile(
     model,
@@ -175,7 +229,11 @@ def compile(
 
     if ep is None:
         ep = torch.export.export(
-            model, (example_input,), kwargs=kwargs, dynamic_shapes=None, **extra,
+            model,
+            (example_input,),
+            kwargs=kwargs,
+            dynamic_shapes=None,
+            **extra,
         )
 
     return _save_and_compile(ep, backend, search_iterations)
@@ -186,11 +244,33 @@ def pt2_backend(gm, example_inputs, backend=None):
 
     Usage: torch.compile(model, backend=luminal.pt2.pt2_backend)
     """
+    import gc
+
     _register_cache_serialization()
     if backend is None:
         device = example_inputs[0].device if example_inputs else torch.device("cpu")
         backend = "cuda" if device.type == "cuda" else "cpu"
     gm = gm.eval()
-    gm, user_inputs = _reinternalize_lifted_params(gm, example_inputs)
+    gm, user_inputs, original_weights = _reinternalize_lifted_params(gm, example_inputs)
+    _gpu_mem_pt2("before torch.export.export")
     ep = torch.export.export(gm, tuple(user_inputs), **_export_kwargs())
-    return _save_and_compile(ep, backend, 10)
+    _gpu_mem_pt2("after torch.export.export (may clone weights)")
+
+    # Save the exported program to disk, then free it and the traced graph module
+    # BEFORE Rust compilation. torch.export clones the state_dict internally, so
+    # holding ep alive during compilation would double the weight memory on GPU.
+    tmpdir = tempfile.mkdtemp(prefix="luminal_")
+    pt2_path = os.path.join(tmpdir, "model.pt2")
+    torch.export.save(ep, pt2_path)
+    del ep, gm
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    _gpu_mem_pt2("after del ep + empty_cache")
+
+    try:
+        return _save_and_compile(
+            pt2_path, backend, 10, original_weights=original_weights
+        )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)

@@ -26,7 +26,9 @@ def luminal_backend(gm, example_inputs, options=None):
 
     # Env var override
     env_mode = os.getenv("LUMINAL_EXPORT_MODE", "").lower()
-    export_mode = env_mode if env_mode in ("pt2", "onnx") else options.get("export_mode", "onnx")
+    export_mode = (
+        env_mode if env_mode in ("pt2", "onnx") else options.get("export_mode", "onnx")
+    )
     opset = options.get("opset", 20)
 
     _register_cache_serialization()
@@ -54,6 +56,21 @@ def _compile_onnx(gm, example_inputs, backend, opset=20):
                 user_indices.append(ph_idx)
             ph_idx += 1
 
+    # Collect weight device pointers upfront so Rust can use them during search
+    # (avoids allocating duplicate GPU buffers from ONNX file data)
+    weight_refs = []
+    weight_device_ptrs = {}  # onnx_name -> (device_ptr, n_bytes)
+    cpu_weights = {}         # onnx_name -> (host_ptr, n_elements)
+    for name, (_idx, tensor) in weight_map.items():
+        if backend == "cuda" and tensor.is_cuda:
+            t = tensor.detach().contiguous().float()
+            weight_refs.append(t)
+            weight_device_ptrs[name] = (t.data_ptr(), t.numel() * 4)
+        else:
+            t = tensor.detach().cpu().contiguous().float()
+            weight_refs.append(t)
+            cpu_weights[name] = (t.data_ptr(), t.numel())
+
     tmp = tempfile.NamedTemporaryFile(suffix=".onnx", delete=False)
     tmp_path = tmp.name
     tmp.close()
@@ -67,32 +84,22 @@ def _compile_onnx(gm, example_inputs, backend, opset=20):
             input_names=[f"input_{i}" for i in range(len(example_inputs))],
         )
 
-        result = luminal.process_onnx(tmp_path, backend)
+        result = luminal.process_onnx(tmp_path, backend, weight_device_ptrs)
     finally:
         os.unlink(tmp_path)
 
-    # Load weights once at compile time and persist them so they survive execute().
-    weight_refs = []
-    for name, (_idx, tensor) in weight_map.items():
+    # Persist all weight inputs and set CPU weights after compilation
+    for name in weight_map:
         result.persist_input(name)
-        if backend == "cuda" and tensor.is_cuda:
-            # Zero-copy: share PyTorch's device memory directly
-            t = tensor.detach().contiguous().float()
-            weight_refs.append(t)
-            result.set_input_device_ptr(name, t.data_ptr(), t.numel() * 4)
-        else:
-            # Copy-once from host pointer (avoids .tolist() overhead)
-            t = tensor.detach().cpu().contiguous().float()
-            weight_refs.append(t)
-            result.set_input_from_ptr(name, t.data_ptr(), t.numel())
+    for name, (ptr, n_elements) in cpu_weights.items():
+        result.set_input_from_ptr(name, ptr, n_elements)
 
-    compiled = CompiledModel(
-        result, weight_refs=weight_refs, user_indices=user_indices
-    )
+    compiled = CompiledModel(result, weight_refs=weight_refs, user_indices=user_indices)
     return compiled
 
 
 def _compile_pt2(gm, example_inputs, backend):
     """PT2/torch.export path — delegates to pt2.pt2_backend."""
     from .pt2 import pt2_backend
+
     return pt2_backend(gm, example_inputs, backend=backend)

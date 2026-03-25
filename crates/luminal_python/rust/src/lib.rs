@@ -14,14 +14,19 @@ mod translator;
 use compiled_graph::{CompiledGraph, translate_onnx};
 use onnx_protobuf::ModelProto;
 use protobuf::Message;
-use pt2_compiled_model::compile_pt2;
+use pt2_compiled_model::process_pt2;
 use pyo3::prelude::*;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 #[pyfunction]
-#[pyo3(signature = (path, backend="native"))]
-fn process_onnx(path: &str, backend: &str) -> PyResult<CompiledGraph> {
+#[pyo3(signature = (path, backend="native", weight_device_ptrs=None))]
+fn process_onnx(
+    path: &str,
+    backend: &str,
+    weight_device_ptrs: Option<HashMap<String, (u64, usize)>>,
+) -> PyResult<CompiledGraph> {
     if backend != "native" && backend != "cuda" {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "Invalid backend '{}'. Must be 'native' or 'cuda'",
@@ -29,10 +34,15 @@ fn process_onnx(path: &str, backend: &str) -> PyResult<CompiledGraph> {
         )));
     }
 
-    parse_onnx(path, backend).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    parse_onnx(path, backend, weight_device_ptrs.unwrap_or_default())
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
-fn parse_onnx(path: &str, backend: &str) -> Result<CompiledGraph, String> {
+fn parse_onnx(
+    path: &str,
+    backend: &str,
+    weight_device_ptrs: HashMap<String, (u64, usize)>,
+) -> Result<CompiledGraph, String> {
     let data = fs::read(path)
         .map_err(|e| format!("Failed to read file: {}", e))
         .unwrap();
@@ -62,13 +72,13 @@ fn parse_onnx(path: &str, backend: &str) -> Result<CompiledGraph, String> {
     }
 
     let (translation, weights) = translate_onnx(model, model_directory)?;
-    CompiledGraph::parse_graph(translation, weights, backend, 10)
+    CompiledGraph::parse_graph(translation, weights, backend, 10, weight_device_ptrs)
 }
 
 #[pymodule]
 fn luminal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(process_onnx, m)?)?;
-    m.add_function(wrap_pyfunction!(compile_pt2, m)?)?;
+    m.add_function(wrap_pyfunction!(process_pt2, m)?)?;
     m.add_class::<CompiledGraph>()?;
     Ok(())
 }

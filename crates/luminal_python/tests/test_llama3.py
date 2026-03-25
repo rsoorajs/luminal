@@ -335,6 +335,15 @@ def test_hf_llama3_1b_decode_loop_dynamic():
             print(f"Step {step}: '{tokenizer.decode(tokens)}'")
 
 
+def _gpu_mem(label):
+    """Print GPU memory stats at a given checkpoint."""
+    if torch.cuda.is_available():
+        alloc = torch.cuda.memory_allocated() / (1024**3)
+        reserved = torch.cuda.memory_reserved() / (1024**3)
+        peak = torch.cuda.max_memory_allocated() / (1024**3)
+        print(f"[GPU MEM] {label}: allocated={alloc:.3f} GiB, reserved={reserved:.3f} GiB, peak={peak:.3f} GiB")
+
+
 @pytest.mark.slow
 def test_hf_llama3_full(device: torch.device):
     """HuggingFace LlamaForCausalLM — full Llama3.2-1B with real pretrained weights.
@@ -344,6 +353,10 @@ def test_hf_llama3_full(device: torch.device):
     """
     from transformers import AutoConfig, LlamaForCausalLM
 
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    _gpu_mem("before model load")
+
     config = AutoConfig.from_pretrained("NousResearch/Llama-3.2-1B")
     config.use_cache = False
     config._attn_implementation = "eager"
@@ -351,6 +364,51 @@ def test_hf_llama3_full(device: torch.device):
     model = (
         LlamaForCausalLM.from_pretrained(
             "NousResearch/Llama-3.2-1B",
+            config=config,
+            torch_dtype=torch.float32,
+        )
+        .eval()
+        .to(device)
+    )
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"[MODEL] Total parameters: {n_params:,} ({n_params * 4 / 1024**3:.3f} GiB in f32)")
+    _gpu_mem("after model load")
+
+    compiled = torch.compile(model, backend=luminal_backend)
+    _gpu_mem("after torch.compile (lazy, no compilation yet)")
+
+    input_ids = torch.tensor([[1, 2, 3, 4]], device=device)
+    with torch.no_grad():
+        ref = model(input_ids)
+        _gpu_mem("after PyTorch reference forward")
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        _gpu_mem("before compiled forward (peak reset)")
+        out = compiled(input_ids)
+        _gpu_mem("after compiled forward (includes compilation)")
+
+    assert torch.allclose(out.logits, ref.logits, atol=1e-3), (
+        f"max_diff={torch.max(torch.abs(out.logits - ref.logits)).item():.2e}"
+    )
+
+
+@pytest.mark.slow
+def test_hf_llama3_large_full(device: torch.device):
+    """HuggingFace LlamaForCausalLM — full Llama3.2-1B with real pretrained weights.
+
+    No config alterations except use_cache=False and eager attention.
+    Loads actual weights from NousResearch/Llama-3.2-1B.
+    """
+    from transformers import AutoConfig, LlamaForCausalLM
+
+    config = AutoConfig.from_pretrained("NousResearch/Meta-Llama-3.1-8B-Instruct")
+    config.use_cache = False
+    config._attn_implementation = "eager"
+
+    model = (
+        LlamaForCausalLM.from_pretrained(
+            "NousResearch/Meta-Llama-3.1-8B-Instruct",
             config=config,
             torch_dtype=torch.float32,
         )

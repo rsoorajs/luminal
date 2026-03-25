@@ -32,24 +32,33 @@ fn resolve_dim_sizes(
 }
 
 #[pyfunction]
-pub fn compile_pt2(
+#[pyo3(signature = (pt2_path, weights_path, backend, search_iters, weight_device_ptrs=None))]
+pub fn process_pt2(
     pt2_path: &str,
     weights_path: &str,
     backend: &str,
     search_iters: usize,
+    weight_device_ptrs: Option<HashMap<String, (u64, usize)>>,
 ) -> PyResult<CompiledGraph> {
-    compile_pt2_inner(pt2_path, weights_path, backend, search_iters)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:#}")))
+    compile_pt2(
+        pt2_path,
+        weights_path,
+        backend,
+        search_iters,
+        weight_device_ptrs.unwrap_or_default(),
+    )
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:#}")))
 }
 
-fn compile_pt2_inner(
+fn compile_pt2(
     pt2_path: &str,
     weights_path: &str,
     backend: &str,
     search_iters: usize,
+    weight_device_ptrs: HashMap<String, (u64, usize)>,
 ) -> anyhow::Result<CompiledGraph> {
     let (translation, weights) = translate_pt2(pt2_path, weights_path)?;
-    CompiledGraph::parse_graph(translation, weights, backend, search_iters)
+    CompiledGraph::parse_graph(translation, weights, backend, search_iters, weight_device_ptrs)
         .map_err(|e| anyhow::anyhow!(e))
 }
 
