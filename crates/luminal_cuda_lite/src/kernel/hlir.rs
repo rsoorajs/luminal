@@ -280,6 +280,10 @@ extern \"C\" {{
         self.out_shape.iter().copied().product::<Expression>() * self.iters
     }
 
+    fn output_dtype(&self) -> DType {
+        self.dtype
+    }
+
     fn kernel_name(&self) -> &'static str {
         "MaxReduce"
     }
@@ -489,6 +493,10 @@ extern \"C\" {{
         self.out_shape.iter().copied().product::<Expression>() * self.iters
     }
 
+    fn output_dtype(&self) -> DType {
+        self.dtype
+    }
+
     fn kernel_name(&self) -> &'static str {
         "SumReduce"
     }
@@ -650,6 +658,10 @@ extern \"C\" {{
         self.out_shape.iter().copied().product()
     }
 
+    fn output_dtype(&self) -> DType {
+        self.dtype
+    }
+
     fn kernel_name(&self) -> &'static str {
         "Add"
     }
@@ -807,6 +819,10 @@ extern \"C\" {{
 
     fn flops(&self) -> Expression {
         self.out_shape.iter().copied().product()
+    }
+
+    fn output_dtype(&self) -> DType {
+        self.dtype
     }
 
     fn kernel_name(&self) -> &'static str {
@@ -1011,6 +1027,10 @@ extern \"C\" {{
 
     fn flops(&self) -> Expression {
         0.into()
+    }
+
+    fn output_dtype(&self) -> DType {
+        self.dtype
     }
 
     fn kernel_name(&self) -> &'static str {
@@ -1325,6 +1345,10 @@ extern \"C\" {{
         Some(0) // output is derived from dest (input 0): copy dest→output then scatter
     }
 
+    fn output_dtype(&self) -> DType {
+        self.dtype
+    }
+
     fn kernel_name(&self) -> &'static str {
         "Scatter"
     }
@@ -1454,6 +1478,10 @@ extern \"C\" {{
 
     fn flops(&self) -> Expression {
         0.into()
+    }
+
+    fn output_dtype(&self) -> DType {
+        DType::Int
     }
 
     fn kernel_name(&self) -> &'static str {
@@ -1610,6 +1638,10 @@ extern \"C\" {{
         self.shape.iter().copied().product()
     }
 
+    fn output_dtype(&self) -> DType {
+        self.dtype
+    }
+
     fn kernel_name(&self) -> &'static str {
         "Exp2"
     }
@@ -1758,6 +1790,10 @@ extern \"C\" {{
 
     fn flops(&self) -> Expression {
         self.shape.iter().copied().product()
+    }
+
+    fn output_dtype(&self) -> DType {
+        self.dtype
     }
 
     fn kernel_name(&self) -> &'static str {
@@ -1910,6 +1946,10 @@ extern \"C\" {{
         self.shape.iter().copied().product()
     }
 
+    fn output_dtype(&self) -> DType {
+        self.dtype
+    }
+
     fn kernel_name(&self) -> &'static str {
         "Sin"
     }
@@ -2060,6 +2100,10 @@ extern \"C\" {{
         self.shape.iter().copied().product()
     }
 
+    fn output_dtype(&self) -> DType {
+        self.dtype
+    }
+
     fn kernel_name(&self) -> &'static str {
         "Recip"
     }
@@ -2208,6 +2252,10 @@ extern \"C\" {{
 
     fn flops(&self) -> Expression {
         self.shape.iter().copied().product()
+    }
+
+    fn output_dtype(&self) -> DType {
+        self.dtype
     }
 
     fn kernel_name(&self) -> &'static str {
@@ -2366,6 +2414,10 @@ extern \"C\" {{
 
     fn flops(&self) -> Expression {
         self.out_shape.iter().copied().product()
+    }
+
+    fn output_dtype(&self) -> DType {
+        self.dtype
     }
 
     fn kernel_name(&self) -> &'static str {
@@ -2538,6 +2590,10 @@ extern \"C\" {{
 
     fn flops(&self) -> Expression {
         self.out_shape.iter().copied().product()
+    }
+
+    fn output_dtype(&self) -> DType {
+        DType::Bool
     }
 
     fn kernel_name(&self) -> &'static str {
@@ -2824,6 +2880,10 @@ extern \"C\" {{
 
     fn flops(&self) -> Expression {
         0.into()
+    }
+
+    fn output_dtype(&self) -> DType {
+        self.out_dtype
     }
 
     fn kernel_name(&self) -> &'static str {
