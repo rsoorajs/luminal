@@ -11,7 +11,7 @@ mod pt2_schema;
 mod pt2_util;
 mod translator;
 
-use compiled_graph::CompiledGraph;
+use compiled_graph::{CompiledGraph, translate_onnx};
 use onnx_protobuf::ModelProto;
 use protobuf::Message;
 use pt2_compiled_model::compile_pt2;
@@ -61,7 +61,8 @@ fn parse_onnx(path: &str, backend: &str) -> Result<CompiledGraph, String> {
         }
     }
 
-    CompiledGraph::parse_graph(model, model_directory, backend)
+    let (translation, weights) = translate_onnx(model, model_directory)?;
+    CompiledGraph::parse_graph(translation, weights, backend, 10)
 }
 
 #[pymodule]
