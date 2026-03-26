@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
     cuda_dtype,
     kernel::KernelOp,
-    kernel::hlir::{compile_kernel, dtype_includes, generate_dyn_dims_defines},
+    kernel::hlir::{compile_kernel, dtype_includes, generate_dyn_dims_defines, kernel_rewrite},
 };
 use cudarc::{
     driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream},
@@ -25,6 +25,7 @@ pub type Ops = (
     KernelBatchMatVec,
     KernelBatchMatMul,
     KernelScatterNoCopy,
+    KernelSoftmax,
 );
 
 #[derive(Default, Debug, Clone)]
@@ -1153,6 +1154,7 @@ impl EgglogOp for KernelSoftmax {
                 ("out_strides", ELIST),
                 ("reduce_dim", EXPRESSION),
                 ("reduce_stride", EXPRESSION),
+                ("dtype", DTYPE),
             ],
         )
     }
@@ -1162,8 +1164,24 @@ impl EgglogOp for KernelSoftmax {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        // No rewrite rules yet - this op is not in the Ops tuple.
-        vec![]
+        vec![
+            kernel_rewrite::<luminal::hlir::Softmax, Self>(),
+            // Also add a direct rewrite that assumes F32 dtype, in case dtype
+            // propagation hasn't reached the Softmax node yet.
+            Rule::raw(
+                "(rule
+                (
+                    (= ?sm (Op (Softmax ?shape ?in_strides ?out_strides ?reduce_dim ?reduce_stride) ?inputs))
+                )
+                (
+                    (let ?ksm (Op (KernelSoftmax ?shape ?in_strides ?out_strides ?reduce_dim ?reduce_stride (F32)) ?inputs))
+                    (union ?sm ?ksm)
+                    (set (dtype ?ksm) (F32))
+                )
+                :name \"softmax-to-kernel-f32\"
+            )",
+            ),
+        ]
     }
 
     fn cleanup(&self) -> bool {
@@ -1178,16 +1196,18 @@ impl EgglogOp for KernelSoftmax {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
+        let out_shape = extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap();
+        let in_stride = extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap();
+        let out_stride = extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap();
+        let reduce_dim = extract_expr(egraph, kind_children[3], expr_cache).unwrap();
+        let reduce_stride = extract_expr(egraph, kind_children[4], expr_cache).unwrap();
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
-                out_shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache)
-                    .unwrap(),
-                in_stride: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
-                    .unwrap(),
-                out_stride: extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
-                    .unwrap(),
-                reduce_dim: extract_expr(egraph, kind_children[3], expr_cache).unwrap(),
-                reduce_stride: extract_expr(egraph, kind_children[4], expr_cache).unwrap(),
+                out_shape,
+                in_stride,
+                out_stride,
+                reduce_dim,
+                reduce_stride,
             })),
             input_enodes,
         )
