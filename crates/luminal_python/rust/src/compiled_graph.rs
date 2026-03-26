@@ -65,6 +65,7 @@ impl CompiledGraph {
         weight_data: WeightData,
         backend: &str,
         search_iters: usize,
+        #[allow(unused_variables)]
         weight_device_ptrs: HashMap<String, (u64, usize)>,
     ) -> Result<CompiledGraph, String> {
         let GraphTranslation {
@@ -170,7 +171,7 @@ impl CompiledGraph {
             }
         }
         let total_device_bytes: usize = device_ptrs.values().map(|(_, n)| *n).sum();
-        eprintln!(
+        trace!(
             "[CUDA BUILD] Device pointers: {} matched, {} missed out of {} total ({:.3} GiB)",
             matched_count,
             missed_labels.len(),
@@ -178,10 +179,9 @@ impl CompiledGraph {
             total_device_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
         );
         if !missed_labels.is_empty() {
-            eprintln!("[CUDA BUILD] Missed device-ptr labels (first 10): {:?}", &missed_labels[..missed_labels.len().min(10)]);
-            // Show available label_map keys for debugging
+            trace!("[CUDA BUILD] Missed device-ptr labels (first 10): {:?}", &missed_labels[..missed_labels.len().min(10)]);
             let available: Vec<&String> = label_map.keys().take(10).collect();
-            eprintln!("[CUDA BUILD] Available label_map keys (first 10): {:?}", available);
+            trace!("[CUDA BUILD] Available label_map keys (first 10): {:?}", available);
         }
 
         // Set dummy 1.0 data for remaining Input nodes (user inputs, constants without
@@ -210,7 +210,7 @@ impl CompiledGraph {
                 }
             }
         }
-        eprintln!(
+        trace!(
             "[CUDA BUILD] Dummy data: {} nodes, {} elements ({:.3} GiB as f32)",
             dummy_count,
             dummy_total_elements,
@@ -232,7 +232,7 @@ impl CompiledGraph {
                 }
             }
         }
-        eprintln!(
+        trace!(
             "[CUDA BUILD] Post-search weight load: {} weights, {} elements ({:.3} GiB as f32)",
             loaded_weight_count,
             loaded_weight_elements,

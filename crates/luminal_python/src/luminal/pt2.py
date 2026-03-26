@@ -32,13 +32,6 @@ def _export_kwargs():
     return kwargs
 
 
-def _gpu_mem_pt2(label):
-    if torch.cuda.is_available():
-        alloc = torch.cuda.memory_allocated() / (1024**3)
-        peak = torch.cuda.max_memory_allocated() / (1024**3)
-        print(f"[GPU MEM pt2] {label}: allocated={alloc:.3f} GiB, peak={peak:.3f} GiB")
-
-
 def _save_and_compile(ep_or_path, backend, search_iterations, original_weights=None):
     """Compile a PT2 model via Rust, return CompiledModel.
 
@@ -77,21 +70,15 @@ def _save_and_compile(ep_or_path, backend, search_iterations, original_weights=N
                 t = param.detach().cpu().contiguous().float()
                 keep_alive.append(t)
                 cpu_weights[name] = (t.data_ptr(), t.numel())
-        print(f"[PT2] weight_device_ptrs keys ({len(weight_device_ptrs)}): {list(weight_device_ptrs.keys())[:5]}...")
-        total_device_bytes = sum(nb for _, nb in weight_device_ptrs.values())
-        print(f"[PT2] Total device ptr bytes: {total_device_bytes / 1024**3:.3f} GiB")
 
         # Compile with device pointers — search uses actual weight memory (zero-copy)
-        _gpu_mem_pt2("before process_pt2 (Rust compilation)")
         compiled = process_pt2(
             pt2_path, "", backend, search_iterations, weight_device_ptrs
         )
-        _gpu_mem_pt2("after process_pt2 (Rust compilation)")
 
-        # Set CPU weights after compilation (host→device copy)
+        # Set CPU weights after compilation (host->device copy)
         for name, (ptr, n_elements) in cpu_weights.items():
             compiled.set_weight_from_ptr(name, ptr, n_elements)
-        _gpu_mem_pt2("after CPU weight loading")
 
         model = CompiledModel(compiled)
         model._weight_refs = keep_alive
@@ -252,9 +239,7 @@ def pt2_backend(gm, example_inputs, backend=None):
         backend = "cuda" if device.type == "cuda" else "cpu"
     gm = gm.eval()
     gm, user_inputs, original_weights = _reinternalize_lifted_params(gm, example_inputs)
-    _gpu_mem_pt2("before torch.export.export")
     ep = torch.export.export(gm, tuple(user_inputs), **_export_kwargs())
-    _gpu_mem_pt2("after torch.export.export (may clone weights)")
 
     # Save the exported program to disk, then free it and the traced graph module
     # BEFORE Rust compilation. torch.export clones the state_dict internally, so
@@ -266,7 +251,6 @@ def pt2_backend(gm, example_inputs, backend=None):
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    _gpu_mem_pt2("after del ep + empty_cache")
 
     try:
         return _save_and_compile(

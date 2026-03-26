@@ -1935,9 +1935,6 @@ impl NativeOp for Softmax {
                 let dims: Vec<usize> = self.shape.iter()
                     .map(|d| d.exec(dyn_map).unwrap())
                     .collect();
-                let strides: Vec<usize> = self.in_strides.iter()
-                    .map(|s| s.exec(dyn_map).unwrap())
-                    .collect();
                 let n = self.reduce_dim.exec(dyn_map).unwrap();
                 let mut reduce_stride_expr = self.reduce_stride;
                 for (&var, &val) in dyn_map {
@@ -1946,7 +1943,6 @@ impl NativeOp for Softmax {
 
                 // Compute row index strides (all dims except last, since softmax is always last-dim)
                 let ndim = dims.len();
-                let n_rows: usize = dims[..ndim - 1].iter().product::<usize>().max(1);
                 let out_size: usize = dims.iter().product();
                 let mut out = vec![0.0f32; out_size];
 

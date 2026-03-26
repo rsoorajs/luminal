@@ -332,10 +332,10 @@ def test_hf_llama3_full(device: torch.device):
 
 @pytest.mark.xfail(reason="numerical precision — max_diff exceeds atol")
 def test_hf_llama3_large_full(device: torch.device):
-    """HuggingFace LlamaForCausalLM — full Llama3.2-1B with real pretrained weights.
+    """HuggingFace LlamaForCausalLM — full Llama-3.1-8B-Instruct with real pretrained weights.
 
     No config alterations except use_cache=False and eager attention.
-    Loads actual weights from NousResearch/Llama-3.2-1B.
+    Loads actual weights from NousResearch/Meta-Llama-3.1-8B-Instruct.
     """
     from transformers import AutoConfig, LlamaForCausalLM
 
@@ -364,10 +364,10 @@ def test_hf_llama3_large_full(device: torch.device):
 
 @pytest.mark.xfail(reason="numerical precision — max_diff exceeds atol")
 def test_hf_llama38b_full(device: torch.device):
-    """HuggingFace LlamaForCausalLM — full Llama3.2-1B with real pretrained weights.
+    """HuggingFace LlamaForCausalLM — full Llama-3.1-8B-Instruct with real pretrained weights.
 
     No config alterations except use_cache=False and eager attention.
-    Loads actual weights from NousResearch/Llama-3.2-1B.
+    Loads actual weights from NousResearch/Meta-Llama-3.1-8B-Instruct.
     """
     from transformers import AutoConfig, LlamaForCausalLM
 
