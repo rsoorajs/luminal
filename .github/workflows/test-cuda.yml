@@ -21,8 +21,10 @@ jobs:
             - uses: actions/setup-python@v5
               with:
                   python-version: "3.11"
-            - name: Update Rust toolchain
-              run: rustup update
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: clippy
             - uses: pre-commit/action@v3.0.1
               with:
                   extra_args: --hook-stage manual cargo-clippy-cuda-lite --all-files
