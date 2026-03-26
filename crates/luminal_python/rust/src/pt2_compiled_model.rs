@@ -57,9 +57,15 @@ fn compile_pt2(
     search_iters: usize,
     weight_device_ptrs: HashMap<String, (u64, usize)>,
 ) -> anyhow::Result<CompiledGraph> {
+    let t0 = std::time::Instant::now();
     let (translation, weights) = translate_pt2(pt2_path, weights_path)?;
-    CompiledGraph::parse_graph(translation, weights, backend, search_iters, weight_device_ptrs)
-        .map_err(|e| anyhow::anyhow!(e))
+    println!("[LUMINAL TIMING] compile_pt2/translate_pt2: {:.3}s", t0.elapsed().as_secs_f64());
+
+    let t0 = std::time::Instant::now();
+    let result = CompiledGraph::parse_graph(translation, weights, backend, search_iters, weight_device_ptrs)
+        .map_err(|e| anyhow::anyhow!(e));
+    println!("[LUMINAL TIMING] compile_pt2/parse_graph: {:.3}s", t0.elapsed().as_secs_f64());
+    result
 }
 
 /// Translate a PT2 exported model into a format-neutral GraphTranslation + WeightData.
@@ -151,15 +157,15 @@ pub fn translate_pt2(
             } => (graph_name.as_str(), original_name.as_str()),
             pt2_parser::InputKind::UserInput { .. } => continue,
         };
-        if !tensor_sizes.contains_key(original_name) {
-            if let Some(meta) = parsed.tensor_meta(graph_name) {
-                let n: usize = meta
-                    .sizes
-                    .iter()
-                    .map(|s| s.hint().unwrap_or(1) as usize)
-                    .product();
-                tensor_sizes.insert(original_name.to_string(), n);
-            }
+        // Always use authoritative sizes from model.json tensor_meta,
+        // even if preload_constants inserted a different (possibly stripped) size.
+        if let Some(meta) = parsed.tensor_meta(graph_name) {
+            let n: usize = meta
+                .sizes
+                .iter()
+                .map(|s| s.hint().unwrap_or(1) as usize)
+                .product();
+            tensor_sizes.insert(original_name.to_string(), n);
         }
     }
 

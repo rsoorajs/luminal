@@ -143,12 +143,19 @@ impl CompiledGraph {
         use luminal_cuda_lite::cudarc::driver::CudaContext;
         use luminal_cuda_lite::runtime::CudaRuntime;
 
+        let t0 = std::time::Instant::now();
         let cuda_ctx =
             CudaContext::new(0).map_err(|e| format!("CUDA context init failed: {e}"))?;
         let stream = cuda_ctx.default_stream();
+        println!("[LUMINAL TIMING] build_cuda_backend/cuda_init: {:.3}s", t0.elapsed().as_secs_f64());
 
+        let t0 = std::time::Instant::now();
         graph.build_search_space::<CudaRuntime>();
+        println!("[LUMINAL TIMING] build_cuda_backend/build_search_space: {:.3}s", t0.elapsed().as_secs_f64());
+
+        let t0 = std::time::Instant::now();
         let mut rt = CudaRuntime::initialize(stream);
+        println!("[LUMINAL TIMING] build_cuda_backend/runtime_init: {:.3}s", t0.elapsed().as_secs_f64());
 
         // Build label → NodeIndex map for device pointer matching.
         let label_map = CompiledGraph::build_label_map(graph);
@@ -157,6 +164,7 @@ impl CompiledGraph {
         // This avoids allocating ~N GB of dummy data during search.
         // The pointers survive search because profiling mode skips buffer consumption,
         // and persist_hlir_node ensures they survive post-search execution too.
+        let t0 = std::time::Instant::now();
         let mut device_ptr_nodes: HashSet<NodeIndex> = HashSet::new();
         let mut matched_count = 0usize;
         let mut missed_labels: Vec<String> = Vec::new();
@@ -184,6 +192,9 @@ impl CompiledGraph {
             trace!("[CUDA BUILD] Available label_map keys (first 10): {:?}", available);
         }
 
+        println!("[LUMINAL TIMING] build_cuda_backend/device_ptr_matching ({} matched, {} missed): {:.3}s",
+            matched_count, missed_labels.len(), t0.elapsed().as_secs_f64());
+
         // Set dummy 1.0 data for remaining Input nodes (user inputs, constants without
         // device pointers) for safe search profiling.
         // IMPORTANT: Must use 1.0, NOT 0.0. Zero inputs cause NaN in many ops:
@@ -191,6 +202,7 @@ impl CompiledGraph {
         //   - recip(0) = inf → weight * inf = NaN  (Div)
         //   - log(0) = -inf  (Pow)
         //   - chain ops with zero produce NaN  (Erf)
+        let t0 = std::time::Instant::now();
         let mut dummy_total_elements = 0usize;
         let mut dummy_count = 0usize;
         for node_id in graph.graph.node_indices() {
@@ -210,6 +222,10 @@ impl CompiledGraph {
                 }
             }
         }
+        println!("[LUMINAL TIMING] build_cuda_backend/dummy_data ({} nodes, {:.3} GiB): {:.3}s",
+            dummy_count,
+            (dummy_total_elements * 4) as f64 / (1024.0 * 1024.0 * 1024.0),
+            t0.elapsed().as_secs_f64());
         trace!(
             "[CUDA BUILD] Dummy data: {} nodes, {} elements ({:.3} GiB as f32)",
             dummy_count,
@@ -218,9 +234,12 @@ impl CompiledGraph {
         );
 
         // Search (device-pointer weights are used directly; dummy data for the rest)
+        let t0 = std::time::Instant::now();
         let mut rt = graph.search(rt, search_iters);
+        println!("[LUMINAL TIMING] build_cuda_backend/search ({} iters): {:.3}s", search_iters, t0.elapsed().as_secs_f64());
 
         // Load real weight data for non-device-ptr weights (constants from PT2 archive, etc.)
+        let t0 = std::time::Instant::now();
         let mut loaded_weight_elements = 0usize;
         let mut loaded_weight_count = 0usize;
         for (label, data) in &weight_data.weights {
@@ -232,6 +251,10 @@ impl CompiledGraph {
                 }
             }
         }
+        println!("[LUMINAL TIMING] build_cuda_backend/post_search_weight_load ({} weights, {:.3} GiB): {:.3}s",
+            loaded_weight_count,
+            (loaded_weight_elements * 4) as f64 / (1024.0 * 1024.0 * 1024.0),
+            t0.elapsed().as_secs_f64());
         trace!(
             "[CUDA BUILD] Post-search weight load: {} weights, {} elements ({:.3} GiB as f32)",
             loaded_weight_count,

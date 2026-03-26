@@ -249,11 +249,22 @@ impl Graph {
         ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
         let cleanup_hlir = TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>();
 
+        let t0 = std::time::Instant::now();
         let subgraphs = split_at_graph_breaks(self);
+        let n_hlir_nodes = self.graph.node_count();
+        println!("[LUMINAL TIMING] build_search_space/split_at_graph_breaks ({} chunks, {} HLIR nodes): {:.3}s",
+            subgraphs.len(), n_hlir_nodes, t0.elapsed().as_secs_f64());
 
         if subgraphs.len() <= 1 {
+            let t0 = std::time::Instant::now();
             let (program, root) = hlir_to_egglog(self);
+            println!("[LUMINAL TIMING] build_search_space/hlir_to_egglog: {:.3}s (program len={})",
+                t0.elapsed().as_secs_f64(), program.len());
+
+            let t0 = std::time::Instant::now();
             self.egraphs = vec![run_egglog(&program, &root, &ops, cleanup_hlir).unwrap()];
+            println!("[LUMINAL TIMING] build_search_space/run_egglog: {:.3}s", t0.elapsed().as_secs_f64());
+
             self.chunk_groups = vec![ChunkGroup {
                 representative: 0,
                 members: vec![0],
@@ -264,7 +275,10 @@ impl Graph {
                 "Split".cyan().bold(),
                 subgraphs.len()
             );
+            let t0 = std::time::Instant::now();
             self.build_grouped_egraphs(&subgraphs, &ops, cleanup_hlir);
+            println!("[LUMINAL TIMING] build_search_space/build_grouped_egraphs ({} groups): {:.3}s",
+                self.chunk_groups.len(), t0.elapsed().as_secs_f64());
         }
         self.subgraph_descriptors = subgraphs;
         self.ops = Some(ops);
@@ -480,6 +494,8 @@ impl Graph {
         let ops = self.ops.as_ref().unwrap();
         let start = std::time::Instant::now();
 
+        println!("[LUMINAL TIMING] search_single: {} chunks, {} groups, limit={}", n_chunks, n_groups, limit);
+
         // Label for the group-level "total" bar: "Group" when in bucketed mode, "Bucket" otherwise
         let group_total_label = if bucket_progress.is_some() {
             "Group"
@@ -579,6 +595,12 @@ impl Graph {
 
         for (group_idx, group) in self.chunk_groups.iter().enumerate() {
             let egraph = &self.egraphs[group_idx];
+            let group_start = std::time::Instant::now();
+            let mut total_egglog_to_llir = std::time::Duration::ZERO;
+            let mut total_profile = std::time::Duration::ZERO;
+            let mut total_nan_check = std::time::Duration::ZERO;
+            let mut total_candidates = 0usize;
+            let mut total_nan_rejects = 0usize;
 
             let mut prev_selected: FxHashSet<u64> = FxHashSet::default();
             let mut list_cache = FxHashMap::default();
@@ -601,6 +623,7 @@ impl Graph {
                 prev_selected.insert(hash_choice_set(&genome));
 
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let t_llir = std::time::Instant::now();
                     let graph = egglog_to_llir(
                         egraph,
                         genome.clone(),
@@ -610,14 +633,29 @@ impl Graph {
                         &mut expr_cache,
                         None,
                     );
+                    let llir_dur = t_llir.elapsed();
                     runtime.clear_intermediate_buffers();
+                    let t_prof = std::time::Instant::now();
                     let profile = runtime.profile(&graph, dyn_map, Self::TRIALS_PER_PROFILE);
+                    let prof_dur = t_prof.elapsed();
+                    let t_nan = std::time::Instant::now();
                     let has_nan = runtime.has_nan_outputs(&graph, dyn_map);
-                    (graph, profile, has_nan)
+                    let nan_dur = t_nan.elapsed();
+                    (graph, profile, has_nan, llir_dur, prof_dur, nan_dur)
                 }));
 
                 match result {
-                    Ok((graph, (metric, disp), has_nan)) if !has_nan => {
+                    Ok((graph, (metric, disp), has_nan, llir_dur, prof_dur, nan_dur)) => {
+                        total_egglog_to_llir += llir_dur;
+                        total_profile += prof_dur;
+                        total_nan_check += nan_dur;
+                        total_candidates += 1;
+                        if has_nan {
+                            total_nan_rejects += 1;
+                            list_cache.clear();
+                            expr_cache.clear();
+                            continue;
+                        }
                         best_genome = genome;
                         best_graph = graph;
                         best_metric = metric;
@@ -625,7 +663,7 @@ impl Graph {
                         n_graphs = 1;
                         break;
                     }
-                    Ok(_) | Err(_) => {
+                    Err(_) => {
                         list_cache.clear();
                         expr_cache.clear();
                         continue;
@@ -686,6 +724,7 @@ impl Graph {
 
                     let profile_result =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let t_llir = std::time::Instant::now();
                             let llir_graph = egglog_to_llir(
                                 egraph,
                                 genome.clone(),
@@ -695,17 +734,51 @@ impl Graph {
                                 &mut expr_cache,
                                 None,
                             );
+                            let llir_dur = t_llir.elapsed();
                             runtime.clear_intermediate_buffers();
+                            let t_prof = std::time::Instant::now();
                             let result =
                                 runtime.profile(&llir_graph, dyn_map, Self::TRIALS_PER_PROFILE);
+                            let prof_dur = t_prof.elapsed();
+                            let t_nan = std::time::Instant::now();
                             let has_nan = runtime.has_nan_outputs(&llir_graph, dyn_map);
-                            (result, llir_graph, has_nan)
+                            let nan_dur = t_nan.elapsed();
+                            (result, llir_graph, has_nan, llir_dur, prof_dur, nan_dur)
                         }));
 
                     let ((new_metric, display_metric), llir_graph) = match profile_result {
-                        Ok((result, graph, false)) => (result, graph),
-                        Ok((_, _, true)) | Err(_) => {
+                        Ok((result, graph, false, llir_dur, prof_dur, nan_dur)) => {
+                            total_egglog_to_llir += llir_dur;
+                            total_profile += prof_dur;
+                            total_nan_check += nan_dur;
+                            total_candidates += 1;
+                            (result, graph)
+                        }
+                        Ok((_, _, true, llir_dur, prof_dur, nan_dur)) => {
+                            total_egglog_to_llir += llir_dur;
+                            total_profile += prof_dur;
+                            total_nan_check += nan_dur;
+                            total_candidates += 1;
+                            total_nan_rejects += 1;
                             // NaN or panic — redraw bars and skip
+                            for _ in 1..n_bar_lines {
+                                print!("\x1b[1A");
+                            }
+                            print!("\r\x1b[2K");
+                            render_bars(
+                                n_graphs,
+                                limit,
+                                group_idx,
+                                n_groups,
+                                multi_chunk,
+                                group_total_label,
+                                bucket_progress,
+                            );
+                            std::io::stdout().flush().unwrap();
+                            continue;
+                        }
+                        Err(_) => {
+                            // Panic — redraw bars and skip
                             for _ in 1..n_bar_lines {
                                 print!("\x1b[1A");
                             }
@@ -758,6 +831,14 @@ impl Graph {
                     std::io::stdout().flush().unwrap();
                 }
             }
+
+            println!("[LUMINAL TIMING] search_single/group_{}: {:.3}s total, {} candidates ({} nan rejects), \
+                egglog_to_llir={:.3}s, profile={:.3}s, nan_check={:.3}s",
+                group_idx, group_start.elapsed().as_secs_f64(),
+                total_candidates, total_nan_rejects,
+                total_egglog_to_llir.as_secs_f64(),
+                total_profile.as_secs_f64(),
+                total_nan_check.as_secs_f64());
 
             group_best_llirs[group_idx] = Some(best_graph);
             group_best_genomes[group_idx] = Some(best_genome);
