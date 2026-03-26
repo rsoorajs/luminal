@@ -14,17 +14,18 @@ jobs:
     cuda_clippy:
         name: Cuda Clippy
         runs-on: cuda_t4_runner
+        container:
+            image: ghcr.io/luminal-ai/luminal-docker:cuda
+            options: --gpus all
         timeout-minutes: 30
 
         steps:
             - uses: actions/checkout@v6
+            - name: Mark workspace as a safe git directory
+              run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
             - uses: actions/setup-python@v5
               with:
                   python-version: "3.11"
-            - name: Install Rust toolchain
-              uses: dtolnay/rust-toolchain@stable
-              with:
-                  components: clippy
             - uses: pre-commit/action@v3.0.1
               with:
                   extra_args: --hook-stage manual cargo-clippy-cuda-lite --all-files
