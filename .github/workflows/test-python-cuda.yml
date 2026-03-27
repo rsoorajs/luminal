@@ -1,0 +1,37 @@
+name: Test Python CUDA
+
+on:
+    push:
+        branches: ["main"]
+    pull_request:
+        branches: ["main"]
+    workflow_dispatch:
+
+jobs:
+    python_cuda_tests:
+        name: Python CUDA Tests
+        runs-on: cuda_t4_runner
+        container:
+            image: ghcr.io/luminal-ai/luminal-docker:cuda
+            options: --gpus all
+        timeout-minutes: 45
+        defaults:
+            run:
+                working-directory: crates/luminal_python
+
+        steps:
+            - uses: actions/checkout@v6
+            - name: Detect GPU compute capability
+              run: |
+                  CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
+                  echo "CUDA_COMPUTE_CAP=${CAP}" >> "$GITHUB_ENV"
+            - name: Install uv
+              run: |
+                  curl -LsSf https://astral.sh/uv/install.sh | sh
+                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            - name: Build maturin extension
+              run: uv run maturin develop --manifest-path rust/Cargo.toml --features cuda
+            - name: Run pytest with CUDA backend
+              env:
+                  LUMINAL_BACKEND: cuda
+              run: uv run pytest tests/ -v -m "not slow"
