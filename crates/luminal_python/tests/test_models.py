@@ -1811,3 +1811,188 @@ class LlamaTransformerBlockModel(torch.nn.Module):
         h = x + self.attn(self.input_norm(x))
         out = h + self.mlp(self.post_attn_norm(h))
         return out
+
+
+# ---------------------------------------------------------------------------
+# Convolution models
+# ---------------------------------------------------------------------------
+
+
+class Conv1dNoPadModel(torch.nn.Module):
+    """Conv1d with no padding: output length shrinks by (kernel-1)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv1d(8, 16, kernel_size=3, padding=0, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class Conv1dSamePadModel(torch.nn.Module):
+    """Conv1d with same-size padding (output length == input length)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv1d(8, 16, kernel_size=3, padding=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class Conv1dBiasModel(torch.nn.Module):
+    """Conv1d with bias."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv1d(8, 16, kernel_size=3, padding=1, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class Conv2dNoPadModel(torch.nn.Module):
+    """Conv2d with no padding: output spatial dims shrink by (kernel-1)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(3, 16, kernel_size=3, padding=0, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class Conv2dSamePadModel(torch.nn.Module):
+    """Conv2d with same-size padding."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(3, 16, kernel_size=3, padding=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class Conv2dBiasModel(torch.nn.Module):
+    """Conv2d with bias."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(3, 16, kernel_size=3, padding=1, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class Conv2dStrideModel(torch.nn.Module):
+    """Conv2d with stride=2 (output dims halved)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class Conv2dDilationModel(torch.nn.Module):
+    """Conv2d with dilation=2 and padding chosen to preserve spatial size."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(
+            8, 16, kernel_size=3, dilation=2, padding=2, bias=False
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class Conv3dSamePadModel(torch.nn.Module):
+    """Conv3d with padding=1 to preserve spatial dimensions."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv3d(4, 8, kernel_size=3, padding=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class DepthwiseConv1dModel(torch.nn.Module):
+    """Depthwise Conv1d as used in Mamba (groups == in_channels)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv1d(16, 16, kernel_size=4, groups=16, padding=3, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Causal truncation: keep only the first L positions
+        return self.conv(x)[:, :, : x.shape[2]]
+
+
+class DepthwiseConv2dModel(torch.nn.Module):
+    """Depthwise Conv2d (groups == in_channels)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(8, 8, kernel_size=3, groups=8, padding=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class DepthwiseMultiplierConv2dModel(torch.nn.Module):
+    """Depthwise Conv2d with channel multiplier 2 (out_channels = 2 * in_channels)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(8, 16, kernel_size=3, groups=8, padding=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class GroupedConv2dModel(torch.nn.Module):
+    """Conv2d with groups=4 (not depthwise, but grouped)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(16, 32, kernel_size=3, groups=4, padding=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class GroupedConv2dGroups3Model(torch.nn.Module):
+    """Conv2d with groups=3 and ch_per_group=4."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(12, 12, kernel_size=3, groups=3, padding=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class MambaConvBlockModel(torch.nn.Module):
+    """Minimal Mamba-style SSM block: Linear -> split -> depthwise Conv1d -> SiLU gate -> Linear.
+
+    This is the core conv pattern used in Mamba / Mamba-2 models.
+    """
+
+    def __init__(self, d_model: int = 16, d_conv: int = 4, expand: int = 2) -> None:
+        super().__init__()
+        d_inner = d_model * expand
+        self.in_proj = torch.nn.Linear(d_model, d_inner * 2, bias=False)
+        self.conv1d = torch.nn.Conv1d(
+            d_inner, d_inner, d_conv, groups=d_inner, padding=d_conv - 1, bias=True
+        )
+        self.out_proj = torch.nn.Linear(d_inner, d_model, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, l, _ = x.shape
+        xz = self.in_proj(x)
+        x_part, z = xz.chunk(2, dim=-1)
+        x_part = self.conv1d(x_part.transpose(1, 2))[:, :, :l].transpose(1, 2)
+        return self.out_proj(torch.nn.functional.silu(x_part) * torch.nn.functional.silu(z))
