@@ -59,8 +59,14 @@ fn compile_pt2(
 ) -> anyhow::Result<CompiledGraph> {
     let (translation, weights) = translate_pt2(pt2_path, weights_path)?;
 
-    CompiledGraph::parse_graph(translation, weights, backend, search_iters, weight_device_ptrs)
-        .map_err(|e| anyhow::anyhow!(e))
+    CompiledGraph::parse_graph(
+        translation,
+        weights,
+        backend,
+        search_iters,
+        weight_device_ptrs,
+    )
+    .map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Translate a PT2 exported model into a format-neutral GraphTranslation + WeightData.

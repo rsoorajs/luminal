@@ -1196,9 +1196,12 @@ impl EgglogOp for KernelSoftmax {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        let out_shape = extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap();
-        let in_stride = extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap();
-        let out_stride = extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap();
+        let out_shape =
+            extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap();
+        let in_stride =
+            extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap();
+        let out_stride =
+            extract_expr_list(egraph, kind_children[2], list_cache, expr_cache).unwrap();
         let reduce_dim = extract_expr(egraph, kind_children[3], expr_cache).unwrap();
         let reduce_stride = extract_expr(egraph, kind_children[4], expr_cache).unwrap();
         (

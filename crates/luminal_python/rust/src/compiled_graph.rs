@@ -65,8 +65,7 @@ impl CompiledGraph {
         weight_data: WeightData,
         backend: &str,
         search_iters: usize,
-        #[allow(unused_variables)]
-        weight_device_ptrs: HashMap<String, (u64, usize)>,
+        #[allow(unused_variables)] weight_device_ptrs: HashMap<String, (u64, usize)>,
     ) -> Result<CompiledGraph, String> {
         let GraphTranslation {
             mut graph,
@@ -80,14 +79,12 @@ impl CompiledGraph {
 
         let rt = match backend {
             #[cfg(feature = "cuda")]
-            "cuda" | "gpu" => {
-                CompiledGraph::build_cuda_backend(
-                    &mut graph,
-                    &weight_data,
-                    search_iters,
-                    &weight_device_ptrs,
-                )?
-            }
+            "cuda" | "gpu" => CompiledGraph::build_cuda_backend(
+                &mut graph,
+                &weight_data,
+                search_iters,
+                &weight_device_ptrs,
+            )?,
             "native" | "cpu" => {
                 CompiledGraph::build_native_backend(&mut graph, &weight_data, search_iters)?
             }
@@ -143,8 +140,7 @@ impl CompiledGraph {
         use luminal_cuda_lite::cudarc::driver::CudaContext;
         use luminal_cuda_lite::runtime::CudaRuntime;
 
-        let cuda_ctx =
-            CudaContext::new(0).map_err(|e| format!("CUDA context init failed: {e}"))?;
+        let cuda_ctx = CudaContext::new(0).map_err(|e| format!("CUDA context init failed: {e}"))?;
         let stream = cuda_ctx.default_stream();
 
         graph.build_search_space::<CudaRuntime>();
@@ -180,9 +176,15 @@ impl CompiledGraph {
             total_device_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
         );
         if !missed_labels.is_empty() {
-            trace!("[CUDA BUILD] Missed device-ptr labels (first 10): {:?}", &missed_labels[..missed_labels.len().min(10)]);
+            trace!(
+                "[CUDA BUILD] Missed device-ptr labels (first 10): {:?}",
+                &missed_labels[..missed_labels.len().min(10)]
+            );
             let available: Vec<&String> = label_map.keys().take(10).collect();
-            trace!("[CUDA BUILD] Available label_map keys (first 10): {:?}", available);
+            trace!(
+                "[CUDA BUILD] Available label_map keys (first 10): {:?}",
+                available
+            );
         }
 
         // Set dummy 1.0 data for remaining Input nodes (user inputs, constants without
@@ -293,8 +295,7 @@ pub fn translate_onnx(
 
     // Create input tensors with dynamic dimension support
     for input in &onnx_graph.input {
-        let shape_exprs =
-            get_shape_for_onnx_value_expr(input, &mut dim_param_map, &mut next_char);
+        let shape_exprs = get_shape_for_onnx_value_expr(input, &mut dim_param_map, &mut next_char);
         if shape_exprs.is_empty() {
             let shape = get_shape_for_onnx_value(input);
             if shape.is_empty() {
@@ -620,7 +621,7 @@ impl CompiledGraph {
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "set_input_device_ptr requires CUDA backend",
-                ))
+                ));
             }
         }
         Ok(())
@@ -664,7 +665,7 @@ impl CompiledGraph {
                     _ => {
                         return Err(pyo3::exceptions::PyValueError::new_err(
                             "set_weight_device_ptr requires CUDA backend",
-                        ))
+                        ));
                     }
                 }
             }
@@ -676,12 +677,7 @@ impl CompiledGraph {
     }
 
     /// Set a weight tensor from a CPU host pointer, matching by Input node label.
-    fn set_weight_from_ptr(
-        &mut self,
-        label: &str,
-        ptr: u64,
-        n_elements: usize,
-    ) -> PyResult<()> {
+    fn set_weight_from_ptr(&mut self, label: &str, ptr: u64, n_elements: usize) -> PyResult<()> {
         let data: Vec<f32> =
             unsafe { std::slice::from_raw_parts(ptr as *const f32, n_elements).to_vec() };
         for node_id in self.graph.graph.node_indices() {

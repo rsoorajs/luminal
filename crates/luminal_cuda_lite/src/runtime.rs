@@ -217,7 +217,10 @@ impl CudaRuntime {
         let id = id.to_id();
         // Create CudaSlice view via cudarc's upgrade_device_ptr.
         // ManuallyDrop prevents cuMemFree on drop (external allocator owns this memory).
-        let slice = unsafe { self.cuda_stream.upgrade_device_ptr::<u8>(device_ptr, n_bytes) };
+        let slice = unsafe {
+            self.cuda_stream
+                .upgrade_device_ptr::<u8>(device_ptr, n_bytes)
+        };
         self.external_buffers
             .insert(id, std::mem::ManuallyDrop::new(slice));
         self.hlir_buffers.insert(id, CudaInput::Ptr(device_ptr));

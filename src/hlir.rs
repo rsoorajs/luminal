@@ -1910,7 +1910,8 @@ impl EgglogOp for Softmax {
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
         let shape = extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap();
-        let in_strides = extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap();
+        let in_strides =
+            extract_expr_list(egraph, kind_children[1], list_cache, expr_cache).unwrap();
         let reduce_dim = extract_expr(egraph, kind_children[3], expr_cache).unwrap();
         let reduce_stride = extract_expr(egraph, kind_children[4], expr_cache).unwrap();
         (
@@ -1932,13 +1933,16 @@ impl NativeOp for Softmax {
         match inputs[0] {
             NativeData::F32(a) => {
                 // Use extracted fields (populated during egglog extraction)
-                let dims: Vec<usize> = self.shape.iter()
+                let dims: Vec<usize> = self
+                    .shape
+                    .iter()
                     .map(|d| d.exec(dyn_map).unwrap())
                     .collect();
                 let n = self.reduce_dim.exec(dyn_map).unwrap();
                 let mut reduce_stride_expr = self.reduce_stride;
                 for (&var, &val) in dyn_map {
-                    reduce_stride_expr = reduce_stride_expr.substitute(var, Expression::from(val as i32));
+                    reduce_stride_expr =
+                        reduce_stride_expr.substitute(var, Expression::from(val as i32));
                 }
 
                 // Compute row index strides (all dims except last, since softmax is always last-dim)
@@ -1958,14 +1962,17 @@ impl NativeOp for Softmax {
                     let mut max_val = f32::NEG_INFINITY;
                     for i in 0..n {
                         let val = a[in_base + reduce_stride_expr.exec_single_var(i)];
-                        if val > max_val { max_val = val; }
+                        if val > max_val {
+                            max_val = val;
+                        }
                     }
 
                     // Pass 2: exp(x - max) and sum
                     let mut sum = 0.0f32;
                     let out_base = row_idx * n;
                     for i in 0..n {
-                        let val = (a[in_base + reduce_stride_expr.exec_single_var(i)] - max_val).exp();
+                        let val =
+                            (a[in_base + reduce_stride_expr.exec_single_var(i)] - max_val).exp();
                         out[out_base + i] = val;
                         sum += val;
                     }
