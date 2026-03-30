@@ -1,25 +1,18 @@
 use luminal::{
-    prelude::{
-        tracing::{Level, span, trace},
-        *,
-    },
+    prelude::*,
     shape::Expression,
     visualization::ToDot,
 };
-use onnx_protobuf::ModelProto;
+#[cfg(feature = "cuda")]
+use luminal::prelude::tracing::trace;
 use pyo3::prelude::*;
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-};
+use std::collections::HashMap;
+#[cfg(feature = "cuda")]
+use std::collections::HashSet;
 
 use crate::{
-    dispatch::process_onnx_nodes,
     runtime::RuntimeBackend,
-    util::{
-        DimParamMap, get_shape_for_onnx_value, get_shape_for_onnx_value_expr,
-        load_all_tensor_floats, load_initializer_as_f32,
-    },
+    util::DimParamMap,
 };
 
 /// Common intermediate result from translating a model graph (ONNX or FX).
@@ -39,6 +32,8 @@ pub struct WeightData {
     pub weights: Vec<(String, Vec<f32>)>,
     /// label → element count for ALL Input nodes (for CUDA dummy data sizing).
     pub tensor_sizes: HashMap<String, usize>,
+    /// label → (device_ptr, n_bytes) for zero-copy CUDA weight sharing.
+    pub device_ptrs: HashMap<String, (u64, usize)>,
 }
 
 #[pyclass(unsendable)]
@@ -46,6 +41,8 @@ pub struct CompiledGraph {
     pub graph: Graph,
     pub runtime: RuntimeBackend,
     pub tensor_ids: HashMap<String, NodeIndex>,
+    /// Cached label → NodeIndex map for O(1) lookups in set_weight_* methods.
+    label_map: HashMap<String, NodeIndex>,
     pub input_names: Vec<String>,
     pub output_names: Vec<String>,
     pub output_shapes: Vec<Vec<usize>>,
@@ -65,7 +62,6 @@ impl CompiledGraph {
         weight_data: WeightData,
         backend: &str,
         search_iters: usize,
-        #[allow(unused_variables)] weight_device_ptrs: HashMap<String, (u64, usize)>,
     ) -> Result<CompiledGraph, String> {
         let GraphTranslation {
             mut graph,
@@ -83,7 +79,6 @@ impl CompiledGraph {
                 &mut graph,
                 &weight_data,
                 search_iters,
-                &weight_device_ptrs,
             )?,
             "native" | "cpu" => {
                 CompiledGraph::build_native_backend(&mut graph, &weight_data, search_iters)?
@@ -102,10 +97,13 @@ impl CompiledGraph {
             .map(|exprs| exprs.iter().map(|e| e.to_usize().unwrap_or(1)).collect())
             .collect();
 
+        let label_map = CompiledGraph::build_label_map(&graph);
+
         Ok(CompiledGraph {
             graph,
             runtime: rt,
             tensor_ids,
+            label_map,
             input_names,
             output_names,
             output_shapes,
@@ -135,8 +133,8 @@ impl CompiledGraph {
         graph: &mut Graph,
         weight_data: &WeightData,
         search_iters: usize,
-        device_ptrs: &HashMap<String, (u64, usize)>,
     ) -> Result<RuntimeBackend, String> {
+        let device_ptrs = &weight_data.device_ptrs;
         use luminal_cuda_lite::cudarc::driver::CudaContext;
         use luminal_cuda_lite::runtime::CudaRuntime;
 
@@ -263,228 +261,6 @@ impl CompiledGraph {
 
         Ok(RuntimeBackend::Native(rt))
     }
-}
-
-/// Translate an ONNX model into a format-neutral GraphTranslation + WeightData.
-pub fn translate_onnx(
-    model: ModelProto,
-    model_directory: &Path,
-) -> Result<(GraphTranslation, WeightData), String> {
-    let _span = span!(Level::TRACE, "ONNX Graph Translation").entered();
-    let onnx_graph = &model.graph;
-    let mut cx = Graph::new();
-    let mut tensors: HashMap<String, GraphTensor> = HashMap::new();
-
-    // Dynamic dimension tracking
-    let mut dim_param_map: DimParamMap = HashMap::new();
-    let mut next_char = 'a';
-
-    // Separate initializers (weights) from true user inputs
-    let initializer_names: HashSet<&str> = onnx_graph
-        .initializer
-        .iter()
-        .map(|t| t.name.as_str())
-        .collect();
-
-    let input_names: Vec<String> = onnx_graph
-        .input
-        .iter()
-        .filter(|inp| !initializer_names.contains(inp.name.as_str()))
-        .map(|inp| inp.name.clone())
-        .collect();
-
-    // Create input tensors with dynamic dimension support
-    for input in &onnx_graph.input {
-        let shape_exprs = get_shape_for_onnx_value_expr(input, &mut dim_param_map, &mut next_char);
-        if shape_exprs.is_empty() {
-            let shape = get_shape_for_onnx_value(input);
-            if shape.is_empty() {
-                trace!("Input {} skipped because it is empty", input.name.clone());
-                continue;
-            }
-            let tensor = cx.named_tensor(input.name.clone(), shape);
-            trace!("Input {} added to tensors", input.name.clone());
-            tensors.insert(input.name.clone(), tensor);
-            continue;
-        }
-        let tensor = cx.named_tensor(input.name.clone(), shape_exprs);
-        trace!("Input {} added to tensors", input.name.clone());
-        tensors.insert(input.name.clone(), tensor);
-    }
-
-    // Create initializer (weight) tensors
-    for init in &onnx_graph.initializer {
-        if !tensors.contains_key(&init.name) {
-            let mut shape: Vec<usize> = init.dims.iter().map(|&d| d as usize).collect();
-            if shape.is_empty() {
-                shape = vec![1];
-            }
-            let tensor = cx.named_tensor(init.name.clone(), shape);
-            tensors.insert(init.name.clone(), tensor);
-        }
-    }
-
-    // Load small constants for constant folding
-    let mut known_values: HashMap<String, Vec<f32>> = HashMap::new();
-    for init in &onnx_graph.initializer {
-        let n_elements: usize = init
-            .dims
-            .iter()
-            .map(|&d| d as usize)
-            .product::<usize>()
-            .max(1);
-        if n_elements <= 32 {
-            if let Some(floats) = load_initializer_as_f32(init) {
-                known_values.insert(init.name.clone(), floats);
-            } else {
-                panic!("Unable to load initializer values for {:?}", init.name);
-            }
-        }
-    }
-
-    // Shape expressions for propagating symbolic shapes through ONNX graphs
-    let mut shape_exprs: HashMap<String, Vec<Expression>> = HashMap::new();
-
-    // Accumulates constant node data from process_onnx_nodes
-    let mut constant_data: Vec<(String, Vec<f32>)> = Vec::new();
-
-    // Process computation nodes
-    process_onnx_nodes(
-        &onnx_graph.node,
-        &mut tensors,
-        &mut cx,
-        &mut constant_data,
-        &mut known_values,
-        &mut shape_exprs,
-    )
-    .map_err(|e| format!("process_onnx_nodes failed: {}", e))?;
-
-    // Mark weight/constant tensors as persistent so their buffers survive execute()
-    for (name, gt) in &tensors {
-        if !input_names.contains(name) {
-            gt.persist();
-        }
-    }
-
-    // Mark graph outputs (must happen before build_search_space)
-    let mut output_names = Vec::new();
-    let mut output_shape_exprs = Vec::new();
-    for output_vi in &onnx_graph.output {
-        if let Some(&gt) = tensors.get(&output_vi.name) {
-            // Force contiguous if the shape tracker is a non-contiguous view
-            let gt = if gt.shape != gt.shape.contiguous() {
-                let contiguous = gt * 1.0;
-                tensors.insert(output_vi.name.clone(), contiguous);
-                contiguous
-            } else {
-                gt
-            };
-            gt.output();
-            let dims = gt.dims();
-            output_shape_exprs.push(dims.clone());
-
-            let shape: Vec<usize> = dims.iter().map(|d| d.to_usize().unwrap_or(1)).collect();
-            if shape.is_empty() {
-                return Err(format!(
-                    "Output tensor '{}' has no shape information in the ONNX model",
-                    output_vi.name
-                ));
-            }
-            output_names.push(output_vi.name.clone());
-        }
-    }
-
-    // Set initial dynamic dimension values from example input shapes
-    let has_dynamic = !dim_param_map.is_empty();
-    if has_dynamic {
-        for input in &onnx_graph.input {
-            if initializer_names.contains(input.name.as_str()) {
-                continue;
-            }
-            let concrete_shape = get_shape_for_onnx_value(input);
-            let expr_shape =
-                get_shape_for_onnx_value_expr(input, &mut dim_param_map, &mut next_char);
-            for (expr, concrete) in expr_shape.iter().zip(concrete_shape.iter()) {
-                if expr.to_usize().is_none() {
-                    if let Some(ch) = dim_param_map
-                        .values()
-                        .find(|&&ch| Expression::from(ch) == *expr)
-                    {
-                        cx.set_dim(*ch, *concrete);
-                    }
-                }
-            }
-        }
-    }
-
-    // Build weight data: initializers + constants from process_onnx_nodes
-    let mut weights: Vec<(String, Vec<f32>)> = Vec::new();
-    for (name, floats) in load_all_tensor_floats(&onnx_graph.initializer, model_directory) {
-        if let Some(f) = floats {
-            weights.push((name, f));
-        }
-    }
-    weights.extend(constant_data);
-
-    // Build tensor sizes for CUDA dummy data allocation
-    let mut tensor_sizes: HashMap<String, usize> = HashMap::new();
-    for input in &onnx_graph.input {
-        if !initializer_names.contains(input.name.as_str()) {
-            let shape = get_shape_for_onnx_value(input);
-            let n: usize = shape.iter().product::<usize>().max(1);
-            tensor_sizes.insert(input.name.clone(), n);
-        }
-    }
-    for init in &onnx_graph.initializer {
-        let n: usize = init
-            .dims
-            .iter()
-            .map(|&d| d as usize)
-            .product::<usize>()
-            .max(1);
-        tensor_sizes.insert(init.name.clone(), n);
-    }
-    // Also include sizes from weight_data (constants created by process_onnx_nodes)
-    for (name, data) in &weights {
-        if !tensor_sizes.contains_key(name) {
-            tensor_sizes.insert(name.clone(), data.len());
-        }
-    }
-
-    // Collect tensor name → NodeIndex mapping
-    let tensor_ids: HashMap<String, NodeIndex> = tensors
-        .iter()
-        .map(|(name, gt)| (name.clone(), gt.id))
-        .collect();
-
-    // Build input_shape_exprs for user inputs (needed for auto-dim detection)
-    let input_shape_exprs: Vec<Vec<Expression>> = input_names
-        .iter()
-        .map(|name| {
-            if let Some(&gt) = tensors.get(name) {
-                gt.dims()
-            } else {
-                vec![]
-            }
-        })
-        .collect();
-
-    let translation = GraphTranslation {
-        graph: cx,
-        tensor_ids,
-        input_names,
-        output_names,
-        output_shape_exprs,
-        input_shape_exprs,
-        dim_param_map,
-    };
-
-    let weight_data = WeightData {
-        weights,
-        tensor_sizes,
-    };
-
-    Ok((translation, weight_data))
 }
 
 #[pymethods]
@@ -650,50 +426,32 @@ impl CompiledGraph {
         device_ptr: u64,
         n_bytes: usize,
     ) -> PyResult<()> {
-        for node_id in self.graph.graph.node_indices() {
-            if let Some(input) = (*self.graph.graph[node_id])
-                .as_any()
-                .downcast_ref::<luminal::hlir::Input>()
-                && input.label == label
-            {
-                match &mut self.runtime {
-                    RuntimeBackend::Cuda(rt) => {
-                        unsafe { rt.set_device_ptr(node_id, device_ptr, n_bytes) };
-                        rt.persist_hlir_node(node_id);
-                        return Ok(());
-                    }
-                    _ => {
-                        return Err(pyo3::exceptions::PyValueError::new_err(
-                            "set_weight_device_ptr requires CUDA backend",
-                        ));
-                    }
-                }
+        let &node_id = self.label_map.get(label).ok_or_else(|| {
+            pyo3::exceptions::PyKeyError::new_err(format!("No Input node with label: {}", label))
+        })?;
+        match &mut self.runtime {
+            RuntimeBackend::Cuda(rt) => {
+                unsafe { rt.set_device_ptr(node_id, device_ptr, n_bytes) };
+                rt.persist_hlir_node(node_id);
+            }
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "set_weight_device_ptr requires CUDA backend",
+                ));
             }
         }
-        Err(pyo3::exceptions::PyKeyError::new_err(format!(
-            "No Input node with label: {}",
-            label
-        )))
+        Ok(())
     }
 
     /// Set a weight tensor from a CPU host pointer, matching by Input node label.
     fn set_weight_from_ptr(&mut self, label: &str, ptr: u64, n_elements: usize) -> PyResult<()> {
+        let &node_id = self.label_map.get(label).ok_or_else(|| {
+            pyo3::exceptions::PyKeyError::new_err(format!("No Input node with label: {}", label))
+        })?;
         let data: Vec<f32> =
             unsafe { std::slice::from_raw_parts(ptr as *const f32, n_elements).to_vec() };
-        for node_id in self.graph.graph.node_indices() {
-            if let Some(input) = (*self.graph.graph[node_id])
-                .as_any()
-                .downcast_ref::<luminal::hlir::Input>()
-                && input.label == label
-            {
-                self.runtime.set_data(node_id, data);
-                return Ok(());
-            }
-        }
-        Err(pyo3::exceptions::PyKeyError::new_err(format!(
-            "No Input node with label: {}",
-            label
-        )))
+        self.runtime.set_data(node_id, data);
+        Ok(())
     }
 
     /// Execute the graph.

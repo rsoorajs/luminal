@@ -12,9 +12,9 @@ import tempfile
 
 import torch
 
-from .cache_utils import _register_cache_serialization
 from .compiled_model import CompiledModel
 from .luminal import process_pt2
+from .main import _collect_weight_pointers, _detect_backend, _load_cpu_weights
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -56,33 +56,20 @@ def _save_and_compile(ep_or_path, backend, search_iterations, original_weights=N
             pt2_path = ep_or_path
             weight_source = original_weights or {}
 
-        # Collect weight pointers upfront so Rust can use them during search
-        # (avoids allocating dummy GPU data for weights)
-        keep_alive = []
-        weight_device_ptrs = {}  # name -> (device_ptr, n_bytes)
-        cpu_weights = {}         # name -> (host_ptr, n_elements)
-        for name, param in weight_source.items():
-            if backend in ("cuda", "gpu") and param.is_cuda:
-                t = param.detach().contiguous().float()
-                keep_alive.append(t)
-                weight_device_ptrs[name] = (t.data_ptr(), t.numel() * 4)
-            else:
-                t = param.detach().cpu().contiguous().float()
-                keep_alive.append(t)
-                cpu_weights[name] = (t.data_ptr(), t.numel())
+        # Collect weight pointers for Rust (avoids duplicate GPU buffer allocation)
+        keep_alive, weight_device_ptrs, cpu_weights = _collect_weight_pointers(
+            weight_source, backend
+        )
 
         # Compile with device pointers — search uses actual weight memory (zero-copy)
         compiled = process_pt2(
             pt2_path, "", backend, search_iterations, weight_device_ptrs
         )
 
-        # Set CPU weights after compilation (host->device copy)
-        for name, (ptr, n_elements) in cpu_weights.items():
-            compiled.set_weight_from_ptr(name, ptr, n_elements)
+        # Load CPU weights after compilation
+        _load_cpu_weights(compiled, cpu_weights)
 
-        model = CompiledModel(compiled)
-        model._weight_refs = keep_alive
-        return model
+        return CompiledModel(compiled, weight_refs=keep_alive)
     finally:
         if owns_tmpdir and tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -168,8 +155,6 @@ def compile(
     Returns:
         A CompiledModel callable.
     """
-    _register_cache_serialization()
-
     if dynamic_dim is None:
         dynamic_dim = "auto"
 
@@ -233,10 +218,8 @@ def pt2_backend(gm, example_inputs, backend=None):
     """
     import gc
 
-    _register_cache_serialization()
     if backend is None:
-        device = example_inputs[0].device if example_inputs else torch.device("cpu")
-        backend = "cuda" if device.type == "cuda" else "cpu"
+        backend = _detect_backend(example_inputs)
 
     gm = gm.eval()
     gm, user_inputs, original_weights = _reinternalize_lifted_params(gm, example_inputs)

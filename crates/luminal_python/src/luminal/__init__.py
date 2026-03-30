@@ -8,6 +8,11 @@ from .compiled_model import CompiledModel
 from .luminal import CompiledGraph, process_onnx, process_pt2
 from .main import luminal_backend
 
+# Register DynamicCache pytree serialization once at import time
+from .cache_utils import _register_cache_serialization
+
+_register_cache_serialization()
+
 # Re-export everything for clean package interface
 __all__ = [
     "CompiledModel",
