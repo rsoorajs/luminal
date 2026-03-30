@@ -57,15 +57,10 @@ fn compile_pt2(
     search_iters: usize,
     weight_device_ptrs: HashMap<String, (u64, usize)>,
 ) -> anyhow::Result<CompiledGraph> {
-    let t0 = std::time::Instant::now();
     let (translation, weights) = translate_pt2(pt2_path, weights_path)?;
-    println!("[LUMINAL TIMING] compile_pt2/translate_pt2: {:.3}s", t0.elapsed().as_secs_f64());
 
-    let t0 = std::time::Instant::now();
-    let result = CompiledGraph::parse_graph(translation, weights, backend, search_iters, weight_device_ptrs)
-        .map_err(|e| anyhow::anyhow!(e));
-    println!("[LUMINAL TIMING] compile_pt2/parse_graph: {:.3}s", t0.elapsed().as_secs_f64());
-    result
+    CompiledGraph::parse_graph(translation, weights, backend, search_iters, weight_device_ptrs)
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Translate a PT2 exported model into a format-neutral GraphTranslation + WeightData.

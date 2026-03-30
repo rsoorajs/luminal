@@ -9,7 +9,6 @@ import inspect
 import os
 import shutil
 import tempfile
-import time
 
 import torch
 
@@ -49,9 +48,7 @@ def _save_and_compile(ep_or_path, backend, search_iterations, original_weights=N
     try:
         if owns_tmpdir:
             pt2_path = os.path.join(tmpdir, "model.pt2")
-            t0 = time.perf_counter()
             torch.export.save(ep_or_path, pt2_path)
-            print(f"[LUMINAL TIMING] _save_and_compile/torch.export.save: {time.perf_counter() - t0:.3f}s")
             weight_source = (
                 original_weights if original_weights else ep_or_path.state_dict
             )
@@ -64,7 +61,6 @@ def _save_and_compile(ep_or_path, backend, search_iterations, original_weights=N
         keep_alive = []
         weight_device_ptrs = {}  # name -> (device_ptr, n_bytes)
         cpu_weights = {}         # name -> (host_ptr, n_elements)
-        t0 = time.perf_counter()
         for name, param in weight_source.items():
             if backend in ("cuda", "gpu") and param.is_cuda:
                 t = param.detach().contiguous().float()
@@ -74,20 +70,15 @@ def _save_and_compile(ep_or_path, backend, search_iterations, original_weights=N
                 t = param.detach().cpu().contiguous().float()
                 keep_alive.append(t)
                 cpu_weights[name] = (t.data_ptr(), t.numel())
-        print(f"[LUMINAL TIMING] _save_and_compile/weight_ptr_collection ({len(weight_device_ptrs)} gpu, {len(cpu_weights)} cpu): {time.perf_counter() - t0:.3f}s")
 
         # Compile with device pointers — search uses actual weight memory (zero-copy)
-        t0 = time.perf_counter()
         compiled = process_pt2(
             pt2_path, "", backend, search_iterations, weight_device_ptrs
         )
-        print(f"[LUMINAL TIMING] _save_and_compile/process_pt2: {time.perf_counter() - t0:.3f}s")
 
         # Set CPU weights after compilation (host->device copy)
-        t0 = time.perf_counter()
         for name, (ptr, n_elements) in cpu_weights.items():
             compiled.set_weight_from_ptr(name, ptr, n_elements)
-        print(f"[LUMINAL TIMING] _save_and_compile/cpu_weight_load ({len(cpu_weights)} weights): {time.perf_counter() - t0:.3f}s")
 
         model = CompiledModel(compiled)
         model._weight_refs = keep_alive
@@ -247,55 +238,38 @@ def pt2_backend(gm, example_inputs, backend=None):
         device = example_inputs[0].device if example_inputs else torch.device("cpu")
         backend = "cuda" if device.type == "cuda" else "cpu"
 
-    t_total = time.perf_counter()
-
     gm = gm.eval()
-    t0 = time.perf_counter()
     gm, user_inputs, original_weights = _reinternalize_lifted_params(gm, example_inputs)
-    print(f"[LUMINAL TIMING] pt2_backend/reinternalize_lifted_params: {time.perf_counter() - t0:.3f}s")
 
-    t0 = time.perf_counter()
     ep = torch.export.export(gm, tuple(user_inputs), **_export_kwargs())
-    print(f"[LUMINAL TIMING] pt2_backend/torch.export.export: {time.perf_counter() - t0:.3f}s")
 
     # When using shared memory (original_weights), strip large weight buffers from
     # the EP before saving.  The Rust side uses device pointers for these weights,
     # not the .pt2 file data, so serializing them is pure IO waste (~32 GB for 8B
     # models).  Replacing with tiny CPU scalars shrinks the .pt2 to < 1 MB.
-    t0 = time.perf_counter()
-    stripped_count = 0
     if original_weights:
         for key in list(ep._state_dict.keys()):
             if key in original_weights:
                 orig = ep._state_dict[key]
                 ep._state_dict[key] = torch.zeros(1, dtype=orig.dtype, device="cpu")
-                stripped_count += 1
                 del orig
-    print(f"[LUMINAL TIMING] pt2_backend/weight_stripping ({stripped_count}/{len(original_weights)} stripped): {time.perf_counter() - t0:.3f}s")
 
     # Save the exported program to disk, then free it and the traced graph module
     # BEFORE Rust compilation. torch.export clones the state_dict internally, so
     # holding ep alive during compilation would double the weight memory on GPU.
     tmpdir = tempfile.mkdtemp(prefix="luminal_")
     pt2_path = os.path.join(tmpdir, "model.pt2")
-    t0 = time.perf_counter()
     torch.export.save(ep, pt2_path)
-    print(f"[LUMINAL TIMING] pt2_backend/torch.export.save: {time.perf_counter() - t0:.3f}s")
 
-    t0 = time.perf_counter()
     del ep, gm
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    print(f"[LUMINAL TIMING] pt2_backend/cleanup_gc: {time.perf_counter() - t0:.3f}s")
 
     try:
-        t0 = time.perf_counter()
         result = _save_and_compile(
             pt2_path, backend, 10, original_weights=original_weights
         )
-        print(f"[LUMINAL TIMING] pt2_backend/_save_and_compile (total): {time.perf_counter() - t0:.3f}s")
-        print(f"[LUMINAL TIMING] pt2_backend TOTAL: {time.perf_counter() - t_total:.3f}s")
         return result
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
