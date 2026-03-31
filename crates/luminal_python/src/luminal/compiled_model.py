@@ -1,6 +1,6 @@
 """CompiledModel wrapper for the Rust CompiledGraph."""
 
-from typing import List, Optional
+from typing import List
 
 import torch
 
