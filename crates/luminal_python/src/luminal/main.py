@@ -15,9 +15,9 @@ from .compiled_model import CompiledModel
 
 
 def _detect_backend(example_inputs):
-    """Detect backend from input device. Returns 'cuda' or 'cpu'."""
+    """Detect backend from input device. Returns 'cuda' or 'native'."""
     device = example_inputs[0].device if example_inputs else torch.device("cpu")
-    return "cuda" if device.type == "cuda" else "cpu"
+    return "cuda" if device.type == "cuda" else "native"
 
 
 def _collect_weight_pointers(weights, backend):

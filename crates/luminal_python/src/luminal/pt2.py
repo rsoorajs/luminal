@@ -146,7 +146,7 @@ def compile(
         model: A PyTorch nn.Module.
         example_input: Example input tensor(s) for tracing.
         search_iterations: Number of optimization search iterations.
-        backend: "cpu" or "cuda". Auto-detected if None.
+        backend: "native" or "cuda". Auto-detected if None.
         export_kwargs: Extra kwargs passed to torch.export.export.
         dynamic_dim: Which input dimension to make dynamic.
 
@@ -159,7 +159,7 @@ def compile(
     if backend is None:
         backend = os.environ.get("LUMINAL_BACKEND", None)
         if backend is None:
-            backend = "cuda" if torch.cuda.is_available() else "cpu"
+            backend = "cuda" if torch.cuda.is_available() else "native"
 
     kwargs = export_kwargs or {}
     extra = _export_kwargs()
