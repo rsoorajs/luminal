@@ -989,9 +989,10 @@ impl Runtime for CudaRuntime {
                         None => {}
                     }
                     if !buffer_map.contains_key(inp)
-                        && let Some(buf) = bucket.buffers.get(inp) {
-                            buffer_map.insert(*inp, buf);
-                        }
+                        && let Some(buf) = bucket.buffers.get(inp)
+                    {
+                        buffer_map.insert(*inp, buf);
+                    }
                 } else if let Some(buf) = bucket.buffers.get(inp) {
                     buffer_map.insert(*inp, buf);
                 }
