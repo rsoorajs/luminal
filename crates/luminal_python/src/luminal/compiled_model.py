@@ -18,7 +18,7 @@ class CompiledModel:
         self._input_names = graph_result.input_names
         self._output_names = graph_result.output_names
         self._output_shapes = graph_result.output_shapes
-        self._has_dynamic_dims = getattr(graph_result, 'has_dynamic_dims', False)
+        self._has_dynamic_dims = getattr(graph_result, "has_dynamic_dims", False)
 
     def set_dim(self, param_name: str, value: int) -> None:
         """Set a dynamic dimension value by its param name."""

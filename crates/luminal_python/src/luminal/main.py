@@ -1,7 +1,6 @@
 import os
 import tempfile
 
-import onnx
 import torch
 import torch._dynamo
 
@@ -26,7 +25,9 @@ def luminal_backend(gm, example_inputs, options=None):
 
     # Env var override
     env_mode = os.getenv("LUMINAL_EXPORT_MODE", "").lower()
-    export_mode = env_mode if env_mode in ("pt2", "onnx") else options.get("export_mode", "onnx")
+    export_mode = (
+        env_mode if env_mode in ("pt2", "onnx") else options.get("export_mode", "onnx")
+    )
     opset = options.get("opset", 20)
 
     _register_cache_serialization()
@@ -63,4 +64,5 @@ def _compile_onnx(gm, example_inputs, backend, opset=20):
 def _compile_pt2(gm, example_inputs, backend):
     """PT2/torch.export path — delegates to pt2.pt2_backend."""
     from .pt2 import pt2_backend
+
     return pt2_backend(gm, example_inputs, backend=backend)

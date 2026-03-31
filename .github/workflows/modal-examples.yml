@@ -10,7 +10,8 @@ on:
 
 jobs:
     modal_example:
-        if: github.event.pull_request.draft != true
+        # Keep the draft check PR-specific so push/manual runs still execute.
+        if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
         name: "${{ matrix.example }} (Modal ${{ matrix.gpu.type }})"
         runs-on: ubuntu-latest
         environment: Modal

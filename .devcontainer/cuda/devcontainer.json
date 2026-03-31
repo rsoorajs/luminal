@@ -6,6 +6,9 @@
         "--gpus=all",
         "--env-file", ".env"
     ],
+    "containerEnv": {
+        "CARGO_HOME": "/home/ubuntu/.cache/luminal/cargo"
+    },
     "containerUser": "ubuntu",
     "features": {
         "ghcr.io/devcontainers/features/common-utils:2": {
@@ -18,7 +21,10 @@
         }
     },
     "remoteUser": "ubuntu",
-    "postStartCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && gh auth setup-git",
+    "remoteEnv": {
+        "CARGO_HOME": "/home/ubuntu/.cache/luminal/cargo"
+    },
+    "postStartCommand": "mkdir -p /home/ubuntu/.cache/luminal/cargo && git config --global --add safe.directory ${containerWorkspaceFolder} && gh auth setup-git",
     "customizations": {
         "vscode": {
             "extensions": [
@@ -34,6 +40,7 @@
                 "streetsidesoftware.code-spell-checker",
                 "hatookov.egglog-language",
                 "rust-lang.rust-analyzer",
+                "openai.chatgpt",
                 "anthropic.claude-code",
                 "tamasfe.even-better-toml",
                 "eamodio.gitlens",
