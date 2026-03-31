@@ -110,9 +110,7 @@ def _reinternalize_lifted_params(gm, example_inputs):
             # torch.export.export may clone the registered buffer, so we bypass
             # the EP's state_dict and use the originals directly.
             original_weights[attr_name] = example_inputs[buffer_indices[i]]
-            gm.register_buffer(
-                attr_name, example_inputs[buffer_indices[i]].detach()
-            )
+            gm.register_buffer(attr_name, example_inputs[buffer_indices[i]].detach())
             with gm.graph.inserting_before(node):
                 new_node = gm.graph.create_node("get_attr", attr_name)
                 new_node.meta = node.meta.copy()

@@ -127,7 +127,9 @@ def _compile_onnx(gm, example_inputs, backend, opset=20):
             input_names=[f"input_{i}" for i in range(len(example_inputs))],
         )
 
-        result = luminal.process_onnx(tmp_path, backend, weight_device_ptrs=weight_device_ptrs)
+        result = luminal.process_onnx(
+            tmp_path, backend, weight_device_ptrs=weight_device_ptrs
+        )
     finally:
         os.unlink(tmp_path)
 
@@ -138,7 +140,10 @@ def _compile_onnx(gm, example_inputs, backend, opset=20):
     # user_indices tells __call__ which args from torch.compile are real user inputs.
     user_input_names = [f"input_{i}" for i in user_indices]
     return CompiledModel(
-        result, weight_refs=weight_refs, input_names=user_input_names, user_indices=user_indices
+        result,
+        weight_refs=weight_refs,
+        input_names=user_input_names,
+        user_indices=user_indices,
     )
 
 

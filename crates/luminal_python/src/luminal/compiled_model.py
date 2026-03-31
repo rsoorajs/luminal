@@ -8,7 +8,9 @@ import torch
 class CompiledModel:
     """Wrapper around CompiledGraph that handles PyTorch tensor conversion."""
 
-    def __init__(self, graph_result, weight_refs=None, input_names=None, user_indices=None):
+    def __init__(
+        self, graph_result, weight_refs=None, input_names=None, user_indices=None
+    ):
         """Initialize with a compiled CompiledGraph from Rust.
 
         Args:
@@ -26,7 +28,7 @@ class CompiledModel:
         self._has_dynamic_dims = getattr(graph_result, "has_dynamic_dims", False)
         self._weight_refs = weight_refs or []
         self._user_indices = user_indices
-        self._is_cuda = (graph_result.backend == "cuda")
+        self._is_cuda = graph_result.backend == "cuda"
 
     def set_dim(self, param_name: str, value: int) -> None:
         """Set a dynamic dimension value by its param name."""
@@ -94,7 +96,7 @@ class CompiledModel:
         # For CUDA: DtoD copy avoids the DtoH + HtoD round-trip.
         outputs = []
         for name, shape in zip(self._output_names, output_shapes):
-            if self._is_cuda and hasattr(self._graph, 'copy_output_to_device_ptr'):
+            if self._is_cuda and hasattr(self._graph, "copy_output_to_device_ptr"):
                 out = torch.empty(shape, dtype=torch.float32, device=input_device)
                 self._graph.copy_output_to_device_ptr(
                     name, out.data_ptr(), out.numel() * 4
