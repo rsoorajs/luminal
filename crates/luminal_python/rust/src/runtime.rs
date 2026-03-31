@@ -63,8 +63,6 @@ impl RuntimeBackend {
 /// 1. Call `prepare_cuda` to get the runtime
 /// 2. Set data on the runtime using `rt.set_data(node_id, data)`
 /// 3. Call `finalize_cuda` to run profiling with data available
-///
-
 #[cfg(feature = "cuda")]
 pub fn prepare_cuda(context: &mut Graph) -> Result<(CudaRuntime, Arc<CudaStream>), String> {
     let cuda_ctx =
