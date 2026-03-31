@@ -8,6 +8,9 @@ use crate::pt2_schema;
 use crate::translator;
 use crate::util::DimParamMap;
 
+/// Pre-loaded weight/constant data paired with tensor sizes.
+type PreloadResult = (Vec<(String, Vec<f32>)>, HashMap<String, usize>);
+
 fn resolve_dim_sizes(
     sizes: &[pt2_schema::DimSize],
     sym_to_char: &HashMap<String, char>,
@@ -167,8 +170,8 @@ pub fn translate_pt2(
 
     // Add user input sizes
     for (name, _id) in &translated.user_input_ids {
-        if !tensor_sizes.contains_key(name) {
-            if let Some(meta) = parsed.tensor_meta(name) {
+        if !tensor_sizes.contains_key(name)
+            && let Some(meta) = parsed.tensor_meta(name) {
                 let n: usize = meta
                     .sizes
                     .iter()
@@ -176,7 +179,6 @@ pub fn translate_pt2(
                     .product();
                 tensor_sizes.insert(name.clone(), n);
             }
-        }
     }
 
     let dim_param_map: DimParamMap = translated.sym_map.sym_to_char;
@@ -209,7 +211,7 @@ pub fn translate_pt2(
 fn preload_safetensors(
     graph: &Graph,
     file_path: &str,
-) -> anyhow::Result<(Vec<(String, Vec<f32>)>, HashMap<String, usize>)> {
+) -> anyhow::Result<PreloadResult> {
     use memmap2::MmapOptions;
     use safetensors::SafeTensors;
     use std::fs::File;
@@ -248,7 +250,7 @@ fn preload_safetensors(
 fn preload_constants(
     _graph: &Graph,
     parsed: &pt2_parser::ParsedPT2,
-) -> anyhow::Result<(Vec<(String, Vec<f32>)>, HashMap<String, usize>)> {
+) -> anyhow::Result<PreloadResult> {
     let constants_config = match &parsed.constants_config {
         Some(c) => c,
         None => return Ok((Vec::new(), HashMap::new())),

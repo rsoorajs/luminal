@@ -1,7 +1,7 @@
 mod compiled_graph;
 mod dispatch;
-mod ops_parse;
 mod onnx_translator;
+mod ops_parse;
 mod runtime;
 mod util;
 

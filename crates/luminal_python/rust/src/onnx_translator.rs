@@ -201,14 +201,13 @@ pub fn translate_onnx(
             let expr_shape =
                 get_shape_for_onnx_value_expr(input, &mut dim_param_map, &mut next_char);
             for (expr, concrete) in expr_shape.iter().zip(concrete_shape.iter()) {
-                if expr.to_usize().is_none() {
-                    if let Some(ch) = dim_param_map
+                if expr.to_usize().is_none()
+                    && let Some(ch) = dim_param_map
                         .values()
                         .find(|&&ch| Expression::from(ch) == *expr)
                     {
                         cx.set_dim(*ch, *concrete);
                     }
-                }
             }
         }
     }

@@ -1,19 +1,12 @@
-use luminal::{
-    prelude::*,
-    shape::Expression,
-    visualization::ToDot,
-};
 #[cfg(feature = "cuda")]
 use luminal::prelude::tracing::trace;
+use luminal::{prelude::*, shape::Expression, visualization::ToDot};
 use pyo3::prelude::*;
 use std::collections::HashMap;
 #[cfg(feature = "cuda")]
 use std::collections::HashSet;
 
-use crate::{
-    runtime::RuntimeBackend,
-    util::DimParamMap,
-};
+use crate::{runtime::RuntimeBackend, util::DimParamMap};
 
 /// Common intermediate result from translating a model graph (ONNX or FX).
 pub struct GraphTranslation {
@@ -75,11 +68,9 @@ impl CompiledGraph {
 
         let rt = match backend {
             #[cfg(feature = "cuda")]
-            "cuda" | "gpu" => CompiledGraph::build_cuda_backend(
-                &mut graph,
-                &weight_data,
-                search_iters,
-            )?,
+            "cuda" | "gpu" => {
+                CompiledGraph::build_cuda_backend(&mut graph, &weight_data, search_iters)?
+            }
             "native" | "cpu" => {
                 CompiledGraph::build_native_backend(&mut graph, &weight_data, search_iters)?
             }
