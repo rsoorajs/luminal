@@ -52,28 +52,32 @@ jobs:
 
     python_cuda_tests:
         name: Python CUDA Tests
-        runs-on: cuda_t4_runner
-        container:
-            image: ghcr.io/luminal-ai/luminal-docker:cuda
-            options: --gpus all
-        timeout-minutes: 45
+        runs-on: ubuntu-latest
+        environment: Modal
+        timeout-minutes: 60
         defaults:
             run:
                 working-directory: crates/luminal_python
 
         steps:
             - uses: actions/checkout@v6
-            - name: Detect GPU compute capability
-              run: |
-                  CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
-                  echo "CUDA_COMPUTE_CAP=${CAP}" >> "$GITHUB_ENV"
-            - name: Install uv
-              run: |
-                  curl -LsSf https://astral.sh/uv/install.sh | sh
-                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            - name: Build maturin extension
-              run: uv run maturin develop --manifest-path rust/Cargo.toml --features cuda
-            - name: Run pytest with CUDA backend
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+            - name: Install Modal
+              run: pip install modal
+            - name: Run pytest with CUDA backend on Modal
               env:
-                  LUMINAL_BACKEND: cuda
-              run: uv run pytest tests/ -v -m "not slow"
+                  MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+                  MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+                  HF_TOKEN: ${{ secrets.HF_TOKEN }}
+              run: modal run modal_pytest_runner.py --gpu A100 --timeout 3300 --profile --profile-output-dir luminal_artifacts/pytest-profiling/github-${{ github.run_id }}-${{ github.run_attempt }} tests/ -v -s -m "not slow"
+            - name: Upload Modal pytest profiling artifacts
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: python-cuda-pytest-profiling-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: crates/luminal_python/luminal_artifacts/pytest-profiling/github-${{ github.run_id }}-${{ github.run_attempt }}
+                  retention-days: 7
+                  if-no-files-found: warn

@@ -5,8 +5,6 @@ PyTorch -> ONNX -> luminal pipeline via torch.compile. Qwen3 shares the same
 architecture family as Llama (GQA, RoPE, SwiGLU MLP, RMSNorm).
 """
 
-from typing import Callable
-
 import torch
 import torch._dynamo
 

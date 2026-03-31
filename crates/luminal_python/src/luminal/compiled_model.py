@@ -23,7 +23,7 @@ class CompiledModel:
         self._input_names = input_names or graph_result.input_names
         self._output_names = graph_result.output_names
         self._output_shapes = graph_result.output_shapes
-        self._has_dynamic_dims = getattr(graph_result, 'has_dynamic_dims', False)
+        self._has_dynamic_dims = getattr(graph_result, "has_dynamic_dims", False)
         self._weight_refs = weight_refs or []
         self._user_indices = user_indices
         self._is_cuda = (graph_result.backend == "cuda")
