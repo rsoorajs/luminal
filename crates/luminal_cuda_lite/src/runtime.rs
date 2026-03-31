@@ -214,6 +214,7 @@ impl CudaRuntime {
     /// The device pointer must point to a valid CUDA allocation on the same device
     /// as this runtime's stream, with at least `n_bytes` bytes available.
     pub unsafe fn set_device_ptr(&mut self, id: impl ToId, device_ptr: u64, n_bytes: usize) {
+        debug_assert!(device_ptr != 0, "set_device_ptr called with null pointer");
         let id = id.to_id();
         // Create CudaSlice view via cudarc's upgrade_device_ptr.
         // ManuallyDrop prevents cuMemFree on drop (external allocator owns this memory).
@@ -336,6 +337,57 @@ impl CudaRuntime {
                 )
                 .unwrap()
         }
+    }
+
+    /// Resolve the device-side CudaSlice for an output tensor without copying to host.
+    /// Used by copy_output_to_device_ptr for DtoD transfers.
+    fn resolve_output_slice(&self, id: impl ToId) -> &CudaSlice<u8> {
+        let data_id = self.resolve_data_node(id);
+        let bucket = self.active();
+        if let Some(hlir_node) = bucket.llir_to_hlir.get(&data_id) {
+            match self
+                .hlir_buffers
+                .get(hlir_node)
+                .expect("Cannot find input tensor in runtime!")
+            {
+                CudaInput::Buffer(buf) => buf,
+                CudaInput::Ptr(_) => self
+                    .external_buffers
+                    .get(hlir_node)
+                    .map(|ext| &**ext)
+                    .expect("Cannot read raw pointer input — no external_buffers entry for node"),
+            }
+        } else {
+            bucket
+                .buffers
+                .get(&data_id)
+                .expect("Cannot find tensor in runtime!")
+        }
+    }
+
+    /// Copy output tensor data to an external CUDA device pointer (DtoD).
+    /// Much faster than get_f32 + HtoD for CUDA-to-CUDA workflows.
+    ///
+    /// # Safety
+    /// The dest_ptr must be a valid CUDA device allocation with at least n_bytes available.
+    pub unsafe fn copy_output_to_device_ptr(&self, id: impl ToId, dest_ptr: u64, n_bytes: usize) {
+        debug_assert!(
+            dest_ptr != 0,
+            "copy_output_to_device_ptr called with null pointer"
+        );
+        let src_slice = self.resolve_output_slice(id);
+        let src_ptr = src_slice.device_ptr(&self.cuda_stream).0;
+        let copy_bytes = n_bytes.min(src_slice.len());
+        unsafe {
+            cudarc::driver::result::memcpy_dtod_async(
+                dest_ptr,
+                src_ptr,
+                copy_bytes,
+                self.cuda_stream.cu_stream(),
+            )
+            .expect("cuMemcpyDtoDAsync failed");
+        }
+        self.cuda_stream.synchronize().unwrap();
     }
 
     pub fn get_f32(&self, id: impl ToId) -> Vec<f32> {

@@ -68,11 +68,15 @@ class CompiledModel:
             input_shapes = [list(t.shape) for t in user_inputs]
             self._graph.auto_set_dims_from_input_shapes(input_shapes)
 
-        # Set user input data via pointer (avoids Python list conversion)
+        # Set user input data via pointer (avoids Python list conversion).
+        # For CUDA inputs, keep references alive so the caching allocator doesn't
+        # recycle GPU memory before run() reads the pointers.
+        _input_refs = []
         for name, tensor in zip(self._input_names, user_inputs):
             if self._is_cuda and tensor.is_cuda:
                 t = tensor.detach().contiguous().float()
                 self._graph.set_input_device_ptr(name, t.data_ptr(), t.numel() * 4)
+                _input_refs.append(t)
             else:
                 t = tensor.detach().cpu().contiguous().float()
                 self._graph.set_input_from_ptr(name, t.data_ptr(), t.numel())
@@ -86,15 +90,22 @@ class CompiledModel:
         else:
             output_shapes = self._output_shapes
 
-        # Get outputs and convert back to PyTorch tensors on the same device as inputs
+        # Get outputs and convert back to PyTorch tensors on the same device as inputs.
+        # For CUDA: DtoD copy avoids the DtoH + HtoD round-trip.
         outputs = []
         for name, shape in zip(self._output_names, output_shapes):
-            data = self._graph.get_output(name)
-            tensor = (
-                torch.tensor(data, dtype=torch.float32)
-                .reshape(tuple(shape))
-                .to(input_device)
-            )
-            outputs.append(tensor)
+            if self._is_cuda and hasattr(self._graph, 'copy_output_to_device_ptr'):
+                out = torch.empty(shape, dtype=torch.float32, device=input_device)
+                self._graph.copy_output_to_device_ptr(
+                    name, out.data_ptr(), out.numel() * 4
+                )
+            else:
+                data = self._graph.get_output(name)
+                out = (
+                    torch.tensor(data, dtype=torch.float32)
+                    .reshape(tuple(shape))
+                    .to(input_device)
+                )
+            outputs.append(out)
 
         return tuple(outputs)

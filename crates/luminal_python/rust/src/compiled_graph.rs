@@ -1,5 +1,5 @@
 #[cfg(feature = "cuda")]
-use luminal::prelude::tracing::trace;
+use luminal::prelude::tracing::{trace, warn};
 use luminal::{prelude::*, shape::Expression, visualization::ToDot};
 use pyo3::prelude::*;
 use std::collections::HashMap;
@@ -20,6 +20,10 @@ pub struct GraphTranslation {
 }
 
 /// Pre-loaded weight data from any model format.
+///
+/// NOTE: Currently assumes all data is F32. When the type system branch lands
+/// with proper multi-dtype support, this struct (and all callers) will need
+/// updating to carry dtype metadata alongside the raw data.
 pub struct WeightData {
     /// (Input node label, f32 data) for weights and constants.
     pub weights: Vec<(String, Vec<f32>)>,
@@ -165,12 +169,13 @@ impl CompiledGraph {
             total_device_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
         );
         if !missed_labels.is_empty() {
-            trace!(
-                "[CUDA BUILD] Missed device-ptr labels (first 10): {:?}",
+            warn!(
+                "[CUDA BUILD] {} device-ptr labels did not match any Input node (first 10): {:?}",
+                missed_labels.len(),
                 &missed_labels[..missed_labels.len().min(10)]
             );
             let available: Vec<&String> = label_map.keys().take(10).collect();
-            trace!(
+            warn!(
                 "[CUDA BUILD] Available label_map keys (first 10): {:?}",
                 available
             );
@@ -362,6 +367,7 @@ impl CompiledGraph {
     /// Set input tensor data from a CPU host memory pointer (avoids Python list conversion).
     /// The pointer must point to contiguous f32 data (from tensor.data_ptr() on a CPU float32 tensor).
     fn set_input_from_ptr(&mut self, name: &str, ptr: u64, n_elements: usize) -> PyResult<()> {
+        debug_assert!(ptr != 0, "set_input_from_ptr called with null pointer");
         let node_id = self.tensor_ids.get(name).ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Unknown input tensor: {}", name))
         })?;
@@ -436,6 +442,7 @@ impl CompiledGraph {
 
     /// Set a weight tensor from a CPU host pointer, matching by Input node label.
     fn set_weight_from_ptr(&mut self, label: &str, ptr: u64, n_elements: usize) -> PyResult<()> {
+        debug_assert!(ptr != 0, "set_weight_from_ptr called with null pointer");
         let &node_id = self.label_map.get(label).ok_or_else(|| {
             pyo3::exceptions::PyKeyError::new_err(format!("No Input node with label: {}", label))
         })?;
@@ -457,7 +464,7 @@ impl CompiledGraph {
         })
     }
 
-    /// Get output tensor data by name.
+    /// Get output tensor data by name (copies to host).
     fn get_output(&self, name: &str) -> PyResult<Vec<f32>> {
         let node_id = self.tensor_ids.get(name).ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
@@ -466,5 +473,26 @@ impl CompiledGraph {
             ))
         })?;
         Ok(self.runtime.get_f32(*node_id))
+    }
+
+    /// Copy output tensor data directly to a CUDA device pointer (DtoD).
+    /// Avoids the DtoH + HtoD round-trip of get_output() + .to(device).
+    #[cfg(feature = "cuda")]
+    fn copy_output_to_device_ptr(&self, name: &str, dest_ptr: u64, n_bytes: usize) -> PyResult<()> {
+        let node_id = self.tensor_ids.get(name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Unknown output tensor: {}",
+                name
+            ))
+        })?;
+        match &self.runtime {
+            RuntimeBackend::Cuda(rt) => {
+                unsafe { rt.copy_output_to_device_ptr(*node_id, dest_ptr, n_bytes) };
+                Ok(())
+            }
+            _ => Err(pyo3::exceptions::PyValueError::new_err(
+                "copy_output_to_device_ptr requires CUDA backend",
+            )),
+        }
     }
 }
