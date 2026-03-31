@@ -205,9 +205,9 @@ pub fn translate_onnx(
                     && let Some(ch) = dim_param_map
                         .values()
                         .find(|&&ch| Expression::from(ch) == *expr)
-                    {
-                        cx.set_dim(*ch, *concrete);
-                    }
+                {
+                    cx.set_dim(*ch, *concrete);
+                }
             }
         }
     }

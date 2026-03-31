@@ -171,14 +171,15 @@ pub fn translate_pt2(
     // Add user input sizes
     for (name, _id) in &translated.user_input_ids {
         if !tensor_sizes.contains_key(name)
-            && let Some(meta) = parsed.tensor_meta(name) {
-                let n: usize = meta
-                    .sizes
-                    .iter()
-                    .map(|s| s.hint().unwrap_or(1) as usize)
-                    .product();
-                tensor_sizes.insert(name.clone(), n);
-            }
+            && let Some(meta) = parsed.tensor_meta(name)
+        {
+            let n: usize = meta
+                .sizes
+                .iter()
+                .map(|s| s.hint().unwrap_or(1) as usize)
+                .product();
+            tensor_sizes.insert(name.clone(), n);
+        }
     }
 
     let dim_param_map: DimParamMap = translated.sym_map.sym_to_char;
@@ -208,10 +209,7 @@ pub fn translate_pt2(
 
 /// Pre-load all safetensors weights that match Input nodes in the graph.
 /// Returns (weight data, tensor sizes for all tensors in the file).
-fn preload_safetensors(
-    graph: &Graph,
-    file_path: &str,
-) -> anyhow::Result<PreloadResult> {
+fn preload_safetensors(graph: &Graph, file_path: &str) -> anyhow::Result<PreloadResult> {
     use memmap2::MmapOptions;
     use safetensors::SafeTensors;
     use std::fs::File;
