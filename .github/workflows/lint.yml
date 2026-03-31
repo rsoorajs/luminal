@@ -11,6 +11,34 @@ env:
     CARGO_TERM_COLOR: always
 
 jobs:
+    ruff:
+        name: Ruff
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+
+        steps:
+            - uses: actions/checkout@v6
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+            - uses: pre-commit/action@v3.0.1
+              with:
+                  extra_args: ruff-check --all-files
+
+    ruff_format:
+        name: Ruff Format
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+
+        steps:
+            - uses: actions/checkout@v6
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+            - uses: pre-commit/action@v3.0.1
+              with:
+                  extra_args: ruff-format --all-files
+
     clippy:
         name: Clippy
         runs-on: ubuntu-latest
@@ -18,8 +46,30 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
-            - name: Run clippy
-              run: rustup update; cargo clippy --workspace --exclude luminal_cuda_lite --exclude luminal_metal --exclude luminal_bench --all-targets -- -D warnings
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+            - name: Update Rust toolchain
+              run: rustup update
+            - uses: pre-commit/action@v3.0.1
+              with:
+                  extra_args: cargo-clippy --all-files
+
+    metal_clippy:
+        name: Metal Clippy
+        runs-on: macos-14
+        timeout-minutes: 30
+
+        steps:
+            - uses: actions/checkout@v6
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+            - name: Update Rust toolchain
+              run: rustup update
+            - uses: pre-commit/action@v3.0.1
+              with:
+                  extra_args: --hook-stage manual cargo-clippy-metal --all-files
 
     fmt:
         name: Fmt
@@ -28,5 +78,9 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
-            - name: Format
-              run: cargo fmt --all --check
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+            - uses: pre-commit/action@v3.0.1
+              with:
+                  extra_args: cargo-fmt --all-files
