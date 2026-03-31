@@ -17,6 +17,7 @@ Cargo.lock
 
 .claude-project
 .claude-memory
+.codex
 
 *.pftrace
 *.safetensors
