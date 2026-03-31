@@ -1790,7 +1790,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("exp_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
@@ -1980,7 +1980,7 @@ extern \"C\" {{
         let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
             (module.clone(), func.clone())
         } else {
-            let ptx = compile_kernel(&kernel, &[self.dtype]);
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
             let module = stream.context().load_module(ptx).unwrap();
             let func = module.load_function("sigmoid_k").unwrap();
             compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
