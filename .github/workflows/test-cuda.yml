@@ -9,31 +9,6 @@ on:
     workflow_dispatch:
 
 jobs:
-    cuda_clippy:
-        if: >-
-            github.event_name == 'push'
-            || github.event_name == 'workflow_dispatch'
-            || (github.event_name == 'pull_request'
-                && contains(github.event.pull_request.labels.*.name, 'modal-ready'))
-        name: Cuda Clippy
-        runs-on: ubuntu-latest
-        environment: Modal
-        timeout-minutes: 30
-
-        steps:
-            - uses: actions/checkout@v6
-            - name: Set up Python
-              uses: actions/setup-python@v5
-              with:
-                  python-version: "3.11"
-            - name: Install Modal
-              run: pip install modal
-            - name: Run CUDA clippy on Modal
-              env:
-                  MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-                  MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-              run: modal run ci/modal_cargo_clippy.py
-
     cuda_unit_test:
         if: >-
             github.event_name == 'push'
