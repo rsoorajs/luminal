@@ -1,6 +1,5 @@
 pub mod host;
 pub mod kernel;
-pub mod logical;
 pub mod runtime;
 use std::{
     ffi::{CStr, CString},

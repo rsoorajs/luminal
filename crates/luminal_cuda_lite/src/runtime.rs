@@ -772,7 +772,7 @@ fn format_duration_precise(d: &std::time::Duration) -> String {
 }
 
 impl Runtime for CudaRuntime {
-    type Ops = (crate::logical::Ops, crate::kernel::Ops, crate::host::Ops);
+    type Ops = (crate::kernel::Ops, crate::host::Ops);
     type CompileArg = Arc<CudaStream>;
     type ExecReturn = ();
     type ProfileMetric = Duration;
