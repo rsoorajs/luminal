@@ -12,7 +12,7 @@ jobs:
         name: CUDA Clippy
         runs-on: cuda_t4_runner
         container:
-            image: ghcr.io/luminal-ai/luminal:cuda
+            image: ghcr.io/luminal-ai/luminal-docker:cuda
             options: --gpus all
         timeout-minutes: 20
 
