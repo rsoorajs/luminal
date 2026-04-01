@@ -79,11 +79,3 @@ pub fn finalize_cuda(context: &mut Graph, rt: CudaRuntime) -> RuntimeBackend {
     let optimized_rt = context.search(rt, 10);
     RuntimeBackend::Cuda(Box::new(optimized_rt))
 }
-
-/// Initialize a native (CPU) runtime using single-phase approach.
-/// NativeRuntime validates Input nodes, so we must search first, then set data.
-pub fn initialize_native(context: &mut Graph) -> Result<RuntimeBackend, String> {
-    context.build_search_space::<NativeRuntime>();
-    let rt = context.search(NativeRuntime::default(), 10);
-    Ok(RuntimeBackend::Native(rt))
-}

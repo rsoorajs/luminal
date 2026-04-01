@@ -69,7 +69,7 @@ pub type Ops = (
 
 /// Build a rewrite that matches an HLIR op, reads dtype(s) from the given source fields,
 /// and unions with a kernel op that has the same fields plus the dtype(s) appended.
-fn kernel_rewrite<H: Default + EgglogOp, L: Default + EgglogOp>() -> Rule {
+pub fn kernel_rewrite<H: Default + EgglogOp, L: Default + EgglogOp>() -> Rule {
     let hlir = H::default().sort();
     let llir = L::default().sort();
     let (mut args, hlir_kind_term) = hlir.new_call();
@@ -415,8 +415,12 @@ extern \"C\" {{
         long long iters = {iters};
 
         {dtype} partial = 0;
+        {dtype} comp = 0;   // Kahan compensation
         for (long long i = tid; i < iters; i += THREADS_PER_BLOCK) {{
-            partial += in_data[in_start + {iter_stride_of_i}];
+            {dtype} y = in_data[in_start + {iter_stride_of_i}] - comp;
+            {dtype} t = partial + y;
+            comp = (t - partial) - y;
+            partial = t;
         }}
 
         #pragma unroll
