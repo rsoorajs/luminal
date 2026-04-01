@@ -1,56 +1,20 @@
-name: Test
+name: Test Python CUDA
 
 on:
     push:
         branches: ["main"]
     pull_request:
         branches: ["main"]
+        types: [labeled, synchronize]
     workflow_dispatch:
 
-env:
-    CARGO_TERM_COLOR: always
-
 jobs:
-    core_unit_test:
-        name: Core Unit Tests
-        runs-on: ubuntu-latest
-        container:
-            image: ghcr.io/luminal-ai/luminal-docker:cpu
-        timeout-minutes: 20
-
-        steps:
-            - uses: actions/checkout@v6
-            - name: Run tests
-              run: cargo test --workspace --exclude luminal_cuda_lite --exclude luminal_metal --exclude luminal_bench --verbose
-    metal_unit_test:
-        name: Metal Unit Tests
-        runs-on: macos-14
-        timeout-minutes: 30
-
-        steps:
-            - uses: actions/checkout@v6
-            - name: Run Metal crate tests
-              run: rustup update; cargo test -p luminal_metal --verbose -- --test-threads=1
-    python_native_tests:
-        name: Python Native Tests
-        runs-on: ubuntu-latest
-        container:
-            image: ghcr.io/luminal-ai/luminal-docker:cpu
-        timeout-minutes: 45
-        defaults:
-            run:
-                working-directory: crates/luminal_python
-
-        steps:
-            - uses: actions/checkout@v6
-            - name: Update Rust toolchain
-              run: rustup update
-            - name: Build maturin extension
-              run: uv run maturin develop --manifest-path rust/Cargo.toml
-            - name: Run pytest
-              run: uv run pytest tests/test_hlir_ops.py tests/test_unary.py -v -m "not slow"
-
     python_cuda_tests:
+        if: >-
+            github.event_name == 'push'
+            || github.event_name == 'workflow_dispatch'
+            || (github.event_name == 'pull_request'
+                && contains(github.event.pull_request.labels.*.name, 'modal-ready'))
         name: Python CUDA Tests
         runs-on: ubuntu-latest
         environment: Modal
