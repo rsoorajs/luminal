@@ -10,7 +10,10 @@ on:
 jobs:
     clippy:
         name: Clippy
-        runs-on: ubuntu-latest
+        runs-on: cuda_t4_runner
+        container:
+            image: ghcr.io/luminal-ai/luminal-docker:cuda
+            options: --gpus all
         timeout-minutes: 20
 
         steps:
