@@ -1,4 +1,4 @@
-name: Clippy
+name: CUDA Clippy
 
 on:
     push:
@@ -8,11 +8,11 @@ on:
     workflow_dispatch:
 
 jobs:
-    clippy:
-        name: Clippy
+    cuda_clippy:
+        name: CUDA Clippy
         runs-on: cuda_t4_runner
         container:
-            image: ghcr.io/luminal-ai/luminal-docker:cuda
+            image: ghcr.io/luminal-ai/luminal:cuda
             options: --gpus all
         timeout-minutes: 20
 
