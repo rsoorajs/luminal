@@ -1,4 +1,4 @@
-use crate::prelude::*;
+use crate::{egglog_utils::elist_to_egglog, prelude::*};
 
 impl GraphTensor {
     pub fn matmul(mut self, mut rhs: GraphTensor) -> Self {
@@ -9,6 +9,10 @@ impl GraphTensor {
             }
             let (m, _) = self.dims2();
             let (_, n) = rhs.dims2();
+            println!(
+                "Strides: {:?}",
+                elist_to_egglog(&self.expand_dim(1, n).shape.strides)
+            );
             // Broadcasted Multiply
             let mul = self.expand_dim(1, n) * rhs.permute((1, 0)).expand_dim(0, m);
 
