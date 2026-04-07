@@ -14,7 +14,7 @@ class CompiledModel:
         """Initialize with a compiled CompiledGraph from Rust.
 
         Args:
-            graph_result: The CompiledGraph from luminal_python.process_onnx() or process_pt2()
+            graph_result: The CompiledGraph from luminal_python.process_pt2()
             weight_refs: List of PyTorch tensors to keep alive (prevents GC of shared weights)
             input_names: Override for user input names. If None, uses graph_result.input_names.
             user_indices: When torch.compile lifts model parameters into extra args,

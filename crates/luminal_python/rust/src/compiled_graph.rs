@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use crate::{runtime::RuntimeBackend, util::DimParamMap};
 
-/// Common intermediate result from translating a model graph (ONNX or FX).
+/// Common intermediate result from translating a model graph (FX/PT2).
 pub struct GraphTranslation {
     pub graph: Graph,
     pub tensor_ids: HashMap<String, NodeIndex>,
@@ -49,10 +49,10 @@ pub struct CompiledGraph {
 }
 
 impl CompiledGraph {
-    /// Shared compilation pipeline for both ONNX and FX/PT2 graphs.
+    /// Shared compilation pipeline for FX/PT2 graphs.
     ///
-    /// Takes a format-neutral `GraphTranslation` (produced by `translate_onnx` or
-    /// `translate_pt2`) and `WeightData`, builds the backend, loads weights, and
+    /// Takes a format-neutral `GraphTranslation` (produced by `translate_pt2`)
+    /// and `WeightData`, builds the backend, loads weights, and
     /// returns a ready-to-execute `CompiledGraph`.
     pub fn parse_graph(
         translation: GraphTranslation,

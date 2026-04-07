@@ -145,7 +145,7 @@ class TransposeInExpressionModel(torch.nn.Module):
 
 
 # ========== Constant Node Test Models ==========
-# These models test ONNX Constant node handling via inline tensor literals
+# These models test PT2 Constant node handling via inline tensor literals
 
 
 class ConstantScalarFloatModel(torch.nn.Module):
@@ -284,7 +284,7 @@ class ConstantMultipleInGraphModel(torch.nn.Module):
 
 
 # ========== Cast Node Test Models ==========
-# These models test ONNX Cast node handling via .to(dtype) method
+# These models test PT2 Cast node handling via .to(dtype) method
 
 
 class CastDoubleToFloatModel(torch.nn.Module):
@@ -387,7 +387,7 @@ class ModTestModel(torch.nn.Module):
 
 
 class ModByConstantModel(torch.nn.Module):
-    """Tests modulo with an inline constant tensor (ONNX Constant node)."""
+    """Tests modulo with an inline constant tensor (PT2 Constant node)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -446,7 +446,7 @@ class CeilInExpressionModel(torch.nn.Module):
 
 
 # ========== Reshape Node Test Models ==========
-# These models test ONNX Reshape node handling in ops_parse.rs
+# These models test PT2 Reshape node handling in ops_parse.rs
 
 
 class ReshapeToFlatModel(torch.nn.Module):
@@ -534,7 +534,7 @@ class ShapeReshapeKeepBatchModel(torch.nn.Module):
 
 
 # ========== Less Node Test Models ==========
-# These models test ONNX Less node handling in ops_parse.rs
+# These models test PT2 Less node handling in ops_parse.rs
 
 
 class LessTestModel(torch.nn.Module):
@@ -560,7 +560,7 @@ class LessBroadcastModel(torch.nn.Module):
 
 
 class LessWithConstantModel(torch.nn.Module):
-    """Tests less-than against an inline constant (ONNX Constant + Less nodes)."""
+    """Tests less-than against an inline constant (PT2 Constant + Less nodes)."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([0.25, 0.5, 0.75]).to(x.device)
@@ -568,7 +568,7 @@ class LessWithConstantModel(torch.nn.Module):
 
 
 # ========== Gather Node Test Models ==========
-# These models test ONNX Gather node handling in ops_parse.rs
+# These models test PT2 Gather node handling in ops_parse.rs
 
 
 class Gather1DModel(torch.nn.Module):
@@ -621,7 +621,7 @@ class GatherNegativeIndicesModel(torch.nn.Module):
 
 
 class GatherConstantFoldModel(torch.nn.Module):
-    """Tests Gather constant folding: both data and indices are ONNX Constant nodes."""
+    """Tests Gather constant folding: both data and indices are PT2 Constant nodes."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         data = torch.tensor([10.0, 20.0, 30.0, 40.0, 50.0]).to(x.device)
@@ -630,7 +630,7 @@ class GatherConstantFoldModel(torch.nn.Module):
 
 
 # ========== Squeeze Node Test Models ==========
-# These models test ONNX Squeeze node handling in ops_parse.rs
+# These models test PT2 Squeeze node handling in ops_parse.rs
 
 
 class SqueezeAxisModel(torch.nn.Module):
@@ -1140,7 +1140,7 @@ class MaxTestModel(torch.nn.Module):
 
 
 class MaxWithConstantModel(torch.nn.Module):
-    """Tests element-wise maximum against an inline constant (ONNX Max + Constant nodes)."""
+    """Tests element-wise maximum against an inline constant (PT2 Max + Constant nodes)."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([0.2, 0.4, 0.6, 0.8, 1.0]).to(x.device)
@@ -1162,7 +1162,7 @@ class MinTestModel(torch.nn.Module):
 
 
 class MinWithConstantModel(torch.nn.Module):
-    """Tests element-wise minimum against an inline constant (ONNX Min + Constant nodes)."""
+    """Tests element-wise minimum against an inline constant (PT2 Min + Constant nodes)."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([0.2, 0.4, 0.6, 0.8, 1.0]).to(x.device)
@@ -1288,7 +1288,7 @@ class LessOrEqualTestModel(torch.nn.Module):
 
 
 class LessOrEqualWithConstantModel(torch.nn.Module):
-    """Tests less-than-or-equal against an inline constant (ONNX Constant + LessOrEqual nodes)."""
+    """Tests less-than-or-equal against an inline constant (PT2 Constant + LessOrEqual nodes)."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([0.25, 0.5, 0.75]).to(x.device)
@@ -1310,7 +1310,7 @@ class GreaterOrEqualTestModel(torch.nn.Module):
 
 
 class GreaterOrEqualWithConstantModel(torch.nn.Module):
-    """Tests greater-than-or-equal against an inline constant (ONNX Constant + GreaterOrEqual nodes)."""
+    """Tests greater-than-or-equal against an inline constant (PT2 Constant + GreaterOrEqual nodes)."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         constant = torch.tensor([0.25, 0.5, 0.75]).to(x.device)
@@ -1432,7 +1432,7 @@ class GreaterTestModel(torch.nn.Module):
 
 
 class GreaterWithConstantModel(torch.nn.Module):
-    """Tests greater-than against a scalar constant (ONNX Greater + Constant nodes)."""
+    """Tests greater-than against a scalar constant (PT2 Greater + Constant nodes)."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return (x > 0.5).to(torch.float32)
@@ -1509,7 +1509,7 @@ class MLPBlockModel(torch.nn.Module):
 
 
 class GatherElementsTestModel(torch.nn.Module):
-    """Tests element-wise gather along axis=1 using torch.gather (→ ONNX GatherElements)."""
+    """Tests element-wise gather along axis=1 using torch.gather (→ PT2 GatherElements)."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         idx = torch.tensor([[0, 1, 1], [1, 0, 0]], device=x.device)
@@ -1530,7 +1530,7 @@ class GatherElementsLargeTestModel(torch.nn.Module):
 
 
 class ExpandTestModel(torch.nn.Module):
-    """Tests broadcasting a (1, 4) tensor to (3, 4) via .expand() (→ ONNX Expand)."""
+    """Tests broadcasting a (1, 4) tensor to (3, 4) via .expand() (→ PT2 Expand)."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.expand(3, 4)
@@ -1550,7 +1550,7 @@ class IsNaNTestModel(torch.nn.Module):
 
 
 class LayerNormTestModel(torch.nn.Module):
-    """Tests nn.LayerNorm which exports as ONNX LayerNormalization."""
+    """Tests nn.LayerNorm which exports as PT2 LayerNormalization."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1564,7 +1564,7 @@ class LayerNormTestModel(torch.nn.Module):
 
 
 class GemmTestModel(torch.nn.Module):
-    """Tests Gemm: nn.Linear exports as ONNX Gemm (weight transposed)."""
+    """Tests Gemm: nn.Linear exports as PT2 Gemm (weight transposed)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1588,14 +1588,14 @@ class ErfTestModel(torch.nn.Module):
 
 
 class SliceTestModel(torch.nn.Module):
-    """Tests ONNX Slice: slice axis 0 from index 1 to 3."""
+    """Tests PT2 Slice: slice axis 0 from index 1 to 3."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x[1:3]
 
 
 class SliceMultiAxisTestModel(torch.nn.Module):
-    """Tests ONNX Slice along multiple axes: x[1:3, 0:2]."""
+    """Tests PT2 Slice along multiple axes: x[1:3, 0:2]."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x[1:3, 0:2]
@@ -1684,7 +1684,7 @@ class ScatterNDTestModel(torch.nn.Module):
 class RMSNormModel(torch.nn.Module):
     """Tests RMS normalization: x * rsqrt(mean(x^2) + eps) * weight.
 
-    ONNX ops: Pow, ReduceMean, Add, Sqrt, Reciprocal, Mul.
+    PT2 ops: Pow, ReduceMean, Add, Sqrt, Reciprocal, Mul.
     Input: (1, 4, 32) -> Output: (1, 4, 32).
     """
 
@@ -1703,7 +1703,7 @@ class RotaryEmbeddingModel(torch.nn.Module):
     """Tests rotary position embeddings (RoPE) using rotate-half approach.
 
     Precomputes cos/sin caches as buffers; at runtime: slice, split halves, rotate.
-    ONNX ops: Slice, Unsqueeze, Mul, Sub, Add, Concat.
+    PT2 ops: Slice, Unsqueeze, Mul, Sub, Add, Concat.
     Input: (1, 4, 4, 8) [batch, seq, heads, head_dim] -> Output: same shape.
     """
 
@@ -1732,7 +1732,7 @@ class RotaryEmbeddingModel(torch.nn.Module):
 class SwiGLUMLPModel(torch.nn.Module):
     """Tests SwiGLU MLP: down_proj(silu(gate_proj(x)) * up_proj(x)).
 
-    silu(x) = x * sigmoid(x), decomposes to Sigmoid+Mul in ONNX.
+    silu(x) = x * sigmoid(x), decomposes to Sigmoid+Mul in PT2.
     Input: (1, 4, 32) -> Output: (1, 4, 32).
     """
 
