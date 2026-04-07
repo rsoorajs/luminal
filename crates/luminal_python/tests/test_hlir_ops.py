@@ -8,6 +8,8 @@ from test_models import (
     AddTestModel,
     # And model
     AndTestModel,
+    # Dtype round-trip model
+    SelfAddModel,
     CastBoolToFloatModel,
     # Cast models
     CastDoubleToFloatModel,
@@ -1983,4 +1985,29 @@ def test_scatter_nd(device: torch.device):
     )
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original)
+
+
+# ========== Dtype Round-Trip Tests ==========
+
+
+def test_dtype_float16(device: torch.device):
+    """Verify float16 input produces float16 output with correct values."""
+    model: torch.nn.Module = SelfAddModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float16, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert output.dtype == torch.float16, f"Expected float16 output, got {output.dtype}"
+    assert torch.allclose(output.float(), original.float())
+
+
+def test_dtype_float32(device: torch.device):
+    """Verify float32 input produces float32 output (baseline)."""
+    model: torch.nn.Module = SelfAddModel()
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert output.dtype == torch.float32, f"Expected float32 output, got {output.dtype}"
     assert torch.allclose(output, original)

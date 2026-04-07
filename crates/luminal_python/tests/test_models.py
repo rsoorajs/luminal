@@ -3,6 +3,13 @@
 import torch
 
 
+class SelfAddModel(torch.nn.Module):
+    """Adds input to itself (x + x). Preserves input dtype."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + x
+
+
 class AddTestModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()

@@ -1,6 +1,6 @@
 mod compiled_graph;
 mod runtime;
-mod util;
+pub mod typed_data;
 
 // PT2 modules
 mod pt2_compiled_model;
@@ -12,7 +12,6 @@ mod translator;
 use compiled_graph::CompiledGraph;
 use pt2_compiled_model::process_pt2;
 use pyo3::prelude::*;
-use std::collections::HashMap;
 
 #[pymodule]
 fn luminal(m: &Bound<'_, PyModule>) -> PyResult<()> {
