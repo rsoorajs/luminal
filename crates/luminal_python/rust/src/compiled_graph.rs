@@ -319,13 +319,12 @@ impl CompiledGraph {
         self.input_names
             .iter()
             .map(|name| {
-                if let Some(&node_id) = self.tensor_ids.get(name) {
-                    if let Some(input) = (*self.graph.graph[node_id])
+                if let Some(&node_id) = self.tensor_ids.get(name)
+                    && let Some(input) = (*self.graph.graph[node_id])
                         .as_any()
                         .downcast_ref::<luminal::hlir::Input>()
-                    {
-                        return luminal_dtype_to_pt2_code(input.dtype);
-                    }
+                {
+                    return luminal_dtype_to_pt2_code(input.dtype);
                 }
                 7 // default to f32
             })
