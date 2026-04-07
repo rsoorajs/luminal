@@ -1,9 +1,7 @@
-import os
-
 import torch
 import torch._dynamo
 
-from .compiled_model import CompiledModel
+from .dtype_util import torch_dtype_code as _torch_dtype_code
 
 
 # ---------------------------------------------------------------------------
@@ -15,9 +13,6 @@ def _detect_backend(example_inputs):
     """Detect backend from input device. Returns 'cuda' or 'native'."""
     device = example_inputs[0].device if example_inputs else torch.device("cpu")
     return "cuda" if device.type == "cuda" else "native"
-
-
-from .dtype_util import torch_dtype_code as _torch_dtype_code
 
 
 def _collect_weight_pointers(weights, backend):
