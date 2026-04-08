@@ -1901,7 +1901,9 @@ class Conv2dStrideModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.conv = torch.nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=1, bias=False)
+        self.conv = torch.nn.Conv2d(
+            3, 16, kernel_size=3, stride=2, padding=1, bias=False
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(x)
@@ -1936,7 +1938,9 @@ class DepthwiseConv1dModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.conv = torch.nn.Conv1d(16, 16, kernel_size=4, groups=16, padding=3, bias=True)
+        self.conv = torch.nn.Conv1d(
+            16, 16, kernel_size=4, groups=16, padding=3, bias=True
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Causal truncation: keep only the first L positions
@@ -1948,7 +1952,9 @@ class DepthwiseConv2dModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.conv = torch.nn.Conv2d(8, 8, kernel_size=3, groups=8, padding=1, bias=False)
+        self.conv = torch.nn.Conv2d(
+            8, 8, kernel_size=3, groups=8, padding=1, bias=False
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(x)
@@ -1959,7 +1965,9 @@ class DepthwiseMultiplierConv2dModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.conv = torch.nn.Conv2d(8, 16, kernel_size=3, groups=8, padding=1, bias=False)
+        self.conv = torch.nn.Conv2d(
+            8, 16, kernel_size=3, groups=8, padding=1, bias=False
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(x)
@@ -1970,7 +1978,9 @@ class GroupedConv2dModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.conv = torch.nn.Conv2d(16, 32, kernel_size=3, groups=4, padding=1, bias=False)
+        self.conv = torch.nn.Conv2d(
+            16, 32, kernel_size=3, groups=4, padding=1, bias=False
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(x)
@@ -1981,7 +1991,9 @@ class GroupedConv2dGroups3Model(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.conv = torch.nn.Conv2d(12, 12, kernel_size=3, groups=3, padding=1, bias=False)
+        self.conv = torch.nn.Conv2d(
+            12, 12, kernel_size=3, groups=3, padding=1, bias=False
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(x)
@@ -2003,8 +2015,10 @@ class MambaConvBlockModel(torch.nn.Module):
         self.out_proj = torch.nn.Linear(d_inner, d_model, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, l, _ = x.shape
+        b, seq_len, _ = x.shape
         xz = self.in_proj(x)
         x_part, z = xz.chunk(2, dim=-1)
-        x_part = self.conv1d(x_part.transpose(1, 2))[:, :, :l].transpose(1, 2)
-        return self.out_proj(torch.nn.functional.silu(x_part) * torch.nn.functional.silu(z))
+        x_part = self.conv1d(x_part.transpose(1, 2))[:, :, :seq_len].transpose(1, 2)
+        return self.out_proj(
+            torch.nn.functional.silu(x_part) * torch.nn.functional.silu(z)
+        )

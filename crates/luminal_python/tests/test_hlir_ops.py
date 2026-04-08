@@ -234,7 +234,9 @@ from test_models import (
 from luminal import luminal_backend
 
 
-def _compile_for_export_mode(model: torch.nn.Module, export_mode: str | None = None) -> Callable:
+def _compile_for_export_mode(
+    model: torch.nn.Module, export_mode: str | None = None
+) -> Callable:
     if export_mode is None:
         return torch.compile(model, backend=luminal_backend)
     return torch.compile(
@@ -2157,7 +2159,9 @@ def test_depthwise_conv2d(device: torch.device):
     assert torch.allclose(output, original, atol=1e-4)
 
 
-def _run_depthwise_multiplier_conv2d(device: torch.device, export_mode: str | None = None):
+def _run_depthwise_multiplier_conv2d(
+    device: torch.device, export_mode: str | None = None
+):
     """Depthwise Conv2d with multiplier > 1 should preserve both output channels per input channel."""
     model: torch.nn.Module = DepthwiseMultiplierConv2dModel().to(device)
     model_compiled: Callable = _compile_for_export_mode(model, export_mode)
@@ -2185,7 +2189,9 @@ def test_grouped_conv2d(device: torch.device):
     assert torch.allclose(output, original, atol=1e-4)
 
 
-def _run_grouped_conv2d_groups3_batch4(device: torch.device, export_mode: str | None = None):
+def _run_grouped_conv2d_groups3_batch4(
+    device: torch.device, export_mode: str | None = None
+):
     """Grouped Conv2d with groups=3 and batch>1 exercises the pre-pad + slice path."""
     model: torch.nn.Module = GroupedConv2dGroups3Model().to(device)
     model_compiled: Callable = _compile_for_export_mode(model, export_mode)
