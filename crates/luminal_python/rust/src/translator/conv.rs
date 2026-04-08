@@ -1,7 +1,6 @@
 use anyhow::Result;
 use luminal::prelude::*;
 
-use crate::ops_parse::convolution::{conv_unfold, depthwise_conv};
 use crate::pt2_schema::*;
 
 use super::Translator;
@@ -228,4 +227,181 @@ fn slice_weight_group(
     w_flat.shape =
         ShapeTracker::new_with_element_bits(vec![group_out, flat_inner], w_sliced.dtype.bits());
     w_flat
+}
+
+/// Core unfold-based convolution for a single group.
+///
+/// `x`: [batch, ch_in, spatial...]
+/// `w_flat`: [ch_out, ch_in * kernel_product] (already reshaped)
+/// Returns: [batch, ch_out, out_spatial...]
+#[allow(clippy::too_many_arguments)]
+fn conv_unfold(
+    x: GraphTensor,
+    w_flat: GraphTensor,
+    kernel_shape: &[usize],
+    strides: &[usize],
+    dilations: &[usize],
+    pads_begin: &[usize],
+    pads_end: &[usize],
+    _ch_in: usize,
+    _ch_out: usize,
+    spatial: usize,
+) -> GraphTensor {
+    let rank = 2 + spatial;
+
+    // Pad spatial dimensions (skip if all padding is zero)
+    let needs_pad = pads_begin.iter().any(|&p| p > 0) || pads_end.iter().any(|&p| p > 0);
+    let padded = if needs_pad {
+        let mut padding: Vec<(Expression, Expression)> = vec![(0.into(), 0.into()); rank];
+        for i in 0..spatial {
+            padding[2 + i] = (pads_begin[i].into(), pads_end[i].into());
+        }
+        x.pad(padding, 0.0)
+    } else {
+        x
+    };
+
+    // Build full-rank unfold parameters (1 for batch/channel, actual for spatial)
+    let mut kernel_full = vec![1usize; rank];
+    let mut stride_full = vec![1usize; rank];
+    let mut dilation_full = vec![1usize; rank];
+    kernel_full[2..(spatial + 2)].copy_from_slice(&kernel_shape[..spatial]);
+    stride_full[2..(spatial + 2)].copy_from_slice(&strides[..spatial]);
+    dilation_full[2..(spatial + 2)].copy_from_slice(&dilations[..spatial]);
+
+    let unfolded = padded.unfold(kernel_full, stride_full, dilation_full);
+    // Shape: [win_N, win_C, win_spatial..., k_N=1, k_C=1, k_spatial...]
+
+    // Permute to [N, win_spatial..., C_in, k_N, k_C, k_spatial...]
+    let mut perm: Vec<usize> = Vec::with_capacity(2 * rank);
+    perm.push(0);
+    perm.extend(2..2 + spatial);
+    perm.push(1);
+    perm.extend(rank..2 * rank);
+    let permuted = unfolded.permute(perm);
+
+    let output_spatial_dims: Vec<Expression> = permuted.dims()[1..1 + spatial].to_vec();
+
+    // Merge all channel+kernel dims into [N, spatial..., ch_in * kernel_product]
+    let mut patches = permuted;
+    let target = 2 + spatial;
+    while patches.dims().len() > target {
+        let last = patches.dims().len();
+        patches = patches.merge_dims(last - 2, last - 1);
+    }
+
+    // Merge spatial dims into one
+    for _ in 1..spatial {
+        patches = patches.merge_dims(1, 2);
+    }
+    // patches: [N, spatial_product, ch_in * kernel_product]
+
+    let mut out = patches.matmul(w_flat.permute((1, 0)));
+    // out: [N, spatial_product, ch_out]
+
+    // Restore spatial dimensions
+    for i in (1..spatial).rev() {
+        out = out.split_dims(1, output_spatial_dims[i]);
+    }
+
+    // Move ch_out from last to position 1: [N, ch_out, spatial...]
+    let mut final_order: Vec<usize> = Vec::with_capacity(2 + spatial);
+    final_order.push(0);
+    final_order.push(1 + spatial);
+    final_order.extend(1..1 + spatial);
+    out.permute(final_order)
+}
+
+/// Depthwise convolution: groups == in_channels, ch_per_group == 1.
+///
+/// Processes all channels simultaneously using element-wise multiply + reduce,
+/// avoiding per-channel input slicing which can cause index-expression bugs in luminal.
+///
+/// out[n, c, oh, ow] = sum_k patches[n, c, oh, ow, k] * weight[c, k]
+#[allow(clippy::too_many_arguments)]
+fn depthwise_conv(
+    x: GraphTensor,
+    w: GraphTensor, // [C, 1, *kernel]
+    kernel_shape: &[usize],
+    strides: &[usize],
+    dilations: &[usize],
+    pads_begin: &[usize],
+    pads_end: &[usize],
+    ch: usize,
+    group_out: usize,
+    kernel_product: usize,
+    spatial: usize,
+) -> GraphTensor {
+    let rank = 2 + spatial;
+
+    let needs_pad = pads_begin.iter().any(|&p| p > 0) || pads_end.iter().any(|&p| p > 0);
+    let padded = if needs_pad {
+        let mut padding: Vec<(Expression, Expression)> = vec![(0.into(), 0.into()); rank];
+        for i in 0..spatial {
+            padding[2 + i] = (pads_begin[i].into(), pads_end[i].into());
+        }
+        x.pad(padding, 0.0)
+    } else {
+        x
+    };
+
+    // Unfold the full [N, C, H+2p, W+2p] with kernel [1, 1, kH, kW]
+    let mut kernel_full = vec![1usize; rank];
+    let mut stride_full = vec![1usize; rank];
+    let mut dilation_full = vec![1usize; rank];
+    kernel_full[2..(spatial + 2)].copy_from_slice(&kernel_shape[..spatial]);
+    stride_full[2..(spatial + 2)].copy_from_slice(&strides[..spatial]);
+    dilation_full[2..(spatial + 2)].copy_from_slice(&dilations[..spatial]);
+
+    let unfolded = padded.unfold(kernel_full, stride_full, dilation_full);
+    // Shape: [N, C, out_H, out_W, 1, 1, kH, kW]
+
+    // Permute to [N, C, out_spatial..., k_all...]
+    let mut perm: Vec<usize> = Vec::with_capacity(2 * rank);
+    perm.push(0); // N
+    perm.push(1); // C
+    perm.extend(2..2 + spatial); // win_spatial
+    perm.extend(rank..2 * rank); // all kernel dims
+    let permuted = unfolded.permute(perm);
+
+    let out_spatial_dims: Vec<Expression> = permuted.dims()[2..2 + spatial].to_vec();
+
+    // Merge all kernel dims (including 1-size k_N, k_C) into kernel_product
+    let target = 3 + spatial; // [N, C, spatial..., K]
+    let mut patches = permuted;
+    while patches.dims().len() > target {
+        let last = patches.dims().len();
+        patches = patches.merge_dims(last - 2, last - 1);
+    }
+    // patches: [N, C, out_H, ..., out_W, kernel_product]
+
+    // Merge spatial into one: [N, C, out_spatial_product, kernel_product]
+    for _ in 1..spatial {
+        patches = patches.merge_dims(2, 3);
+    }
+
+    // Weight [C * group_out, 1, *kernel] -> [C, group_out, kernel_product]
+    let mut w_flat = w;
+    w_flat.shape =
+        ShapeTracker::new_with_element_bits(vec![ch, group_out, kernel_product], w.dtype.bits());
+
+    // patches: [N, C, out_spatial_product, kernel_product]
+    // Expand to [N, C, group_out, out_spatial_product, kernel_product]
+    let patches = patches.expand_dim(2, group_out);
+
+    // Expand weight for broadcast: [1, C, group_out, out_spatial_product, kernel_product]
+    let w_expanded = w_flat.expand_dim(0, 1).expand_dim(3, patches.dims()[3]);
+
+    // Element-wise multiply and sum over kernel dim
+    let product = patches * w_expanded;
+    let mut out = product.sum(vec![4]).merge_dims(1, 2);
+    // out: [N, C * group_out, out_spatial_product]
+
+    // Restore spatial dimensions
+    for i in (1..spatial).rev() {
+        out = out.split_dims(2, out_spatial_dims[i]);
+    }
+    // out: [N, C, out_spatial_0, ..., out_spatial_{s-1}]
+
+    out
 }

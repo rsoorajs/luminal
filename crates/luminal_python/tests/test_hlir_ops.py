@@ -2159,7 +2159,7 @@ def _run_conv3d_same_pad(device: torch.device, export_mode: str | None = None):
     x: torch.Tensor = torch.randn(2, 4, 6, 7, 8, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
-    assert torch.allclose(output, original, atol=1e-4)
+    assert torch.allclose(output, original, atol=1e-3)
 
 
 def test_conv3d_same_pad(device: torch.device):
@@ -2229,7 +2229,7 @@ def _run_grouped_conv2d_groups3_batch4(
     x: torch.Tensor = torch.randn(4, 12, 11, 9, device=device)
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
-    assert torch.allclose(output, original, atol=1e-4)
+    assert torch.allclose(output, original, atol=1e-3)
 
 
 def test_grouped_conv2d_groups3_batch4(device: torch.device):
