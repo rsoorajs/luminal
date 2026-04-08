@@ -135,6 +135,12 @@ impl<'a> Translator<'a> {
             // Linear
             "torch.ops.aten.linear.default" => self.translate_linear(node)?,
 
+            // Convolution
+            "torch.ops.aten.conv1d.default"
+            | "torch.ops.aten.conv2d.default"
+            | "torch.ops.aten.conv3d.default"
+            | "torch.ops.aten.convolution.default" => self.translate_conv(node)?,
+
             // Reduction ops
             "torch.ops.aten.sum.dim_IntList" => self.translate_reduction(node, ReductionOp::Sum)?,
             "torch.ops.aten.mean.dim" => self.translate_reduction(node, ReductionOp::Mean)?,
@@ -410,10 +416,11 @@ impl<'a> Translator<'a> {
                 return Ok(());
             }
 
-            // Split
+            // Split / Chunk
             "torch.ops.aten.split.Tensor" | "torch.ops.aten.split_with_sizes.default" => {
                 self.translate_split(node)?
             }
+            "torch.ops.aten.chunk.default" => self.translate_chunk(node)?,
 
             // One-hot
             "torch.ops.aten.one_hot.default" => self.translate_one_hot(node)?,

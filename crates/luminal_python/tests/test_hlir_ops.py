@@ -215,9 +215,37 @@ from test_models import (
     WhereWithConstantModel,
     # Xor model
     XorTestModel,
+    # Conv models
+    Conv1dNoPadModel,
+    Conv1dSamePadModel,
+    Conv1dBiasModel,
+    Conv2dNoPadModel,
+    Conv2dSamePadModel,
+    Conv2dBiasModel,
+    Conv2dStrideModel,
+    Conv2dDilationModel,
+    Conv3dSamePadModel,
+    DepthwiseConv1dModel,
+    DepthwiseConv2dModel,
+    DepthwiseMultiplierConv2dModel,
+    GroupedConv2dModel,
+    GroupedConv2dGroups3Model,
+    MambaConvBlockModel,
 )
 
 from luminal import luminal_backend
+
+
+def _compile_for_export_mode(
+    model: torch.nn.Module, export_mode: str | None = None
+) -> Callable:
+    if export_mode is None:
+        return torch.compile(model, backend=luminal_backend)
+    return torch.compile(
+        model,
+        backend=luminal_backend,
+        options={"export_mode": export_mode},
+    )
 
 
 def test_add(device: torch.device):
@@ -2015,3 +2043,208 @@ def test_dtype_float32(device: torch.device):
     output: torch.Tensor = model_compiled(x)
     assert output.dtype == torch.float32, f"Expected float32 output, got {output.dtype}"
     assert torch.allclose(output, original)
+
+
+# ========== Convolution Tests ==========
+
+
+def _run_conv1d_no_pad(device: torch.device, export_mode: str | None = None):
+    """Conv1d without padding: output length = input - (kernel-1)."""
+    model: torch.nn.Module = Conv1dNoPadModel().to(device)
+    model_compiled: Callable = _compile_for_export_mode(model, export_mode)
+    x: torch.Tensor = torch.randn(2, 8, 32, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv1d_no_pad(device: torch.device):
+    _run_conv1d_no_pad(device)
+
+
+def test_conv1d_no_pad_pt2(device: torch.device):
+    _run_conv1d_no_pad(device, "pt2")
+
+
+def test_conv1d_same_pad(device: torch.device):
+    """Conv1d with padding=1: output length == input length."""
+    model: torch.nn.Module = Conv1dSamePadModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(2, 8, 32, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv1d_bias(device: torch.device):
+    """Conv1d with bias term."""
+    model: torch.nn.Module = Conv1dBiasModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(2, 8, 32, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def _run_conv2d_no_pad(device: torch.device, export_mode: str | None = None):
+    """Conv2d without padding: output spatial = input - (kernel-1)."""
+    model: torch.nn.Module = Conv2dNoPadModel().to(device)
+    model_compiled: Callable = _compile_for_export_mode(model, export_mode)
+    x: torch.Tensor = torch.randn(1, 3, 8, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv2d_no_pad(device: torch.device):
+    _run_conv2d_no_pad(device)
+
+
+def test_conv2d_no_pad_pt2(device: torch.device):
+    _run_conv2d_no_pad(device, "pt2")
+
+
+def test_conv2d_same_pad(device: torch.device):
+    """Conv2d with padding=1: output spatial == input spatial."""
+    model: torch.nn.Module = Conv2dSamePadModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(1, 3, 8, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv2d_bias(device: torch.device):
+    """Conv2d with bias term."""
+    model: torch.nn.Module = Conv2dBiasModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(1, 3, 8, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv2d_stride(device: torch.device):
+    """Conv2d with stride=2: output spatial dims halved."""
+    model: torch.nn.Module = Conv2dStrideModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(1, 3, 8, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def _run_conv2d_dilation(device: torch.device, export_mode: str | None = None):
+    """Conv2d with dilation=2 preserves the expected spatial shape and values."""
+    model: torch.nn.Module = Conv2dDilationModel().to(device)
+    model_compiled: Callable = _compile_for_export_mode(model, export_mode)
+    x: torch.Tensor = torch.randn(2, 8, 17, 19, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv2d_dilation(device: torch.device):
+    _run_conv2d_dilation(device)
+
+
+def test_conv2d_dilation_pt2(device: torch.device):
+    _run_conv2d_dilation(device, "pt2")
+
+
+def _run_conv3d_same_pad(device: torch.device, export_mode: str | None = None):
+    """Conv3d exercises the spatial=3 unfold/permute/split path."""
+    model: torch.nn.Module = Conv3dSamePadModel().to(device)
+    model_compiled: Callable = _compile_for_export_mode(model, export_mode)
+    x: torch.Tensor = torch.randn(2, 4, 6, 7, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_conv3d_same_pad(device: torch.device):
+    _run_conv3d_same_pad(device)
+
+
+def test_conv3d_same_pad_pt2(device: torch.device):
+    _run_conv3d_same_pad(device, "pt2")
+
+
+def test_depthwise_conv1d(device: torch.device):
+    """Depthwise Conv1d with groups=in_channels, as used in Mamba."""
+    model: torch.nn.Module = DepthwiseConv1dModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(2, 16, 32, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_depthwise_conv2d(device: torch.device):
+    """Depthwise Conv2d with groups=in_channels."""
+    model: torch.nn.Module = DepthwiseConv2dModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(1, 8, 8, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def _run_depthwise_multiplier_conv2d(
+    device: torch.device, export_mode: str | None = None
+):
+    """Depthwise Conv2d with multiplier > 1 should preserve both output channels per input channel."""
+    model: torch.nn.Module = DepthwiseMultiplierConv2dModel().to(device)
+    model_compiled: Callable = _compile_for_export_mode(model, export_mode)
+    x: torch.Tensor = torch.randn(2, 8, 9, 9, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_depthwise_multiplier_conv2d(device: torch.device):
+    _run_depthwise_multiplier_conv2d(device)
+
+
+def test_depthwise_multiplier_conv2d_pt2(device: torch.device):
+    _run_depthwise_multiplier_conv2d(device, "pt2")
+
+
+def test_grouped_conv2d(device: torch.device):
+    """Conv2d with groups=4 (grouped, not depthwise)."""
+    model: torch.nn.Module = GroupedConv2dModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(1, 16, 8, 8, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def _run_grouped_conv2d_groups3_batch4(
+    device: torch.device, export_mode: str | None = None
+):
+    """Grouped Conv2d with groups=3 and batch>1 exercises the pre-pad + slice path."""
+    model: torch.nn.Module = GroupedConv2dGroups3Model().to(device)
+    model_compiled: Callable = _compile_for_export_mode(model, export_mode)
+    x: torch.Tensor = torch.randn(4, 12, 11, 9, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
+
+
+def test_grouped_conv2d_groups3_batch4(device: torch.device):
+    _run_grouped_conv2d_groups3_batch4(device)
+
+
+def test_grouped_conv2d_groups3_batch4_pt2(device: torch.device):
+    _run_grouped_conv2d_groups3_batch4(device, "pt2")
+
+
+def test_mamba_conv_block(device: torch.device):
+    """Minimal Mamba-style block: depthwise Conv1d with causal gating (end-to-end)."""
+    model: torch.nn.Module = MambaConvBlockModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    x: torch.Tensor = torch.randn(2, 64, 16, device=device)
+    original: torch.Tensor = model(x)
+    output: torch.Tensor = model_compiled(x)
+    assert torch.allclose(output, original, atol=1e-4)
