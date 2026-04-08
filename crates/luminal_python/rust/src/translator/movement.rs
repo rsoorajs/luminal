@@ -6,6 +6,10 @@ use crate::pt2_util::*;
 
 use super::Translator;
 
+const CHUNK_INPUT_ARG: usize = 0;
+const CHUNK_NUM_CHUNKS_ARG: usize = 1;
+const CHUNK_DIM_ARG: usize = 2;
+
 impl<'a> Translator<'a> {
     pub(crate) fn translate_reshape(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, 0)?;
@@ -428,6 +432,41 @@ impl<'a> Translator<'a> {
         } else {
             bail!("index_put with multiple index tensors not yet supported");
         }
+    }
+
+    /// chunk(tensor, n_chunks, dim) -> splits tensor into n_chunks equal parts
+    pub(crate) fn translate_chunk(&mut self, node: &Node) -> Result<GraphTensor> {
+        let a = self.get_input_tensor(node, CHUNK_INPUT_ARG)?;
+        let n_chunks = self.get_int_arg(node, CHUNK_NUM_CHUNKS_ARG)? as usize;
+        let dim = if node.inputs.len() > CHUNK_DIM_ARG {
+            self.get_int_arg(node, CHUNK_DIM_ARG).unwrap_or(0)
+        } else {
+            0
+        };
+        let dim = normalize_dim(dim, a.shape.len());
+
+        let total = a.shape.dims[dim]
+            .to_usize()
+            .ok_or_else(|| anyhow::anyhow!("chunk requires concrete dim size"))?;
+        let chunk_size = total.div_ceil(n_chunks);
+
+        let output_names: Vec<String> = node
+            .outputs
+            .first()
+            .and_then(|o| o.as_tensors.as_ref())
+            .map(|ts| ts.iter().map(|t| t.name.clone()).collect())
+            .unwrap_or_default();
+
+        for (i, out_name) in output_names.iter().enumerate() {
+            let start = i * chunk_size;
+            let end = ((i + 1) * chunk_size).min(total);
+            if start < total {
+                let chunk = a.slice_along(start..end, dim);
+                self.tensors.insert(out_name.clone(), chunk);
+            }
+        }
+
+        Ok(a.slice_along(0..chunk_size.min(total), dim))
     }
 
     pub(crate) fn translate_split(&mut self, node: &Node) -> Result<GraphTensor> {
