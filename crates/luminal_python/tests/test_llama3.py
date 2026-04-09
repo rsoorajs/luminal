@@ -2,7 +2,7 @@
 
 Tests individual Llama3 building blocks (RMSNorm, RoPE, SwiGLU, causal attention,
 full transformer block) and progressively larger HuggingFace LlamaForCausalLM configs
-through the PyTorch -> ONNX -> luminal pipeline via torch.compile.
+through the PyTorch -> Pt2 -> luminal pipeline via torch.compile.
 """
 
 from typing import Callable

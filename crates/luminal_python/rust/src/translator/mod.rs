@@ -19,6 +19,7 @@ use luminal::prelude::*;
 
 use crate::pt2_parser::{InputKind, ParsedPT2, SymDimMap};
 use crate::pt2_schema::*;
+use crate::pt2_util;
 
 /// Result of translating a PT2 graph to a Luminal graph.
 pub struct TranslatedGraph {
@@ -98,7 +99,12 @@ impl<'a> Translator<'a> {
                         .tensor_meta(graph_name)
                         .with_context(|| format!("Missing tensor meta for param {graph_name}"))?;
                     let shape = self.tensor_meta_to_shape(meta)?;
-                    let tensor = self.graph.named_tensor(original_name, shape);
+                    let dtype = pt2_util::torch_dtype_int_to_luminal(meta.dtype);
+                    let tensor = self
+                        .graph
+                        .named_tensor(original_name, shape)
+                        .as_dtype(dtype);
+                    tensor.persist();
                     self.tensors.insert(graph_name.clone(), tensor);
                 }
                 InputKind::Buffer {
@@ -110,7 +116,12 @@ impl<'a> Translator<'a> {
                         .tensor_meta(graph_name)
                         .with_context(|| format!("Missing tensor meta for buffer {graph_name}"))?;
                     let shape = self.tensor_meta_to_shape(meta)?;
-                    let tensor = self.graph.named_tensor(original_name, shape);
+                    let dtype = pt2_util::torch_dtype_int_to_luminal(meta.dtype);
+                    let tensor = self
+                        .graph
+                        .named_tensor(original_name, shape)
+                        .as_dtype(dtype);
+                    tensor.persist();
                     self.tensors.insert(graph_name.clone(), tensor);
                 }
                 InputKind::UserInput { graph_name } => {
@@ -119,7 +130,8 @@ impl<'a> Translator<'a> {
                         .tensor_meta(graph_name)
                         .with_context(|| format!("Missing tensor meta for input {graph_name}"))?;
                     let shape = self.tensor_meta_to_shape(meta)?;
-                    let tensor = self.graph.named_tensor(graph_name, shape);
+                    let dtype = pt2_util::torch_dtype_int_to_luminal(meta.dtype);
+                    let tensor = self.graph.named_tensor(graph_name, shape).as_dtype(dtype);
                     self.user_input_ids.push((graph_name.clone(), tensor.id));
                     self.tensors.insert(graph_name.clone(), tensor);
                 }
