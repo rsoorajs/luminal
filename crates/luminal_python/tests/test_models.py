@@ -1649,18 +1649,21 @@ class TinyMoERoutingModel(torch.nn.Module):
 
     def forward(
         self, scores: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_values, topk_indices = torch.topk(
-            scores, self.TOP_K, dim=self.ROUTING_DIM
-        )
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        topk_values, topk_indices = torch.topk(scores, self.TOP_K, dim=self.ROUTING_DIM)
         regroup_order = torch.argsort(topk_indices, dim=self.ROUTING_DIM)
         routed_indices = torch.gather(topk_indices, self.ROUTING_DIM, regroup_order)
         routed_values = torch.gather(topk_values, self.ROUTING_DIM, regroup_order)
 
         expert_scale = self.expert_scale.unsqueeze(0).expand(scores.shape[0], -1)
-        gathered_scale = torch.gather(
-            expert_scale, self.ROUTING_DIM, routed_indices
-        )
+        gathered_scale = torch.gather(expert_scale, self.ROUTING_DIM, routed_indices)
         weighted = routed_values * gathered_scale
 
         inactive_mask = torch.bitwise_not(weighted > 0)
