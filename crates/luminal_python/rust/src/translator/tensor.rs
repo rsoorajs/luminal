@@ -6,6 +6,16 @@ use crate::pt2_util::*;
 
 use super::Translator;
 
+const FULL_SHAPE_ARG: usize = 0;
+const FULL_VALUE_ARG: usize = 1;
+
+const TOPK_INPUT_ARG: usize = 0;
+const TOPK_K_ARG: usize = 1;
+const TOPK_DIM_ARG: usize = 2;
+
+const ONE_HOT_INPUT_ARG: usize = 0;
+const ONE_HOT_NUM_CLASSES_ARG: usize = 1;
+
 impl<'a> Translator<'a> {
     pub(crate) fn translate_arange(&mut self, node: &Node) -> Result<GraphTensor> {
         let positional_args: Vec<Expression> = node
@@ -25,9 +35,15 @@ impl<'a> Translator<'a> {
     }
 
     pub(crate) fn translate_full(&mut self, node: &Node) -> Result<GraphTensor> {
-        let shape = self.get_exprs_arg(node, 0)?;
-        let val = self.get_float_arg(node, 1)? as f32;
-        Ok(self.graph.constant_float(val).expand_rhs(shape))
+        let shape = self.get_exprs_arg(node, FULL_SHAPE_ARG)?;
+        let val = self.get_float_arg(node, FULL_VALUE_ARG)? as f32;
+        let dtype = self.output_meta_dtype(node)?;
+        let value = self.graph.constant_float(val).cast(dtype);
+        Ok(if shape.is_empty() {
+            value
+        } else {
+            value.expand_rhs(shape)
+        })
     }
 
     pub(crate) fn translate_zeros(&mut self, node: &Node) -> Result<GraphTensor> {
@@ -53,11 +69,26 @@ impl<'a> Translator<'a> {
             .tensor_meta(&output_name)
             .context("Missing tensor meta for constant fill output")?;
         let shape = self.tensor_meta_to_shape(meta)?;
+        let dtype = torch_dtype_int_to_luminal(meta.dtype);
+        let value = self.graph.constant_float(val).cast(dtype);
         if shape.is_empty() {
-            Ok(self.graph.constant_float(val))
+            Ok(value)
         } else {
-            Ok(self.graph.constant_float(val).expand_rhs(shape))
+            Ok(value.expand_rhs(shape))
         }
+    }
+
+    fn output_meta_dtype(&self, node: &Node) -> Result<DType> {
+        let output_name = node
+            .outputs
+            .first()
+            .and_then(|o| o.as_tensor.as_ref())
+            .map(|t| t.name.clone())
+            .unwrap_or_default();
+        let meta = self
+            .tensor_meta(&output_name)
+            .context("Missing tensor meta for output dtype")?;
+        Ok(torch_dtype_int_to_luminal(meta.dtype))
     }
 
     pub(crate) fn translate_where(&mut self, node: &Node) -> Result<GraphTensor> {
@@ -154,10 +185,10 @@ impl<'a> Translator<'a> {
     }
 
     pub(crate) fn translate_topk(&mut self, node: &Node) -> Result<()> {
-        let a = self.get_input_tensor(node, 0)?;
-        let k = self.get_int_arg(node, 1)? as usize;
-        let dim = if node.inputs.len() > 2 {
-            self.get_int_arg(node, 2).unwrap_or(-1)
+        let a = self.get_input_tensor(node, TOPK_INPUT_ARG)?;
+        let k = self.get_int_arg(node, TOPK_K_ARG)? as usize;
+        let dim = if node.inputs.len() > TOPK_DIM_ARG {
+            self.get_int_arg(node, TOPK_DIM_ARG).unwrap_or(-1)
         } else {
             -1
         };
@@ -177,13 +208,10 @@ impl<'a> Translator<'a> {
                 None
             };
 
-        // Use full argsort then slice, rather than topk_indexes/topk_values directly.
-        // This avoids a CUDA gather kernel bug when data and index shapes differ
-        // along the gather axis (topk_indexes returns a sliced tensor).
-        let full_argsort = a.argsort(dim, true);
+        // Build top-k outputs from a full stable argsort, then slice to k.
+        let full_argsort = a.stable_argsort(dim, true);
 
-        // Only build each branch when its output is consumed.
-        // Dead nodes in the graph can confuse the CUDA optimizer.
+        // Only build the outputs that are consumed.
         if let Some(val_name) = values_name
             && !val_name.is_empty()
         {
@@ -191,8 +219,7 @@ impl<'a> Translator<'a> {
             self.tensors.insert(val_name, values);
         }
         if let Some(idx_name) = indices_name {
-            // Materialize Int indices as F32 with `* 1.0` to force a contiguous copy.
-            // Without this, CUDA can't correctly read the sliced Int view.
+            // Materialize the sliced indices through a copy before storing them.
             let indices = full_argsort.slice_along(..k, dim) * 1.0;
             self.tensors.insert(idx_name, indices);
         }
@@ -201,8 +228,8 @@ impl<'a> Translator<'a> {
     }
 
     pub(crate) fn translate_one_hot(&mut self, node: &Node) -> Result<GraphTensor> {
-        let a = self.get_input_tensor(node, 0)?;
-        let num_classes = self.get_int_arg(node, 1)? as usize;
+        let a = self.get_input_tensor(node, ONE_HOT_INPUT_ARG)?;
+        let num_classes = self.get_int_arg(node, ONE_HOT_NUM_CLASSES_ARG)? as usize;
         // one_hot: output[..., i] = 1 if input[...] == i else 0
         let a_int = a.cast(DType::Int);
         let classes = self.graph.arange(num_classes);

@@ -9,6 +9,8 @@ use std::{
 
 pub use cudarc;
 
+use cudarc::{cublaslt::CudaBlasLT, driver::CudaStream};
+
 #[cfg(test)]
 mod tests;
 
@@ -135,6 +137,49 @@ fn cuda_driver_diagnostics() -> (Option<i32>, Option<i32>) {
     // Avoid touching cudarc's runtime loader here. On some environments it eagerly
     // resolves newer libcudart symbols that may not exist in the installed runtime.
     (driver_version, None)
+}
+
+pub(crate) fn cublaslt_grouped_layout_supported() -> bool {
+    static SUPPORTS_GROUPED_LAYOUT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTS_GROUPED_LAYOUT.get_or_init(|| {
+        let symbol = CString::new("cublasLtGroupedMatrixLayoutCreate").unwrap();
+        let candidates = [
+            "libcublasLt.so",
+            "libcublasLt.so.12",
+            "libcublasLt.so.11",
+            "/usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so",
+        ];
+
+        candidates.iter().any(|candidate| unsafe {
+            let library = CString::new(*candidate).unwrap();
+            let handle = libc::dlopen(library.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+            if handle.is_null() {
+                return false;
+            }
+            let found = !libc::dlsym(handle, symbol.as_ptr()).is_null();
+            libc::dlclose(handle);
+            found
+        })
+    })
+}
+
+pub(crate) fn try_create_cublaslt(
+    stream: Arc<CudaStream>,
+) -> std::result::Result<Arc<CudaBlasLT>, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| CudaBlasLT::new(stream))) {
+        Ok(Ok(handle)) => Ok(Arc::new(handle)),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(payload) => {
+            let message = if let Some(message) = payload.downcast_ref::<String>() {
+                message.clone()
+            } else if let Some(message) = payload.downcast_ref::<&str>() {
+                message.to_string()
+            } else {
+                "cuBLASLt initialization panicked".to_string()
+            };
+            Err(message)
+        }
+    }
 }
 
 fn cuda_nvrtc_compile_options(target_arch: &str) -> Vec<String> {

@@ -6,7 +6,35 @@ use crate::pt2_util::{broadcast_binary, torch_dtype_int_to_luminal};
 
 use super::Translator;
 
+const ARGSORT_INPUT_ARG: usize = 0;
+const ARGSORT_DIM_ARG: usize = 1;
+const ARGSORT_DESCENDING_ARG: usize = 2;
+
+const MASKED_FILL_INPUT_ARG: usize = 0;
+const MASKED_FILL_MASK_ARG: usize = 1;
+const MASKED_FILL_VALUE_ARG: usize = 2;
+
+const FLOOR_DIVIDE_INPUT_ARG: usize = 0;
+const FLOOR_DIVIDE_OTHER_ARG: usize = 1;
+
 impl<'a> Translator<'a> {
+    pub(crate) fn translate_argsort(&mut self, node: &Node) -> Result<GraphTensor> {
+        let a = self.get_input_tensor(node, ARGSORT_INPUT_ARG)?;
+        let dim = if node.inputs.len() > ARGSORT_DIM_ARG {
+            self.get_int_arg(node, ARGSORT_DIM_ARG).unwrap_or(-1)
+        } else {
+            -1
+        };
+        let descending = if node.inputs.len() > ARGSORT_DESCENDING_ARG {
+            self.get_bool_arg(node, ARGSORT_DESCENDING_ARG)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let dim = crate::pt2_util::normalize_dim(dim, a.shape.len());
+        Ok(a.stable_argsort(dim, descending))
+    }
+
     pub(crate) fn translate_unary_op(
         &mut self,
         node: &Node,
@@ -88,6 +116,103 @@ impl<'a> Translator<'a> {
         }
 
         Ok(result)
+    }
+
+    pub(crate) fn translate_sign(&mut self, node: &Node) -> Result<GraphTensor> {
+        let a = self.get_input_tensor(node, 0)?;
+        let zero = self
+            .graph
+            .constant_float(0.0)
+            .cast(a.dtype)
+            .expand_rhs(a.shape);
+        let pos = a.gt(zero).cast(DType::Int);
+        let neg = a.lt(zero).cast(DType::Int);
+        let signed = pos - neg;
+        Ok(if a.dtype == DType::Int {
+            signed
+        } else {
+            signed.cast(a.dtype)
+        })
+    }
+
+    pub(crate) fn translate_bitwise_not(&mut self, node: &Node) -> Result<GraphTensor> {
+        let a = self.get_input_tensor(node, 0)?;
+        Ok(match a.dtype {
+            DType::Bool => {
+                let one = self
+                    .graph
+                    .constant_float(1.0)
+                    .cast(DType::Int)
+                    .expand_rhs(a.shape);
+                (one - a.cast(DType::Int)).cast(DType::Bool)
+            }
+            DType::Int => (a + 1) * -1.0,
+            other => {
+                anyhow::bail!("bitwise_not only supports Bool/Int routing tensors, got {other:?}")
+            }
+        })
+    }
+
+    pub(crate) fn translate_masked_fill_scalar(&mut self, node: &Node) -> Result<GraphTensor> {
+        let input = self.get_input_tensor(node, MASKED_FILL_INPUT_ARG)?;
+        let mask = self.get_input_tensor(node, MASKED_FILL_MASK_ARG)?;
+        let fill = self.get_float_arg(node, MASKED_FILL_VALUE_ARG)? as f32;
+        let (input, mask) = broadcast_binary(input, mask);
+        let work_dtype = if input.dtype == DType::Bool {
+            DType::Int
+        } else {
+            input.dtype
+        };
+        let input_work = if input.dtype == DType::Bool {
+            input.cast(DType::Int)
+        } else {
+            input
+        };
+        let mask_work = mask.cast(work_dtype);
+        let fill_work = self
+            .graph
+            .constant_float(fill)
+            .cast(work_dtype)
+            .expand_rhs(input_work.shape);
+        let one = self
+            .graph
+            .constant_float(1.0)
+            .cast(work_dtype)
+            .expand_rhs(input_work.shape);
+        let result = mask_work * fill_work + (one - mask_work) * input_work;
+        Ok(if input.dtype == DType::Bool {
+            result.cast(DType::Bool)
+        } else {
+            result
+        })
+    }
+
+    pub(crate) fn translate_floor_divide(&mut self, node: &Node) -> Result<GraphTensor> {
+        let a = self.get_input_tensor(node, FLOOR_DIVIDE_INPUT_ARG)?;
+        let b = if let Some(name) = node
+            .inputs
+            .get(FLOOR_DIVIDE_OTHER_ARG)
+            .and_then(|i| i.arg.as_tensor_name())
+        {
+            self.get_tensor(name)?
+        } else {
+            let scalar = self.get_float_arg(node, FLOOR_DIVIDE_OTHER_ARG)? as f32;
+            self.graph
+                .constant_float(scalar)
+                .cast(a.dtype)
+                .expand_rhs(a.shape)
+        };
+        let (a, b) = crate::pt2_util::ensure_same_dtype(a, b);
+        let (a, b) = broadcast_binary(a, b);
+        let quotient = a.cast(DType::F32) / b.cast(DType::F32);
+        let trunc = quotient.cast(DType::Int).cast(DType::F32);
+        let adjust = quotient.lt(trunc).cast(DType::F32);
+        let floored = trunc - adjust;
+        Ok(if a.dtype == DType::Int {
+            floored.cast(DType::Int)
+        } else {
+            floored.cast(a.dtype)
+        })
     }
 
     pub(crate) fn translate_clamp(&mut self, node: &Node) -> Result<GraphTensor> {

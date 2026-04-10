@@ -70,6 +70,8 @@ impl<'a> Translator<'a> {
             "torch.ops.aten.tanh.default" => self.translate_unary_op(node, |a| a.tanh())?,
             "torch.ops.aten.abs.default" => self.translate_unary_op(node, |a| a.abs())?,
             "torch.ops.aten.log.default" => self.translate_unary_op(node, |a| a.log())?,
+            "torch.ops.aten.sign.default" => self.translate_sign(node)?,
+            "torch.ops.aten.bitwise_not.default" => self.translate_bitwise_not(node)?,
 
             // Cast
             "torch.ops.aten._to_copy.default" => self.translate_to_copy(node)?,
@@ -122,6 +124,7 @@ impl<'a> Translator<'a> {
                 let a = self.get_input_tensor(node, 0)?;
                 if !a.shape.is_contiguous() { a + 0.0 } else { a }
             }
+            "torch.ops.aten.argsort.default" => self.translate_argsort(node)?,
 
             // Matmul
             "torch.ops.aten.mm.default"
@@ -170,6 +173,7 @@ impl<'a> Translator<'a> {
             // Where
             "torch.ops.aten.where.self" => self.translate_where(node)?,
             "torch.ops.aten.where.ScalarOther" => self.translate_where_scalar_other(node)?,
+            "torch.ops.aten.masked_fill.Scalar" => self.translate_masked_fill_scalar(node)?,
 
             // Pow
             "torch.ops.aten.pow.Tensor_Scalar" => {
@@ -404,7 +408,11 @@ impl<'a> Translator<'a> {
 
             // Scatter ops
             "torch.ops.aten.scatter.src" => self.translate_scatter_src(node)?,
+            "torch.ops.aten.scatter.value" => self.translate_scatter_value(node)?,
             "torch.ops.aten.index_put_.default" => self.translate_index_put(node)?,
+
+            // Integer routing math
+            "torch.ops.aten.floor_divide.default" => self.translate_floor_divide(node)?,
 
             // Triangular
             "torch.ops.aten.tril.default" => self.translate_tril(node)?,

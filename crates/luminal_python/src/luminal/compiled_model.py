@@ -95,7 +95,7 @@ class CompiledModel:
                 self._graph.set_input_device_ptr(name, t.data_ptr(), n_bytes)
                 _input_refs.append(t)
             else:
-                t = tensor.detach().cpu().contiguous()
+                t = tensor.detach().cpu().contiguous().to(expected_dtype)
                 n_bytes = t.numel() * t.element_size()
                 dtype_code = _torch_dtype_code(t.dtype)
                 self._graph.set_input_from_ptr(name, t.data_ptr(), n_bytes, dtype_code)
@@ -120,9 +120,10 @@ class CompiledModel:
                     else torch.float32
                 )
                 out = torch.empty(shape, dtype=out_dtype, device=input_device)
-                self._graph.set_output_device_ptr(
-                    name, out.data_ptr(), out.numel() * out.element_size()
-                )
+                if out_dtype.is_floating_point:
+                    self._graph.set_output_device_ptr(
+                        name, out.data_ptr(), out.numel() * out.element_size()
+                    )
                 output_tensors.append(out)
 
         # Run the graph
@@ -130,13 +131,42 @@ class CompiledModel:
 
         # Collect outputs
         if _use_zero_copy:
-            # For aliased outputs that couldn't be zero-copied, fall back to DtoD copy.
-            for name, out in zip(self._output_names, output_tensors):
-                if not self._graph.output_is_zero_copy(name):
-                    self._graph.copy_output_to_device_ptr(
-                        name, out.data_ptr(), out.numel() * out.element_size()
+            outputs = []
+            for i, (name, shape) in enumerate(zip(self._output_names, output_shapes)):
+                out_dtype = (
+                    code_to_torch_dtype(output_dtype_codes[i])
+                    if i < len(output_dtype_codes)
+                    else torch.float32
+                )
+                out = output_tensors[i]
+                if out_dtype.is_floating_point:
+                    if not self._graph.output_is_zero_copy(name):
+                        self._graph.copy_output_to_device_ptr(
+                            name, out.data_ptr(), out.numel() * out.element_size()
+                        )
+                elif out_dtype == torch.int32:
+                    data = self._graph.get_output_i32(name)
+                    out = (
+                        torch.tensor(data, dtype=torch.int32)
+                        .reshape(tuple(shape))
+                        .to(input_device)
                     )
-            outputs = output_tensors
+                elif out_dtype == torch.bool:
+                    data = self._graph.get_output_bool(name)
+                    out = (
+                        torch.tensor(data, dtype=torch.bool)
+                        .reshape(tuple(shape))
+                        .to(input_device)
+                    )
+                else:
+                    data = self._graph.get_output(name)
+                    out = (
+                        torch.tensor(data, dtype=torch.float32)
+                        .reshape(tuple(shape))
+                        .to(out_dtype)
+                        .to(input_device)
+                    )
+                outputs.append(out)
         else:
             # Native path: retrieve as f32, then convert to target dtype if needed.
             outputs = []
@@ -146,13 +176,20 @@ class CompiledModel:
                     if i < len(output_dtype_codes)
                     else torch.float32
                 )
-                data = self._graph.get_output(name)
-                out = (
-                    torch.tensor(data, dtype=torch.float32)
-                    .reshape(tuple(shape))
-                    .to(out_dtype)
-                    .to(input_device)
-                )
+                if out_dtype == torch.int32:
+                    data = self._graph.get_output_i32(name)
+                    out = torch.tensor(data, dtype=torch.int32).reshape(tuple(shape))
+                elif out_dtype == torch.bool:
+                    data = self._graph.get_output_bool(name)
+                    out = torch.tensor(data, dtype=torch.bool).reshape(tuple(shape))
+                else:
+                    data = self._graph.get_output(name)
+                    out = (
+                        torch.tensor(data, dtype=torch.float32)
+                        .reshape(tuple(shape))
+                        .to(out_dtype)
+                    )
+                out = out.to(input_device)
                 outputs.append(out)
 
         return tuple(outputs)

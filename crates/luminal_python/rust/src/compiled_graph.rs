@@ -628,6 +628,84 @@ impl CompiledGraph {
         }
     }
 
+    fn get_output_i32(&self, name: &str) -> PyResult<Vec<i32>> {
+        let node_id = self.tensor_ids.get(name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Unknown output tensor: {}",
+                name
+            ))
+        })?;
+        match &self.runtime {
+            RuntimeBackend::Native(rt) => {
+                let id = *node_id;
+                let output_id = rt
+                    .graph
+                    .node_indices()
+                    .find(|n| {
+                        if let Some(out) = (**rt.graph[*n]).as_any().downcast_ref::<Output>() {
+                            out.node == id.index()
+                        } else {
+                            false
+                        }
+                    })
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "No output node found for tensor: {}",
+                            name
+                        ))
+                    })?;
+                let data = rt.buffers.get(&output_id).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "No buffer data for output tensor: {}",
+                        name
+                    ))
+                })?;
+                Ok((0..data.len()).map(|i| data.i32(i)).collect())
+            }
+            #[cfg(feature = "cuda")]
+            RuntimeBackend::Cuda(rt) => Ok(rt.get_i32(*node_id)),
+        }
+    }
+
+    fn get_output_bool(&self, name: &str) -> PyResult<Vec<bool>> {
+        let node_id = self.tensor_ids.get(name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Unknown output tensor: {}",
+                name
+            ))
+        })?;
+        match &self.runtime {
+            RuntimeBackend::Native(rt) => {
+                let id = *node_id;
+                let output_id = rt
+                    .graph
+                    .node_indices()
+                    .find(|n| {
+                        if let Some(out) = (**rt.graph[*n]).as_any().downcast_ref::<Output>() {
+                            out.node == id.index()
+                        } else {
+                            false
+                        }
+                    })
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "No output node found for tensor: {}",
+                            name
+                        ))
+                    })?;
+                let data = rt.buffers.get(&output_id).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "No buffer data for output tensor: {}",
+                        name
+                    ))
+                })?;
+                Ok((0..data.len()).map(|i| data.bool(i)).collect())
+            }
+            #[cfg(feature = "cuda")]
+            RuntimeBackend::Cuda(rt) => Ok(rt.get_bool(*node_id)),
+        }
+    }
+
     /// Copy output tensor data directly to a CUDA device pointer (DtoD).
     /// Avoids the DtoH + HtoD round-trip of get_output() + .to(device).
     #[cfg(feature = "cuda")]

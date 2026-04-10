@@ -78,7 +78,13 @@ impl<'a> Translator<'a> {
         let output_names = self.parsed.output_names();
         for name in &output_names {
             let tensor = self.get_tensor(name)?;
-            let tensor = tensor + 0.0;
+            let tensor = if tensor.dtype == DType::Bool {
+                tensor.cast(DType::Int).cast(DType::Bool)
+            } else if tensor.dtype == DType::Int {
+                tensor
+            } else {
+                tensor + 0.0
+            };
             tensor.output();
             self.output_ids.push((name.clone(), tensor.id));
         }
