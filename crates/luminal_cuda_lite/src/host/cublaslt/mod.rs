@@ -15,7 +15,6 @@ use luminal::{
 };
 
 use crate::{
-    cublaslt_grouped_layout_supported,
     cudarc::{
         cublas::sys::cublasOperation_t,
         cublaslt::{
@@ -105,9 +104,6 @@ impl EgglogOp for CuBlasLt {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        if !cublaslt_grouped_layout_supported() {
-            return vec![];
-        }
         vec![
             Rule::raw(include_str!["cublaslt_RmRm_rewrite.egg"]), // row row
             Rule::raw(include_str!["cublaslt_RmCm_rewrite.egg"]), // row col

@@ -139,30 +139,6 @@ fn cuda_driver_diagnostics() -> (Option<i32>, Option<i32>) {
     (driver_version, None)
 }
 
-pub(crate) fn cublaslt_grouped_layout_supported() -> bool {
-    static SUPPORTS_GROUPED_LAYOUT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *SUPPORTS_GROUPED_LAYOUT.get_or_init(|| {
-        let symbol = CString::new("cublasLtGroupedMatrixLayoutCreate").unwrap();
-        let candidates = [
-            "libcublasLt.so",
-            "libcublasLt.so.12",
-            "libcublasLt.so.11",
-            "/usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so",
-        ];
-
-        candidates.iter().any(|candidate| unsafe {
-            let library = CString::new(*candidate).unwrap();
-            let handle = libc::dlopen(library.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
-            if handle.is_null() {
-                return false;
-            }
-            let found = !libc::dlsym(handle, symbol.as_ptr()).is_null();
-            libc::dlclose(handle);
-            found
-        })
-    })
-}
-
 pub(crate) fn try_create_cublaslt(
     stream: Arc<CudaStream>,
 ) -> std::result::Result<Arc<CudaBlasLT>, String> {
