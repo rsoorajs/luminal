@@ -12,7 +12,7 @@ use luminal::{
 };
 
 use crate::{
-    compile_module_image_for_current_device, cublaslt_grouped_layout_supported,
+    compile_module_image_for_current_device,
     cudarc::{
         cublas::sys::cublasOperation_t,
         cublaslt::{
@@ -184,9 +184,6 @@ impl EgglogOp for GLUMoE {
     }
 
     fn early_rewrites(&self) -> Vec<Rule> {
-        if !cublaslt_grouped_layout_supported() {
-            return vec![];
-        }
         vec![Rule::raw(include_str!["glumoe_rewrite.egg"])]
     }
 
