@@ -702,5 +702,4 @@ mod tests {
             assert_close(&rt.get_f32(c), &expected, tol, tol);
         }
     }
-
 }

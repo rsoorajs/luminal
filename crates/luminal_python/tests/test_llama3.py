@@ -396,16 +396,12 @@ def test_dynamic_dim_reuse_no_recompile(device: torch.device):
 
     # Compile once with dynamic seq dim (auto-detected for integer inputs)
     example = torch.tensor([[1, 2, 3, 4]], device=device)
-    compiled = luminal_compile(
-        model, example, search_iterations=5, backend=backend
-    )
+    compiled = luminal_compile(model, example, search_iterations=5, backend=backend)
 
     # Execute with multiple different seq lengths — each call reuses the
     # same compiled graph, updating dynamic dims in-place.
     for seq_len in [4, 5, 6, 7, 8]:
-        input_ids = torch.tensor(
-            [list(range(1, seq_len + 1))], device=device
-        )
+        input_ids = torch.tensor([list(range(1, seq_len + 1))], device=device)
         with torch.no_grad():
             ref = model(input_ids)
             out = compiled(input_ids)
