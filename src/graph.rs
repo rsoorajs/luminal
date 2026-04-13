@@ -333,7 +333,6 @@ impl Graph {
             subgraphs.len()
         );
 
-        // Build e-graphs only for representative chunks
         self.egraphs = groups
             .iter()
             .map(|g| {
@@ -813,7 +812,7 @@ impl Graph {
                     &mut expr_cache,
                     custom_remap,
                 );
-                remap_llir_io_nodes(&mut llir, &node_remap);
+                remap_llir_io_nodes(&mut llir, &node_remap, &self.graph);
                 chunk_best_llirs[chunk_idx] = Some(llir);
             }
 
@@ -1223,17 +1222,27 @@ fn build_chunk_remaps(
 }
 
 /// Apply Input/Output node index remapping to an LLIR graph (in-place modification).
-fn remap_llir_io_nodes(llir: &mut LLIRGraph, node_remap: &FxHashMap<usize, usize>) {
+fn remap_llir_io_nodes(
+    llir: &mut LLIRGraph,
+    node_remap: &FxHashMap<usize, usize>,
+    hlir_graph: &HLIRGraph,
+) {
     // We need to replace nodes in-place. Collect node indices first.
     let node_indices: Vec<NodeIndex> = llir.node_indices().collect();
     for node_idx in node_indices {
         let op = &llir[node_idx];
         let new_op = if let Some(input_op) = op.to_op::<crate::hlir::Input>() {
             if let Some(&new_node) = node_remap.get(&input_op.node) {
+                // Look up the target HLIR Input's label so chunk copies get correct names
+                let new_label = hlir_graph
+                    .node_weight(NodeIndex::new(new_node))
+                    .and_then(|w| w.as_any().downcast_ref::<crate::hlir::Input>())
+                    .map(|inp| inp.label.clone())
+                    .unwrap_or_else(|| input_op.label.clone());
                 Some(LLIROp::new::<crate::hlir::Input>(Box::new(
                     crate::hlir::Input {
                         node: new_node,
-                        label: input_op.label.clone(),
+                        label: new_label,
                         dtype: input_op.dtype,
                     },
                 )))
@@ -1447,7 +1456,7 @@ mod tests {
         assert!(custom_op_remap.is_empty());
 
         // Apply IO remap
-        remap_llir_io_nodes(&mut llir, &node_remap);
+        remap_llir_io_nodes(&mut llir, &node_remap, &hlir_graph);
 
         // Verify remapped nodes
         let mut input_nodes: Vec<(usize, String)> = vec![];
