@@ -13,7 +13,7 @@ pub mod api;
 pub mod base;
 
 pub const RUN_SCHEDULE: &str = "(run-schedule
-    (repeat 5
+    (repeat 10
         (saturate expr)
         (saturate dtype_prop)
         (run)

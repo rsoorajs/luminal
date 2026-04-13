@@ -333,7 +333,6 @@ impl Graph {
             subgraphs.len()
         );
 
-        // Build e-graphs only for representative chunks
         self.egraphs = groups
             .iter()
             .map(|g| {
