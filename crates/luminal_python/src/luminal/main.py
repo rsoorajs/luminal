@@ -10,7 +10,11 @@ from .dtype_util import torch_dtype_code as _torch_dtype_code
 
 
 def _detect_backend(example_inputs):
-    """Detect backend from input device. Returns 'cuda' or 'native'."""
+    """Detect backend from LUMINAL_BACKEND env var or input device."""
+    import os
+    env_backend = os.environ.get("LUMINAL_BACKEND")
+    if env_backend:
+        return env_backend
     device = example_inputs[0].device if example_inputs else torch.device("cpu")
     return "cuda" if device.type == "cuda" else "native"
 
@@ -36,7 +40,7 @@ def _collect_weight_pointers(weights, backend):
     for name, tensor in weights.items():
         t = tensor.detach().contiguous()
         n_bytes = t.numel() * t.element_size()
-        if backend in ("cuda", "gpu") and t.is_cuda:
+        if backend in ("cuda", "gpu", "cuda_lite", "cuda_heavy") and t.is_cuda:
             keep_alive.append(t)
             device_ptrs[name] = (t.data_ptr(), n_bytes)
         else:

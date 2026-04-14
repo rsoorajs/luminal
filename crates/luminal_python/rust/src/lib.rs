@@ -21,6 +21,9 @@ fn luminal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cuda")]
     luminal_cuda_lite::dyn_backend::register();
 
+    #[cfg(feature = "cuda_heavy")]
+    luminal_cuda::dyn_backend::register();
+
     m.add_function(wrap_pyfunction!(process_pt2, m)?)?;
     m.add_class::<CompiledGraph>()?;
     m.add_function(wrap_pyfunction!(available_backends, m)?)?;

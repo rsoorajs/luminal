@@ -23,7 +23,10 @@ torch.set_float32_matmul_precision("highest")
 @pytest.fixture
 def device() -> torch.device:
     backend = os.getenv("LUMINAL_BACKEND", "native").lower()
-    return torch.device("cuda") if backend == "cuda" else torch.device("cpu")
+    # Any CUDA-based backend (cuda, cuda_lite, cuda_heavy, gpu) needs GPU tensors
+    if backend in ("cuda", "cuda_lite", "cuda_heavy", "gpu"):
+        return torch.device("cuda")
+    return torch.device("cpu")
 
 
 @pytest.fixture(autouse=True, scope="function")
