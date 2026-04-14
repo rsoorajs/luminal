@@ -297,6 +297,41 @@ impl Graph {
         self.ops = Some(ops);
     }
 
+    /// Build the search space from an explicit ops list, without requiring a Runtime type parameter.
+    /// This is the dynamic-dispatch equivalent of `build_search_space<Rt>()`.
+    ///
+    /// `cleanup_hlir` should be `true` for all backends except NativeRuntime.
+    /// The caller must include backend-specific ops; HLIROps are appended automatically.
+    #[tracing::instrument(skip_all)]
+    pub fn build_search_space_with_ops(
+        &mut self,
+        mut ops: Vec<Arc<Box<dyn EgglogOp>>>,
+        cleanup_hlir: bool,
+    ) {
+        ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
+
+        let subgraphs = split_at_graph_breaks(self);
+
+        if subgraphs.len() <= 1 {
+            let (program, root) = hlir_to_egglog(self);
+            self.egraphs = vec![run_egglog(&program, &root, &ops, cleanup_hlir).unwrap()];
+
+            self.chunk_groups = vec![ChunkGroup {
+                representative: 0,
+                members: vec![0],
+            }];
+        } else {
+            println!(
+                "   {:>6}  {} chunks from graph breaks",
+                "Split".cyan().bold(),
+                subgraphs.len()
+            );
+            self.build_grouped_egraphs(&subgraphs, &ops, cleanup_hlir);
+        }
+        self.subgraph_descriptors = subgraphs;
+        self.ops = Some(ops);
+    }
+
     /// Build e-graphs for multi-chunk subgraphs, grouping structurally identical
     /// chunks and only building one e-graph per unique group.
     fn build_grouped_egraphs(
