@@ -102,6 +102,8 @@ pub struct SearchOptions {
     pub mutations: usize,
     /// Number of profiling trials per candidate (default: 10)
     pub trials: usize,
+    /// Number of best genomes to keep as parents per generation (default: 1)
+    pub keep_best: usize,
 }
 
 impl SearchOptions {
@@ -112,6 +114,7 @@ impl SearchOptions {
             generation_size: 30,
             mutations: 30,
             trials: 10,
+            keep_best: 1,
         }
     }
 
@@ -130,6 +133,12 @@ impl SearchOptions {
     /// Set the number of profiling trials per candidate.
     pub fn trials(mut self, trials: usize) -> Self {
         self.trials = trials;
+        self
+    }
+
+    /// Set the number of best genomes to keep as parents per generation.
+    pub fn keep_best(mut self, keep_best: usize) -> Self {
+        self.keep_best = keep_best;
         self
     }
 }
@@ -714,20 +723,36 @@ impl Graph {
                 bars_drawn = true;
             }
 
+            // Track top-N parents for offspring generation
+            let mut parents: Vec<(
+                R::ProfileMetric,
+                crate::egglog_utils::EGraphChoiceSet<'_>,
+            )> = vec![(best_metric.clone(), best_genome.clone())];
+
             while n_graphs < limit {
-                let offspring = extract_generation(
-                    egraph,
-                    &best_genome,
-                    (limit - n_graphs).min(options.generation_size),
-                    options.mutations,
-                    &mut prev_selected,
-                    rng,
-                );
-                if offspring.is_empty() {
+                // Generate offspring from all parents, dividing budget evenly
+                let budget = (limit - n_graphs).min(options.generation_size);
+                let per_parent = budget.div_ceil(parents.len());
+                let mut all_offspring = Vec::new();
+                for (_, parent_genome) in &parents {
+                    let remaining = budget.saturating_sub(all_offspring.len());
+                    if remaining == 0 {
+                        break;
+                    }
+                    all_offspring.extend(extract_generation(
+                        egraph,
+                        parent_genome,
+                        per_parent.min(remaining),
+                        options.mutations,
+                        &mut prev_selected,
+                        rng,
+                    ));
+                }
+                if all_offspring.is_empty() {
                     break;
                 }
 
-                for genome in offspring {
+                for genome in all_offspring {
                     n_graphs += 1;
                     list_cache.clear();
                     expr_cache.clear();
@@ -771,6 +796,24 @@ impl Graph {
                             continue;
                         }
                     };
+
+                    // Update parents list (keep top-N for next generation)
+                    let dominated_by_all = parents.len() >= options.keep_best
+                        && !parents.last().unwrap().0.gt(&new_metric);
+                    if !dominated_by_all {
+                        let pos = parents
+                            .iter()
+                            .position(|(m, _)| {
+                                new_metric
+                                    .partial_cmp(m)
+                                    .is_some_and(|o| o == std::cmp::Ordering::Less)
+                            })
+                            .unwrap_or(parents.len());
+                        parents.insert(pos, (new_metric.clone(), genome.clone()));
+                        if parents.len() > options.keep_best {
+                            parents.truncate(options.keep_best);
+                        }
+                    }
 
                     let new_best = best_metric.gt(&new_metric);
                     if new_best {
