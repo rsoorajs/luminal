@@ -1,5 +1,4 @@
 mod compiled_graph;
-mod runtime;
 pub mod typed_data;
 
 // PT2 modules
@@ -22,9 +21,6 @@ fn luminal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cuda")]
     luminal_cuda_lite::dyn_backend::register();
 
-    #[cfg(feature = "cuda_heavy")]
-    luminal_cuda::dyn_backend::register();
-
     m.add_function(wrap_pyfunction!(process_pt2, m)?)?;
     m.add_class::<CompiledGraph>()?;
     m.add_function(wrap_pyfunction!(available_backends, m)?)?;
@@ -40,10 +36,10 @@ fn available_backends() -> Vec<String> {
 
 /// Export the backend registry's `register_backend` function pointer as a PyCapsule.
 ///
-/// External backend plugins (e.g. luminal_tron) import this capsule and use it
-/// to register their backend factory without needing compile-time linkage to
-/// luminal_python. See the plugin discovery system in `luminal/__init__.py`.
-/// Wrapper to make a function pointer Send-safe for PyCapsule.
+/// External backend plugins (e.g. `luminal_penguin`, `luminal_walrus`) import
+/// this capsule and use it to register their backend factory without
+/// compile-time linkage to luminal_python.
+/// See the plugin discovery system in `luminal/__init__.py`.
 #[allow(dead_code)]
 struct FnPtrWrapper(pub *const std::ffi::c_void);
 // Safety: the wrapped pointer is a function pointer (code, not data), valid for the process lifetime.

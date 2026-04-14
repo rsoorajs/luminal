@@ -16,11 +16,12 @@ _register_cache_serialization()
 def _discover_backends():
     """Auto-discover and register external backend plugins.
 
-    External backends (e.g. luminal_tron, luminal_cuda) declare an entry point
-    in their pyproject.toml under the ``luminal.backends`` group::
+    External backends declare an entry point in their pyproject.toml
+    under the ``luminal.backends`` group::
 
         [project.entry-points."luminal.backends"]
-        tron = "luminal_tron:register"
+        penguin = "luminal_penguin:register"
+        walrus = "luminal_walrus:register"
 
     Each entry point should be a callable that accepts a PyCapsule containing
     the ``register_backend`` function pointer from the Rust registry.

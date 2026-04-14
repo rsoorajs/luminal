@@ -1,12 +1,9 @@
 //! [`DynBackend`] implementation for the Metal runtime.
 
-use std::sync::Arc;
-
 use luminal::dyn_backend::{
-    BackendFactory, DynBackend, build_label_map, bytes_to_native_data, register_backend,
+    BackendCompileArgs, DynBackend, bytes_to_native_data, compile_backend, register_backend,
 };
 use luminal::dtype::DType;
-use luminal::op::IntoEgglogOp;
 use luminal::prelude::*;
 
 use crate::runtime::MetalRuntime;
@@ -17,52 +14,35 @@ pub struct MetalDynBackend {
 }
 
 impl DynBackend for MetalDynBackend {
-    fn name(&self) -> &str {
-        "metal"
-    }
+    fn name(&self) -> &str { "metal" }
 
     fn set_data_bytes(&mut self, node: NodeIndex, bytes: Vec<u8>, dtype: DType) {
-        // Metal uses host-side NativeData storage (input_data map).
-        let native = bytes_to_native_data(bytes, dtype);
-        self.runtime.set_data(node, native);
+        self.runtime.set_data(node, bytes_to_native_data(bytes, dtype));
     }
-
     fn set_data_f32(&mut self, node: NodeIndex, data: Vec<f32>) {
         self.runtime.set_data(node, data);
     }
-
     fn get_output_f32(&self, node: NodeIndex) -> Vec<f32> {
-        // MetalRuntime::get_f32 handles Output node lookup + dtype conversion internally.
         self.runtime.get_f32(node)
     }
-
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) {
         self.runtime.execute(dyn_map);
     }
 }
 
-/// Register the Metal backend in the global registry.
-///
-/// Registers under the name `"metal"`.
+fn metal_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<dyn DynBackend>, String> {
+    compile_backend::<MetalRuntime>(
+        graph, args,
+        || Ok(MetalRuntime::initialize(())),
+        |rt, node, bytes, dtype| {
+            rt.set_data(node, bytes_to_native_data(bytes, dtype));
+        },
+        None,
+        |rt| Box::new(MetalDynBackend { runtime: rt }),
+    )
+}
+
+/// Register under `"metal"`.
 pub fn register() {
-    let factory: BackendFactory = Arc::new(|graph, args| {
-        let ops = <MetalRuntime as Runtime>::Ops::into_vec();
-        graph.build_search_space_with_ops(ops, true); // cleanup_hlir=true for non-native
-
-        let rt = MetalRuntime::initialize(());
-        let mut rt = graph.search(rt, args.search_iters);
-
-        // Load weights after search
-        let label_map = build_label_map(graph);
-        for (label, bytes, dtype) in args.weights {
-            if let Some(&node_id) = label_map.get(&label) {
-                let native = bytes_to_native_data(bytes, dtype);
-                rt.set_data(node_id, native);
-            }
-        }
-
-        Ok(Box::new(MetalDynBackend { runtime: rt }) as Box<dyn DynBackend>)
-    });
-
-    register_backend("metal", factory);
+    register_backend("metal", metal_factory);
 }

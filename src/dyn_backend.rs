@@ -1,13 +1,13 @@
 //! Dynamic backend trait and plugin registry.
 //!
 //! This module provides:
-//! - [`DynBackend`]: an object-safe trait that wraps a concrete `Runtime` for dynamic dispatch
-//! - [`BackendFactory`] / [`BackendCompileArgs`]: the factory pattern for backend creation
-//! - A global registry for backend discovery (`register_backend`, `create_backend`)
-//! - [`NativeDynBackend`]: the reference `DynBackend` implementation for CPU
+//! - [`DynBackend`]: an object-safe trait for dynamic backend dispatch
+//! - [`compile_backend`]: generic helper that handles the full compilation pipeline
+//! - A global registry for backend discovery ([`register_backend`], [`create_backend`])
+//! - [`NativeDynBackend`]: the reference implementation for CPU
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 use half::{bf16, f16};
 use petgraph::stable_graph::NodeIndex;
@@ -28,63 +28,31 @@ use crate::op::Runtime;
 /// for `luminal_python` (and other dynamic consumers) without requiring
 /// generic type parameters.
 pub trait DynBackend {
-    /// Human-readable backend name (e.g. `"cuda_lite"`, `"native"`, `"tron"`).
     fn name(&self) -> &str;
 
-    // --- Data management ---------------------------------------------------
-
-    /// Set input data as raw bytes with dtype metadata.
-    /// The backend converts to its native format internally.
     fn set_data_bytes(&mut self, node: NodeIndex, bytes: Vec<u8>, dtype: DType);
-
-    /// Set input data from an f32 vector (convenience / backward compat).
     fn set_data_f32(&mut self, node: NodeIndex, data: Vec<f32>);
-
-    /// Get output tensor data as f32 (copies to host if needed).
     fn get_output_f32(&self, node: NodeIndex) -> Vec<f32>;
-
-    // --- Execution ---------------------------------------------------------
-
-    /// Execute the compiled graph with the given dynamic dimension map.
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>);
 
-    // --- Device pointer support (GPU backends) -----------------------------
+    // --- Optional device pointer support (GPU backends) --------------------
 
-    /// Whether this backend supports direct device pointer operations.
     fn supports_device_ptrs(&self) -> bool {
         false
     }
-
-    /// Set an input tensor from a device pointer (zero-copy).
-    ///
     /// # Safety
-    /// The device pointer must be valid and point to at least `n_bytes` bytes
-    /// on the same device as this runtime.
+    /// Device pointer must be valid and point to at least `n_bytes` bytes.
     unsafe fn set_device_ptr(&mut self, _node: NodeIndex, _ptr: u64, _n_bytes: usize) {
-        panic!(
-            "set_device_ptr not supported by backend '{}'",
-            self.name()
-        );
+        panic!("set_device_ptr not supported by '{}'", self.name());
     }
-
-    /// Register an external device pointer for an output tensor (zero-copy output).
-    ///
     /// # Safety
-    /// The device pointer must be valid through the next `execute()` call.
+    /// Device pointer must remain valid through the next `execute()` call.
     unsafe fn set_output_device_ptr(&mut self, _node: NodeIndex, _ptr: u64, _n_bytes: usize) {
-        panic!(
-            "set_output_device_ptr not supported by backend '{}'",
-            self.name()
-        );
+        panic!("set_output_device_ptr not supported by '{}'", self.name());
     }
-
-    /// Check whether an output was written directly to the registered pointer.
     fn output_is_zero_copy(&self, _node: NodeIndex) -> bool {
         false
     }
-
-    /// Copy output data directly to a device pointer (device-to-device).
-    ///
     /// # Safety
     /// `dest_ptr` must be a valid device allocation with at least `n_bytes`.
     unsafe fn copy_output_to_device_ptr(
@@ -93,47 +61,25 @@ pub trait DynBackend {
         _dest_ptr: u64,
         _n_bytes: usize,
     ) {
-        panic!(
-            "copy_output_to_device_ptr not supported by backend '{}'",
-            self.name()
-        );
+        panic!("copy_output_to_device_ptr not supported by '{}'", self.name());
     }
 }
 
 // ---------------------------------------------------------------------------
-// BackendCompileArgs + BackendFactory
+// BackendCompileArgs + BackendFactory + Registry
 // ---------------------------------------------------------------------------
 
-/// Arguments passed to a [`BackendFactory`] during compilation.
+/// Arguments passed to a backend factory during compilation.
 pub struct BackendCompileArgs {
-    /// Number of search iterations for graph optimization.
     pub search_iters: usize,
-    /// Weights as `(label, raw_bytes, dtype)`.
     pub weights: Vec<(String, Vec<u8>, DType)>,
-    /// `label → element_count` for ALL Input nodes (for sizing dummy data during search).
     pub tensor_sizes: HashMap<String, usize>,
-    /// `label → (device_ptr, n_bytes)` for zero-copy GPU weight sharing.
     pub device_ptrs: HashMap<String, (u64, usize)>,
 }
 
 /// A factory function that compiles a [`Graph`] into a ready-to-execute [`DynBackend`].
-///
-/// The factory is responsible for the full compilation pipeline:
-/// 1. `graph.build_search_space_with_ops(ops, cleanup_hlir)`
-/// 2. Initialize the concrete `Runtime`
-/// 3. Load dummy / real data for search profiling
-/// 4. `graph.search(runtime, search_iters)`
-/// 5. Load real weights post-search
-/// 6. Return a `Box<dyn DynBackend>` wrapper
-// Note: BackendFactory itself must be Send+Sync for the global registry,
-// but the DynBackend it produces need not be Send (e.g., CudaRuntime is !Send).
-pub type BackendFactory = Arc<
-    dyn Fn(&mut Graph, BackendCompileArgs) -> Result<Box<dyn DynBackend>, String> + Send + Sync,
->;
-
-// ---------------------------------------------------------------------------
-// Global registry
-// ---------------------------------------------------------------------------
+pub type BackendFactory =
+    fn(&mut Graph, BackendCompileArgs) -> Result<Box<dyn DynBackend>, String>;
 
 static REGISTRY: OnceLock<Mutex<HashMap<String, BackendFactory>>> = OnceLock::new();
 
@@ -142,41 +88,101 @@ fn registry() -> &'static Mutex<HashMap<String, BackendFactory>> {
 }
 
 /// Register a backend factory under the given name.
-///
-/// Names are case-insensitive (stored lowercase).
-/// Replaces any previously registered factory with the same name.
 pub fn register_backend(name: &str, factory: BackendFactory) {
-    let name = name.to_lowercase();
-    let mut map = registry().lock().unwrap();
-    map.insert(name, factory);
+    registry().lock().unwrap().insert(name.to_string(), factory);
 }
 
 /// Create a backend by name.
-///
-/// Returns `Err` if the name is not registered or if the factory fails.
 pub fn create_backend(
     name: &str,
     graph: &mut Graph,
     args: BackendCompileArgs,
 ) -> Result<Box<dyn DynBackend>, String> {
-    let name_lower = name.to_lowercase();
     let map = registry().lock().unwrap();
-    let factory = map.get(&name_lower).ok_or_else(|| {
+    let factory = *map.get(name).ok_or_else(|| {
         let available: Vec<&String> = map.keys().collect();
-        format!(
-            "Unknown backend '{}'. Available: {:?}",
-            name, available
-        )
+        format!("Unknown backend '{}'. Available: {:?}", name, available)
     })?;
-    let factory = Arc::clone(factory);
-    drop(map); // release lock before calling factory
+    drop(map);
     factory(graph, args)
 }
 
 /// List all registered backend names.
 pub fn available_backends() -> Vec<String> {
-    let map = registry().lock().unwrap();
-    map.keys().cloned().collect()
+    registry().lock().unwrap().keys().cloned().collect()
+}
+
+// ---------------------------------------------------------------------------
+// compile_backend — generic compilation helper
+// ---------------------------------------------------------------------------
+
+/// Generic compilation pipeline shared by all backends.
+///
+/// Handles: build search space → init runtime → set device ptrs → set dummy
+/// data → search → load weights → wrap as `Box<dyn DynBackend>`.
+///
+/// Backend-specific behavior is injected via callbacks:
+/// - `init`: create the concrete runtime
+/// - `set_raw`: upload raw bytes + dtype to a node
+/// - `set_device_ptr`: optional zero-copy device pointer setter
+/// - `wrap`: wrap the final runtime in a `Box<dyn DynBackend>`
+pub fn compile_backend<Rt: Runtime + 'static>(
+    graph: &mut Graph,
+    args: BackendCompileArgs,
+    init: impl FnOnce() -> Result<Rt, String>,
+    set_raw: impl Fn(&mut Rt, NodeIndex, Vec<u8>, DType),
+    set_device_ptr: Option<&dyn Fn(&mut Rt, NodeIndex, u64, usize)>,
+    wrap: impl FnOnce(Rt) -> Box<dyn DynBackend>,
+) -> Result<Box<dyn DynBackend>, String> {
+    graph.build_search_space::<Rt>();
+
+    let mut rt = init()?;
+
+    // Build label map before search (for device ptrs and dummy data)
+    let label_map = build_label_map(graph);
+
+    // Set device pointers for zero-copy weights (GPU backends)
+    let mut device_ptr_nodes = rustc_hash::FxHashSet::default();
+    if let Some(set_ptr) = set_device_ptr {
+        for (label, &(ptr, n_bytes)) in &args.device_ptrs {
+            if let Some(&node_id) = label_map.get(label) {
+                set_ptr(&mut rt, node_id, ptr, n_bytes);
+                device_ptr_nodes.insert(node_id);
+            }
+        }
+    }
+
+    // Set dummy ones for remaining Input nodes (required for search profiling).
+    // Must use 1, NOT 0 — zero inputs cause NaN in many ops.
+    for node_id in graph.graph.node_indices() {
+        if device_ptr_nodes.contains(&node_id) {
+            continue;
+        }
+        if let Some(input) = (*graph.graph[node_id]).as_any().downcast_ref::<Input>() {
+            if let Some(&n) = args.tensor_sizes.get(&input.label) {
+                if n > 0 {
+                    set_raw(&mut rt, node_id, make_ones_bytes(n, input.dtype), input.dtype);
+                }
+            }
+        }
+    }
+
+    // Search
+    let mut rt = graph.search(rt, args.search_iters);
+
+    // Rebuild label map after search (graph may have changed)
+    let label_map = build_label_map(graph);
+
+    // Load real weights post-search (skip device-ptr weights)
+    for (label, bytes, dtype) in &args.weights {
+        if !args.device_ptrs.contains_key(label) {
+            if let Some(&node_id) = label_map.get(label) {
+                set_raw(&mut rt, node_id, bytes.clone(), *dtype);
+            }
+        }
+    }
+
+    Ok(wrap(rt))
 }
 
 // ---------------------------------------------------------------------------
@@ -184,8 +190,6 @@ pub fn available_backends() -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// Build a `label → NodeIndex` map for all `Input` nodes in the graph.
-///
-/// Used by backend factories for weight loading by label matching.
 pub fn build_label_map(graph: &Graph) -> HashMap<String, NodeIndex> {
     graph
         .graph
@@ -199,136 +203,60 @@ pub fn build_label_map(graph: &Graph) -> HashMap<String, NodeIndex> {
         .collect()
 }
 
-/// Convert raw bytes + [`DType`] to [`NativeData`].
-///
-/// Handles the common dtypes. Exotic types (F8, F6, etc.) fall back to
-/// an empty F32 buffer — these are not expected in practice.
-pub fn bytes_to_native_data(bytes: Vec<u8>, dtype: DType) -> NativeData {
-    match dtype {
-        DType::F32 | DType::TF32 => {
-            let data: Vec<f32> = bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect();
-            NativeData::F32(data)
-        }
-        DType::F64 => {
-            // Downcast f64 → f32
-            let data: Vec<f32> = bytes
-                .chunks_exact(8)
-                .map(|b| {
-                    f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
-                })
-                .collect();
-            NativeData::F32(data)
-        }
-        DType::F16 => {
-            let data: Vec<f16> = bytes
-                .chunks_exact(2)
-                .map(|b| f16::from_le_bytes([b[0], b[1]]))
-                .collect();
-            NativeData::F16(data)
-        }
-        DType::Bf16 => {
-            let data: Vec<bf16> = bytes
-                .chunks_exact(2)
-                .map(|b| bf16::from_le_bytes([b[0], b[1]]))
-                .collect();
-            NativeData::Bf16(data)
-        }
-        DType::Int => {
-            let data: Vec<i32> = bytes
-                .chunks_exact(4)
-                .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect();
-            NativeData::Int(data)
-        }
-        DType::Bool => {
-            let data: Vec<bool> = bytes.iter().map(|&b| b != 0).collect();
-            NativeData::Bool(data)
-        }
-        DType::I8 => {
-            let data: Vec<i32> = bytes.iter().map(|&b| b as i8 as i32).collect();
-            NativeData::Int(data)
-        }
-        DType::U8 => {
-            let data: Vec<i32> = bytes.iter().map(|&b| b as i32).collect();
-            NativeData::Int(data)
-        }
-        DType::I16 => {
-            let data: Vec<i32> = bytes
-                .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]) as i32)
-                .collect();
-            NativeData::Int(data)
-        }
-        DType::U16 => {
-            let data: Vec<i32> = bytes
-                .chunks_exact(2)
-                .map(|b| u16::from_le_bytes([b[0], b[1]]) as i32)
-                .collect();
-            NativeData::Int(data)
-        }
-        _ => {
-            // F8/F6/F4/I4/U4 — not expected in practice for native runtime
-            NativeData::F32(vec![])
-        }
-    }
-}
-
 /// Create a byte buffer of `n_elements` ones for the given dtype.
 ///
 /// IMPORTANT: Must use 1, NOT 0 — zero inputs cause NaN in many ops
 /// (fmod, recip, log, etc.) during search profiling.
 pub fn make_ones_bytes(n_elements: usize, dtype: DType) -> Vec<u8> {
+    // Safety: all source types have defined bit representations; we just
+    // reinterpret the backing Vec<u8> without changing the allocation.
+    unsafe fn as_bytes<T>(v: Vec<T>) -> Vec<u8> {
+        let mut v = std::mem::ManuallyDrop::new(v);
+        let ptr = v.as_mut_ptr() as *mut u8;
+        let len = v.len() * std::mem::size_of::<T>();
+        unsafe { Vec::from_raw_parts(ptr, len, len) }
+    }
     match dtype {
-        DType::F32 | DType::TF32 => {
-            let data = vec![1.0f32; n_elements];
-            unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4).to_vec()
-            }
-        }
+        DType::F32 | DType::TF32 => unsafe { as_bytes(vec![1.0f32; n_elements]) },
+        DType::F64 => unsafe { as_bytes(vec![1.0f64; n_elements]) },
+        DType::F16 => unsafe { as_bytes(vec![f16::from_f32(1.0); n_elements]) },
+        DType::Bf16 => unsafe { as_bytes(vec![bf16::from_f32(1.0); n_elements]) },
+        DType::Int => unsafe { as_bytes(vec![1i32; n_elements]) },
+        DType::I16 => unsafe { as_bytes(vec![1i16; n_elements]) },
+        DType::U16 => unsafe { as_bytes(vec![1u16; n_elements]) },
+        _ => vec![1u8; n_elements], // I8, U8, Bool, sub-byte types
+    }
+}
+
+/// Convert raw bytes + [`DType`] to [`NativeData`].
+pub fn bytes_to_native_data(bytes: Vec<u8>, dtype: DType) -> NativeData {
+    // Safety: source bytes are from a valid typed buffer; we reinterpret.
+    unsafe fn from_bytes<T: Copy>(bytes: Vec<u8>) -> Vec<T> {
+        let n = bytes.len() / std::mem::size_of::<T>();
+        let mut bytes = std::mem::ManuallyDrop::new(bytes);
+        unsafe { Vec::from_raw_parts(bytes.as_mut_ptr() as *mut T, n, n) }
+    }
+    match dtype {
+        DType::F32 | DType::TF32 => NativeData::F32(unsafe { from_bytes(bytes) }),
         DType::F64 => {
-            let data = vec![1.0f64; n_elements];
-            unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 8).to_vec()
-            }
+            let f64s: Vec<f64> = unsafe { from_bytes(bytes) };
+            NativeData::F32(f64s.into_iter().map(|v| v as f32).collect())
         }
-        DType::F16 => {
-            let data = vec![f16::from_f32(1.0); n_elements];
-            unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2).to_vec()
-            }
-        }
-        DType::Bf16 => {
-            let data = vec![bf16::from_f32(1.0); n_elements];
-            unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2).to_vec()
-            }
-        }
-        DType::Int => {
-            let data = vec![1i32; n_elements];
-            unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4).to_vec()
-            }
-        }
-        DType::I8 | DType::U8 | DType::Bool => vec![1u8; n_elements],
+        DType::F16 => NativeData::F16(unsafe { from_bytes(bytes) }),
+        DType::Bf16 => NativeData::Bf16(unsafe { from_bytes(bytes) }),
+        DType::Int => NativeData::Int(unsafe { from_bytes(bytes) }),
+        DType::Bool => NativeData::Bool(bytes.into_iter().map(|b| b != 0).collect()),
+        DType::I8 => NativeData::Int(bytes.iter().map(|&b| b as i8 as i32).collect()),
+        DType::U8 => NativeData::Int(bytes.iter().map(|&b| b as i32).collect()),
         DType::I16 => {
-            let data = vec![1i16; n_elements];
-            unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2).to_vec()
-            }
+            let i16s: Vec<i16> = unsafe { from_bytes(bytes) };
+            NativeData::Int(i16s.into_iter().map(|v| v as i32).collect())
         }
         DType::U16 => {
-            let data = vec![1u16; n_elements];
-            unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2).to_vec()
-            }
+            let u16s: Vec<u16> = unsafe { from_bytes(bytes) };
+            NativeData::Int(u16s.into_iter().map(|v| v as i32).collect())
         }
-        _ => {
-            // Sub-byte types (F8, F6, F4, etc.) — just fill with 1 bytes
-            vec![1u8; n_elements]
-        }
+        _ => NativeData::F32(vec![]),
     }
 }
 
@@ -347,8 +275,7 @@ impl DynBackend for NativeDynBackend {
     }
 
     fn set_data_bytes(&mut self, node: NodeIndex, bytes: Vec<u8>, dtype: DType) {
-        let native = bytes_to_native_data(bytes, dtype);
-        self.runtime.set_data(node, native);
+        self.runtime.set_data(node, bytes_to_native_data(bytes, dtype));
     }
 
     fn set_data_f32(&mut self, node: NodeIndex, data: Vec<f32>) {
@@ -356,30 +283,22 @@ impl DynBackend for NativeDynBackend {
     }
 
     fn get_output_f32(&self, node: NodeIndex) -> Vec<f32> {
-        // Find the Output node in the LLIR graph that points to this HLIR node.
         let output_id = self
             .runtime
             .graph
             .node_indices()
             .find(|n| {
-                if let Some(out) = (**self.runtime.graph[*n])
+                (**self.runtime.graph[*n])
                     .as_any()
                     .downcast_ref::<Output>()
-                {
-                    out.node == node.index()
-                } else {
-                    false
-                }
+                    .is_some_and(|out| out.node == node.index())
             })
             .unwrap_or_else(|| panic!("No output node found for {:?}", node));
-
         let data = self
             .runtime
             .buffers
             .get(&output_id)
             .unwrap_or_else(|| panic!("No buffer data for output {:?}", node));
-
-        // Convert any NativeData variant to f32
         (0..data.len()).map(|i| data.f32(i)).collect()
     }
 
@@ -388,30 +307,27 @@ impl DynBackend for NativeDynBackend {
     }
 }
 
-/// Register the native (CPU) backend in the global registry.
-///
-/// Registers under the names `"native"` and `"cpu"`.
-pub fn register_native_backend() {
-    let factory: BackendFactory = Arc::new(|graph, args| {
-        // NativeRuntime has Ops = () — only HLIROps are used.
-        let ops = Vec::new(); // build_search_space_with_ops appends HLIROps automatically
-        graph.build_search_space_with_ops(ops, false); // cleanup_hlir=false for native
-
-        let rt = NativeRuntime::default();
-        let mut rt = graph.search(rt, args.search_iters);
-
-        // Load weights after search, preserving native dtype.
-        let label_map = build_label_map(graph);
-        for (label, bytes, dtype) in args.weights {
-            if let Some(&node_id) = label_map.get(&label) {
-                let native = bytes_to_native_data(bytes, dtype);
-                rt.set_data(node_id, native);
+fn native_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<dyn DynBackend>, String> {
+    compile_backend::<NativeRuntime>(
+        graph,
+        args,
+        || Ok(NativeRuntime::default()),
+        // NativeRuntime::set_data requires the LLIR graph to be loaded (it searches
+        // for Input nodes in the LLIR). Before search, the LLIR is empty. We guard
+        // against that: if rt.graph is empty, skip (dummy data isn't needed for
+        // native since its profile is a no-op).
+        |rt, node, bytes, dtype| {
+            if rt.graph.node_count() > 0 {
+                rt.set_data(node, bytes_to_native_data(bytes, dtype));
             }
-        }
+        },
+        None,
+        |rt| Box::new(NativeDynBackend { runtime: rt }),
+    )
+}
 
-        Ok(Box::new(NativeDynBackend { runtime: rt }) as Box<dyn DynBackend>)
-    });
-
-    register_backend("native", Arc::clone(&factory));
-    register_backend("cpu", factory);
+/// Register the native (CPU) backend. Registers under `"native"` and `"cpu"`.
+pub fn register_native_backend() {
+    register_backend("native", native_factory);
+    register_backend("cpu", native_factory);
 }
