@@ -1,13 +1,12 @@
-//! Dynamic backend trait and plugin registry.
+//! Dynamic backend trait and factory-based compilation.
 //!
 //! This module provides:
 //! - [`DynBackend`]: an object-safe trait for dynamic backend dispatch
 //! - [`compile_backend`]: generic helper that handles the full compilation pipeline
-//! - A global registry for backend discovery ([`register_backend`], [`create_backend`])
+//! - [`BackendFactory`]: function pointer type for backend factories
 //! - [`NativeDynBackend`]: the reference implementation for CPU
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 use half::{bf16, f16};
 use petgraph::stable_graph::NodeIndex;
@@ -87,35 +86,13 @@ pub struct BackendCompileArgs {
 pub type BackendFactory =
     fn(&mut Graph, BackendCompileArgs) -> Result<Box<dyn DynBackend>, String>;
 
-static REGISTRY: OnceLock<Mutex<HashMap<String, BackendFactory>>> = OnceLock::new();
-
-fn registry() -> &'static Mutex<HashMap<String, BackendFactory>> {
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Register a backend factory under the given name.
-pub fn register_backend(name: &str, factory: BackendFactory) {
-    registry().lock().unwrap().insert(name.to_string(), factory);
-}
-
-/// Create a backend by name.
-pub fn create_backend(
-    name: &str,
+/// Compile a graph using a factory function directly.
+pub fn compile_backend_from_factory(
+    factory: BackendFactory,
     graph: &mut Graph,
     args: BackendCompileArgs,
 ) -> Result<Box<dyn DynBackend>, String> {
-    let map = registry().lock().unwrap();
-    let factory = *map.get(name).ok_or_else(|| {
-        let available: Vec<&String> = map.keys().collect();
-        format!("Unknown backend '{}'. Available: {:?}", name, available)
-    })?;
-    drop(map);
     factory(graph, args)
-}
-
-/// List all registered backend names.
-pub fn available_backends() -> Vec<String> {
-    registry().lock().unwrap().keys().cloned().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +288,7 @@ impl DynBackend for NativeDynBackend {
     }
 }
 
-fn native_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<dyn DynBackend>, String> {
+pub fn native_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<dyn DynBackend>, String> {
     compile_backend::<NativeRuntime>(
         graph,
         args,
@@ -330,8 +307,3 @@ fn native_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<dyn
     )
 }
 
-/// Register the native (CPU) backend. Registers under `"native"` and `"cpu"`.
-pub fn register_native_backend() {
-    register_backend("native", native_factory);
-    register_backend("cpu", native_factory);
-}

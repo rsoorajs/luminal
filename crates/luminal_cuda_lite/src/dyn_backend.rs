@@ -1,7 +1,7 @@
 //! [`DynBackend`] implementation for the CUDA lite runtime.
 
 use luminal::dyn_backend::{
-    BackendCompileArgs, DynBackend, compile_backend, register_backend,
+    BackendCompileArgs, DynBackend, compile_backend,
 };
 use luminal::dtype::DType;
 use luminal::prelude::*;
@@ -46,7 +46,7 @@ impl DynBackend for CudaLiteDynBackend {
     }
 }
 
-fn cuda_lite_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<dyn DynBackend>, String> {
+pub fn cuda_lite_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<dyn DynBackend>, String> {
     let cuda_ctx = CudaContext::new(0).map_err(|e| format!("CUDA init failed: {e}"))?;
     let stream = cuda_ctx.default_stream();
     compile_backend::<CudaRuntime>(
@@ -56,9 +56,4 @@ fn cuda_lite_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<
         Some(&|rt, node, ptr, n| unsafe { rt.set_device_ptr(node, ptr, n) }),
         |rt| Box::new(CudaLiteDynBackend { runtime: rt }),
     )
-}
-
-/// Register under `"cuda_lite"`.
-pub fn register() {
-    register_backend("cuda_lite", cuda_lite_factory);
 }

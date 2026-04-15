@@ -9,24 +9,28 @@ from .dtype_util import torch_dtype_code as _torch_dtype_code
 # ---------------------------------------------------------------------------
 
 
-def _detect_backend(example_inputs):
-    """Detect backend from LUMINAL_BACKEND env var or input device."""
-    import os
-    env_backend = os.environ.get("LUMINAL_BACKEND")
-    if env_backend:
-        return env_backend
+def _detect_factory_capsule(example_inputs):
+    """Pick the best built-in factory capsule based on input device."""
     device = example_inputs[0].device if example_inputs else torch.device("cpu")
-    return "cuda_lite" if device.type == "cuda" else "native"
+    if device.type == "cuda":
+        try:
+            from .luminal import _cuda_lite_factory_capsule
+
+            return _cuda_lite_factory_capsule()
+        except ImportError:
+            pass
+    from .luminal import _native_factory_capsule
+
+    return _native_factory_capsule()
 
 
-def _collect_weight_pointers(weights, backend):
+def _collect_weight_pointers(weights):
     """Partition weight tensors into CUDA device pointers and CPU host pointers.
 
     Preserves native dtype — no forced conversion to float32.
 
     Args:
         weights: dict of name -> torch.Tensor
-        backend: backend name string (unused for device decisions now)
 
     Returns:
         (keep_alive, device_ptrs, cpu_ptrs) where:
@@ -57,22 +61,46 @@ def _load_cpu_weights(compiled_graph, cpu_weights):
 
 
 # ---------------------------------------------------------------------------
-# torch.compile backend entry point
+# Backend registration
+# ---------------------------------------------------------------------------
+
+
+def register_backend(factory_capsule):
+    """Wrap a backend factory PyCapsule into a torch.compile-compatible callable.
+
+    Usage:
+        import luminal, luminal_cuda
+        compiled = torch.compile(model, backend=luminal.register_backend(luminal_cuda.luminal_backend))
+
+    Args:
+        factory_capsule: PyCapsule wrapping a BackendFactory fn pointer.
+
+    Returns:
+        A callable(gm, example_inputs, options=None) suitable for torch.compile.
+    """
+
+    def backend(gm, example_inputs, options=None):
+        return _compile_pt2(gm, example_inputs, factory_capsule)
+
+    return backend
+
+
+# ---------------------------------------------------------------------------
+# torch.compile backend entry point (auto-detecting)
 # ---------------------------------------------------------------------------
 
 
 def luminal_backend(gm, example_inputs, options=None):
-    """Luminal torch.compile backend.
+    """Auto-detecting torch.compile backend.
 
-    Usage:
-        torch.compile(model, backend=luminal_backend)
-        torch.compile(model, backend=luminal_backend, options={"backend": "cuda_heavy"})
+    Picks cuda_lite if inputs are on CUDA (and cuda feature is compiled in),
+    native otherwise.
+
+    For external backends, use register_backend:
+        torch.compile(model, backend=luminal.register_backend(luminal_cuda.luminal_backend))
     """
-    if options and "backend" in options:
-        backend = options["backend"]
-    else:
-        backend = _detect_backend(example_inputs)
-    return _compile_pt2(gm, example_inputs, backend)
+    capsule = _detect_factory_capsule(example_inputs)
+    return _compile_pt2(gm, example_inputs, capsule)
 
 
 # ---------------------------------------------------------------------------
@@ -80,8 +108,8 @@ def luminal_backend(gm, example_inputs, options=None):
 # ---------------------------------------------------------------------------
 
 
-def _compile_pt2(gm, example_inputs, backend):
+def _compile_pt2(gm, example_inputs, factory_capsule):
     """PT2/torch.export path — delegates to pt2.pt2_backend."""
     from .pt2 import pt2_backend
 
-    return pt2_backend(gm, example_inputs, backend=backend)
+    return pt2_backend(gm, example_inputs, factory=factory_capsule)

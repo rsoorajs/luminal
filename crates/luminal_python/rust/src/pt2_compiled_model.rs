@@ -1,6 +1,8 @@
+use luminal::dyn_backend::BackendFactory;
 use luminal::prelude::tracing::warn;
 use luminal::prelude::*;
 use pyo3::prelude::*;
+use pyo3::types::{PyCapsule, PyCapsuleMethods};
 use std::collections::HashMap;
 
 use crate::compiled_graph::{CompiledGraph, DimParamMap, GraphTranslation, WeightData};
@@ -36,20 +38,25 @@ fn resolve_dim_sizes(
 }
 
 #[pyfunction]
-#[pyo3(signature = (pt2_path, weights_path, backend, search_iters, weight_device_ptrs=None))]
+#[pyo3(signature = (pt2_path, weights_path, search_iters, factory_capsule, weight_device_ptrs=None))]
 pub fn process_pt2(
     pt2_path: &str,
     weights_path: &str,
-    backend: &str,
     search_iters: usize,
+    factory_capsule: &Bound<'_, PyCapsule>,
     weight_device_ptrs: Option<HashMap<String, (u64, usize)>>,
 ) -> PyResult<CompiledGraph> {
+    let factory: BackendFactory = unsafe {
+        let wrapper_ptr = factory_capsule.pointer() as *const *const std::ffi::c_void;
+        let fn_ptr = *wrapper_ptr;
+        std::mem::transmute(fn_ptr)
+    };
     compile_pt2(
         pt2_path,
         weights_path,
-        backend,
         search_iters,
         weight_device_ptrs.unwrap_or_default(),
+        factory,
     )
     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:#}")))
 }
@@ -57,14 +64,14 @@ pub fn process_pt2(
 fn compile_pt2(
     pt2_path: &str,
     weights_path: &str,
-    backend: &str,
     search_iters: usize,
     weight_device_ptrs: HashMap<String, (u64, usize)>,
+    factory: BackendFactory,
 ) -> anyhow::Result<CompiledGraph> {
     let (translation, mut weights) = translate_pt2(pt2_path, weights_path)?;
     weights.device_ptrs = weight_device_ptrs;
 
-    CompiledGraph::parse_graph(translation, weights, backend, search_iters)
+    CompiledGraph::parse_graph(translation, weights, factory, search_iters)
         .map_err(|e| anyhow::anyhow!(e))
 }
 

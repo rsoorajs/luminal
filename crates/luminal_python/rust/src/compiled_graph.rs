@@ -1,5 +1,5 @@
 use luminal::{
-    dyn_backend::{BackendCompileArgs, DynBackend},
+    dyn_backend::{BackendCompileArgs, BackendFactory, DynBackend},
     prelude::*,
     shape::Expression,
     visualization::ToDot,
@@ -77,7 +77,7 @@ impl CompiledGraph {
     pub fn parse_graph(
         translation: GraphTranslation,
         weight_data: WeightData,
-        backend: &str,
+        factory: BackendFactory,
         search_iters: usize,
     ) -> Result<CompiledGraph, String> {
         let GraphTranslation {
@@ -103,8 +103,8 @@ impl CompiledGraph {
             device_ptrs: weight_data.device_ptrs,
         };
 
-        // Create backend via the global registry
-        let rt = luminal::dyn_backend::create_backend(backend, &mut graph, compile_args)?;
+        // Create backend via the factory directly
+        let rt = luminal::dyn_backend::compile_backend_from_factory(factory, &mut graph, compile_args)?;
 
         // Resolve concrete output shapes from expressions
         let output_shapes: Vec<Vec<usize>> = output_shape_exprs
