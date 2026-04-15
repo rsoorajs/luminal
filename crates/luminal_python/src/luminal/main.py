@@ -26,7 +26,7 @@ def _collect_weight_pointers(weights, backend):
 
     Args:
         weights: dict of name -> torch.Tensor
-        backend: "cuda", "gpu", "cpu", or "native"
+        backend: backend name string (unused for device decisions now)
 
     Returns:
         (keep_alive, device_ptrs, cpu_ptrs) where:
@@ -40,7 +40,7 @@ def _collect_weight_pointers(weights, backend):
     for name, tensor in weights.items():
         t = tensor.detach().contiguous()
         n_bytes = t.numel() * t.element_size()
-        if backend in ("cuda", "gpu", "cuda_lite", "cuda_heavy") and t.is_cuda:
+        if t.is_cuda:
             keep_alive.append(t)
             device_ptrs[name] = (t.data_ptr(), n_bytes)
         else:

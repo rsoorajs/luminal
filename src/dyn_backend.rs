@@ -30,6 +30,12 @@ use crate::op::Runtime;
 pub trait DynBackend {
     fn name(&self) -> &str;
 
+    /// The device type this backend operates on (e.g. "cpu", "cuda").
+    /// Used by the Python frontend to decide input tensor placement.
+    fn device_type(&self) -> &str {
+        "cpu"
+    }
+
     fn set_data_bytes(&mut self, node: NodeIndex, bytes: Vec<u8>, dtype: DType);
     fn set_data_f32(&mut self, node: NodeIndex, data: Vec<f32>);
     fn get_output_f32(&self, node: NodeIndex) -> Vec<f32>;

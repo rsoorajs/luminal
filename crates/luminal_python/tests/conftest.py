@@ -8,7 +8,7 @@ try:
     from maturin_import_hook.settings import MaturinSettings
 
     backend = os.getenv("LUMINAL_BACKEND", "native").lower()
-    settings = MaturinSettings(features=["cuda"]) if backend == "cuda" else None
+    settings = MaturinSettings(features=["cuda"]) if backend != "native" else None
     maturin_import_hook.install(settings=settings)
 except ImportError:
     pass  # Hook not available, rebuilds will be manual
@@ -23,8 +23,7 @@ torch.set_float32_matmul_precision("highest")
 @pytest.fixture
 def device() -> torch.device:
     backend = os.getenv("LUMINAL_BACKEND", "native").lower()
-    # Any CUDA-based backend (cuda, cuda_lite, cuda_heavy, gpu) needs GPU tensors
-    if backend in ("cuda", "cuda_lite", "cuda_heavy", "gpu"):
+    if backend != "native" and torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")
 

@@ -31,7 +31,7 @@ class CompiledModel:
         self._has_dynamic_dims = getattr(graph_result, "has_dynamic_dims", False)
         self._weight_refs = weight_refs or []
         self._user_indices = user_indices
-        self._is_gpu = graph_result.backend not in ("native", "cpu")
+        self._is_gpu = getattr(graph_result, "device_type", "cpu") != "cpu"
         self._supports_device_ptrs = getattr(graph_result, "supports_device_ptrs", False)
         # Expected input dtypes from graph (used to convert user inputs)
         input_dtype_codes = graph_result.input_dtypes

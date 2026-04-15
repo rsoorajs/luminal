@@ -16,6 +16,7 @@ pub struct CudaLiteDynBackend {
 
 impl DynBackend for CudaLiteDynBackend {
     fn name(&self) -> &str { "cuda" }
+    fn device_type(&self) -> &str { "cuda" }
 
     fn set_data_bytes(&mut self, node: NodeIndex, bytes: Vec<u8>, _dtype: DType) {
         self.runtime.set_data(node, bytes);

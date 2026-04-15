@@ -180,6 +180,12 @@ impl CompiledGraph {
         self.runtime.name()
     }
 
+    /// The device type this backend operates on (e.g. "cpu", "cuda").
+    #[getter]
+    fn device_type(&self) -> &str {
+        self.runtime.device_type()
+    }
+
     /// Whether the active backend supports device pointer operations (zero-copy GPU I/O).
     #[getter]
     fn supports_device_ptrs(&self) -> bool {
