@@ -16,7 +16,7 @@ def _detect_backend(example_inputs):
     if env_backend:
         return env_backend
     device = example_inputs[0].device if example_inputs else torch.device("cpu")
-    return "cuda" if device.type == "cuda" else "native"
+    return "cuda_lite" if device.type == "cuda" else "native"
 
 
 def _collect_weight_pointers(weights, backend):

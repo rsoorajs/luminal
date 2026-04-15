@@ -15,7 +15,7 @@ pub struct CudaLiteDynBackend {
 }
 
 impl DynBackend for CudaLiteDynBackend {
-    fn name(&self) -> &str { "cuda" }
+    fn name(&self) -> &str { "cuda_lite" }
     fn device_type(&self) -> &str { "cuda" }
 
     fn set_data_bytes(&mut self, node: NodeIndex, bytes: Vec<u8>, _dtype: DType) {
@@ -58,9 +58,7 @@ fn cuda_lite_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<
     )
 }
 
-/// Register under `"cuda_lite"`, `"cuda"`, and `"gpu"`.
+/// Register under `"cuda_lite"`.
 pub fn register() {
     register_backend("cuda_lite", cuda_lite_factory);
-    register_backend("cuda", cuda_lite_factory);
-    register_backend("gpu", cuda_lite_factory);
 }
