@@ -1,19 +1,25 @@
-# External Backend Plugin Example
+# Luminal Backend Plugin System
 
-luminal supports external backends that register themselves at runtime through
-Python's [entry point](https://packaging.python.org/en/latest/specifications/entry-points/)
-mechanism. This means you can install a backend as a separate pip package and
-luminal will discover it automatically on `import luminal`.
+luminal uses a factory-capsule system for backends. Each backend is a Rust
+`BackendFactory` function wrapped in a PyCapsule and passed directly through
+the compilation chain — no string registry or global state.
 
-## How it works
+## Using a backend
 
-1. **luminal_python** exports a PyCapsule containing the `register_backend`
-   function pointer from its Rust registry.
-2. On `import luminal`, the `_discover_backends()` function scans all installed
-   packages for entry points in the `luminal.backends` group.
-3. Each entry point's `register(capsule)` function is called with the PyCapsule.
-4. The plugin extracts the function pointer, creates a `BackendFactory`, and
-   registers itself under a name (e.g. `"cuda_heavy"`, `"tron"`).
+```python
+import luminal
+
+# Auto-detect (picks cuda_lite if GPU available, native otherwise)
+compiled = torch.compile(model, backend=luminal.luminal_backend)
+
+# External plugin (e.g. luminal_cuda for the cuda_heavy backend)
+import luminal_cuda
+compiled = torch.compile(model, backend=luminal.register_backend(luminal_cuda.luminal_backend))
+```
+
+`register_backend(capsule)` wraps a factory PyCapsule into a
+`torch.compile`-compatible callable. The returned callable passes the factory
+through the shared compilation pipeline (graph export, weight handling, search).
 
 ## Creating a backend plugin
 
@@ -29,58 +35,54 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "luminal-walrus"
+name = "luminal-mybackend"
 dependencies = ["luminal"]
 
-[project.entry-points."luminal.backends"]
-my_backend = "luminal_walrus:register"
-
 [tool.maturin]
-module-name = "luminal_walrus._native"
+module-name = "luminal_mybackend._native"
 python-source = "python"
 features = ["python"]
 ```
 
 ```python
-# python/luminal_walrus/__init__.py
-def register(capsule):
-    from luminal_walrus._native import _register_via_capsule
-    _register_via_capsule(capsule)
+# python/luminal_mybackend/__init__.py
+from luminal_mybackend._native import _factory_capsule
+
+# PyCapsule wrapping the backend factory
+luminal_backend = _factory_capsule()
 ```
 
 ### Rust side
 
 ```rust
 // In Cargo.toml, add pyo3 as an optional dependency gated by a "python" feature.
-// Set crate-type = ["cdylib", "rlib"] so the crate works as both a Python
-// extension and a normal Rust library.
+// Set crate-type = ["cdylib", "rlib"].
 
 // In src/lib.rs:
 #[cfg(feature = "python")]
 #[pyo3::pymodule]
 fn _native(m: &pyo3::prelude::Bound<'_, pyo3::prelude::PyModule>) -> pyo3::PyResult<()> {
     use pyo3::prelude::*;
-    m.add_function(wrap_pyfunction!(_register_via_capsule, m)?)?;
+    m.add_function(wrap_pyfunction!(_factory_capsule, m)?)?;
     Ok(())
 }
 
 #[cfg(feature = "python")]
 #[pyo3::pyfunction]
-fn _register_via_capsule(
-    capsule: &pyo3::prelude::Bound<'_, pyo3::types::PyCapsule>,
-) -> pyo3::PyResult<()> {
-    use pyo3::types::PyCapsuleMethods;
-    unsafe {
-        let fptr = capsule.pointer();
-        let register_fn: fn(&str, luminal::dyn_backend::BackendFactory) =
-            std::mem::transmute(fptr);
-        register_fn("my_backend", my_crate::dyn_backend::my_factory);
-    }
-    Ok(())
+fn _factory_capsule(
+    py: pyo3::prelude::Python<'_>,
+) -> pyo3::PyResult<pyo3::prelude::Bound<'_, pyo3::types::PyCapsule>> {
+    use pyo3::types::PyCapsule;
+    #[repr(transparent)]
+    struct FnPtrWrapper(*const std::ffi::c_void);
+    unsafe impl Send for FnPtrWrapper {}
+    let fptr = my_crate::dyn_backend::my_factory as *const std::ffi::c_void;
+    let name = std::ffi::CString::new("luminal.backend_factory").unwrap();
+    PyCapsule::new(py, FnPtrWrapper(fptr), Some(name))
 }
 ```
 
-The `my_factory` function has the signature:
+The factory function has the signature:
 
 ```rust
 pub fn my_factory(
@@ -89,18 +91,8 @@ pub fn my_factory(
 ) -> Result<Box<dyn DynBackend>, String>
 ```
 
-Use [`luminal::dyn_backend::compile_backend`] to handle the boilerplate
+Use `luminal::dyn_backend::compile_backend` to handle the boilerplate
 (build search space, init runtime, set dummy data, search, load weights).
-
-## Usage
-
-```bash
-# Install luminal and the external backend
-pip install luminal luminal-walrus
-
-# The backend is auto-discovered on import
-python example.py
-```
 
 ## Requirements
 
