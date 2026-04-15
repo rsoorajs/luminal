@@ -105,6 +105,10 @@ pub struct Graph {
     /// single implicit bucket (current behavior). When set, search compiles a
     /// separate LLIR per bucket combination and runtime dispatches automatically.
     pub dim_buckets: FxHashMap<char, Vec<DimBucket>>,
+    /// Metadata for Input nodes: NodeIndex -> (label, dtype).
+    /// Stored as plain data so it survives cross-binary type identity mismatches
+    /// when external backend plugins are compiled separately.
+    pub input_meta: FxHashMap<NodeIndex, (String, DType)>,
 }
 
 impl Graph {
@@ -150,12 +154,14 @@ impl Graph {
 
     /// Create a new tensor with shape S and a name. This name will show up on the graph when displayed
     pub fn named_tensor(&mut self, name: impl ToString, shape: impl ToShape) -> GraphTensor {
+        let name = name.to_string();
         let id = self.graph.add_node(Box::new(crate::hlir::Input {
             node: 0,
-            label: name.to_string(),
+            label: name.clone(),
             dtype: DType::default(),
         }));
         self.get_op_mut::<crate::hlir::Input>(id).node = id.index();
+        self.input_meta.insert(id, (name.clone(), DType::default()));
         GraphTensor {
             id,
             graph_ref: self,

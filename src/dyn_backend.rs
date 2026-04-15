@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 
 use crate::dtype::DType;
 use crate::graph::Graph;
-use crate::hlir::{Input, NativeData, NativeRuntime, Output};
+use crate::hlir::{NativeData, NativeRuntime, Output};
 use crate::op::Runtime;
 
 // ---------------------------------------------------------------------------
@@ -134,12 +134,13 @@ pub fn compile_backend<Rt: Runtime + 'static>(
     set_device_ptr: Option<&dyn Fn(&mut Rt, NodeIndex, u64, usize)>,
     wrap: impl FnOnce(Rt) -> Box<dyn DynBackend>,
 ) -> Result<Box<dyn DynBackend>, String> {
+    // Build label map from input_meta (plain data — no downcast needed,
+    // survives cross-binary type identity mismatches with external plugins).
+    let label_map = build_label_map(graph);
+
     graph.build_search_space::<Rt>();
 
     let mut rt = init()?;
-
-    // Build label map before search (for device ptrs and dummy data)
-    let label_map = build_label_map(graph);
 
     // Set device pointers for zero-copy weights (GPU backends)
     let mut device_ptr_nodes = rustc_hash::FxHashSet::default();
@@ -152,17 +153,15 @@ pub fn compile_backend<Rt: Runtime + 'static>(
         }
     }
 
-    // Set dummy ones for remaining Input nodes (required for search profiling).
+    // Set dummy ones for Input nodes (required for search profiling).
     // Must use 1, NOT 0 — zero inputs cause NaN in many ops.
-    for node_id in graph.graph.node_indices() {
+    for (&node_id, (label, dtype)) in &graph.input_meta {
         if device_ptr_nodes.contains(&node_id) {
             continue;
         }
-        if let Some(input) = (*graph.graph[node_id]).as_any().downcast_ref::<Input>() {
-            if let Some(&n) = args.tensor_sizes.get(&input.label) {
-                if n > 0 {
-                    set_raw(&mut rt, node_id, make_ones_bytes(n, input.dtype), input.dtype);
-                }
+        if let Some(&n) = args.tensor_sizes.get(label) {
+            if n > 0 {
+                set_raw(&mut rt, node_id, make_ones_bytes(n, *dtype), *dtype);
             }
         }
     }
@@ -189,17 +188,16 @@ pub fn compile_backend<Rt: Runtime + 'static>(
 // Shared utilities
 // ---------------------------------------------------------------------------
 
-/// Build a `label → NodeIndex` map for all `Input` nodes in the graph.
+/// Build a `label → NodeIndex` map for all Input nodes in the graph.
+///
+/// Uses `graph.input_meta` (plain data) rather than downcasting, so it works
+/// correctly when the graph was built by a different compilation unit (e.g.
+/// an external backend plugin compiled as a separate wheel).
 pub fn build_label_map(graph: &Graph) -> HashMap<String, NodeIndex> {
     graph
-        .graph
-        .node_indices()
-        .filter_map(|node_id| {
-            (*graph.graph[node_id])
-                .as_any()
-                .downcast_ref::<Input>()
-                .map(|input| (input.label.clone(), node_id))
-        })
+        .input_meta
+        .iter()
+        .map(|(&node_id, (label, _))| (label.clone(), node_id))
         .collect()
 }
 

@@ -66,8 +66,12 @@ def luminal_backend(gm, example_inputs, options=None):
 
     Usage:
         torch.compile(model, backend=luminal_backend)
+        torch.compile(model, backend=luminal_backend, options={"backend": "cuda_heavy"})
     """
-    backend = _detect_backend(example_inputs)
+    if options and "backend" in options:
+        backend = options["backend"]
+    else:
+        backend = _detect_backend(example_inputs)
     return _compile_pt2(gm, example_inputs, backend)
 
 
