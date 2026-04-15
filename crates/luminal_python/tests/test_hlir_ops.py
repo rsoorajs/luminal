@@ -1962,10 +1962,10 @@ def test_argsort_stable_duplicates(device: torch.device):
         dtype=torch.float32,
         device=device,
     )
-    expected = torch.tensor([[1, 2, 0, 3]], dtype=torch.int32, device=device)
+    original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert output.dtype == torch.int32
-    assert torch.equal(output, expected)
+    assert torch.equal(output, original.to(torch.int32))
 
 
 def test_tiny_moe_routing(device: torch.device):

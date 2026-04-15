@@ -17,6 +17,9 @@ const MASKED_FILL_VALUE_ARG: usize = 2;
 const FLOOR_DIVIDE_INPUT_ARG: usize = 0;
 const FLOOR_DIVIDE_OTHER_ARG: usize = 1;
 
+const DIV_MODE_INPUT_ARG: usize = 0;
+const DIV_MODE_OTHER_ARG: usize = 1;
+
 impl<'a> Translator<'a> {
     pub(crate) fn translate_argsort(&mut self, node: &Node) -> Result<GraphTensor> {
         let a = self.get_input_tensor(node, ARGSORT_INPUT_ARG)?;
@@ -52,36 +55,6 @@ impl<'a> Translator<'a> {
             {
                 let dtype = torch_dtype_int_to_luminal(dtype_int as u32);
                 return Ok(a.cast(dtype));
-            }
-        }
-        Ok(a)
-    }
-
-    pub(crate) fn translate_to_dtype(&mut self, node: &Node) -> Result<GraphTensor> {
-        let a = self.get_input_tensor(node, 0)?;
-        if let Some(dtype_int) = node.inputs.get(1).and_then(|i| i.arg.as_scalar_type()) {
-            let dtype = torch_dtype_int_to_luminal(dtype_int);
-            Ok(a.cast(dtype))
-        } else if let Some(dtype_int) = node.inputs.get(1).and_then(|i| i.arg.as_int()) {
-            let dtype = torch_dtype_int_to_luminal(dtype_int as u32);
-            Ok(a.cast(dtype))
-        } else {
-            Ok(a)
-        }
-    }
-
-    pub(crate) fn translate_to_dtype_layout(&mut self, node: &Node) -> Result<GraphTensor> {
-        let a = self.get_input_tensor(node, 0)?;
-        for input in &node.inputs {
-            if input.name == "dtype" {
-                if let Some(dtype_int) = input.arg.as_scalar_type() {
-                    let dtype = torch_dtype_int_to_luminal(dtype_int);
-                    return Ok(a.cast(dtype));
-                }
-                if let Some(dtype_int) = input.arg.as_int() {
-                    let dtype = torch_dtype_int_to_luminal(dtype_int as u32);
-                    return Ok(a.cast(dtype));
-                }
             }
         }
         Ok(a)
@@ -213,6 +186,58 @@ impl<'a> Translator<'a> {
         } else {
             floored.cast(a.dtype)
         })
+    }
+
+    pub(crate) fn translate_div_tensor_mode(&mut self, node: &Node) -> Result<GraphTensor> {
+        let a = self.get_input_tensor(node, DIV_MODE_INPUT_ARG)?;
+        let b = if let Some(name) = node
+            .inputs
+            .get(DIV_MODE_OTHER_ARG)
+            .and_then(|i| i.arg.as_tensor_name())
+        {
+            self.get_tensor(name)?
+        } else {
+            let scalar = self.get_float_arg(node, DIV_MODE_OTHER_ARG)? as f32;
+            self.graph
+                .constant_float(scalar)
+                .cast(a.dtype)
+                .expand_rhs(a.shape)
+        };
+        let (a, b) = crate::pt2_util::ensure_same_dtype(a, b);
+        let (a, b) = broadcast_binary(a, b);
+
+        // Check rounding_mode kwarg
+        let rounding_mode = node.inputs.iter().find_map(|input| {
+            if input.name == "rounding_mode"
+                && let Argument::Other(val) = &input.arg
+            {
+                return val.as_str().map(|s| s.to_string());
+            }
+            None
+        });
+
+        let quotient = a.cast(DType::F32) / b.cast(DType::F32);
+        match rounding_mode.as_deref() {
+            Some("floor") => {
+                let trunc = quotient.cast(DType::Int).cast(DType::F32);
+                let adjust = quotient.lt(trunc).cast(DType::F32);
+                let floored = trunc - adjust;
+                Ok(if a.dtype == DType::Int {
+                    floored.cast(DType::Int)
+                } else {
+                    floored.cast(a.dtype)
+                })
+            }
+            Some("trunc") => Ok(if a.dtype == DType::Int {
+                quotient.cast(DType::Int)
+            } else {
+                quotient.cast(DType::Int).cast(a.dtype)
+            }),
+            _ => {
+                // No rounding mode — regular division
+                Ok(quotient.cast(a.dtype))
+            }
+        }
     }
 
     pub(crate) fn translate_clamp(&mut self, node: &Node) -> Result<GraphTensor> {
