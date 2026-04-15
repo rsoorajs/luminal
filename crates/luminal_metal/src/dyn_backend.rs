@@ -1,7 +1,7 @@
 //! [`DynBackend`] implementation for the Metal runtime.
 
 use luminal::dyn_backend::{
-    BackendCompileArgs, DynBackend, bytes_to_native_data, compile_backend, register_backend,
+    BackendCompileArgs, DynBackend, bytes_to_native_data, compile_backend,
 };
 use luminal::dtype::DType;
 use luminal::prelude::*;
@@ -30,7 +30,7 @@ impl DynBackend for MetalDynBackend {
     }
 }
 
-fn metal_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<dyn DynBackend>, String> {
+pub fn metal_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<dyn DynBackend>, String> {
     compile_backend::<MetalRuntime>(
         graph, args,
         || Ok(MetalRuntime::initialize(())),
@@ -40,9 +40,4 @@ fn metal_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<dyn 
         None,
         |rt| Box::new(MetalDynBackend { runtime: rt }),
     )
-}
-
-/// Register under `"metal"`.
-pub fn register() {
-    register_backend("metal", metal_factory);
 }
