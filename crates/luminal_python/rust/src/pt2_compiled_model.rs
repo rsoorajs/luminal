@@ -68,12 +68,10 @@ pub fn process_pt2(
                 ));
             }
         }
-        let wrapper_ptr = factory_capsule.pointer() as *const *const std::ffi::c_void;
-        if wrapper_ptr.is_null() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "factory_capsule pointer is null",
-            ));
-        }
+        let wrapper_ptr = factory_capsule
+            .pointer_checked(None)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))?
+            .as_ptr() as *const *const std::ffi::c_void;
         let fn_ptr = unsafe { *wrapper_ptr };
         if fn_ptr.is_null() {
             return Err(pyo3::exceptions::PyValueError::new_err(
