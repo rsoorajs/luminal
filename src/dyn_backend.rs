@@ -60,13 +60,11 @@ pub trait DynBackend {
     }
     /// # Safety
     /// `dest_ptr` must be a valid device allocation with at least `n_bytes`.
-    unsafe fn copy_output_to_device_ptr(
-        &self,
-        _node: NodeIndex,
-        _dest_ptr: u64,
-        _n_bytes: usize,
-    ) {
-        panic!("copy_output_to_device_ptr not supported by '{}'", self.name());
+    unsafe fn copy_output_to_device_ptr(&self, _node: NodeIndex, _dest_ptr: u64, _n_bytes: usize) {
+        panic!(
+            "copy_output_to_device_ptr not supported by '{}'",
+            self.name()
+        );
     }
 }
 
@@ -89,8 +87,7 @@ pub struct BackendCompileArgs {
 pub const BACKEND_FACTORY_CAPSULE_NAME: &std::ffi::CStr = c"luminal.backend_factory";
 
 /// A factory function that compiles a [`Graph`] into a ready-to-execute [`DynBackend`].
-pub type BackendFactory =
-    fn(&mut Graph, BackendCompileArgs) -> Result<Box<dyn DynBackend>, String>;
+pub type BackendFactory = fn(&mut Graph, BackendCompileArgs) -> Result<Box<dyn DynBackend>, String>;
 
 /// Compile a graph using a factory function directly.
 pub fn compile_backend_from_factory(
@@ -104,6 +101,9 @@ pub fn compile_backend_from_factory(
 // ---------------------------------------------------------------------------
 // compile_backend — generic compilation helper
 // ---------------------------------------------------------------------------
+
+/// Optional callback for uploading a device pointer + byte count to a node.
+pub type SetDevicePtrFn<'a, Rt> = &'a dyn Fn(&mut Rt, NodeIndex, u64, usize);
 
 /// Generic compilation pipeline shared by all backends.
 ///
@@ -120,7 +120,7 @@ pub fn compile_backend<Rt: Runtime + 'static>(
     args: BackendCompileArgs,
     init: impl FnOnce() -> Result<Rt, String>,
     set_raw: impl Fn(&mut Rt, NodeIndex, Vec<u8>, DType),
-    set_device_ptr: Option<&dyn Fn(&mut Rt, NodeIndex, u64, usize)>,
+    set_device_ptr: Option<SetDevicePtrFn<'_, Rt>>,
     wrap: impl FnOnce(Rt) -> Box<dyn DynBackend>,
 ) -> Result<Box<dyn DynBackend>, String> {
     // Build label map from input_meta (plain data — no downcast needed,
@@ -262,7 +262,8 @@ impl DynBackend for NativeDynBackend {
     }
 
     fn set_data_bytes(&mut self, node: NodeIndex, bytes: Vec<u8>, dtype: DType) {
-        self.runtime.set_data(node, bytes_to_native_data(bytes, dtype));
+        self.runtime
+            .set_data(node, bytes_to_native_data(bytes, dtype));
     }
 
     fn set_data_f32(&mut self, node: NodeIndex, data: Vec<f32>) {
@@ -294,7 +295,10 @@ impl DynBackend for NativeDynBackend {
     }
 }
 
-pub fn native_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<dyn DynBackend>, String> {
+pub fn native_factory(
+    graph: &mut Graph,
+    args: BackendCompileArgs,
+) -> Result<Box<dyn DynBackend>, String> {
     compile_backend::<NativeRuntime>(
         graph,
         args,
@@ -312,4 +316,3 @@ pub fn native_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box
         |rt| Box::new(NativeDynBackend { runtime: rt }),
     )
 }
-

@@ -104,7 +104,8 @@ impl CompiledGraph {
         };
 
         // Create backend via the factory directly
-        let rt = luminal::dyn_backend::compile_backend_from_factory(factory, &mut graph, compile_args)?;
+        let rt =
+            luminal::dyn_backend::compile_backend_from_factory(factory, &mut graph, compile_args)?;
 
         // Resolve concrete output shapes from expressions
         let output_shapes: Vec<Vec<usize>> = output_shape_exprs
@@ -282,7 +283,8 @@ impl CompiledGraph {
         })?;
         let raw_bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, n_bytes).to_vec() };
         let typed = TypedData::from_pytorch_bytes(raw_bytes, dtype_code);
-        self.runtime.set_data_bytes(*node_id, typed.bytes, typed.dtype);
+        self.runtime
+            .set_data_bytes(*node_id, typed.bytes, typed.dtype);
         Ok(())
     }
 
@@ -348,7 +350,10 @@ impl CompiledGraph {
                 name
             ))
         })?;
-        unsafe { self.runtime.set_output_device_ptr(*node_id, device_ptr, n_bytes) };
+        unsafe {
+            self.runtime
+                .set_output_device_ptr(*node_id, device_ptr, n_bytes)
+        };
         Ok(())
     }
 
@@ -380,7 +385,8 @@ impl CompiledGraph {
         })?;
         let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, n_bytes).to_vec() };
         let typed = TypedData::from_pytorch_bytes(bytes, dtype_code);
-        self.runtime.set_data_bytes(node_id, typed.bytes, typed.dtype);
+        self.runtime
+            .set_data_bytes(node_id, typed.bytes, typed.dtype);
         Ok(())
     }
 
@@ -431,7 +437,10 @@ impl CompiledGraph {
                 name
             ))
         })?;
-        unsafe { self.runtime.copy_output_to_device_ptr(*node_id, dest_ptr, n_bytes) };
+        unsafe {
+            self.runtime
+                .copy_output_to_device_ptr(*node_id, dest_ptr, n_bytes)
+        };
         Ok(())
     }
 }

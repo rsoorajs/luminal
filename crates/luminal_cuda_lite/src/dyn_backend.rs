@@ -1,9 +1,7 @@
 //! [`DynBackend`] implementation for the CUDA lite runtime.
 
-use luminal::dyn_backend::{
-    BackendCompileArgs, DynBackend, compile_backend,
-};
 use luminal::dtype::DType;
+use luminal::dyn_backend::{BackendCompileArgs, DynBackend, compile_backend};
 use luminal::prelude::*;
 
 use crate::cudarc::driver::CudaContext;
@@ -15,8 +13,12 @@ pub struct CudaLiteDynBackend {
 }
 
 impl DynBackend for CudaLiteDynBackend {
-    fn name(&self) -> &str { "cuda_lite" }
-    fn device_type(&self) -> &str { "cuda" }
+    fn name(&self) -> &str {
+        "cuda_lite"
+    }
+    fn device_type(&self) -> &str {
+        "cuda"
+    }
 
     fn set_data_bytes(&mut self, node: NodeIndex, bytes: Vec<u8>, _dtype: DType) {
         self.runtime.set_data(node, bytes);
@@ -31,7 +33,9 @@ impl DynBackend for CudaLiteDynBackend {
         self.runtime.execute(dyn_map);
     }
 
-    fn supports_device_ptrs(&self) -> bool { true }
+    fn supports_device_ptrs(&self) -> bool {
+        true
+    }
     unsafe fn set_device_ptr(&mut self, node: NodeIndex, ptr: u64, n: usize) {
         unsafe { self.runtime.set_device_ptr(node, ptr, n) }
     }
@@ -46,13 +50,19 @@ impl DynBackend for CudaLiteDynBackend {
     }
 }
 
-pub fn cuda_lite_factory(graph: &mut Graph, args: BackendCompileArgs) -> Result<Box<dyn DynBackend>, String> {
+pub fn cuda_lite_factory(
+    graph: &mut Graph,
+    args: BackendCompileArgs,
+) -> Result<Box<dyn DynBackend>, String> {
     let cuda_ctx = CudaContext::new(0).map_err(|e| format!("CUDA init failed: {e}"))?;
     let stream = cuda_ctx.default_stream();
     compile_backend::<CudaRuntime>(
-        graph, args,
+        graph,
+        args,
         || Ok(CudaRuntime::initialize(stream)),
-        |rt, node, bytes, _dtype| { rt.set_data(node, bytes); },
+        |rt, node, bytes, _dtype| {
+            rt.set_data(node, bytes);
+        },
         Some(&|rt, node, ptr, n| unsafe { rt.set_device_ptr(node, ptr, n) }),
         |rt| Box::new(CudaLiteDynBackend { runtime: rt }),
     )

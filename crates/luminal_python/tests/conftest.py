@@ -22,7 +22,10 @@ torch.set_float32_matmul_precision("highest")
 
 @pytest.fixture
 def device() -> torch.device:
-    if os.getenv("LUMINAL_TEST_DEVICE", "cpu").lower() == "cuda" and torch.cuda.is_available():
+    if (
+        os.getenv("LUMINAL_TEST_DEVICE", "cpu").lower() == "cuda"
+        and torch.cuda.is_available()
+    ):
         return torch.device("cuda")
     return torch.device("cpu")
 
