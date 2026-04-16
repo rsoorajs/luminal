@@ -68,10 +68,6 @@ def _load_cpu_weights(compiled_graph, cpu_weights):
 def register_backend(factory_capsule):
     """Wrap a backend factory PyCapsule into a torch.compile-compatible callable.
 
-    Usage:
-        import luminal, luminal_cuda
-        compiled = torch.compile(model, backend=luminal.register_backend(luminal_cuda.luminal_backend))
-
     Args:
         factory_capsule: PyCapsule wrapping a BackendFactory fn pointer.
 
@@ -96,8 +92,7 @@ def luminal_backend(gm, example_inputs, options=None):
     Picks cuda_lite if inputs are on CUDA (and cuda feature is compiled in),
     native otherwise.
 
-    For external backends, use register_backend:
-        torch.compile(model, backend=luminal.register_backend(luminal_cuda.luminal_backend))
+    For external backends, use register_backend with the backend's factory capsule.
     """
     capsule = _detect_factory_capsule(example_inputs)
     return _compile_pt2(gm, example_inputs, capsule)
