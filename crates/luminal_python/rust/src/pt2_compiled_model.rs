@@ -69,7 +69,7 @@ pub fn process_pt2(
             }
         }
         let wrapper_ptr = factory_capsule
-            .pointer_checked(None)
+            .pointer_checked(Some(expected))
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))?
             .as_ptr() as *const *const std::ffi::c_void;
         let fn_ptr = unsafe { *wrapper_ptr };
