@@ -192,6 +192,7 @@ def compile(
                     dynamic_shapes=dynamic_shapes,
                     **extra,
                 )
+                ep = ep.run_decompositions()
                 break
             except Exception:
                 continue
@@ -204,6 +205,7 @@ def compile(
             dynamic_shapes=None,
             **extra,
         )
+        ep = ep.run_decompositions()
 
     return _save_and_compile(ep, factory, search_iterations)
 
@@ -222,6 +224,7 @@ def pt2_backend(gm, example_inputs, factory=None):
     gm, user_inputs, original_weights = _reinternalize_lifted_params(gm, example_inputs)
 
     ep = torch.export.export(gm, tuple(user_inputs), **_export_kwargs())
+    ep = ep.run_decompositions()
 
     # When using shared memory (original_weights), strip large weight buffers from
     # the EP before saving.  The Rust side uses device pointers for these weights,

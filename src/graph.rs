@@ -82,6 +82,67 @@ impl DimBucket {
     }
 }
 
+/// Options for controlling the genetic search algorithm.
+///
+/// Use the builder pattern to configure search parameters:
+/// ```
+/// use luminal::prelude::SearchOptions;
+/// let opts = SearchOptions::new(5)
+///     .generation_size(50)
+///     .mutations(40)
+///     .trials(15);
+/// ```
+#[derive(Debug, Clone)]
+pub struct SearchOptions {
+    /// Maximum number of graphs to evaluate
+    pub limit: usize,
+    /// Number of offspring per generation (default: 30)
+    pub generation_size: usize,
+    /// Number of mutations applied to each offspring (default: 30)
+    pub mutations: usize,
+    /// Number of profiling trials per candidate (default: 10)
+    pub trials: usize,
+    /// Number of best genomes to keep as parents per generation (default: 1)
+    pub keep_best: usize,
+}
+
+impl SearchOptions {
+    /// Create new search options with the given limit. Other fields use defaults.
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            generation_size: 30,
+            mutations: 30,
+            trials: 10,
+            keep_best: 1,
+        }
+    }
+
+    /// Set the number of offspring per generation.
+    pub fn generation_size(mut self, generation_size: usize) -> Self {
+        self.generation_size = generation_size;
+        self
+    }
+
+    /// Set the number of mutations per offspring.
+    pub fn mutations(mut self, mutations: usize) -> Self {
+        self.mutations = mutations;
+        self
+    }
+
+    /// Set the number of profiling trials per candidate.
+    pub fn trials(mut self, trials: usize) -> Self {
+        self.trials = trials;
+        self
+    }
+
+    /// Set the number of best genomes to keep as parents per generation.
+    pub fn keep_best(mut self, keep_best: usize) -> Self {
+        self.keep_best = keep_best;
+        self
+    }
+}
+
 /// A Luminal compute graph.
 ///
 /// All computation is represented as a directed acyclic graph.
@@ -360,27 +421,23 @@ impl Graph {
         self.ops.as_ref()
     }
 
-    const DEFAULT_GENERATION_SIZE: usize = 30;
-    const MUTATIONS_PER_OFFSPRING: usize = 30;
-    const TRIALS_PER_PROFILE: usize = 10;
-
     #[tracing::instrument(skip_all)]
     pub fn search<R: Runtime>(&mut self, runtime: R, limit: usize) -> R {
         let mut rng = rand::rng();
-        self.search_rng(runtime, limit, &mut rng)
+        self.search_options(runtime, SearchOptions::new(limit), &mut rng)
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn search_rng<R: Runtime, G: rand::Rng>(
+    pub fn search_options<R: Runtime, G: rand::Rng>(
         &mut self,
         mut runtime: R,
-        limit: usize,
+        options: SearchOptions,
         rng: &mut G,
     ) -> R {
         if self.dim_buckets.is_empty() {
             // No buckets: existing single-search path
             let stitched =
-                self.search_single(&mut runtime, limit, rng, &self.dyn_map.clone(), None);
+                self.search_single(&mut runtime, &options, rng, &self.dyn_map.clone(), None);
 
             runtime.clear_intermediate_buffers();
             runtime.load_llir(&stitched);
@@ -405,7 +462,7 @@ impl Graph {
 
                 let stitched = self.search_single(
                     &mut runtime,
-                    limit,
+                    &options,
                     rng,
                     &representative_dyn_map,
                     Some((combo_idx, n_combos)),
@@ -475,11 +532,12 @@ impl Graph {
     fn search_single<R: Runtime, G: rand::Rng>(
         &self,
         runtime: &mut R,
-        limit: usize,
+        options: &SearchOptions,
         rng: &mut G,
         dyn_map: &FxHashMap<char, usize>,
         bucket_progress: Option<(usize, usize)>,
     ) -> LLIRGraph {
+        let limit = options.limit;
         let n_chunks = self.subgraph_descriptors.len();
         let n_groups = self.chunk_groups.len();
         let multi_chunk = n_chunks > 1;
@@ -616,7 +674,7 @@ impl Graph {
                         None,
                     );
                     runtime.clear_intermediate_buffers();
-                    let profile = runtime.profile(&graph, dyn_map, Self::TRIALS_PER_PROFILE);
+                    let profile = runtime.profile(&graph, dyn_map, options.trials);
                     let has_nan = runtime.has_nan_outputs(&graph, dyn_map);
                     (graph, profile, has_nan)
                 }));
@@ -671,20 +729,36 @@ impl Graph {
                 bars_drawn = true;
             }
 
+            // Track top-N parents for offspring generation
+            let mut parents: Vec<(
+                R::ProfileMetric,
+                crate::egglog_utils::EGraphChoiceSet<'_>,
+            )> = vec![(best_metric.clone(), best_genome.clone())];
+
             while n_graphs < limit {
-                let offspring = extract_generation(
-                    egraph,
-                    &best_genome,
-                    (limit - n_graphs).min(Self::DEFAULT_GENERATION_SIZE),
-                    Self::MUTATIONS_PER_OFFSPRING,
-                    &mut prev_selected,
-                    rng,
-                );
-                if offspring.is_empty() {
+                // Generate offspring from all parents, dividing budget evenly
+                let budget = (limit - n_graphs).min(options.generation_size);
+                let per_parent = budget.div_ceil(parents.len());
+                let mut all_offspring = Vec::new();
+                for (_, parent_genome) in &parents {
+                    let remaining = budget.saturating_sub(all_offspring.len());
+                    if remaining == 0 {
+                        break;
+                    }
+                    all_offspring.extend(extract_generation(
+                        egraph,
+                        parent_genome,
+                        per_parent.min(remaining),
+                        options.mutations,
+                        &mut prev_selected,
+                        rng,
+                    ));
+                }
+                if all_offspring.is_empty() {
                     break;
                 }
 
-                for genome in offspring {
+                for genome in all_offspring {
                     n_graphs += 1;
                     list_cache.clear();
                     expr_cache.clear();
@@ -702,7 +776,7 @@ impl Graph {
                             );
                             runtime.clear_intermediate_buffers();
                             let result =
-                                runtime.profile(&llir_graph, dyn_map, Self::TRIALS_PER_PROFILE);
+                                runtime.profile(&llir_graph, dyn_map, options.trials);
                             let has_nan = runtime.has_nan_outputs(&llir_graph, dyn_map);
                             (result, llir_graph, has_nan)
                         }));
@@ -728,6 +802,24 @@ impl Graph {
                             continue;
                         }
                     };
+
+                    // Update parents list (keep top-N for next generation)
+                    let dominated_by_all = parents.len() >= options.keep_best
+                        && !parents.last().unwrap().0.gt(&new_metric);
+                    if !dominated_by_all {
+                        let pos = parents
+                            .iter()
+                            .position(|(m, _)| {
+                                new_metric
+                                    .partial_cmp(m)
+                                    .is_some_and(|o| o == std::cmp::Ordering::Less)
+                            })
+                            .unwrap_or(parents.len());
+                        parents.insert(pos, (new_metric.clone(), genome.clone()));
+                        if parents.len() > options.keep_best {
+                            parents.truncate(options.keep_best);
+                        }
+                    }
 
                     let new_best = best_metric.gt(&new_metric);
                     if new_best {
