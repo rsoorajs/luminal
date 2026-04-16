@@ -36,7 +36,7 @@ unsafe impl Send for FnPtrWrapper {}
 #[pyfunction]
 fn _native_factory_capsule<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
     let fptr = ::luminal::dyn_backend::native_factory as *const std::ffi::c_void;
-    let name = std::ffi::CString::new("luminal.backend_factory").unwrap();
+    let name = ::luminal::dyn_backend::BACKEND_FACTORY_CAPSULE_NAME.to_owned();
     PyCapsule::new(py, FnPtrWrapper(fptr), Some(name))
 }
 
@@ -45,6 +45,6 @@ fn _native_factory_capsule<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyCapsul
 #[pyfunction]
 fn _cuda_lite_factory_capsule<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
     let fptr = luminal_cuda_lite::dyn_backend::cuda_lite_factory as *const std::ffi::c_void;
-    let name = std::ffi::CString::new("luminal.backend_factory").unwrap();
+    let name = ::luminal::dyn_backend::BACKEND_FACTORY_CAPSULE_NAME.to_owned();
     PyCapsule::new(py, FnPtrWrapper(fptr), Some(name))
 }

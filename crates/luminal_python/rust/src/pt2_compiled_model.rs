@@ -46,10 +46,41 @@ pub fn process_pt2(
     factory_capsule: &Bound<'_, PyCapsule>,
     weight_device_ptrs: Option<HashMap<String, (u64, usize)>>,
 ) -> PyResult<CompiledGraph> {
-    let factory: BackendFactory = unsafe {
+    let factory: BackendFactory = {
+        let expected = ::luminal::dyn_backend::BACKEND_FACTORY_CAPSULE_NAME;
+        match factory_capsule.name()? {
+            Some(name) => {
+                // SAFETY: the &CStr is used immediately (for a byte-wise
+                // comparison) and never stored; the capsule is borrowed for
+                // the duration of this function, so the name pointer stays
+                // valid for as long as we read it here.
+                let actual = unsafe { name.as_cstr() };
+                if actual != expected {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "factory_capsule has wrong name: expected {:?}, got {:?}",
+                        expected, actual,
+                    )));
+                }
+            }
+            None => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "factory_capsule has no name; expected \"luminal.backend_factory\"",
+                ));
+            }
+        }
         let wrapper_ptr = factory_capsule.pointer() as *const *const std::ffi::c_void;
-        let fn_ptr = *wrapper_ptr;
-        std::mem::transmute(fn_ptr)
+        if wrapper_ptr.is_null() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "factory_capsule pointer is null",
+            ));
+        }
+        let fn_ptr = unsafe { *wrapper_ptr };
+        if fn_ptr.is_null() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "factory_capsule inner function pointer is null",
+            ));
+        }
+        unsafe { std::mem::transmute(fn_ptr) }
     };
     compile_pt2(
         pt2_path,

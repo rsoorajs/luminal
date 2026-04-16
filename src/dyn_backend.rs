@@ -82,6 +82,12 @@ pub struct BackendCompileArgs {
     pub device_ptrs: HashMap<String, (u64, usize)>,
 }
 
+/// Canonical PyCapsule name for [`BackendFactory`] function-pointer capsules.
+///
+/// Value MUST remain `"luminal.backend_factory"` for compatibility with
+/// external plugin producers built against older versions of this crate.
+pub const BACKEND_FACTORY_CAPSULE_NAME: &std::ffi::CStr = c"luminal.backend_factory";
+
 /// A factory function that compiles a [`Graph`] into a ready-to-execute [`DynBackend`].
 pub type BackendFactory =
     fn(&mut Graph, BackendCompileArgs) -> Result<Box<dyn DynBackend>, String>;
