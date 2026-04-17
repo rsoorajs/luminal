@@ -188,7 +188,7 @@ fn get_cubin(program: nvrtc_sys::nvrtcProgram) -> Result<Vec<u8>, NvrtcError> {
     let mut cubin = Vec::with_capacity(cubin_size);
     cubin.resize(cubin_size, 0);
     unsafe { nvrtc_sys::nvrtcGetCUBIN(program, cubin.as_mut_ptr()) }.result()?;
-    Ok(cubin.into_iter().map(|byte| byte as u8).collect())
+    Ok(cubin)
 }
 
 pub(crate) fn compile_module_image_for_current_device<S: AsRef<str>>(

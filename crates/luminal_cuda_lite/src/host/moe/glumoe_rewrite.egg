@@ -12,7 +12,7 @@
 ;   ?down_w       - stacked down expert weights [E, H, intermediate] BF16
 ;
 ; The pattern captures:
-;   1. Gate-up expert gather (Iota, Mul, Cast, Iota, Cast, Add, Cast, Gather)
+;   1. Gate-up expert gather (Iota, Mul, Iota, Add, Gather)
 ;   2. Cast BF16→F32 of gathered gate-up weights
 ;   3. Gate-up batched matmul (Mul + SumReduce)
 ;   4. Gate/Up split via Iota+Gather (slice semantics)
@@ -32,21 +32,15 @@
         (= ?gu_iota_base (Op (Iota ?gu_io ?gu_iota_base_range) (INil)))
         ; t52: Mul topk_indices * io → base offsets [s, k]
         (= ?gu_mul_base (Op (Mul ?gu_mul_base_shape ?gu_mul_base_a_stride ?gu_mul_base_b_stride ?gu_mul_base_out_stride) (ICons ?topk_idx (ICons ?gu_iota_base (INil)))))
-        ; t53: Cast to F32
-        (= ?gu_cast_base (Op (Cast ?gu_cast_base_size (F32)) (ICons ?gu_mul_base (INil))))
-        ; t54: Iota for within-expert index
+        ; t53: Iota for within-expert index
         (= ?gu_iota_within (Op (Iota (MIter) ?gu_iota_within_range) (INil)))
-        ; t55: Cast within to F32
-        (= ?gu_cast_within (Op (Cast ?gu_cast_within_size (F32)) (ICons ?gu_iota_within (INil))))
-        ; t56: Add base + within → flat gather indices
-        (= ?gu_add_idx (Op (Add ?gu_add_shape ?gu_add_a_stride ?gu_add_b_stride ?gu_add_out_stride) (ICons ?gu_cast_base (ICons ?gu_cast_within (INil)))))
-        ; t57: Cast to Int
-        (= ?gu_cast_idx (Op (Cast ?gu_cast_idx_size (Int)) (ICons ?gu_add_idx (INil))))
-        ; t58: Gather gate_up weights
-        (= ?gu_gathered (Op (Gather ?gu_gather_idx_shape ?gu_gather_idx_stride ?gu_gather_data_shape ?gu_gather_data_stride) (ICons ?gu_cast_idx (ICons ?gate_up_w (INil)))))
+        ; t54: Add base + within → flat gather indices
+        (= ?gu_add_idx (Op (Add ?gu_add_shape ?gu_add_a_stride ?gu_add_b_stride ?gu_add_out_stride) (ICons ?gu_mul_base (ICons ?gu_iota_within (INil)))))
+        ; t55: Gather gate_up weights
+        (= ?gu_gathered (Op (Gather ?gu_gather_idx_shape ?gu_gather_idx_stride ?gu_gather_data_shape ?gu_gather_data_stride) (ICons ?gu_add_idx (ICons ?gate_up_w (INil)))))
 
         ; ===== Cast BF16→F32 =====
-        ; t59: Cast gathered gate_up to F32
+        ; t56: Cast gathered gate_up to F32
         (= ?gu_f32 (Op (Cast ?gu_f32_size (F32)) (ICons ?gu_gathered (INil))))
 
         ; ===== Gate-up batched matmul =====
@@ -88,21 +82,15 @@
         (= ?dn_iota_base (Op (Iota ?dn_io ?dn_iota_base_range) (INil)))
         ; t75: Mul topk_indices * io_down
         (= ?dn_mul_base (Op (Mul ?dn_mul_base_shape ?dn_mul_base_a_stride ?dn_mul_base_b_stride ?dn_mul_base_out_stride) (ICons ?topk_idx (ICons ?dn_iota_base (INil)))))
-        ; t76: Cast to F32
-        (= ?dn_cast_base (Op (Cast ?dn_cast_base_size (F32)) (ICons ?dn_mul_base (INil))))
-        ; t77: Iota for within-expert index
+        ; t76: Iota for within-expert index
         (= ?dn_iota_within (Op (Iota (MIter) ?dn_iota_within_range) (INil)))
-        ; t78: Cast within to F32
-        (= ?dn_cast_within (Op (Cast ?dn_cast_within_size (F32)) (ICons ?dn_iota_within (INil))))
-        ; t79: Add base + within
-        (= ?dn_add_idx (Op (Add ?dn_add_shape ?dn_add_a_stride ?dn_add_b_stride ?dn_add_out_stride) (ICons ?dn_cast_base (ICons ?dn_cast_within (INil)))))
-        ; t80: Cast to Int
-        (= ?dn_cast_idx (Op (Cast ?dn_cast_idx_size (Int)) (ICons ?dn_add_idx (INil))))
-        ; t81: Gather down weights
-        (= ?dn_gathered (Op (Gather ?dn_gather_idx_shape ?dn_gather_idx_stride ?dn_gather_data_shape ?dn_gather_data_stride) (ICons ?dn_cast_idx (ICons ?down_w (INil)))))
+        ; t77: Add base + within
+        (= ?dn_add_idx (Op (Add ?dn_add_shape ?dn_add_a_stride ?dn_add_b_stride ?dn_add_out_stride) (ICons ?dn_mul_base (ICons ?dn_iota_within (INil)))))
+        ; t78: Gather down weights
+        (= ?dn_gathered (Op (Gather ?dn_gather_idx_shape ?dn_gather_idx_stride ?dn_gather_data_shape ?dn_gather_data_stride) (ICons ?dn_add_idx (ICons ?down_w (INil)))))
 
         ; ===== Cast BF16→F32 =====
-        ; t82: Cast gathered down to F32
+        ; t79: Cast gathered down to F32
         (= ?dn_f32 (Op (Cast ?dn_f32_size (F32)) (ICons ?dn_gathered (INil))))
 
         ; ===== Down batched matmul =====
