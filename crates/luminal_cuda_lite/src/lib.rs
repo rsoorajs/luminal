@@ -186,8 +186,8 @@ fn get_cubin(program: nvrtc_sys::nvrtcProgram) -> Result<Vec<u8>, NvrtcError> {
     }
 
     let mut cubin = Vec::with_capacity(cubin_size);
-    cubin.resize(cubin_size, 0);
-    unsafe { nvrtc_sys::nvrtcGetCUBIN(program, cubin.as_mut_ptr()) }.result()?;
+    cubin.resize(cubin_size, 0u8);
+    unsafe { nvrtc_sys::nvrtcGetCUBIN(program, cubin.as_mut_ptr() as *mut _) }.result()?;
     Ok(cubin)
 }
 
