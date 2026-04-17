@@ -14,7 +14,10 @@ const REPO_ID: &str = "google/gemma-4-26B-A4B";
 fn main() {
     let max_seq_len = 4096;
     let gen_tokens = 30;
-    let search_graphs = 50;
+    let search_graphs = std::env::var("SEARCH_GRAPHS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
     let prompt = "The capital of France is";
 
     let ctx = CudaContext::new(0).unwrap();
