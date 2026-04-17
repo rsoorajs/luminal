@@ -11,14 +11,26 @@ use tokenizers::Tokenizer;
 
 const REPO_ID: &str = "google/gemma-4-26B-A4B";
 
-fn main() {
-    let max_seq_len = 4096;
-    let gen_tokens = 30;
-    let search_graphs = std::env::var("SEARCH_GRAPHS")
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(50);
-    let prompt = "The capital of France is";
+        .unwrap_or(default)
+}
+
+fn env_bool(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|s| matches!(s.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn main() {
+    let max_seq_len = env_usize("MAX_SEQ_LEN", 4096);
+    let gen_tokens = env_usize("GEN_TOKENS", 30);
+    let search_graphs = env_usize("SEARCH_GRAPHS", 50);
+    let prompt = std::env::var("PROMPT").unwrap_or_else(|_| "The capital of France is".to_string());
+    let use_full_cuda_rewrites = env_bool("FULL_CUDA_REWRITES");
+    let print_token_ids = env_bool("PRINT_TOKEN_IDS");
 
     let ctx = CudaContext::new(0).unwrap();
     let stream = ctx.default_stream();
@@ -27,7 +39,11 @@ fn main() {
     println!("Using model directory: {}", model_dir.display());
 
     let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
-    let prompt_tokens = tokenizer.encode(prompt, true).unwrap().get_ids().to_vec();
+    let prompt_tokens = tokenizer
+        .encode(prompt.as_str(), true)
+        .unwrap()
+        .get_ids()
+        .to_vec();
 
     let mut cx = Graph::default();
     let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
@@ -40,8 +56,19 @@ fn main() {
         v_out.output();
     }
 
-    println!("Building E-Graph...");
-    cx.build_search_space::<CudaRuntime>();
+    // Gemma 4's MoE graph is large enough that saturating the full CUDA rewrite
+    // space can take a very long time. Keep the generic CUDA HLIR kernels as the
+    // default so the example reaches end-to-end inference quickly.
+    if use_full_cuda_rewrites {
+        println!("Building E-Graph...");
+        cx.build_search_space::<CudaRuntime>();
+    } else {
+        println!("Building E-Graph (generic CUDA HLIR kernels)...");
+        cx.build_search_space_exclude_ops::<CudaRuntime, (
+            luminal_cuda_lite::kernel::other_ops::Ops,
+            luminal_cuda_lite::host::Ops,
+        )>();
+    }
 
     println!("Loading weights...");
     let mut runtime = CudaRuntime::initialize(stream);
@@ -73,6 +100,7 @@ fn main() {
     let mut prev_seq = 0usize;
     let mut fwd_durations = vec![];
     let mut seen_tokens = FxHashSet::default();
+    let mut generated_token_ids = vec![];
     let repetition_penalty: f32 = 1.05;
 
     const EOS_TOKEN: u32 = 1;
@@ -104,6 +132,7 @@ fn main() {
         .max_by(|(_, a), (_, b)| a.total_cmp(b))
         .unwrap()
         .0 as u32;
+    generated_token_ids.push(next_token);
     print!("{}", tokenizer.decode(&[next_token], true).unwrap());
     std::io::stdout().flush().unwrap();
     seen_tokens.insert(next_token);
@@ -141,6 +170,7 @@ fn main() {
             .max_by(|(_, a), (_, b)| a.total_cmp(b))
             .unwrap()
             .0 as u32;
+        generated_token_ids.push(next_token);
         seen_tokens.insert(next_token);
 
         if next_token == EOS_TOKEN {
@@ -152,6 +182,9 @@ fn main() {
         fwd_durations.push(start.elapsed());
     }
     println!();
+    if print_token_ids {
+        println!("Generated token ids: {generated_token_ids:?}");
+    }
 
     println!(
         "  TTFT: {:.2} ms ({} prompt tokens)",
