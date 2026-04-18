@@ -29,7 +29,6 @@ fn main() {
     let gen_tokens = env_usize("GEN_TOKENS", 30);
     let search_graphs = env_usize("SEARCH_GRAPHS", 50);
     let prompt = std::env::var("PROMPT").unwrap_or_else(|_| "The capital of France is".to_string());
-    let use_full_cuda_rewrites = env_bool("FULL_CUDA_REWRITES");
     let print_token_ids = env_bool("PRINT_TOKEN_IDS");
 
     let ctx = CudaContext::new(0).unwrap();
@@ -56,19 +55,8 @@ fn main() {
         v_out.output();
     }
 
-    // Gemma 4's MoE graph is large enough that saturating the full CUDA rewrite
-    // space can take a very long time. Keep the generic CUDA HLIR kernels as the
-    // default so the example reaches end-to-end inference quickly.
-    if use_full_cuda_rewrites {
-        println!("Building E-Graph...");
-        cx.build_search_space::<CudaRuntime>();
-    } else {
-        println!("Building E-Graph (generic CUDA HLIR kernels)...");
-        cx.build_search_space_exclude_ops::<CudaRuntime, (
-            luminal_cuda_lite::kernel::other_ops::Ops,
-            luminal_cuda_lite::host::Ops,
-        )>();
-    }
+    println!("Building E-Graph...");
+    cx.build_search_space::<CudaRuntime>();
 
     println!("Loading weights...");
     let mut runtime = CudaRuntime::initialize(stream);
