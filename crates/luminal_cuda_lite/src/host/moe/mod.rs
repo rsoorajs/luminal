@@ -324,8 +324,14 @@ impl HostOp for GLUMoE {
         let topk_idx_i32: &[i32] = bytemuck::cast_slice(&topk_idx_host);
         let topk_vals_host: Vec<u8> = stream.clone_dtoh(topk_vals_buf)?;
         let topk_vals_f32: &[f32] = bytemuck::cast_slice(&topk_vals_host);
-        let idx_k = topk_idx_i32.len().checked_div(seq).unwrap_or(top_k_expected);
-        let val_k = topk_vals_f32.len().checked_div(seq).unwrap_or(top_k_expected);
+        let idx_k = topk_idx_i32
+            .len()
+            .checked_div(seq)
+            .unwrap_or(top_k_expected);
+        let val_k = topk_vals_f32
+            .len()
+            .checked_div(seq)
+            .unwrap_or(top_k_expected);
         let top_k = idx_k.min(val_k);
         if seq > 0 && top_k == 0 {
             return Ok(());
