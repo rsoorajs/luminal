@@ -394,11 +394,19 @@ impl Graph {
             subgraphs.len()
         );
 
+        // Run egglog per group in parallel: each `run_egglog_with` creates
+        // a fresh `egglog::EGraph` and shares no mutable state, so group
+        // executions are trivially data-parallel. Pre-build the shared op
+        // text fragments outside the loop so the parallel closure only
+        // captures Send types (strings), not the non-Send trait objects.
+        use crate::egglog_utils::{OpTextParts, run_egglog_with};
+        use rayon::prelude::*;
+        let op_parts = OpTextParts::new(ops, cleanup_hlir);
         self.egraphs = groups
-            .iter()
+            .par_iter()
             .map(|g| {
                 let (ref program, ref root) = egglog_texts[g.representative];
-                run_egglog(program, root, ops, cleanup_hlir).unwrap()
+                run_egglog_with(program, root, &op_parts).unwrap()
             })
             .collect();
 
