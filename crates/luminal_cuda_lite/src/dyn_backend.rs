@@ -29,6 +29,12 @@ impl DynBackend for CudaLiteDynBackend {
     fn get_output_f32(&self, node: NodeIndex) -> Vec<f32> {
         self.runtime.get_f32(node)
     }
+    fn get_output_i32(&self, node: NodeIndex) -> Vec<i32> {
+        self.runtime.get_i32(node)
+    }
+    fn get_output_bool(&self, node: NodeIndex) -> Vec<bool> {
+        self.runtime.get_bool(node)
+    }
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) {
         self.runtime.execute(dyn_map);
     }

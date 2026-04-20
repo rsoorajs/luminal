@@ -422,6 +422,28 @@ impl CompiledGraph {
         Ok(self.runtime.get_output_f32(*node_id))
     }
 
+    /// Get output tensor data by name as i32 (copies to host).
+    fn get_output_i32(&self, name: &str) -> PyResult<Vec<i32>> {
+        let node_id = self.tensor_ids.get(name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Unknown output tensor: {}",
+                name
+            ))
+        })?;
+        Ok(self.runtime.get_output_i32(*node_id))
+    }
+
+    /// Get output tensor data by name as bool (copies to host).
+    fn get_output_bool(&self, name: &str) -> PyResult<Vec<bool>> {
+        let node_id = self.tensor_ids.get(name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Unknown output tensor: {}",
+                name
+            ))
+        })?;
+        Ok(self.runtime.get_output_bool(*node_id))
+    }
+
     /// Copy output tensor data directly to a device pointer (DtoD).
     /// Avoids the DtoH + HtoD round-trip of get_output() + .to(device).
     /// Requires a GPU backend.

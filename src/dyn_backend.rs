@@ -38,6 +38,12 @@ pub trait DynBackend {
     fn set_data_bytes(&mut self, node: NodeIndex, bytes: Vec<u8>, dtype: DType);
     fn set_data_f32(&mut self, node: NodeIndex, data: Vec<f32>);
     fn get_output_f32(&self, node: NodeIndex) -> Vec<f32>;
+    fn get_output_i32(&self, _node: NodeIndex) -> Vec<i32> {
+        panic!("get_output_i32 not supported by '{}'", self.name());
+    }
+    fn get_output_bool(&self, _node: NodeIndex) -> Vec<bool> {
+        panic!("get_output_bool not supported by '{}'", self.name());
+    }
     fn execute(&mut self, dyn_map: &FxHashMap<char, usize>);
 
     // --- Optional device pointer support (GPU backends) --------------------
@@ -271,6 +277,27 @@ impl DynBackend for NativeDynBackend {
     }
 
     fn get_output_f32(&self, node: NodeIndex) -> Vec<f32> {
+        let data = self.output_buffer(node);
+        (0..data.len()).map(|i| data.f32(i)).collect()
+    }
+
+    fn get_output_i32(&self, node: NodeIndex) -> Vec<i32> {
+        let data = self.output_buffer(node);
+        (0..data.len()).map(|i| data.i32(i)).collect()
+    }
+
+    fn get_output_bool(&self, node: NodeIndex) -> Vec<bool> {
+        let data = self.output_buffer(node);
+        (0..data.len()).map(|i| data.bool(i)).collect()
+    }
+
+    fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) {
+        self.runtime.execute(dyn_map);
+    }
+}
+
+impl NativeDynBackend {
+    fn output_buffer(&self, node: NodeIndex) -> &NativeData {
         let output_id = self
             .runtime
             .graph
@@ -282,16 +309,10 @@ impl DynBackend for NativeDynBackend {
                     .is_some_and(|out| out.node == node.index())
             })
             .unwrap_or_else(|| panic!("No output node found for {:?}", node));
-        let data = self
-            .runtime
+        self.runtime
             .buffers
             .get(&output_id)
-            .unwrap_or_else(|| panic!("No buffer data for output {:?}", node));
-        (0..data.len()).map(|i| data.f32(i)).collect()
-    }
-
-    fn execute(&mut self, dyn_map: &FxHashMap<char, usize>) {
-        self.runtime.execute(dyn_map);
+            .unwrap_or_else(|| panic!("No buffer data for output {:?}", node))
     }
 }
 
