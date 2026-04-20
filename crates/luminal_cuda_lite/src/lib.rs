@@ -1,3 +1,4 @@
+pub mod dyn_backend;
 pub mod host;
 pub mod kernel;
 pub mod runtime;

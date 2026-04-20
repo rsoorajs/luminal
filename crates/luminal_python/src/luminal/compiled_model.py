@@ -31,7 +31,10 @@ class CompiledModel:
         self._has_dynamic_dims = getattr(graph_result, "has_dynamic_dims", False)
         self._weight_refs = weight_refs or []
         self._user_indices = user_indices
-        self._is_cuda = graph_result.backend == "cuda"
+        self._is_gpu = getattr(graph_result, "device_type", "cpu") != "cpu"
+        self._supports_device_ptrs = getattr(
+            graph_result, "supports_device_ptrs", False
+        )
         # Expected input dtypes from graph (used to convert user inputs)
         input_dtype_codes = graph_result.input_dtypes
         self._input_dtypes = [
@@ -89,7 +92,7 @@ class CompiledModel:
         for name, tensor, expected_dtype in zip(
             self._input_names, user_inputs, self._input_dtypes
         ):
-            if self._is_cuda and tensor.is_cuda:
+            if self._supports_device_ptrs and tensor.is_cuda:
                 t = tensor.detach().contiguous().to(expected_dtype)
                 n_bytes = t.numel() * t.element_size()
                 self._graph.set_input_device_ptr(name, t.data_ptr(), n_bytes)
@@ -110,7 +113,7 @@ class CompiledModel:
 
         # CUDA zero-copy path: pre-allocate output tensors and register their device
         # pointers so the final kernel writes directly into PyTorch's buffer.
-        _use_zero_copy = self._is_cuda and hasattr(self._graph, "set_output_device_ptr")
+        _use_zero_copy = self._supports_device_ptrs
         output_tensors = []
         if _use_zero_copy:
             for i, (name, shape) in enumerate(zip(self._output_names, output_shapes)):
