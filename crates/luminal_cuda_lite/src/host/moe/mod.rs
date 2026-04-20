@@ -324,7 +324,7 @@ impl HostOp for GLUMoE {
         let output_ptr = buf_ptr(output_buf, stream);
 
         let cublaslt = self.get_cublaslt(stream)?;
-        let (_, f32_to_bf16_fn, swiglu_fn) = self.get_kernels(stream);
+        let (_, f32_to_bf16_fn, activation_fn) = self.get_kernels(stream);
 
         // Read top-k routing values from GPU
         let topk_idx_host: Vec<u8> = stream.clone_dtoh(topk_idx_buf)?;
