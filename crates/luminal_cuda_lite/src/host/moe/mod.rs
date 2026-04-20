@@ -33,6 +33,7 @@ use crate::{
         },
     },
     host::HostOp,
+    try_create_cublaslt,
 };
 
 const WORKSPACE_SIZE: usize = 32 * 1024 * 1024; // 32 MiB
@@ -146,9 +147,15 @@ impl Clone for GLUMoE {
 }
 
 impl GLUMoE {
-    fn get_cublaslt(&self, stream: &Arc<CudaStream>) -> &Arc<CudaBlasLT> {
-        self.cublaslt
-            .get_or_init(|| Arc::new(CudaBlasLT::new(stream.clone()).unwrap()))
+    fn get_cublaslt(&self, stream: &Arc<CudaStream>) -> anyhow::Result<Arc<CudaBlasLT>> {
+        if let Some(cublaslt) = self.cublaslt.get() {
+            return Ok(cublaslt.clone());
+        }
+        let created = try_create_cublaslt(stream.clone()).map_err(|message| {
+            anyhow::anyhow!("cuBLASLt unavailable on this machine: {message}")
+        })?;
+        let _ = self.cublaslt.set(created.clone());
+        Ok(created)
     }
 
     fn get_kernels(
@@ -316,7 +323,7 @@ impl HostOp for GLUMoE {
         let down_ptr = buf_ptr(down_buf, stream);
         let output_ptr = buf_ptr(output_buf, stream);
 
-        let cublaslt = self.get_cublaslt(stream);
+        let cublaslt = self.get_cublaslt(stream)?;
         let (_, f32_to_bf16_fn, activation_fn) = self.get_kernels(stream);
 
         // Read top-k routing values from GPU
@@ -414,7 +421,7 @@ impl HostOp for GLUMoE {
                 let expert_gu_ptr = gate_up_ptr + expert_idx as u64 * gu_stride;
                 cublas_matmul(
                     stream,
-                    cublaslt,
+                    &cublaslt,
                     ws_ptr,
                     gate_up_dim as u64,
                     1,
@@ -458,7 +465,7 @@ impl HostOp for GLUMoE {
                 let beta = if i == 0 { 0.0f32 } else { 1.0f32 };
                 cublas_matmul_mixed(
                     stream,
-                    cublaslt,
+                    &cublaslt,
                     ws_ptr,
                     hidden as u64,
                     1,
