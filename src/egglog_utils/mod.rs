@@ -391,8 +391,10 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
 
     // 2. Map <node-id> → <egglog var name>
     let mut names: HashMap<NodeIndex, String> = HashMap::new();
-    let mut out = String::new();
+    // Pre-size output to avoid growth reallocations; ops emit ~100-200 chars each.
+    let mut out = String::with_capacity(topo_order.len() * 160);
 
+    use std::fmt::Write;
     let mut curr_id = 0;
     for n in topo_order {
         let sources: Vec<(NodeIndex, String)> = graph
@@ -401,7 +403,9 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
             .map(|src| (src, names[&src].clone()))
             .collect_vec();
         let code = graph[n].to_egglog(&sources);
-        out.push_str(&format!("(let t{curr_id} {code})\n"));
+        // write!() into the existing buffer skips the intermediate String
+        // that format! would otherwise allocate for each node.
+        let _ = write!(out, "(let t{curr_id} {code})\n");
         names.insert(n, format!("t{curr_id}"));
         curr_id += 1;
     }
@@ -414,7 +418,7 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
     let mut root = names[0].clone();
     for node in names.into_iter().skip(1) {
         curr_id += 1;
-        out.push_str(&format!("(let t{curr_id} (OutputJoin {root} {node}))\n"));
+        let _ = write!(out, "(let t{curr_id} (OutputJoin {root} {node}))\n");
         root = format!("t{curr_id}");
     }
     (out.replace("(MVar \"z\")", "(MIter)"), root)
