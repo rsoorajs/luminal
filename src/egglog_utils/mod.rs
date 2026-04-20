@@ -6,7 +6,7 @@ use rand::Rng;
 use rustc_hash::FxHashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::{str, sync::Arc};
+use std::{str, sync::Arc, time::Duration};
 use tracing::trace;
 
 pub mod api;
@@ -128,8 +128,10 @@ pub fn early_egglog(
         program.to_string(),
         format!(
             "(run-schedule
-                (saturate expr)
-                (run)
+                (repeat 6
+                    (saturate expr)
+                    (run)
+                )
                 (saturate base_cleanup)
             )
             (extract {root})"
@@ -177,6 +179,20 @@ pub struct SerializedEGraph {
     pub eclasses: FxHashMap<ClassId, (String, Vec<NodeId>)>,
     pub node_to_class: FxHashMap<NodeId, ClassId>,
     pub roots: Vec<ClassId>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EgglogStageReport {
+    pub num_matches_per_rule: FxHashMap<String, usize>,
+    pub search_and_apply_time_per_rule: FxHashMap<String, Duration>,
+    pub total_time: Duration,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EgglogRunReport {
+    pub early: EgglogStageReport,
+    pub full: EgglogStageReport,
+    pub total_time: Duration,
 }
 
 impl SerializedEGraph {
@@ -589,41 +605,34 @@ fn termdag_to_egglog(td: &egglog::TermDag, root: egglog::TermId) -> (String, Str
     (out.replace("(MVar \"z\")", "(MIter)"), format!("t{root}"))
 }
 
-#[tracing::instrument(skip_all)]
-pub fn run_egglog(
-    program: &str,
-    root: &str,
-    ops: &[Arc<Box<dyn EgglogOp>>],
-    cleanup: bool,
-) -> Result<SerializedEGraph, egglog::Error> {
-    let start = std::time::Instant::now();
-    let code = early_egglog(program, root, ops, cleanup);
-    let mut egraph = egglog::EGraph::default();
-    let commands = egraph.parser.get_program_from_string(None, &code)?;
-    let outputs = egraph.run_program(commands)?;
-    let CommandOutput::ExtractBest(termdag, _cost, term) = outputs.last().unwrap() else {
-        panic!();
-    };
-    let (program, root) = termdag_to_egglog(termdag, termdag.lookup(term));
-    let code = full_egglog(&program, ops, cleanup);
-    let mut egraph = egglog::EGraph::default();
-    let commands = egraph.parser.get_program_from_string(None, &code)?;
-    trace!("{}", "Egglog running...".green());
-    let _outputs = egraph.run_program(commands)?;
-    trace!("{}", "---- Egglog Rule Matches ----".green());
+fn stage_report(egraph: &egglog::EGraph, total_time: Duration) -> EgglogStageReport {
     let run_report = egraph.get_overall_run_report();
+    EgglogStageReport {
+        num_matches_per_rule: run_report
+            .num_matches_per_rule
+            .iter()
+            .map(|(name, matches)| (name.to_string(), *matches))
+            .collect(),
+        search_and_apply_time_per_rule: run_report
+            .search_and_apply_time_per_rule
+            .iter()
+            .map(|(name, elapsed)| (name.to_string(), *elapsed))
+            .collect(),
+        total_time,
+    }
+}
+
+fn trace_stage_report(header: &str, report: &EgglogStageReport) {
+    trace!("{}", header.green());
     trace!(
         "{}",
-        run_report
+        report
             .num_matches_per_rule
             .iter()
             .filter(|(k, _)| !k.contains("("))
             .map(|(k, v)| format!(
                 "{k}: {v} ({})",
-                pretty_duration::pretty_duration(
-                    &run_report.search_and_apply_time_per_rule[k],
-                    None
-                )
+                pretty_duration::pretty_duration(&report.search_and_apply_time_per_rule[k], None)
             ))
             .join("\n")
             .green()
@@ -631,11 +640,59 @@ pub fn run_egglog(
     trace!(
         "{}",
         format!(
-            "---- Egglog Took {} ----",
-            pretty_duration::pretty_duration(&start.elapsed(), None).bold()
+            "---- {} Took {} ----",
+            header,
+            pretty_duration::pretty_duration(&report.total_time, None).bold()
         )
         .green()
     );
+}
+
+#[tracing::instrument(skip_all)]
+pub fn run_egglog_with_report(
+    program: &str,
+    root: &str,
+    ops: &[Arc<Box<dyn EgglogOp>>],
+    cleanup: bool,
+) -> Result<(SerializedEGraph, EgglogRunReport), egglog::Error> {
+    let total_start = std::time::Instant::now();
+
+    let early_start = std::time::Instant::now();
+    let code = early_egglog(program, root, ops, cleanup);
+    let mut egraph = egglog::EGraph::default();
+    let commands = egraph.parser.get_program_from_string(None, &code)?;
+    let outputs = egraph.run_program(commands)?;
+    let early_report = stage_report(&egraph, early_start.elapsed());
+
+    let CommandOutput::ExtractBest(termdag, _cost, term) = outputs.last().unwrap() else {
+        panic!();
+    };
+    let (program, root) = termdag_to_egglog(termdag, termdag.lookup(term));
+
+    let full_start = std::time::Instant::now();
+    let code = full_egglog(&program, ops, cleanup);
+    let mut egraph = egglog::EGraph::default();
+    let commands = egraph.parser.get_program_from_string(None, &code)?;
+    trace!("{}", "Egglog running...".green());
+    let _outputs = egraph.run_program(commands)?;
+    let full_report = stage_report(&egraph, full_start.elapsed());
+    trace_stage_report("---- Egglog Early Rule Matches ----", &early_report);
+    trace_stage_report("---- Egglog Full Rule Matches ----", &full_report);
+
+    let run_report = EgglogRunReport {
+        early: early_report,
+        full: full_report,
+        total_time: total_start.elapsed(),
+    };
+    trace!(
+        "{}",
+        format!(
+            "---- Egglog Total Took {} ----",
+            pretty_duration::pretty_duration(&run_report.total_time, None).bold()
+        )
+        .green()
+    );
+
     let (sort, value) = egraph.eval_expr(&var!(root))?;
     let s = egraph.serialize(egglog::SerializeConfig {
         root_eclasses: vec![(sort, value)],
@@ -720,7 +777,17 @@ pub fn run_egglog(
         "No valid graphs present in the e-graph!"
     );
 
-    Ok(egraph)
+    Ok((egraph, run_report))
+}
+
+#[tracing::instrument(skip_all)]
+pub fn run_egglog(
+    program: &str,
+    root: &str,
+    ops: &[Arc<Box<dyn EgglogOp>>],
+    cleanup: bool,
+) -> Result<SerializedEGraph, egglog::Error> {
+    run_egglog_with_report(program, root, ops, cleanup).map(|(egraph, _)| egraph)
 }
 
 pub fn extract_expr_list<'a>(
