@@ -72,6 +72,7 @@ fn main() {
     runtime.set_data(input, vec![1]);
     runtime.set_data(token_ids, vec![1]);
     runtime = cx.search(runtime, search_graphs);
+    runtime.print_kernel_summary();
 
     for i in 0..LAYERS {
         runtime.set_zeros(kv_cache.k_caches[i], cache_bytes);

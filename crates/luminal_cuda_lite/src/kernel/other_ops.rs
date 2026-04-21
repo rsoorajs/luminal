@@ -1809,6 +1809,12 @@ pub struct KernelFusedElementwise {
     dtype: DType,
 }
 
+impl KernelFusedElementwise {
+    pub fn ops(&self) -> &[UnaryFn] {
+        &self.ops
+    }
+}
+
 impl EgglogOp for KernelFusedElementwise {
     fn sort(&self) -> SortDef {
         sort(
@@ -1839,7 +1845,18 @@ impl EgglogOp for KernelFusedElementwise {
             ("KernelLog2", UnaryFn::Log2.tag()),
             ("KernelRecip", UnaryFn::Recip.tag()),
         ];
-        let mut rules = Vec::with_capacity(unaries.len() * unaries.len());
+
+        // Hard cap on the length of a fused chain. Chains longer than this
+        // stay partially fused (one Fused of this length + trailing unaries).
+        // Picking a bounded max keeps the egglog search space bounded -- a
+        // recursive list-append approach blows up the egraph because every
+        // new cons node re-triggers the recursive rule.
+        const MAX_FUSION_DEPTH: usize = 8;
+
+        let mut rules =
+            Vec::with_capacity(unaries.len() * unaries.len() + (MAX_FUSION_DEPTH - 2) * unaries.len());
+
+        // Pair fusion: two adjacent pure-elementwise unaries -> Fused[a, b].
         for (a_name, a_tag) in unaries {
             for (b_name, b_tag) in unaries {
                 rules.push(Rule::raw(format!(
@@ -1860,6 +1877,40 @@ impl EgglogOp for KernelFusedElementwise {
                 )));
             }
         }
+
+        // Chain extend: Fused[K ops] -> unary -> Fused[K+1 ops], for each
+        // K from 2 up to MAX_FUSION_DEPTH-1. Each rule pattern-matches the
+        // exact ops-list length, so no recursion and no list-append helper.
+        for existing_len in 2..MAX_FUSION_DEPTH {
+            // Build pattern like (ECons ?o0 (ECons ?o1 ... (ENil)))
+            let ops_pattern = (0..existing_len).rev().fold("(ENil)".to_string(), |tail, i| {
+                format!("(ECons ?o{i} {tail})")
+            });
+            for (b_name, b_tag) in unaries {
+                // Extended: same prefix, append (MNum b_tag) just before the ENil.
+                let new_ops_pattern = (0..existing_len).rev().fold(
+                    format!("(ECons (MNum {b_tag}) (ENil))"),
+                    |tail, i| format!("(ECons ?o{i} {tail})"),
+                );
+                rules.push(Rule::raw(format!(
+                    "(rule
+                        (
+                            (= ?fused (Op (KernelFusedElementwise ?shape ?strides {ops_pattern} ?dt)
+                                (ICons ?inp (INil))))
+                            (= ?next (Op ({b_name} ?shape ?strides ?strides ?dt)
+                                (ICons ?fused (INil))))
+                        )
+                        (
+                            (let ?new_fused (Op (KernelFusedElementwise ?shape ?strides {new_ops_pattern} ?dt)
+                                (ICons ?inp (INil))))
+                            (union ?next ?new_fused)
+                        )
+                        :name \"extend-Fused-len{existing_len}-{b_name}\"
+                    )"
+                )));
+            }
+        }
+
         rules
     }
 

@@ -167,6 +167,38 @@ impl CudaRuntime {
         &self.active().buffers
     }
 
+    /// Print a histogram of KernelOp types in the active compiled graph.
+    /// For `KernelFusedElementwise` nodes, also break down by the fused op
+    /// sequence so you can see which fusion chains the search actually picked.
+    pub fn print_kernel_summary(&self) {
+        use crate::kernel::KernelOp;
+        use crate::kernel::other_ops::KernelFusedElementwise;
+        use as_any::Downcast;
+        use std::collections::BTreeMap;
+
+        let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut fused_by_ops: BTreeMap<String, usize> = BTreeMap::new();
+        for node in self.active().llir_graph.node_weights() {
+            if let Some(kop) = node.to_dialect::<dyn KernelOp>() {
+                *counts.entry(kop.kernel_name()).or_insert(0) += 1;
+                if let Some(fused) = (***kop).downcast_ref::<KernelFusedElementwise>() {
+                    let key = format!("{:?}", fused.ops());
+                    *fused_by_ops.entry(key).or_insert(0) += 1;
+                }
+            }
+        }
+        println!("Kernel summary:");
+        for (name, n) in &counts {
+            println!("  {name}: {n}");
+        }
+        if !fused_by_ops.is_empty() {
+            println!("  FusedElementwise breakdown:");
+            for (ops, n) in &fused_by_ops {
+                println!("    {ops}: {n}");
+            }
+        }
+    }
+
     #[tracing::instrument(skip_all)]
     pub fn load_safetensors(&mut self, cx: &Graph, file_path: &str) {
         let f = File::open(file_path).unwrap();
