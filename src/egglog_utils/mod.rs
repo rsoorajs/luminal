@@ -112,18 +112,57 @@ pub fn early_egglog(
     ops: &[Arc<Box<dyn EgglogOp>>],
     cleanup: bool,
 ) -> String {
+    let parts = OpTextParts::new(ops, cleanup);
+    early_egglog_with(program, root, &parts)
+}
+
+pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> String {
+    let parts = OpTextParts::new(ops, cleanup);
+    full_egglog_with(program, &parts)
+}
+
+/// Pre-computed per-op text fragments. `run_egglog` calls early + full back
+/// to back with identical `ops`, and `Graph::build_grouped_egraphs` wants to
+/// run many `run_egglog` calls in parallel. Materialising all op-derived
+/// strings once (outside any parallel loop) means the hot work takes only
+/// `&str` references — so the parallel loop never touches the non-Send
+/// trait objects in `ops`.
+pub struct OpTextParts {
+    op_defs: String,
+    cleanups: String,
+    early_rewrites: String,
+    full_rewrites: String,
+}
+
+impl OpTextParts {
+    pub fn new(ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> Self {
+        Self {
+            op_defs: op_defs_string(ops),
+            cleanups: if cleanup {
+                op_cleanups_string(ops)
+            } else {
+                String::new()
+            },
+            early_rewrites: ops
+                .iter()
+                .flat_map(|o| o.early_rewrites())
+                .map(|r| r.to_egglog_string())
+                .join("\n"),
+            full_rewrites: ops
+                .iter()
+                .flat_map(|o| o.rewrites())
+                .map(|r| r.to_egglog_string())
+                .join("\n"),
+        }
+    }
+}
+
+fn early_egglog_with(program: &str, root: &str, parts: &OpTextParts) -> String {
     [
         base::base_expression_egglog(),
-        op_defs_string(ops),
-        ops.iter()
-            .flat_map(|o| o.early_rewrites())
-            .map(|r| r.to_egglog_string())
-            .join("\n"),
-        if cleanup {
-            op_cleanups_string(ops)
-        } else {
-            "".to_string()
-        },
+        parts.op_defs.clone(),
+        parts.early_rewrites.clone(),
+        parts.cleanups.clone(),
         base::base_cleanup_egglog(),
         program.to_string(),
         format!(
@@ -140,20 +179,13 @@ pub fn early_egglog(
     .join("\n")
 }
 
-pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> String {
+fn full_egglog_with(program: &str, parts: &OpTextParts) -> String {
     [
         base::base_expression_egglog(),
-        op_defs_string(ops),
-        if cleanup {
-            op_cleanups_string(ops)
-        } else {
-            "".to_string()
-        },
+        parts.op_defs.clone(),
+        parts.cleanups.clone(),
         base::base_cleanup_egglog(),
-        ops.iter()
-            .flat_map(|o| o.rewrites())
-            .map(|r| r.to_egglog_string())
-            .join("\n"),
+        parts.full_rewrites.clone(),
         program.to_string(),
         RUN_SCHEDULE.to_string(),
     ]
@@ -407,8 +439,10 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
 
     // 2. Map <node-id> → <egglog var name>
     let mut names: HashMap<NodeIndex, String> = HashMap::new();
-    let mut out = String::new();
+    // Pre-size output to avoid growth reallocations; ops emit ~100-200 chars each.
+    let mut out = String::with_capacity(topo_order.len() * 160);
 
+    use std::fmt::Write;
     let mut curr_id = 0;
     for n in topo_order {
         let sources: Vec<(NodeIndex, String)> = graph
@@ -417,7 +451,9 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
             .map(|src| (src, names[&src].clone()))
             .collect_vec();
         let code = graph[n].to_egglog(&sources);
-        out.push_str(&format!("(let t{curr_id} {code})\n"));
+        // write!() into the existing buffer skips the intermediate String
+        // that format! would otherwise allocate for each node.
+        let _ = writeln!(out, "(let t{curr_id} {code})");
         names.insert(n, format!("t{curr_id}"));
         curr_id += 1;
     }
@@ -430,7 +466,7 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
     let mut root = names[0].clone();
     for node in names.into_iter().skip(1) {
         curr_id += 1;
-        out.push_str(&format!("(let t{curr_id} (OutputJoin {root} {node}))\n"));
+        let _ = writeln!(out, "(let t{curr_id} (OutputJoin {root} {node}))");
         root = format!("t{curr_id}");
     }
     (out.replace("(MVar \"z\")", "(MIter)"), root)
@@ -655,10 +691,25 @@ pub fn run_egglog_with_report(
     ops: &[Arc<Box<dyn EgglogOp>>],
     cleanup: bool,
 ) -> Result<(SerializedEGraph, EgglogRunReport), egglog::Error> {
+    let op_parts = OpTextParts::new(ops, cleanup);
+    run_egglog_with_report_parts(program, root, &op_parts)
+}
+
+/// Same as [`run_egglog_with_report`], but takes pre-computed [`OpTextParts`].
+/// Useful when a caller runs many egglog invocations with the same op set
+/// (e.g. the parallel grouped-egraphs build in `Graph::build_grouped_egraphs`)
+/// and wants to factor the op-derived text work out of a parallel loop.
+/// Takes only `&str` / `&OpTextParts` inputs so the whole function is `Send`.
+#[tracing::instrument(skip_all)]
+pub fn run_egglog_with_report_parts(
+    program: &str,
+    root: &str,
+    op_parts: &OpTextParts,
+) -> Result<(SerializedEGraph, EgglogRunReport), egglog::Error> {
     let total_start = std::time::Instant::now();
 
     let early_start = std::time::Instant::now();
-    let code = early_egglog(program, root, ops, cleanup);
+    let code = early_egglog_with(program, root, op_parts);
     let mut egraph = egglog::EGraph::default();
     let commands = egraph.parser.get_program_from_string(None, &code)?;
     let outputs = egraph.run_program(commands)?;
@@ -670,7 +721,7 @@ pub fn run_egglog_with_report(
     let (program, root) = termdag_to_egglog(termdag, termdag.lookup(term));
 
     let full_start = std::time::Instant::now();
-    let code = full_egglog(&program, ops, cleanup);
+    let code = full_egglog_with(&program, op_parts);
     let mut egraph = egglog::EGraph::default();
     let commands = egraph.parser.get_program_from_string(None, &code)?;
     trace!("{}", "Egglog running...".green());
@@ -788,6 +839,17 @@ pub fn run_egglog(
     cleanup: bool,
 ) -> Result<SerializedEGraph, egglog::Error> {
     run_egglog_with_report(program, root, ops, cleanup).map(|(egraph, _)| egraph)
+}
+
+/// Same as [`run_egglog`] but takes pre-computed [`OpTextParts`], so the
+/// whole function is `Send`. Used by the parallel grouped-egraphs build.
+#[tracing::instrument(skip_all)]
+pub fn run_egglog_with(
+    program: &str,
+    root: &str,
+    op_parts: &OpTextParts,
+) -> Result<SerializedEGraph, egglog::Error> {
+    run_egglog_with_report_parts(program, root, op_parts).map(|(egraph, _)| egraph)
 }
 
 pub fn extract_expr_list<'a>(
