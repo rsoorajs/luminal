@@ -1853,8 +1853,9 @@ impl EgglogOp for KernelFusedElementwise {
         // new cons node re-triggers the recursive rule.
         const MAX_FUSION_DEPTH: usize = 8;
 
-        let mut rules =
-            Vec::with_capacity(unaries.len() * unaries.len() + (MAX_FUSION_DEPTH - 2) * unaries.len());
+        let mut rules = Vec::with_capacity(
+            unaries.len() * unaries.len() + (MAX_FUSION_DEPTH - 2) * unaries.len(),
+        );
 
         // Pair fusion: two adjacent pure-elementwise unaries -> Fused[a, b].
         for (a_name, a_tag) in unaries {
@@ -1883,15 +1884,18 @@ impl EgglogOp for KernelFusedElementwise {
         // exact ops-list length, so no recursion and no list-append helper.
         for existing_len in 2..MAX_FUSION_DEPTH {
             // Build pattern like (ECons ?o0 (ECons ?o1 ... (ENil)))
-            let ops_pattern = (0..existing_len).rev().fold("(ENil)".to_string(), |tail, i| {
-                format!("(ECons ?o{i} {tail})")
-            });
+            let ops_pattern = (0..existing_len)
+                .rev()
+                .fold("(ENil)".to_string(), |tail, i| {
+                    format!("(ECons ?o{i} {tail})")
+                });
             for (b_name, b_tag) in unaries {
                 // Extended: same prefix, append (MNum b_tag) just before the ENil.
-                let new_ops_pattern = (0..existing_len).rev().fold(
-                    format!("(ECons (MNum {b_tag}) (ENil))"),
-                    |tail, i| format!("(ECons ?o{i} {tail})"),
-                );
+                let new_ops_pattern = (0..existing_len)
+                    .rev()
+                    .fold(format!("(ECons (MNum {b_tag}) (ENil))"), |tail, i| {
+                        format!("(ECons ?o{i} {tail})")
+                    });
                 rules.push(Rule::raw(format!(
                     "(rule
                         (
