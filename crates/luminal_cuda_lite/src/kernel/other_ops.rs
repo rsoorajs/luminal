@@ -25,6 +25,7 @@ pub type Ops = (
     KernelSoftmax,
     KernelExp,
     KernelSigmoid,
+    KernelFusedElementwise,
 );
 
 #[derive(Default, Debug, Clone)]
@@ -1764,5 +1765,242 @@ extern \"C\" {{
 
     fn kernel_name(&self) -> &'static str {
         "Sigmoid"
+    }
+}
+
+/// A unary math function that can appear inside a fused elementwise kernel.
+/// The integer tag is the stable encoding used when this op is serialized
+/// into an egglog `EList` of `(MNum tag)`, so the fusion rule can construct
+/// and match `KernelFusedElementwise` without needing a dedicated egglog sort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnaryFn {
+    Sin = 0,
+    Sqrt = 1,
+    Exp2 = 2,
+    Log2 = 3,
+    Recip = 4,
+}
+
+impl UnaryFn {
+    pub fn tag(self) -> usize {
+        self as usize
+    }
+
+    pub fn from_tag(tag: usize) -> Self {
+        match tag {
+            0 => UnaryFn::Sin,
+            1 => UnaryFn::Sqrt,
+            2 => UnaryFn::Exp2,
+            3 => UnaryFn::Log2,
+            4 => UnaryFn::Recip,
+            _ => panic!("invalid UnaryFn tag: {tag}"),
+        }
+    }
+}
+
+/// An LLIR-only op created by fusing a chain of unary elementwise kernels.
+/// Only fires when every op in the chain shares the same stride pattern,
+/// so reads and writes use a single `strides` field.
+#[derive(Default, Debug, Clone)]
+pub struct KernelFusedElementwise {
+    shape: Vec<Expression>,
+    strides: Vec<Expression>,
+    ops: Vec<UnaryFn>,
+    dtype: DType,
+}
+
+impl EgglogOp for KernelFusedElementwise {
+    fn sort(&self) -> SortDef {
+        sort(
+            OP_KIND,
+            "KernelFusedElementwise",
+            &[
+                ("shape", ELIST),
+                ("strides", ELIST),
+                ("ops", ELIST),
+                ("dtype", DTYPE),
+            ],
+        )
+    }
+
+    fn n_inputs(&self) -> usize {
+        1
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn rewrites(&self) -> Vec<Rule> {
+        let unaries = [
+            ("KernelSin", UnaryFn::Sin.tag()),
+            ("KernelSqrt", UnaryFn::Sqrt.tag()),
+            ("KernelExp2", UnaryFn::Exp2.tag()),
+            ("KernelLog2", UnaryFn::Log2.tag()),
+            ("KernelRecip", UnaryFn::Recip.tag()),
+        ];
+        let mut rules = Vec::with_capacity(unaries.len() * unaries.len());
+        for (a_name, a_tag) in unaries {
+            for (b_name, b_tag) in unaries {
+                rules.push(Rule::raw(format!(
+                    "(rule
+                        (
+                            (= ?a (Op ({a_name} ?shape ?strides ?strides ?dt) (ICons ?inp (INil))))
+                            (= ?b (Op ({b_name} ?shape ?strides ?strides ?dt) (ICons ?a (INil))))
+                        )
+                        (
+                            (let ?fused (Op (KernelFusedElementwise ?shape ?strides
+                                (ECons (MNum {a_tag}) (ECons (MNum {b_tag}) (ENil)))
+                                ?dt)
+                                (ICons ?inp (INil))))
+                            (union ?b ?fused)
+                        )
+                        :name \"fuse-{a_name}-{b_name}\"
+                    )"
+                )));
+            }
+        }
+        rules
+    }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
+        list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        let ops = extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
+            .unwrap()
+            .into_iter()
+            .map(|e| {
+                UnaryFn::from_tag(
+                    e.to_usize()
+                        .expect("FusedElementwise ops list must contain constant integer tags"),
+                )
+            })
+            .collect();
+        (
+            LLIROp::new::<dyn KernelOp>(Box::new(Self {
+                shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
+                strides: extract_expr_list(egraph, kind_children[1], list_cache, expr_cache)
+                    .unwrap(),
+                ops,
+                dtype: extract_dtype(egraph, kind_children[3]),
+            })),
+            input_enodes,
+        )
+    }
+}
+
+impl KernelOp for KernelFusedElementwise {
+    fn compile(
+        &self,
+        stream: &Arc<CudaStream>,
+        compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
+    ) -> (
+        CudaFunction,
+        Arc<CudaModule>,
+        String,
+        (Expression, Expression, Expression),
+        (Expression, Expression, Expression),
+        Expression,
+        FxHashMap<char, CudaSlice<u8>>,
+    ) {
+        let vars = self
+            .shape
+            .iter()
+            .flat_map(|e| e.dyn_vars())
+            .chain(self.strides.iter().flat_map(|e| e.dyn_vars()))
+            .collect::<FxHashSet<_>>();
+        let dtype = cuda_dtype(self.dtype);
+        let includes = dtype_includes(&[self.dtype]);
+        let (dyn_defines, _sorted_dims) = generate_dyn_dims_defines(&vars);
+        let dyn_dims_param = if vars.is_empty() {
+            ""
+        } else {
+            ", const int* dyn_dims"
+        };
+        let n_elements = self
+            .shape
+            .iter()
+            .copied()
+            .product::<Expression>()
+            .to_kernel();
+        let idx = flatten_strides(&self.shape, &self.strides).to_kernel();
+        let ops_body = self
+            .ops
+            .iter()
+            .map(|op| match op {
+                UnaryFn::Sin => "val = sinf(val);",
+                UnaryFn::Sqrt => "val = sqrtf(val);",
+                UnaryFn::Exp2 => "val = exp2f(val);",
+                UnaryFn::Log2 => "val = log2f(val);",
+                UnaryFn::Recip => "val = 1.0f / val;",
+            })
+            .collect::<Vec<_>>()
+            .join("\n        ");
+        let kernel = format!(
+            "{includes}
+{dyn_defines}
+extern \"C\" {{
+    __global__ void fused_elementwise_k({dtype} *out, const {dtype} *in{dyn_dims_param}) {{
+        long long const_z = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+        if (const_z >= {n_elements}) return;
+        long long idx = {idx};
+        {dtype} val = in[idx];
+        {ops_body}
+        out[idx] = val;
+    }}
+}}"
+        );
+        let (module, func) = if let Some((module, func)) = compile_cache.get(&kernel) {
+            (module.clone(), func.clone())
+        } else {
+            let ptx = compile_module_image_for_current_device(stream.context(), &kernel).unwrap();
+            let module = stream.context().load_module(ptx).unwrap();
+            let func = module.load_function("fused_elementwise_k").unwrap();
+            compile_cache.insert(kernel.clone(), (module.clone(), func.clone()));
+            (module, func)
+        };
+        let out_size = self.shape.iter().copied().product::<Expression>();
+        (
+            func,
+            module,
+            kernel,
+            (out_size.ceil_div(256), 1.into(), 1.into()),
+            (out_size.min(256), 1.into(), 1.into()),
+            0.into(),
+            FxHashMap::default(),
+        )
+    }
+
+    fn output_size(&self) -> Expression {
+        self.shape.iter().copied().product()
+    }
+
+    fn output_bytes(&self) -> Expression {
+        (self.output_size() * self.dtype.bits()).ceil_div(8)
+    }
+
+    fn bytes_loaded(&self) -> Expression {
+        self.output_bytes()
+    }
+
+    fn bytes_stored(&self) -> Expression {
+        self.output_bytes()
+    }
+
+    fn flops(&self) -> Expression {
+        self.output_size() * (self.ops.len() as i32)
+    }
+
+    fn output_dtype(&self) -> DType {
+        self.dtype
+    }
+
+    fn kernel_name(&self) -> &'static str {
+        "FusedElementwise"
     }
 }
