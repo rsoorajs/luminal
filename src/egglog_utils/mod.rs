@@ -453,7 +453,7 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
         let code = graph[n].to_egglog(&sources);
         // write!() into the existing buffer skips the intermediate String
         // that format! would otherwise allocate for each node.
-        let _ = write!(out, "(let t{curr_id} {code})\n");
+        let _ = writeln!(out, "(let t{curr_id} {code})");
         names.insert(n, format!("t{curr_id}"));
         curr_id += 1;
     }
@@ -466,7 +466,7 @@ pub fn hlir_to_egglog(graph: &Graph) -> (String, String) {
     let mut root = names[0].clone();
     for node in names.into_iter().skip(1) {
         curr_id += 1;
-        let _ = write!(out, "(let t{curr_id} (OutputJoin {root} {node}))\n");
+        let _ = writeln!(out, "(let t{curr_id} (OutputJoin {root} {node}))");
         root = format!("t{curr_id}");
     }
     (out.replace("(MVar \"z\")", "(MIter)"), root)
