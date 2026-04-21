@@ -81,6 +81,8 @@ pub trait DynBackend {
 /// Arguments passed to a backend factory during compilation.
 pub struct BackendCompileArgs {
     pub search_iters: usize,
+    /// Enable automatic HLIR loop-rolling prepass before egglog search-space build.
+    pub auto_loop_rolling: bool,
     pub weights: Vec<(String, Vec<u8>, DType)>,
     pub tensor_sizes: HashMap<String, usize>,
     pub device_ptrs: HashMap<String, (u64, usize)>,
@@ -133,6 +135,7 @@ pub fn compile_backend<Rt: Runtime + 'static>(
     // survives cross-binary type identity mismatches with external plugins).
     let label_map = build_label_map(graph);
 
+    graph.set_auto_loop_rolling(args.auto_loop_rolling);
     graph.build_search_space::<Rt>();
 
     let mut rt = init()?;

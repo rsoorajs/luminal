@@ -336,11 +336,17 @@ pub fn hash_egglog_normalized(text: &str) -> u64 {
     for line in text.lines() {
         if line.contains("(Input ") {
             // Format: (let tN (Input NODE "LABEL" (DTYPE)))
-            // Strip the node index and label, keep only the dtype.
+            // Strip the node index and label identity, but preserve whether this
+            // is a synthetic boundary input or a real graph input.
             // The dtype is the last parenthesized token, e.g. "(F32)".
             if let Some(dtype_start) = line.rfind(" (") {
                 let dtype = &line[dtype_start + 1..];
-                ("INPUT", dtype).hash(&mut hasher);
+                let kind = if line.contains("\"boundary\"") {
+                    "BOUNDARY_INPUT"
+                } else {
+                    "REAL_INPUT"
+                };
+                (kind, dtype).hash(&mut hasher);
             } else {
                 line.hash(&mut hasher);
             }
@@ -455,8 +461,8 @@ pub fn hlir_subgraph_to_egglog(graph: &Graph, subgraph: &SubgraphDescriptor) -> 
             boundary.dtype
         );
         out.push_str(&format!("(let {var_name} {code})\n"));
-        // Map the GraphBreak node to this synthetic Input variable.
-        // When downstream nodes reference the GraphBreak as a source, they'll use this.
+        // Map the boundary node to this synthetic Input variable.
+        // When downstream nodes reference the boundary source, they'll use this.
         names.insert(boundary.break_node, var_name);
         curr_id += 1;
     }
@@ -512,14 +518,18 @@ pub fn hlir_subgraph_to_egglog(graph: &Graph, subgraph: &SubgraphDescriptor) -> 
         curr_id += 1;
     }
 
-    // Emit synthetic Output nodes for boundary outputs
+    // Emit synthetic Output nodes for boundary outputs.
+    // `boundary_outputs` stores producer nodes for virtual region boundaries.
     for &brk in &subgraph.boundary_outputs {
-        // The predecessor of the GraphBreak is the actual producer
-        let pred = graph
-            .graph
-            .neighbors_directed(brk, Direction::Incoming)
-            .next()
-            .expect("GraphBreak must have exactly one input");
+        let pred = if subgraph.nodes.contains(&brk) {
+            brk
+        } else {
+            graph
+                .graph
+                .neighbors_directed(brk, Direction::Incoming)
+                .next()
+                .expect("Boundary output indirection must have exactly one input")
+        };
         let pred_name = names.get(&pred).cloned().unwrap_or_else(|| {
             panic!(
                 "Missing egglog name for boundary output predecessor {:?}",

@@ -21,6 +21,14 @@ pub trait Runtime {
         dyn_map: &FxHashMap<char, usize>,
         trials: usize,
     ) -> (Self::ProfileMetric, String);
+    /// Aggregate multiple profile metrics into one comparable metric.
+    /// Used for regionalized profiling where one candidate maps to multiple LLIR regions.
+    fn aggregate_profile_metrics(metrics: &[Self::ProfileMetric]) -> Self::ProfileMetric {
+        metrics
+            .first()
+            .unwrap_or_else(|| panic!("aggregate_profile_metrics called with empty metrics"))
+            .clone()
+    }
     /// Optional per-candidate profiling timeout used by search.
     fn set_profile_timeout(&mut self, _timeout: Option<std::time::Duration>) {}
     /// Allocate a dummy input buffer for a boundary node during per-chunk profiling.

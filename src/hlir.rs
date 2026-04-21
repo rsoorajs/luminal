@@ -555,28 +555,6 @@ impl NativeOp for Cast {
     }
 }
 
-/// Graph break for chunking search graphs
-#[derive(Clone, PartialEq, Default)]
-pub struct GraphBreak {
-    pub input_shape: ShapeTracker,
-}
-impl Debug for GraphBreak {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "GraphBreak")
-    }
-}
-impl Display for GraphBreak {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "GraphBreak")
-    }
-}
-
-impl HLIROp for GraphBreak {
-    fn to_egglog(&self, _: &[(NodeIndex, String)]) -> String {
-        panic!("Cannot turn GraphBreak into egglog op!");
-    }
-}
-
 // Unary Op (A -> A)
 
 fn unary_impl(
@@ -2198,6 +2176,10 @@ impl Runtime for NativeRuntime {
         _: usize,
     ) -> (Self::ProfileMetric, String) {
         (0, "0 ms".to_string())
+    }
+
+    fn aggregate_profile_metrics(metrics: &[Self::ProfileMetric]) -> Self::ProfileMetric {
+        metrics.iter().copied().sum()
     }
 
     fn load_llir(&mut self, llir_graph: &LLIRGraph) {

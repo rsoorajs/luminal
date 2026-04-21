@@ -300,7 +300,7 @@ fn test_mini_transformer_two_layers() {
     let input = cx.tensor((SEQ, HIDDEN));
     let layer1 = MiniTransformerLayer::init(&mut cx);
     let layer2 = MiniTransformerLayer::init(&mut cx);
-    let x = layer1.forward(input).graph_break();
+    let x = layer1.forward(input);
     let out = layer2.forward(x).output();
 
     cx.build_search_space::<CudaRuntime>();

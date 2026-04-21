@@ -94,6 +94,7 @@ impl CompiledGraph {
         // Build compile args from WeightData (convert TypedData -> raw bytes + dtype)
         let compile_args = BackendCompileArgs {
             search_iters,
+            auto_loop_rolling: true,
             weights: weight_data
                 .weights
                 .iter()
