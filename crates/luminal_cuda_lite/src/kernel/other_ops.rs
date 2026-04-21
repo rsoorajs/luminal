@@ -10,7 +10,7 @@ use itertools::Itertools;
 use luminal::{
     egglog_utils::{
         api::{Rule, SortDef, sort},
-        base::{DTYPE, ELIST, EXPRESSION, OP_KIND},
+        base::{DTYPE, ELIST, EXPRESSION, OP_KIND, STRING},
         extract_dtype, extract_expr, extract_expr_list,
     },
     op::*,
@@ -1769,31 +1769,37 @@ extern \"C\" {{
 }
 
 /// A unary math function that can appear inside a fused elementwise kernel.
-/// The integer tag is the stable encoding used when this op is serialized
-/// into an egglog `EList` of `(MNum tag)`, so the fusion rule can construct
-/// and match `KernelFusedElementwise` without needing a dedicated egglog sort.
+/// Each variant has a stable string name (used both as the egglog token in
+/// the rule-generated ops string and as the `kernel_name()` of the source
+/// unary kernel op).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnaryFn {
-    Sin = 0,
-    Sqrt = 1,
-    Exp2 = 2,
-    Log2 = 3,
-    Recip = 4,
+    Sin,
+    Sqrt,
+    Exp2,
+    Log2,
+    Recip,
 }
 
 impl UnaryFn {
-    pub fn tag(self) -> usize {
-        self as usize
+    pub fn name(self) -> &'static str {
+        match self {
+            UnaryFn::Sin => "Sin",
+            UnaryFn::Sqrt => "Sqrt",
+            UnaryFn::Exp2 => "Exp2",
+            UnaryFn::Log2 => "Log2",
+            UnaryFn::Recip => "Recip",
+        }
     }
 
-    pub fn from_tag(tag: usize) -> Self {
-        match tag {
-            0 => UnaryFn::Sin,
-            1 => UnaryFn::Sqrt,
-            2 => UnaryFn::Exp2,
-            3 => UnaryFn::Log2,
-            4 => UnaryFn::Recip,
-            _ => panic!("invalid UnaryFn tag: {tag}"),
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "Sin" => UnaryFn::Sin,
+            "Sqrt" => UnaryFn::Sqrt,
+            "Exp2" => UnaryFn::Exp2,
+            "Log2" => UnaryFn::Log2,
+            "Recip" => UnaryFn::Recip,
+            _ => panic!("invalid UnaryFn name: {name}"),
         }
     }
 }
@@ -1801,6 +1807,11 @@ impl UnaryFn {
 /// An LLIR-only op created by fusing a chain of unary elementwise kernels.
 /// Only fires when every op in the chain shares the same stride pattern,
 /// so reads and writes use a single `strides` field.
+///
+/// The `ops` sequence is carried as a comma-separated egglog `String`
+/// (e.g. `"Sin,Sqrt,Exp2"`) — it's pure codegen metadata that egglog never
+/// reasons about, and `String` is a primitive sort, so this avoids
+/// introducing a new datatype/sort just to carry the list.
 #[derive(Default, Debug, Clone)]
 pub struct KernelFusedElementwise {
     shape: Vec<Expression>,
@@ -1823,7 +1834,7 @@ impl EgglogOp for KernelFusedElementwise {
             &[
                 ("shape", ELIST),
                 ("strides", ELIST),
-                ("ops", ELIST),
+                ("ops", STRING),
                 ("dtype", DTYPE),
             ],
         )
@@ -1839,27 +1850,18 @@ impl EgglogOp for KernelFusedElementwise {
 
     fn rewrites(&self) -> Vec<Rule> {
         let unaries = [
-            ("KernelSin", UnaryFn::Sin.tag()),
-            ("KernelSqrt", UnaryFn::Sqrt.tag()),
-            ("KernelExp2", UnaryFn::Exp2.tag()),
-            ("KernelLog2", UnaryFn::Log2.tag()),
-            ("KernelRecip", UnaryFn::Recip.tag()),
+            ("KernelSin", UnaryFn::Sin),
+            ("KernelSqrt", UnaryFn::Sqrt),
+            ("KernelExp2", UnaryFn::Exp2),
+            ("KernelLog2", UnaryFn::Log2),
+            ("KernelRecip", UnaryFn::Recip),
         ];
-
-        // Hard cap on the length of a fused chain. Chains longer than this
-        // stay partially fused (one Fused of this length + trailing unaries).
-        // Picking a bounded max keeps the egglog search space bounded -- a
-        // recursive list-append approach blows up the egraph because every
-        // new cons node re-triggers the recursive rule.
-        const MAX_FUSION_DEPTH: usize = 8;
-
-        let mut rules = Vec::with_capacity(
-            unaries.len() * unaries.len() + (MAX_FUSION_DEPTH - 2) * unaries.len(),
-        );
+        let mut rules = Vec::with_capacity(unaries.len() * unaries.len() + unaries.len());
 
         // Pair fusion: two adjacent pure-elementwise unaries -> Fused[a, b].
-        for (a_name, a_tag) in unaries {
-            for (b_name, b_tag) in unaries {
+        for (a_name, a_fn) in unaries {
+            for (b_name, b_fn) in unaries {
+                let (a_str, b_str) = (a_fn.name(), b_fn.name());
                 rules.push(Rule::raw(format!(
                     "(rule
                         (
@@ -1868,8 +1870,7 @@ impl EgglogOp for KernelFusedElementwise {
                         )
                         (
                             (let ?fused (Op (KernelFusedElementwise ?shape ?strides
-                                (ECons (MNum {a_tag}) (ECons (MNum {b_tag}) (ENil)))
-                                ?dt)
+                                \"{a_str},{b_str}\" ?dt)
                                 (ICons ?inp (INil))))
                             (union ?b ?fused)
                         )
@@ -1879,40 +1880,29 @@ impl EgglogOp for KernelFusedElementwise {
             }
         }
 
-        // Chain extend: Fused[K ops] -> unary -> Fused[K+1 ops], for each
-        // K from 2 up to MAX_FUSION_DEPTH-1. Each rule pattern-matches the
-        // exact ops-list length, so no recursion and no list-append helper.
-        for existing_len in 2..MAX_FUSION_DEPTH {
-            // Build pattern like (ECons ?o0 (ECons ?o1 ... (ENil)))
-            let ops_pattern = (0..existing_len)
-                .rev()
-                .fold("(ENil)".to_string(), |tail, i| {
-                    format!("(ECons ?o{i} {tail})")
-                });
-            for (b_name, b_tag) in unaries {
-                // Extended: same prefix, append (MNum b_tag) just before the ENil.
-                let new_ops_pattern = (0..existing_len)
-                    .rev()
-                    .fold(format!("(ECons (MNum {b_tag}) (ENil))"), |tail, i| {
-                        format!("(ECons ?o{i} {tail})")
-                    });
-                rules.push(Rule::raw(format!(
-                    "(rule
-                        (
-                            (= ?fused (Op (KernelFusedElementwise ?shape ?strides {ops_pattern} ?dt)
-                                (ICons ?inp (INil))))
-                            (= ?next (Op ({b_name} ?shape ?strides ?strides ?dt)
-                                (ICons ?fused (INil))))
-                        )
-                        (
-                            (let ?new_fused (Op (KernelFusedElementwise ?shape ?strides {new_ops_pattern} ?dt)
-                                (ICons ?inp (INil))))
-                            (union ?next ?new_fused)
-                        )
-                        :name \"extend-Fused-len{existing_len}-{b_name}\"
-                    )"
-                )));
-            }
+        // Chain extend: Fused[ops] -> unary -> Fused[ops + \",<new>\"]. One
+        // rule per outer unary. `+` is the builtin variadic string concat,
+        // so this is O(1) per firing and handles chains of any length
+        // without recursion.
+        for (b_name, b_fn) in unaries {
+            let b_str = b_fn.name();
+            rules.push(Rule::raw(format!(
+                "(rule
+                    (
+                        (= ?fused (Op (KernelFusedElementwise ?shape ?strides ?ops ?dt)
+                            (ICons ?inp (INil))))
+                        (= ?next (Op ({b_name} ?shape ?strides ?strides ?dt)
+                            (ICons ?fused (INil))))
+                    )
+                    (
+                        (let ?new_ops (+ ?ops \",{b_str}\"))
+                        (let ?new_fused (Op (KernelFusedElementwise ?shape ?strides ?new_ops ?dt)
+                            (ICons ?inp (INil))))
+                        (union ?next ?new_fused)
+                    )
+                    :name \"extend-Fused-{b_name}\"
+                )"
+            )));
         }
 
         rules
@@ -1926,16 +1916,14 @@ impl EgglogOp for KernelFusedElementwise {
         list_cache: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
         expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
     ) -> (LLIROp, Vec<&'a ENodeId>) {
-        let ops = extract_expr_list(egraph, kind_children[2], list_cache, expr_cache)
-            .unwrap()
-            .into_iter()
-            .map(|e| {
-                UnaryFn::from_tag(
-                    e.to_usize()
-                        .expect("FusedElementwise ops list must contain constant integer tags"),
-                )
-            })
-            .collect();
+        // The `ops` field is a String enode; its label is the quoted
+        // literal (e.g. `"Sin,Sqrt"`), so strip the quotes and split.
+        let ops_str = egraph.enodes[kind_children[2]].0.replace('"', "");
+        let ops = if ops_str.is_empty() {
+            Vec::new()
+        } else {
+            ops_str.split(',').map(UnaryFn::from_name).collect()
+        };
         (
             LLIROp::new::<dyn KernelOp>(Box::new(Self {
                 shape: extract_expr_list(egraph, kind_children[0], list_cache, expr_cache).unwrap(),
