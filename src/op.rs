@@ -21,6 +21,8 @@ pub trait Runtime {
         dyn_map: &FxHashMap<char, usize>,
         trials: usize,
     ) -> (Self::ProfileMetric, String);
+    /// Optional per-candidate profiling timeout used by search.
+    fn set_profile_timeout(&mut self, _timeout: Option<std::time::Duration>) {}
     /// Allocate a dummy input buffer for a boundary node during per-chunk profiling.
     /// `node_index` is the HLIR node index used in the Input op's `node` field.
     /// `num_bytes` is the number of bytes to allocate.

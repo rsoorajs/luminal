@@ -104,6 +104,12 @@ pub struct SearchOptions {
     pub trials: usize,
     /// Number of best genomes to keep as parents per generation (default: 1)
     pub keep_best: usize,
+    /// Optional per-candidate profiling timeout.
+    pub profile_timeout: Option<std::time::Duration>,
+    /// Optional per-group search timeout.
+    pub group_timeout: Option<std::time::Duration>,
+    /// Optional profiling dimension overrides.
+    pub profile_dims: FxHashMap<char, usize>,
 }
 
 impl SearchOptions {
@@ -115,6 +121,9 @@ impl SearchOptions {
             mutations: 30,
             trials: 10,
             keep_best: 1,
+            profile_timeout: None,
+            group_timeout: None,
+            profile_dims: FxHashMap::default(),
         }
     }
 
@@ -139,6 +148,24 @@ impl SearchOptions {
     /// Set the number of best genomes to keep as parents per generation.
     pub fn keep_best(mut self, keep_best: usize) -> Self {
         self.keep_best = keep_best;
+        self
+    }
+
+    /// Set an optional per-candidate profiling timeout.
+    pub fn profile_timeout(mut self, profile_timeout: std::time::Duration) -> Self {
+        self.profile_timeout = Some(profile_timeout);
+        self
+    }
+
+    /// Set an optional per-group search timeout.
+    pub fn group_timeout(mut self, group_timeout: std::time::Duration) -> Self {
+        self.group_timeout = Some(group_timeout);
+        self
+    }
+
+    /// Override a dynamic dimension value used during search profiling.
+    pub fn profile_dim(mut self, dim: char, value: usize) -> Self {
+        self.profile_dims.insert(dim, value);
         self
     }
 }
@@ -166,6 +193,10 @@ pub struct Graph {
     /// single implicit bucket (current behavior). When set, search compiles a
     /// separate LLIR per bucket combination and runtime dispatches automatically.
     pub dim_buckets: FxHashMap<char, Vec<DimBucket>>,
+    /// Metadata for Input nodes: NodeIndex -> (label, dtype).
+    /// Stored as plain data so it survives cross-binary type identity mismatches
+    /// when external backend plugins are compiled separately.
+    pub input_meta: FxHashMap<NodeIndex, (String, DType)>,
 }
 
 impl Graph {
@@ -211,12 +242,14 @@ impl Graph {
 
     /// Create a new tensor with shape S and a name. This name will show up on the graph when displayed
     pub fn named_tensor(&mut self, name: impl ToString, shape: impl ToShape) -> GraphTensor {
+        let name = name.to_string();
         let id = self.graph.add_node(Box::new(crate::hlir::Input {
             node: 0,
-            label: name.to_string(),
+            label: name.clone(),
             dtype: DType::default(),
         }));
         self.get_op_mut::<crate::hlir::Input>(id).node = id.index();
+        self.input_meta.insert(id, (name.clone(), DType::default()));
         GraphTensor {
             id,
             graph_ref: self,
@@ -436,6 +469,7 @@ impl Graph {
         options: SearchOptions,
         rng: &mut G,
     ) -> R {
+        runtime.set_profile_timeout(options.profile_timeout);
         if self.dim_buckets.is_empty() {
             // No buckets: existing single-search path
             let stitched =
@@ -443,6 +477,7 @@ impl Graph {
 
             runtime.clear_intermediate_buffers();
             runtime.load_llir(&stitched);
+            runtime.set_profile_timeout(None);
             runtime
         } else {
             // Bucketed search: compile one LLIR per bucket combination
@@ -474,6 +509,7 @@ impl Graph {
 
             runtime.clear_intermediate_buffers();
             runtime.load_llir_buckets(&self.dim_buckets, &bucket_llirs);
+            runtime.set_profile_timeout(None);
             runtime
         }
     }
@@ -539,6 +575,10 @@ impl Graph {
         dyn_map: &FxHashMap<char, usize>,
         bucket_progress: Option<(usize, usize)>,
     ) -> LLIRGraph {
+        let mut profile_dyn_map = dyn_map.clone();
+        for (&dim, &value) in &options.profile_dims {
+            profile_dyn_map.insert(dim, value);
+        }
         let limit = options.limit;
         let n_chunks = self.subgraph_descriptors.len();
         let n_groups = self.chunk_groups.len();
@@ -567,7 +607,7 @@ impl Graph {
                     let n_elements = bi
                         .shape
                         .n_elements()
-                        .exec(dyn_map)
+                        .exec(&profile_dyn_map)
                         .expect("Failed to resolve boundary input shape");
                     let n_bytes = n_elements * bi.dtype.bits() / 8;
                     runtime.allocate_dummy_input(bi.break_node.index(), n_bytes);
@@ -644,6 +684,7 @@ impl Graph {
         };
 
         for (group_idx, group) in self.chunk_groups.iter().enumerate() {
+            let group_start = std::time::Instant::now();
             let egraph = &self.egraphs[group_idx];
             let mut prev_selected: FxHashSet<u64> = FxHashSet::default();
             let mut list_cache = FxHashMap::default();
@@ -676,8 +717,8 @@ impl Graph {
                         None,
                     );
                     runtime.clear_intermediate_buffers();
-                    let profile = runtime.profile(&graph, dyn_map, options.trials);
-                    let has_nan = runtime.has_nan_outputs(&graph, dyn_map);
+                    let profile = runtime.profile(&graph, &profile_dyn_map, options.trials);
+                    let has_nan = runtime.has_nan_outputs(&graph, &profile_dyn_map);
                     (graph, profile, has_nan)
                 }));
 
@@ -691,6 +732,14 @@ impl Graph {
                         break;
                     }
                     Ok(_) | Err(_) => {
+                        if options
+                            .group_timeout
+                            .is_some_and(|timeout| group_start.elapsed() >= timeout)
+                        {
+                            panic!(
+                                "Failed to find a viable initial genome for group {group_idx} before timeout"
+                            );
+                        }
                         list_cache.clear();
                         expr_cache.clear();
                         continue;
@@ -736,6 +785,13 @@ impl Graph {
                 vec![(best_metric.clone(), best_genome.clone())];
 
             while n_graphs < limit {
+                if options
+                    .group_timeout
+                    .is_some_and(|timeout| group_start.elapsed() >= timeout)
+                {
+                    break;
+                }
+
                 // Generate offspring from all parents, dividing budget evenly
                 let budget = (limit - n_graphs).min(options.generation_size);
                 let per_parent = budget.div_ceil(parents.len());
@@ -759,6 +815,12 @@ impl Graph {
                 }
 
                 for genome in all_offspring {
+                    if options
+                        .group_timeout
+                        .is_some_and(|timeout| group_start.elapsed() >= timeout)
+                    {
+                        break;
+                    }
                     n_graphs += 1;
                     list_cache.clear();
                     expr_cache.clear();
@@ -775,8 +837,9 @@ impl Graph {
                                 None,
                             );
                             runtime.clear_intermediate_buffers();
-                            let result = runtime.profile(&llir_graph, dyn_map, options.trials);
-                            let has_nan = runtime.has_nan_outputs(&llir_graph, dyn_map);
+                            let result =
+                                runtime.profile(&llir_graph, &profile_dyn_map, options.trials);
+                            let has_nan = runtime.has_nan_outputs(&llir_graph, &profile_dyn_map);
                             (result, llir_graph, has_nan)
                         }));
 
