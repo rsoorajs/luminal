@@ -451,6 +451,7 @@ pub fn hlir_subgraph_to_egglog(graph: &Graph, subgraph: &SubgraphDescriptor) -> 
     let mut names: HashMap<NodeIndex, String> = HashMap::new();
     let mut out = String::new();
     let mut curr_id = 0;
+    let mut boundary_output_names: Vec<String> = vec![];
 
     // Emit synthetic Input nodes for boundary inputs
     for boundary in &subgraph.boundary_inputs {
@@ -537,21 +538,15 @@ pub fn hlir_subgraph_to_egglog(graph: &Graph, subgraph: &SubgraphDescriptor) -> 
             )
         });
         let code = format!("(Output {} {})", pred_name, brk.index());
-        out.push_str(&format!("(let t{curr_id} {code})\n"));
-        names.insert(brk, format!("t{curr_id}"));
+        let boundary_name = format!("t{curr_id}");
+        out.push_str(&format!("(let {boundary_name} {code})\n"));
+        boundary_output_names.push(boundary_name);
         curr_id += 1;
     }
 
     // Join outputs: real outputs (nodes with no outgoing edges within the subgraph)
     // plus boundary outputs
-    let mut output_names: Vec<String> = vec![];
-
-    // Boundary outputs
-    for &brk in &subgraph.boundary_outputs {
-        if let Some(name) = names.get(&brk) {
-            output_names.push(name.clone());
-        }
-    }
+    let mut output_names: Vec<String> = boundary_output_names;
 
     // Real outputs: only actual Output HLIR ops that exist in this subgraph
     // (not arbitrary nodes that happen to have no subgraph successors)
@@ -1385,6 +1380,10 @@ pub fn stitch_llir_graphs(
 
     for (_chunk_idx, chunk_graph) in chunk_llirs.iter().enumerate() {
         let mut this_map: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
+        let output_id_counts = chunk_graph
+            .node_indices()
+            .filter_map(|n| chunk_graph[n].to_op::<Output>().map(|op| op.node))
+            .counts();
 
         // Pass 1: Add all non-boundary nodes
         for old_node in chunk_graph.node_indices() {
@@ -1393,8 +1392,20 @@ pub fn stitch_llir_graphs(
             // Check if this is a boundary Output
             if let Some(output_op) = op.to_op::<Output>() {
                 if boundary_output_set.contains(&output_op.node) {
-                    // Skip — will resolve in pass 2
-                    continue;
+                    let pred = chunk_graph
+                        .neighbors_directed(old_node, petgraph::Direction::Incoming)
+                        .next();
+                    let is_boundary_wrapper = pred
+                        .and_then(|p| chunk_graph[p].to_op::<Output>())
+                        .is_some_and(|pred_out| pred_out.node == output_op.node);
+                    let duplicated_output_id =
+                        output_id_counts.get(&output_op.node).copied().unwrap_or(0) > 1;
+                    if !duplicated_output_id || is_boundary_wrapper {
+                        // Pure boundary output: skip and stitch through the producer in pass 2.
+                        // If the same HLIR output id appears twice, keep the real top-level
+                        // Output and only drop the synthetic boundary wrapper.
+                        continue;
+                    }
                 }
             }
 

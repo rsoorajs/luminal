@@ -53,7 +53,6 @@ fn main() {
     }
 
     println!("Building E-Graph...");
-    cx.set_auto_loop_rolling(true);
     cx.build_search_space::<CudaRuntime>();
 
     println!("Loading weights...");
