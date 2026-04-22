@@ -73,7 +73,6 @@ struct RollingSearchDiagnostics {
     adjacent_hash_matches: usize,
     repeated_signature_runs: usize,
     rejected_zero_state_params: usize,
-    rejected_multi_state_params: usize,
     best_rejected: Option<RollingRejectedCandidate>,
     top_runs: Vec<String>,
 }
@@ -639,13 +638,12 @@ impl Graph {
             })
             .unwrap_or_else(|| "best rejected: none".to_string());
         println!(
-            "   {:>6}  diagnostics: windows={} hash_matches={} repeated_runs={} rejected(zero_state={}, multi_state={}); {}",
+            "   {:>6}  diagnostics: windows={} hash_matches={} repeated_runs={} rejected(zero_state={}); {}",
             "Rolled".yellow().bold(),
             diagnostics.windows_probed,
             diagnostics.adjacent_hash_matches,
             diagnostics.repeated_signature_runs,
             diagnostics.rejected_zero_state_params,
-            diagnostics.rejected_multi_state_params,
             best_rejected,
         );
         for run in diagnostics.top_runs.iter().take(5) {

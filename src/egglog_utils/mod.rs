@@ -3,6 +3,7 @@ use egglog::{ast::Span, prelude::RustSpan, var};
 use itertools::Itertools;
 use petgraph::{Direction, graph::NodeIndex};
 use rand::Rng;
+use regex::Regex;
 use rustc_hash::FxHashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -802,14 +803,133 @@ pub fn run_egglog_multi_roots(
     ops: &[Arc<Box<dyn EgglogOp>>],
     cleanup: bool,
 ) -> Result<SerializedEGraph, egglog::Error> {
-    let code = full_egglog(program, ops, cleanup);
+    // Two-stage pipeline mirroring run_egglog_with_report:
+    //   1. Run early rewrites, extract best per root.
+    //   2. Reassemble extracted termdags into one program, run full rewrites.
+    //
+    // Without this staging the regionalized path stuffs early + full rules
+    // into one saturation, which makes pattern-matching rewrites like
+    // GLUMoE dependent on saturation order. The two-stage approach commits
+    // one rewrite choice per e-class before full rules run.
+    //
+    // Collect rule names declared in early rewrites (each raw egg file embeds
+    // rule names via `:name "..."`). If stage 1 reports zero matches across
+    // all of these, stage 1 did nothing useful — fall back to single-stage on
+    // the original program. Running the extract round-trip when nothing fused
+    // caused a measurable regression (observed ~40% TPOT on Llama).
+    let name_re = Regex::new(r#":name\s+"([^"]+)""#).expect("valid name regex");
+    let early_rule_names: FxHashSet<String> = ops
+        .iter()
+        .flat_map(|o| o.early_rewrites())
+        .flat_map(|r| {
+            let s = r.to_egglog_string();
+            name_re
+                .captures_iter(&s)
+                .map(|c| c[1].to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    // ----- Stage 1: early rewrites, one extract per root -----
+    let early_code = [
+        base::base_expression_egglog(),
+        op_defs_string(ops),
+        ops.iter()
+            .flat_map(|o| o.early_rewrites())
+            .map(|r| r.to_egglog_string())
+            .join("\n"),
+        if cleanup {
+            op_cleanups_string(ops)
+        } else {
+            "".to_string()
+        },
+        base::base_cleanup_egglog(),
+        program.to_string(),
+        "(run-schedule
+            (repeat 6
+                (saturate expr)
+                (run)
+            )
+            (saturate base_cleanup)
+        )"
+        .to_string(),
+        roots.iter().map(|r| format!("(extract {r})")).join("\n"),
+    ]
+    .join("\n");
+
+    let mut egraph = egglog::EGraph::default();
+    let commands = egraph
+        .parser
+        .get_program_from_string(None, &early_code)?;
+    let early_outputs = egraph.run_program(commands)?;
+
+    // If no early-rewrite rule actually fired, skip the extract/reassemble
+    // round-trip and run the original program through the single-stage path.
+    let run_report = egraph.get_overall_run_report();
+    let any_early_fired = run_report
+        .num_matches_per_rule
+        .iter()
+        .any(|(name, count)| *count > 0 && early_rule_names.contains(&name.to_string()));
+    if !any_early_fired {
+        let code = full_egglog(program, ops, cleanup);
+        let mut egraph = egglog::EGraph::default();
+        let commands = egraph.parser.get_program_from_string(None, &code)?;
+        let _ = egraph.run_program(commands)?;
+        let mut root_eclasses = Vec::with_capacity(roots.len());
+        for root in roots {
+            let (sort, value) = egraph.eval_expr(&var!(root))?;
+            root_eclasses.push((sort, value));
+        }
+        return Ok(SerializedEGraph::new(&egraph, root_eclasses));
+    }
+
+    let extracted: Vec<&CommandOutput> = early_outputs
+        .iter()
+        .filter(|o| matches!(o, CommandOutput::ExtractBest(..)))
+        .collect();
+    assert_eq!(
+        extracted.len(),
+        roots.len(),
+        "early stage extract count ({}) must match root count ({})",
+        extracted.len(),
+        roots.len()
+    );
+
+    // Reassemble each extracted termdag into a prefixed let-binding block so
+    // the next stage sees a single program with unique tN names per root.
+    let token_re = Regex::new(r"\bt\d+\b").expect("valid egglog temp-var regex");
+    let mut merged = String::new();
+    let mut merged_roots = Vec::with_capacity(roots.len());
+    for (idx, out) in extracted.iter().enumerate() {
+        let CommandOutput::ExtractBest(termdag, _cost, term) = out else {
+            unreachable!();
+        };
+        let (text, local_root) = termdag_to_egglog(termdag, termdag.lookup(term));
+        let prefix = format!("s{idx}_");
+        let renamed = token_re.replace_all(&text, |caps: &regex::Captures<'_>| {
+            format!("{prefix}{}", &caps[0])
+        });
+        let renamed_root = token_re
+            .replace_all(&local_root, |caps: &regex::Captures<'_>| {
+                format!("{prefix}{}", &caps[0])
+            })
+            .to_string();
+        merged.push_str(&renamed);
+        if !merged.ends_with('\n') {
+            merged.push('\n');
+        }
+        merged_roots.push(renamed_root);
+    }
+
+    // ----- Stage 2: full rewrites on the re-emitted program -----
+    let code = full_egglog(&merged, ops, cleanup);
     let mut egraph = egglog::EGraph::default();
     let commands = egraph.parser.get_program_from_string(None, &code)?;
     trace!("{}", "Egglog running...".green());
     let _outputs = egraph.run_program(commands)?;
 
-    let mut root_eclasses = Vec::with_capacity(roots.len());
-    for root in roots {
+    let mut root_eclasses = Vec::with_capacity(merged_roots.len());
+    for root in &merged_roots {
         let (sort, value) = egraph.eval_expr(&var!(root))?;
         root_eclasses.push((sort, value));
     }

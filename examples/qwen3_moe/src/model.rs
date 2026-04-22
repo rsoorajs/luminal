@@ -186,7 +186,7 @@ impl Qwen3MoE {
                 kv_cache.v_caches[i],
                 kv_cache.max_seq,
             );
-            x = x_new.graph_break();
+            x = x_new;
             cache_outputs.push((k_out, v_out));
         }
         let logits = self.lm_norm.forward(x).matmul(self.lm_head.t());
@@ -239,7 +239,6 @@ impl Qwen3MoELayer {
         let (attn_out, k_cache_out, v_cache_out) =
             attention(q_rope, k_rope, v, k_cache_in, v_cache_in, max_seq);
         x += attn_out.matmul(self.o_proj.t());
-        x = x.graph_break();
 
         // MoE FFN
         let x_mlp = self.mlp_rms.forward(x);
