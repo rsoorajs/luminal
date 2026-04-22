@@ -138,6 +138,10 @@ pub type HLIROps = (
     Input,
     Output,
     CustomOpKind,
+    LoopStart,
+    LoopEnd,
+    LoopInput,
+    LoopOutput,
     Constant,
     Cast,
     Iota,
@@ -333,6 +337,314 @@ impl HLIROp for CustomOpKind {
 impl NativeOp for CustomOpKind {
     fn execute(&self, _: Vec<&NativeData>, _: &FxHashMap<char, usize>) -> NativeData {
         unimplemented!()
+    }
+}
+
+// --- Loop ops ---------------------------------------------------------------
+//
+// Automatic loop-rolling replaces N unrolled copies of a repeating body with
+// a single body plus structural marker ops. All four ops in one loop share a
+// `loop_id`. `iters` lives on `LoopStart` only; every other op references the
+// same loop via `loop_id`.
+//
+//   LoopStart   — one per loop-carried slot; takes the initial value, yields
+//                 the current iteration's value into the body.
+//   LoopEnd     — mirror of LoopStart; takes the body's final value for the
+//                 slot, yields the post-loop value.
+//   LoopInput   — OpKind (variable-arity). Takes N input tensors (one per
+//                 iteration) and yields the current iteration's tensor.
+//   LoopOutput  — OpKind (variable-arity, sink). Takes the body's value + N
+//                 target tensors; writes body[i] -> target[i] each iteration.
+//
+// Execution semantics and iteration driving live in the runtime compilation
+// step; these ops just carry the structure through HLIR/egglog/LLIR.
+
+#[derive(Default, Debug, Clone)]
+pub struct LoopStart {
+    pub loop_id: usize,
+    pub slot_idx: usize,
+    pub iters: Expression,
+    pub dtype: DType,
+}
+
+impl Display for LoopStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LoopStart(id={}, slot={}, iters={:?}, {})",
+            self.loop_id, self.slot_idx, self.iters, self.dtype
+        )
+    }
+}
+
+impl EgglogOp for LoopStart {
+    fn sort(&self) -> SortDef {
+        sort(
+            IR,
+            "LoopStart",
+            &[
+                ("inp", IR),
+                ("loop_id", I64),
+                ("slot_idx", I64),
+                ("iters", EXPRESSION),
+                ("dtype", DTYPE),
+            ],
+        )
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn rewrites(&self) -> Vec<Rule> {
+        vec![dtype_from_field_rule(&self.sort(), "dtype")]
+    }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        kind_children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
+        _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        expr_cache: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        let loop_id = egraph.enodes[kind_children[1]]
+            .0
+            .replace("\"", "")
+            .parse::<usize>()
+            .unwrap();
+        let slot_idx = egraph.enodes[kind_children[2]]
+            .0
+            .replace("\"", "")
+            .parse::<usize>()
+            .unwrap();
+        let iters = extract_expr(egraph, kind_children[3], expr_cache).unwrap();
+        let dtype = extract_dtype(egraph, kind_children[4]);
+        (
+            LLIROp::new::<LoopStart>(Box::new(Self {
+                loop_id,
+                slot_idx,
+                iters,
+                dtype,
+            })),
+            vec![kind_children[0]],
+        )
+    }
+}
+
+impl HLIROp for LoopStart {
+    fn to_egglog(&self, inp: &[(NodeIndex, String)]) -> String {
+        format!(
+            "(LoopStart {} {} {} {} ({:?}))",
+            inp[0].1,
+            self.loop_id,
+            self.slot_idx,
+            self.iters.to_egglog(),
+            self.dtype,
+        )
+    }
+}
+
+impl NativeOp for LoopStart {
+    fn execute(&self, _: Vec<&NativeData>, _: &FxHashMap<char, usize>) -> NativeData {
+        unimplemented!("LoopStart is driven by the runtime loop compiler")
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct LoopEnd {
+    pub loop_id: usize,
+    pub slot_idx: usize,
+    pub dtype: DType,
+}
+
+impl Display for LoopEnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LoopEnd(id={}, slot={}, {})",
+            self.loop_id, self.slot_idx, self.dtype
+        )
+    }
+}
+
+impl EgglogOp for LoopEnd {
+    fn sort(&self) -> SortDef {
+        sort(
+            IR,
+            "LoopEnd",
+            &[
+                ("inp", IR),
+                ("loop_id", I64),
+                ("slot_idx", I64),
+                ("dtype", DTYPE),
+            ],
+        )
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn rewrites(&self) -> Vec<Rule> {
+        vec![dtype_from_field_rule(&self.sort(), "dtype")]
+    }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        kind_children: &[&'a ENodeId],
+        _input_enodes: Vec<&'a ENodeId>,
+        _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        _: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        let loop_id = egraph.enodes[kind_children[1]]
+            .0
+            .replace("\"", "")
+            .parse::<usize>()
+            .unwrap();
+        let slot_idx = egraph.enodes[kind_children[2]]
+            .0
+            .replace("\"", "")
+            .parse::<usize>()
+            .unwrap();
+        let dtype = extract_dtype(egraph, kind_children[3]);
+        (
+            LLIROp::new::<LoopEnd>(Box::new(Self {
+                loop_id,
+                slot_idx,
+                dtype,
+            })),
+            vec![kind_children[0]],
+        )
+    }
+}
+
+impl HLIROp for LoopEnd {
+    fn to_egglog(&self, inp: &[(NodeIndex, String)]) -> String {
+        format!(
+            "(LoopEnd {} {} {} ({:?}))",
+            inp[0].1, self.loop_id, self.slot_idx, self.dtype,
+        )
+    }
+}
+
+impl NativeOp for LoopEnd {
+    fn execute(&self, _: Vec<&NativeData>, _: &FxHashMap<char, usize>) -> NativeData {
+        unimplemented!("LoopEnd is driven by the runtime loop compiler")
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct LoopInput {
+    pub loop_id: usize,
+    pub stream_id: usize,
+    pub dtype: DType,
+}
+
+impl Display for LoopInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LoopInput(id={}, stream={}, {})",
+            self.loop_id, self.stream_id, self.dtype
+        )
+    }
+}
+
+impl EgglogOp for LoopInput {
+    fn sort(&self) -> SortDef {
+        sort(
+            OP_KIND,
+            "LoopInput",
+            &[
+                ("loop_id", I64),
+                ("stream_id", I64),
+                ("dtype", DTYPE),
+            ],
+        )
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn rewrites(&self) -> Vec<Rule> {
+        vec![dtype_from_kind_field(&self.sort(), "dtype")]
+    }
+}
+
+impl HLIROp for LoopInput {
+    fn to_egglog(&self, inp: &[(NodeIndex, String)]) -> String {
+        format!(
+            "(Op (LoopInput {} {} ({:?})) {})",
+            self.loop_id,
+            self.stream_id,
+            self.dtype,
+            list_to_egglog(&inp.iter().map(|i| &i.1).collect_vec(), "ICons", "INil"),
+        )
+    }
+}
+
+impl NativeOp for LoopInput {
+    fn execute(&self, _: Vec<&NativeData>, _: &FxHashMap<char, usize>) -> NativeData {
+        unimplemented!("LoopInput is driven by the runtime loop compiler")
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct LoopOutput {
+    pub loop_id: usize,
+    pub stream_id: usize,
+    /// Per-iteration target output-node indices. At iteration `i`, the runtime
+    /// routes `body_val` to the output slot associated with `targets[i]`.
+    ///
+    /// This is host-side routing metadata only — not passed through egglog, so
+    /// it survives the egraph roundtrip via instance-cloning only. After
+    /// extraction the prepass rehydrates it via `loop_id + stream_id` lookup.
+    pub targets: Vec<usize>,
+}
+
+impl Display for LoopOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LoopOutput(id={}, stream={}, {} targets)",
+            self.loop_id,
+            self.stream_id,
+            self.targets.len()
+        )
+    }
+}
+
+impl EgglogOp for LoopOutput {
+    fn sort(&self) -> SortDef {
+        sort(
+            OP_KIND,
+            "LoopOutput",
+            &[("loop_id", I64), ("stream_id", I64)],
+        )
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+}
+
+impl HLIROp for LoopOutput {
+    fn to_egglog(&self, inp: &[(NodeIndex, String)]) -> String {
+        format!(
+            "(Op (LoopOutput {} {}) {})",
+            self.loop_id,
+            self.stream_id,
+            list_to_egglog(&inp.iter().map(|i| &i.1).collect_vec(), "ICons", "INil"),
+        )
+    }
+}
+
+impl NativeOp for LoopOutput {
+    fn execute(&self, _: Vec<&NativeData>, _: &FxHashMap<char, usize>) -> NativeData {
+        unimplemented!("LoopOutput is driven by the runtime loop compiler")
     }
 }
 
