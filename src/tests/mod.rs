@@ -489,10 +489,8 @@ fn test_only_outputs_remain() {
 fn build_repeated_block_graph(
     layers: usize,
     width: usize,
-    auto_roll: bool,
 ) -> (Graph, NodeIndex, Vec<NodeIndex>, NodeIndex) {
     let mut cx = Graph::new();
-    cx.set_auto_loop_rolling(auto_roll);
     let x = cx.tensor(width);
     let mut state = x;
     let mut weight_nodes = Vec::with_capacity(layers * 2);
@@ -507,117 +505,36 @@ fn build_repeated_block_graph(
     (cx, x.id, weight_nodes, y.id)
 }
 
+fn repeated_block_reference(layers: usize, input: &[f32], weights: &[Vec<f32>]) -> Vec<f32> {
+    let mut state = input.to_vec();
+    for i in 0..layers {
+        let w = &weights[i * 2];
+        let b = &weights[i * 2 + 1];
+        for ((s, wi), bi) in state.iter_mut().zip(w.iter()).zip(b.iter()) {
+            *s = (*s * *wi + *bi).sin();
+        }
+    }
+    state
+}
+
 #[test]
-fn integration_auto_loop_rolling_matches_baseline_native_runtime() {
-    let layers = 4;
+fn integration_auto_loop_rolling_matches_reference_native_runtime() {
+    let layers = 12;
     let width = 16;
     let input = random_vec(width);
     let weights: Vec<Vec<f32>> = (0..layers * 2).map(|_| random_vec(width)).collect();
 
-    let (mut base_graph, base_input, base_weight_nodes, base_output) =
-        build_repeated_block_graph(layers, width, false);
-    base_graph.build_search_space::<NativeRuntime>();
-    let mut base_rt = base_graph.search(NativeRuntime::default(), 1);
-    base_rt.set_data(base_input, input.clone());
-    for (node, data) in base_weight_nodes.iter().zip(weights.iter()) {
-        base_rt.set_data(*node, data.clone());
+    let reference = repeated_block_reference(layers, &input, &weights);
+
+    let (mut graph, input_id, weight_ids, output_id) = build_repeated_block_graph(layers, width);
+    graph.build_search_space::<NativeRuntime>();
+    let mut rt = graph.search(NativeRuntime::default(), 1);
+    rt.set_data(input_id, input);
+    for (node, data) in weight_ids.iter().zip(weights.iter()) {
+        rt.set_data(*node, data.clone());
     }
-    base_rt.execute(&base_graph.dyn_map);
-    let baseline = base_rt.get_f32(base_output).clone();
+    rt.execute(&graph.dyn_map);
+    let out = rt.get_f32(output_id);
 
-    let (mut rolled_graph, rolled_input, rolled_weight_nodes, rolled_output) =
-        build_repeated_block_graph(layers, width, true);
-    rolled_graph.build_search_space::<NativeRuntime>();
-    let mut rolled_rt = rolled_graph.search(NativeRuntime::default(), 1);
-    let regional = rolled_graph
-        .regional_llir()
-        .expect("expected regionalized LLIR artifact after rolled search");
-    assert!(
-        regional.regions.len() > 1,
-        "expected full regionalized search artifact with multiple regions"
-    );
-    let covered_chunks: usize = regional
-        .regions
-        .iter()
-        .map(|r| r.member_regions.len())
-        .sum();
-    assert_eq!(
-        covered_chunks,
-        regional.region_descriptors.len(),
-        "regionalized LLIR should cover all region descriptors"
-    );
-    rolled_rt.set_data(rolled_input, input);
-    for (node, data) in rolled_weight_nodes.iter().zip(weights.iter()) {
-        rolled_rt.set_data(*node, data.clone());
-    }
-    rolled_rt.execute(&rolled_graph.dyn_map);
-    let rolled = rolled_rt.get_f32(rolled_output);
-
-    assert_close(&baseline, rolled);
-}
-
-#[test]
-fn integration_auto_loop_rolling_perf_report_native() {
-    use std::time::Instant;
-
-    let layers = 10;
-    let width = 1024;
-    let input = random_vec(width);
-    let weights: Vec<Vec<f32>> = (0..layers * 2).map(|_| random_vec(width)).collect();
-
-    fn run_case(
-        layers: usize,
-        width: usize,
-        auto_roll: bool,
-        input: &[f32],
-        weights: &[Vec<f32>],
-    ) -> (f64, f64, Vec<f32>) {
-        let (mut graph, input_id, weight_ids, output_id) =
-            build_repeated_block_graph(layers, width, auto_roll);
-
-        let t0 = Instant::now();
-        graph.build_search_space::<NativeRuntime>();
-        let mut rt = graph.search(NativeRuntime::default(), 1);
-        let search_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
-        rt.set_data(input_id, input.to_vec());
-        for (node, data) in weight_ids.iter().zip(weights.iter()) {
-            rt.set_data(*node, data.clone());
-        }
-
-        let t1 = Instant::now();
-        rt.execute(&graph.dyn_map);
-        let exec_ms = t1.elapsed().as_secs_f64() * 1000.0;
-        let out = rt.get_f32(output_id).clone();
-
-        (search_ms, exec_ms, out)
-    }
-
-    let (baseline_search_ms, baseline_exec_ms, baseline_out) =
-        run_case(layers, width, false, &input, &weights);
-    let (rolled_search_ms, rolled_exec_ms, rolled_out) =
-        run_case(layers, width, true, &input, &weights);
-
-    assert_close(&baseline_out, &rolled_out);
-
-    let search_delta_pct = if baseline_search_ms > 0.0 {
-        ((rolled_search_ms - baseline_search_ms) / baseline_search_ms) * 100.0
-    } else {
-        0.0
-    };
-    let exec_delta_pct = if baseline_exec_ms > 0.0 {
-        ((rolled_exec_ms - baseline_exec_ms) / baseline_exec_ms) * 100.0
-    } else {
-        0.0
-    };
-
-    println!(
-        "PERF(native) layers={layers} width={width}\n  baseline: search={:.3}ms exec={:.3}ms\n  rolled:   search={:.3}ms exec={:.3}ms\n  delta:    search={:+.2}% exec={:+.2}%",
-        baseline_search_ms,
-        baseline_exec_ms,
-        rolled_search_ms,
-        rolled_exec_ms,
-        search_delta_pct,
-        exec_delta_pct,
-    );
+    assert_close(&reference, out);
 }

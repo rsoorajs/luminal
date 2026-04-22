@@ -61,7 +61,6 @@ struct RollingCandidate {
 
 #[derive(Debug, Clone)]
 struct RollingRun {
-    signature: String,
     occurrences: Vec<RollingOccurrence>,
     starts: Vec<usize>,
     window: usize,
@@ -95,6 +94,7 @@ struct RollingSearchReport {
 #[derive(Debug, Clone)]
 struct AutoRegionPlan {
     descriptors: Vec<SubgraphDescriptor>,
+    #[allow(dead_code)] // read only in tests
     loop_region_indices: Vec<usize>,
 }
 
@@ -280,8 +280,6 @@ pub struct Graph {
     /// Stored as plain data so it survives cross-binary type identity mismatches
     /// when external backend plugins are compiled separately.
     pub input_meta: FxHashMap<NodeIndex, (String, DType)>,
-    /// Enable automatic loop-rolling prepass before e-graph search-space build.
-    pub enable_auto_loop_rolling: bool,
     /// Whether explicit loop regions were produced by the automatic loop-rolling prepass.
     auto_rolled_regions: bool,
     /// Virtual region plan produced by automatic loop rolling.
@@ -304,7 +302,6 @@ impl Default for Graph {
             custom_ops: Default::default(),
             dim_buckets: Default::default(),
             input_meta: Default::default(),
-            enable_auto_loop_rolling: true,
             auto_rolled_regions: Default::default(),
             auto_region_plan: Default::default(),
             last_regional_llir: Default::default(),
@@ -319,17 +316,7 @@ impl Graph {
         Graph::default()
     }
 
-    pub fn set_auto_loop_rolling(&mut self, enabled: bool) {
-        self.enable_auto_loop_rolling = enabled;
-    }
-
-    fn maybe_enable_auto_loop_rolling(&mut self) {
-        if !self.enable_auto_loop_rolling {
-            self.auto_rolled_regions = false;
-            self.auto_region_plan = None;
-            return;
-        }
-
+    fn run_auto_loop_rolling_prepass(&mut self) {
         let max_region_size = self.graph.node_count() / 2;
         self.auto_roll_loops_prepass();
         if !self.auto_rolled_regions {
@@ -741,7 +728,6 @@ impl Graph {
                 }
                 diagnostics.repeated_signature_runs += 1;
                 discovered_runs.push(RollingRun {
-                    signature: sig.clone(),
                     occurrences: occs.clone(),
                     starts: starts.clone(),
                     window,
@@ -815,16 +801,6 @@ impl Graph {
             candidate: best_overall,
             diagnostics,
         }
-    }
-
-    fn grow_rolling_candidate(
-        &self,
-        uses: &FxHashMap<NodeIndex, Vec<(NodeIndex, usize)>>,
-        topo_index: &FxHashMap<NodeIndex, usize>,
-        candidate: RollingCandidate,
-        discovered_runs: &[RollingRun],
-    ) -> RollingCandidate {
-        grow_rolling_candidate(&self.graph, uses, topo_index, candidate, discovered_runs)
     }
 
     /// Create a new tensor with shape S
@@ -933,19 +909,16 @@ impl Graph {
     pub fn build_search_space<Rt: Runtime + 'static>(&mut self) {
         self.last_regional_llir = None;
         self.single_regional_egraph = None;
-        self.maybe_enable_auto_loop_rolling();
+        self.run_auto_loop_rolling_prepass();
         let mut ops = Rt::Ops::into_vec();
         ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
         let cleanup_hlir = TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>();
 
-        let subgraphs = if self.auto_rolled_regions {
-            self.auto_region_plan
-                .as_ref()
-                .map(|p| p.descriptors.clone())
-                .unwrap_or_else(|| default_region_descriptors(self))
-        } else {
-            default_region_descriptors(self)
-        };
+        let subgraphs = self
+            .auto_region_plan
+            .as_ref()
+            .map(|p| p.descriptors.clone())
+            .unwrap_or_else(|| default_region_descriptors(self));
 
         if subgraphs.len() <= 1 {
             let (program, root) = hlir_to_egglog(self);
@@ -961,12 +934,8 @@ impl Graph {
                 "Split".cyan().bold(),
                 subgraphs.len()
             );
-            if self.auto_rolled_regions {
-                let groups = self.auto_rolled_region_groups(&subgraphs);
-                self.build_single_regionalized_egraph(&subgraphs, groups, &ops, cleanup_hlir);
-            } else {
-                self.build_grouped_egraphs(&subgraphs, &ops, cleanup_hlir);
-            }
+            let groups = self.auto_rolled_region_groups(&subgraphs);
+            self.build_single_regionalized_egraph(&subgraphs, groups, &ops, cleanup_hlir);
         }
         self.region_descriptors = subgraphs;
         self.ops = Some(ops);
@@ -976,7 +945,7 @@ impl Graph {
     pub fn build_search_space_exclude_ops<Rt: Runtime + 'static, Ex: IntoEgglogOp>(&mut self) {
         self.last_regional_llir = None;
         self.single_regional_egraph = None;
-        self.maybe_enable_auto_loop_rolling();
+        self.run_auto_loop_rolling_prepass();
         let exclude_ops = Ex::into_vec()
             .into_iter()
             .map(|e| e.sort().name)
@@ -986,14 +955,11 @@ impl Graph {
         ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
         let cleanup_hlir = TypeId::of::<Rt>() != TypeId::of::<NativeRuntime>();
 
-        let subgraphs = if self.auto_rolled_regions {
-            self.auto_region_plan
-                .as_ref()
-                .map(|p| p.descriptors.clone())
-                .unwrap_or_else(|| default_region_descriptors(self))
-        } else {
-            default_region_descriptors(self)
-        };
+        let subgraphs = self
+            .auto_region_plan
+            .as_ref()
+            .map(|p| p.descriptors.clone())
+            .unwrap_or_else(|| default_region_descriptors(self));
         if subgraphs.len() <= 1 {
             let (program, root) = hlir_to_egglog(self);
             self.egraphs = vec![run_egglog(&program, &root, &ops, cleanup_hlir).unwrap()];
@@ -1002,12 +968,8 @@ impl Graph {
                 members: vec![0],
             }];
         } else {
-            if self.auto_rolled_regions {
-                let groups = self.auto_rolled_region_groups(&subgraphs);
-                self.build_single_regionalized_egraph(&subgraphs, groups, &ops, cleanup_hlir);
-            } else {
-                self.build_grouped_egraphs(&subgraphs, &ops, cleanup_hlir);
-            }
+            let groups = self.auto_rolled_region_groups(&subgraphs);
+            self.build_single_regionalized_egraph(&subgraphs, groups, &ops, cleanup_hlir);
         }
         self.region_descriptors = subgraphs;
         self.ops = Some(ops);
@@ -1082,73 +1044,6 @@ impl Graph {
             region_groups: ordered_groups,
             representative_root_indices: (0..roots.len()).collect(),
         });
-    }
-
-    /// Build e-graphs for multi-chunk subgraphs, grouping structurally identical
-    /// chunks and only building one e-graph per unique group.
-    fn build_grouped_egraphs(
-        &mut self,
-        subgraphs: &[SubgraphDescriptor],
-        ops: &[Arc<Box<dyn EgglogOp>>],
-        cleanup_hlir: bool,
-    ) {
-        // Get egglog text for each subgraph
-        let egglog_texts: Vec<(String, String)> = subgraphs
-            .iter()
-            .map(|sg| hlir_subgraph_to_egglog(self, sg))
-            .collect();
-
-        // Group by normalized egglog hash
-        let mut hash_to_chunks: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
-        for (i, (text, _)) in egglog_texts.iter().enumerate() {
-            let h = hash_egglog_normalized(text);
-            hash_to_chunks.entry(h).or_default().push(i);
-        }
-        let mut groups: Vec<RegionGroup> = hash_to_chunks
-            .into_values()
-            .map(|members| RegionGroup {
-                representative: members[0],
-                members,
-            })
-            .collect();
-        groups.sort_by_key(|g| g.representative);
-
-        println!(
-            "   {:>6}  {} unique groups from {} chunks",
-            "Graphs".cyan().bold(),
-            groups.len(),
-            subgraphs.len()
-        );
-
-        self.egraphs = groups
-            .iter()
-            .enumerate()
-            .map(|(group_idx, g)| {
-                let group_start = std::time::Instant::now();
-                let rep_nodes = subgraphs[g.representative].nodes.len();
-                println!(
-                    "   {:>6}  group {}/{} rep={} members={} nodes={}",
-                    "Graphs".cyan().bold(),
-                    group_idx + 1,
-                    groups.len(),
-                    g.representative,
-                    g.members.len(),
-                    rep_nodes
-                );
-                let (ref program, ref root) = egglog_texts[g.representative];
-                let egraph = run_egglog(program, root, ops, cleanup_hlir).unwrap();
-                println!(
-                    "   {:>6}  group {}/{} ready in {}",
-                    "Graphs".cyan().bold(),
-                    group_idx + 1,
-                    groups.len(),
-                    pretty_duration::pretty_duration(&group_start.elapsed(), None)
-                );
-                egraph
-            })
-            .collect();
-
-        self.region_groups = groups;
     }
 
     /// Get a reference to the first e-graph search space (if built)
@@ -2398,106 +2293,6 @@ fn deduped_representative_descriptors(
         .collect()
 }
 
-fn split_regionalized_llir_components(
-    llir: &LLIRGraph,
-    representative_descriptors: &[SubgraphDescriptor],
-    hlir_graph: &HLIRGraph,
-) -> Option<Vec<LLIRGraph>> {
-    let mut visited = FxHashSet::default();
-    let mut components = Vec::new();
-    for start in llir.node_indices() {
-        if !visited.insert(start) {
-            continue;
-        }
-        let mut stack = vec![start];
-        let mut nodes = vec![start];
-        while let Some(node) = stack.pop() {
-            for neighbor in llir.neighbors_undirected(node) {
-                if visited.insert(neighbor) {
-                    stack.push(neighbor);
-                    nodes.push(neighbor);
-                }
-            }
-        }
-        let node_set: FxHashSet<_> = nodes.iter().copied().collect();
-        let mut subgraph = LLIRGraph::default();
-        let mut node_map = FxHashMap::default();
-        for node in nodes.iter().copied().sorted_by_key(|n| n.index()) {
-            node_map.insert(node, subgraph.add_node(llir[node].clone()));
-        }
-        for edge in llir.edge_indices() {
-            let (src, dst) = llir.edge_endpoints(edge).unwrap();
-            if node_set.contains(&src) && node_set.contains(&dst) {
-                subgraph.add_edge(node_map[&src], node_map[&dst], ());
-            }
-        }
-        components.push(subgraph);
-    }
-
-    if components.len() != representative_descriptors.len() {
-        return None;
-    }
-
-    let mut keyed_components: Vec<(usize, LLIRGraph)> = components
-        .into_iter()
-        .map(|component| (llir_order_key(&component), component))
-        .collect();
-    keyed_components.sort_by_key(|(key, _)| *key);
-
-    let mut keyed_descriptors: Vec<(usize, usize)> = representative_descriptors
-        .iter()
-        .enumerate()
-        .map(|(idx, desc)| (idx, descriptor_order_key(desc, hlir_graph)))
-        .collect();
-    keyed_descriptors.sort_by_key(|(_, key)| *key);
-
-    let mut ordered: Vec<Option<LLIRGraph>> = (0..representative_descriptors.len())
-        .map(|_| None)
-        .collect();
-    for ((desc_idx, _), (_, component)) in keyed_descriptors
-        .into_iter()
-        .zip(keyed_components.into_iter())
-    {
-        ordered[desc_idx] = Some(component);
-    }
-    ordered.into_iter().collect()
-}
-
-fn descriptor_order_key(desc: &SubgraphDescriptor, hlir_graph: &HLIRGraph) -> usize {
-    let mut ids: Vec<usize> = desc
-        .nodes
-        .iter()
-        .filter_map(|n| {
-            hlir_graph[*n]
-                .as_any()
-                .downcast_ref::<crate::hlir::Input>()
-                .map(|inp| inp.node)
-                .or_else(|| {
-                    hlir_graph[*n]
-                        .as_any()
-                        .downcast_ref::<crate::hlir::Output>()
-                        .map(|out| out.node)
-                })
-        })
-        .collect();
-    ids.extend(desc.boundary_inputs.iter().map(|bi| bi.break_node.index()));
-    ids.extend(desc.boundary_outputs.iter().map(|n| n.index()));
-    ids.into_iter().min().unwrap_or(usize::MAX)
-}
-
-fn llir_order_key(llir: &LLIRGraph) -> usize {
-    let mut ids = Vec::new();
-    for node in llir.node_indices() {
-        if let Some(inp) = llir[node].to_op::<crate::hlir::Input>() {
-            ids.push(inp.node);
-        }
-        if let Some(out) = llir[node].to_op::<crate::hlir::Output>() {
-            ids.push(out.node);
-        }
-    }
-    ids.into_iter().min().unwrap_or(usize::MAX)
-}
-
 fn canonicalize_occurrence(
     graph: &HLIRGraph,
     ordered_nodes: &[NodeIndex],
@@ -3685,7 +3480,6 @@ mod tests {
     #[test]
     fn test_auto_roll_loops_prepass_creates_regions_for_chain_recurrence() {
         let mut cx = Graph::new();
-        cx.set_auto_loop_rolling(true);
         let x = cx.tensor(8);
         let out = x.exp2().sin().exp2().sin().exp2().sin().output();
 
@@ -3742,7 +3536,6 @@ mod tests {
     #[test]
     fn test_auto_roll_loops_prepass_skips_non_recurrent_branches() {
         let mut cx = Graph::new();
-        cx.set_auto_loop_rolling(true);
         let x = cx.tensor(8);
         let y = cx.tensor(8);
         let _out = (x.exp().sin() + y.exp().sin()).output();
@@ -3754,7 +3547,6 @@ mod tests {
     #[test]
     fn test_regionalized_hlir_debug_graph_collapses_repeated_regions() {
         let mut cx = Graph::new();
-        cx.set_auto_loop_rolling(true);
         let x = cx.tensor(8);
         let _out = x
             .exp2()
