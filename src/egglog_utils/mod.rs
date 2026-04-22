@@ -800,6 +800,27 @@ pub fn run_egglog(
     run_egglog_with_report(program, root, ops, cleanup).map(|(egraph, _)| egraph)
 }
 
+#[tracing::instrument(skip_all)]
+pub fn run_egglog_multi_roots(
+    program: &str,
+    roots: &[String],
+    ops: &[Arc<Box<dyn EgglogOp>>],
+    cleanup: bool,
+) -> Result<SerializedEGraph, egglog::Error> {
+    let code = full_egglog(program, ops, cleanup);
+    let mut egraph = egglog::EGraph::default();
+    let commands = egraph.parser.get_program_from_string(None, &code)?;
+    trace!("{}", "Egglog running...".green());
+    let _outputs = egraph.run_program(commands)?;
+
+    let mut root_eclasses = Vec::with_capacity(roots.len());
+    for root in roots {
+        let (sort, value) = egraph.eval_expr(&var!(root))?;
+        root_eclasses.push((sort, value));
+    }
+    Ok(SerializedEGraph::new(&egraph, root_eclasses))
+}
+
 pub fn extract_expr_list<'a>(
     egraph: &'a SerializedEGraph,
     node: &'a NodeId,
@@ -1182,10 +1203,32 @@ pub fn egglog_to_llir<'a>(
     expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
     custom_op_id_remap: Option<&FxHashMap<usize, usize>>,
 ) -> LLIRGraph {
+    egglog_to_llir_from_root(
+        egraph,
+        choices,
+        ops,
+        custom_ops,
+        list_cache,
+        expr_cache,
+        custom_op_id_remap,
+        &egraph.roots[0],
+    )
+}
+
+pub fn egglog_to_llir_from_root<'a>(
+    egraph: &'a SerializedEGraph,
+    choices: EGraphChoiceSet<'a>,
+    ops: &'a Vec<Arc<Box<dyn EgglogOp>>>,
+    custom_ops: &[Box<dyn CustomOp>],
+    list_cache: &mut FxHashMap<&'a NodeId, Vec<Expression>>,
+    expr_cache: &mut FxHashMap<&'a NodeId, Expression>,
+    custom_op_id_remap: Option<&FxHashMap<usize, usize>>,
+    root_class: &ClassId,
+) -> LLIRGraph {
     // Make reachability set from root
     let mut reachable = FxHashSet::default();
-    reachable.insert(choices[&egraph.roots[0]]);
-    let mut reachability_stack = vec![choices[&egraph.roots[0]]];
+    reachable.insert(choices[root_class]);
+    let mut reachability_stack = vec![choices[root_class]];
     while let Some(r) = reachability_stack.pop() {
         for ch in &egraph.enodes[r].1 {
             if egraph.eclasses[ch].0.contains("IR") || egraph.eclasses[ch].0.contains("IList") {

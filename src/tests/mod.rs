@@ -536,7 +536,11 @@ fn integration_auto_loop_rolling_matches_baseline_native_runtime() {
         regional.regions.len() > 1,
         "expected full regionalized search artifact with multiple regions"
     );
-    let covered_chunks: usize = regional.regions.iter().map(|r| r.member_regions.len()).sum();
+    let covered_chunks: usize = regional
+        .regions
+        .iter()
+        .map(|r| r.member_regions.len())
+        .sum();
     assert_eq!(
         covered_chunks,
         regional.region_descriptors.len(),
