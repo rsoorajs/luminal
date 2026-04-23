@@ -141,6 +141,7 @@ pub type HLIROps = (
     LoopStart,
     LoopEnd,
     LoopInput,
+    LoopInputStatic,
     LoopOutput,
     Constant,
     Cast,
@@ -573,6 +574,52 @@ impl EgglogOp for LoopInput {
         vec![dtype_from_kind_field(&self.sort(), "dtype")]
     }
 
+    fn early_rewrites(&self) -> Vec<Rule> {
+        // Declare the `identical_inputs` relation and the three-way unification
+        // chain between `LoopInput`, `LoopInputStatic`, and an inlined source.
+        // Running in Stage 1 alongside fusion rules (e.g. GLUMoE) so that
+        // fusion patterns that expect raw op kinds at boundary positions can
+        // match via the unioned eclass.
+        vec![Rule::raw(
+            r#"
+            (relation identical_inputs (IList))
+
+            ; All four rules live in the `expr` ruleset, which the early/full
+            ; schedules saturate each iteration. Default-ruleset scheduling
+            ; only runs each rule once per outer step, which is not enough to
+            ; propagate `identical_inputs` through an N-element IList.
+
+            ; Base: single-element list is trivially identical.
+            (rule ((= ?l (ICons ?x (INil))))
+                  ((identical_inputs ?l))
+                  :ruleset expr
+                  :name "identical_inputs base")
+
+            ; Inductive: head equals next-head, and the tail starting at next-head is identical.
+            (rule ((= ?l (ICons ?x (ICons ?x ?tail)))
+                   (identical_inputs (ICons ?x ?tail)))
+                  ((identical_inputs ?l))
+                  :ruleset expr
+                  :name "identical_inputs ind")
+
+            ; LoopInput with an identical IList is equivalent to LoopInputStatic over a single copy.
+            (rule ((= ?e (Op (LoopInput ?id ?stream ?dt) (ICons ?x ?cont)))
+                   (identical_inputs (ICons ?x ?cont)))
+                  ((let ?static (Op (LoopInputStatic ?id ?stream ?dt) (ICons ?x (INil))))
+                   (union ?e ?static))
+                  :ruleset expr
+                  :name "LoopInput to LoopInputStatic")
+
+            ; LoopInputStatic is equivalent to its single inner value — collapses the boundary
+            ; wrapper for pattern-matching and extraction purposes.
+            (rule ((= ?e (Op (LoopInputStatic ?id ?stream ?dt) (ICons ?x (INil)))))
+                  ((union ?e ?x))
+                  :ruleset expr
+                  :name "LoopInputStatic inline")
+            "#,
+        )]
+    }
+
     fn extract<'a>(
         &'a self,
         egraph: &'a SerializedEGraph,
@@ -618,6 +665,100 @@ impl HLIROp for LoopInput {
 impl NativeOp for LoopInput {
     fn execute(&self, _: Vec<&NativeData>, _: &FxHashMap<char, usize>) -> NativeData {
         unimplemented!("LoopInput is driven by the runtime loop compiler")
+    }
+}
+
+/// Iteration-independent boundary input: the same value flows into every
+/// iteration of a loop. Structurally a `LoopInput` whose per-iteration
+/// sources have all been proven equal (via the `identical_inputs` egglog
+/// relation) collapses into `LoopInputStatic` with a single-element IList,
+/// and that in turn collapses via a further rewrite into just its inner
+/// value — so egglog search can explore any of the three representations.
+/// At unroll time `LoopInputStatic` lowers to a plain edge: every cloned
+/// body node in every iteration references the single shared source.
+#[derive(Default, Debug, Clone)]
+pub struct LoopInputStatic {
+    pub loop_id: usize,
+    pub stream_id: usize,
+    pub dtype: DType,
+}
+
+impl Display for LoopInputStatic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LoopInputStatic(id={}, stream={}, {})",
+            self.loop_id, self.stream_id, self.dtype
+        )
+    }
+}
+
+impl EgglogOp for LoopInputStatic {
+    fn sort(&self) -> SortDef {
+        sort(
+            OP_KIND,
+            "LoopInputStatic",
+            &[
+                ("loop_id", I64),
+                ("stream_id", I64),
+                ("dtype", DTYPE),
+            ],
+        )
+    }
+
+    fn cleanup(&self) -> bool {
+        false
+    }
+
+    fn rewrites(&self) -> Vec<Rule> {
+        vec![dtype_from_kind_field(&self.sort(), "dtype")]
+    }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
+        _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        _: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        let loop_id = egraph.enodes[kind_children[0]]
+            .0
+            .replace("\"", "")
+            .parse::<usize>()
+            .unwrap();
+        let stream_id = egraph.enodes[kind_children[1]]
+            .0
+            .replace("\"", "")
+            .parse::<usize>()
+            .unwrap();
+        let dtype = extract_dtype(egraph, kind_children[2]);
+        (
+            LLIROp::new::<LoopInputStatic>(Box::new(Self {
+                loop_id,
+                stream_id,
+                dtype,
+            })),
+            input_enodes,
+        )
+    }
+}
+
+impl HLIROp for LoopInputStatic {
+    fn to_egglog(&self, inp: &[(NodeIndex, String)]) -> String {
+        format!(
+            "(Op (LoopInputStatic {} {} ({:?})) {})",
+            self.loop_id,
+            self.stream_id,
+            self.dtype,
+            list_to_egglog(&inp.iter().map(|i| &i.1).collect_vec(), "ICons", "INil"),
+        )
+    }
+}
+
+impl NativeOp for LoopInputStatic {
+    fn execute(&self, _: Vec<&NativeData>, _: &FxHashMap<char, usize>) -> NativeData {
+        unimplemented!("LoopInputStatic is driven by the runtime loop compiler")
     }
 }
 

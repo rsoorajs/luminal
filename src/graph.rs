@@ -318,11 +318,7 @@ impl Graph {
 
     fn run_auto_loop_rolling_prepass(&mut self) {
         let before = self.graph.node_count();
-        let inserted = if std::env::var("LUMINAL_NO_ROLL").is_ok() {
-            0
-        } else {
-            self.auto_roll_loops_prepass()
-        };
+        let inserted = self.auto_roll_loops_prepass();
         if inserted == 0 {
             println!(
                 "   {:>6}  no loop regions found (max body={})",
@@ -432,13 +428,6 @@ impl Graph {
             created += 2;
         }
 
-        // Cache of structural hashes per HLIR node. Used to detect when two
-        // boundary inputs are STRUCTURALLY identical (e.g., `Iota(z, (d1,d2))`
-        // nodes appear as separate NodeIndex per layer but compute the same
-        // value). Those should NOT be wrapped in LoopInput — they should stay
-        // as shared constants so downstream egglog rules (e.g., MoE fusion,
-        // which requires matching on `(Op (Iota ...) ...)` directly) can fire.
-        let mut struct_hash_cache: FxHashMap<NodeIndex, u64> = FxHashMap::default();
         for p in 0..n_boundary {
             if state_set.contains(&p) {
                 continue;
@@ -449,23 +438,6 @@ impl Graph {
                 .map(|occ| occ.boundary_inputs[p])
                 .collect();
             if per_iter_sources.windows(2).all(|w| w[0] == w[1]) {
-                continue;
-            }
-            // Structural-equality bypass: if all per-iter sources produce the
-            // same structural hash, they're semantically one value. Rewire
-            // iter-0's source to feed all body consumers directly, and skip
-            // creating a LoopInput.
-            let hashes: Vec<u64> = per_iter_sources
-                .iter()
-                .map(|&n| structural_hash_of(&self.graph, n, &mut struct_hash_cache))
-                .collect();
-            if hashes.windows(2).all(|w| w[0] == w[1]) {
-                // All structurally identical — nothing to do. iter-0's source
-                // already feeds iter-0 body nodes; for iter>0 clones we want
-                // them to reference the same source. Since we're NOT creating
-                // a LoopInput, unroll's `resolve_src` will fall through to the
-                // `src` branch (not body_nodes, not markers, not input_per_iter)
-                // and each iter i clone will read from the same shared source.
                 continue;
             }
 
@@ -3035,46 +3007,6 @@ fn build_virtual_loop_region_subgraphs(
     Ok((descriptors, loop_region_indices))
 }
 
-/// Recursively compute a structural hash of an HLIR node. Two nodes with the
-/// same hash produce the same value (e.g., `Iota(z, (d,d))` or `Constant(1.0)`
-/// appearing separately per layer all hash identically). Used by the rolling
-/// prepass to detect "per-iter boundary inputs" that are actually one shared
-/// value, so they can be left unwrapped instead of hidden behind a LoopInput
-/// (which breaks downstream egglog rules that pattern-match on op kind).
-fn structural_hash_of(
-    graph: &HLIRGraph,
-    node: NodeIndex,
-    cache: &mut FxHashMap<NodeIndex, u64>,
-) -> u64 {
-    use std::hash::{Hash, Hasher};
-    if let Some(&h) = cache.get(&node) {
-        return h;
-    }
-    // Cycle-break: insert a placeholder before recursing. In a DAG this
-    // shouldn't fire, but is a safety net.
-    cache.insert(node, 0);
-    let sources: Vec<NodeIndex> = graph
-        .edges_directed(node, Direction::Incoming)
-        .sorted_by_key(|e| e.id())
-        .map(|e| e.source())
-        .collect();
-    let source_names: Vec<(NodeIndex, String)> = sources
-        .iter()
-        .enumerate()
-        .map(|(i, &s)| (s, format!("src{i}")))
-        .collect();
-    let op_repr = graph[node].to_egglog(&source_names);
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    op_repr.hash(&mut hasher);
-    for &src in &sources {
-        let child = structural_hash_of(graph, src, cache);
-        child.hash(&mut hasher);
-    }
-    let h = hasher.finish();
-    cache.insert(node, h);
-    h
-}
-
 fn infer_input_shape_for_port(op: &Box<dyn HLIROp>, port: usize) -> Option<ShapeTracker> {
     use crate::hlir::*;
     if let Some(o) = op.as_any().downcast_ref::<Log2>() {
@@ -3456,13 +3388,17 @@ impl RegionalLLIR {
 /// Incoming-edge ORDER is preserved for every affected node — ops read their
 /// inputs by edge-id order, so edges are rebuilt in position.
 pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
-    use crate::hlir::{LoopEnd, LoopInput, LoopOutput, LoopStart, Output};
+    use crate::hlir::{LoopEnd, LoopInput, LoopInputStatic, LoopOutput, LoopStart, Output};
     use petgraph::visit::EdgeRef;
     use std::collections::BTreeMap;
 
     let mut starts: BTreeMap<usize, NodeIndex> = BTreeMap::new();
     let mut ends: BTreeMap<usize, NodeIndex> = BTreeMap::new();
     let mut inputs: BTreeMap<usize, NodeIndex> = BTreeMap::new();
+    // Iteration-independent inputs. Keyed on LLIR NodeIndex (stream_id is not
+    // unique when a single LoopInput splits into multiple LoopInputStatics via
+    // egglog rewrites of the same stream).
+    let mut static_inputs: FxHashSet<NodeIndex> = FxHashSet::default();
     let mut outputs: BTreeMap<usize, (NodeIndex, Vec<usize>)> = BTreeMap::new();
 
     let mut iters = 0usize;
@@ -3473,6 +3409,11 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
             starts.insert(ls.slot_idx, n);
         } else if let Some(le) = op.to_op::<LoopEnd>() {
             ends.insert(le.slot_idx, n);
+        } else if op.to_op::<LoopInputStatic>().is_some() {
+            // Must be checked before LoopInput because LoopInputStatic is a
+            // distinct op with its own sort name, but we want it recognized as
+            // a separate category here.
+            static_inputs.insert(n);
         } else if let Some(li) = op.to_op::<LoopInput>() {
             inputs.insert(li.stream_id, n);
         } else if let Some(lo) = op.to_op::<LoopOutput>() {
@@ -3488,6 +3429,7 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
         .copied()
         .chain(ends.values().copied())
         .chain(inputs.values().copied())
+        .chain(static_inputs.iter().copied())
         .chain(outputs.values().map(|(n, _)| *n))
         .collect();
 
@@ -3500,6 +3442,9 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
                 .values()
                 .flat_map(|n| llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>()),
         )
+        .chain(static_inputs.iter().flat_map(|n| {
+            llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>()
+        }))
         .collect();
     while let Some(n) = worklist.pop() {
         if body_nodes.contains(&n) || loop_markers.contains(&n) {
@@ -3540,6 +3485,22 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
         assert_eq!(srcs.len(), iters, "LoopInput stream must have `iters` sources");
         input_per_iter.insert(*input_node, srcs);
     }
+    // LoopInputStatic: single shared source reused across all iterations.
+    let mut static_source: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
+    for &static_node in &static_inputs {
+        let srcs: Vec<NodeIndex> = llir
+            .edges_directed(static_node, Direction::Incoming)
+            .sorted_by_key(|e| e.id())
+            .map(|e| e.source())
+            .collect();
+        assert_eq!(
+            srcs.len(),
+            1,
+            "LoopInputStatic must have exactly 1 source (got {})",
+            srcs.len()
+        );
+        static_source.insert(static_node, srcs[0]);
+    }
 
     let mut clone_map: Vec<FxHashMap<NodeIndex, NodeIndex>> = vec![FxHashMap::default(); iters];
     for &b in &body_nodes {
@@ -3561,6 +3522,9 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
             }
         } else if let Some(sources) = input_per_iter.get(&src) {
             sources[i]
+        } else if let Some(&shared) = static_source.get(&src) {
+            // LoopInputStatic: same source for every iteration's clone.
+            shared
         } else if body_nodes.contains(&src) {
             clone_map[i][&src]
         } else {
