@@ -432,6 +432,13 @@ impl Graph {
             created += 2;
         }
 
+        // Cache of structural hashes per HLIR node. Used to detect when two
+        // boundary inputs are STRUCTURALLY identical (e.g., `Iota(z, (d1,d2))`
+        // nodes appear as separate NodeIndex per layer but compute the same
+        // value). Those should NOT be wrapped in LoopInput — they should stay
+        // as shared constants so downstream egglog rules (e.g., MoE fusion,
+        // which requires matching on `(Op (Iota ...) ...)` directly) can fire.
+        let mut struct_hash_cache: FxHashMap<NodeIndex, u64> = FxHashMap::default();
         for p in 0..n_boundary {
             if state_set.contains(&p) {
                 continue;
@@ -442,6 +449,23 @@ impl Graph {
                 .map(|occ| occ.boundary_inputs[p])
                 .collect();
             if per_iter_sources.windows(2).all(|w| w[0] == w[1]) {
+                continue;
+            }
+            // Structural-equality bypass: if all per-iter sources produce the
+            // same structural hash, they're semantically one value. Rewire
+            // iter-0's source to feed all body consumers directly, and skip
+            // creating a LoopInput.
+            let hashes: Vec<u64> = per_iter_sources
+                .iter()
+                .map(|&n| structural_hash_of(&self.graph, n, &mut struct_hash_cache))
+                .collect();
+            if hashes.windows(2).all(|w| w[0] == w[1]) {
+                // All structurally identical — nothing to do. iter-0's source
+                // already feeds iter-0 body nodes; for iter>0 clones we want
+                // them to reference the same source. Since we're NOT creating
+                // a LoopInput, unroll's `resolve_src` will fall through to the
+                // `src` branch (not body_nodes, not markers, not input_per_iter)
+                // and each iter i clone will read from the same shared source.
                 continue;
             }
 
@@ -3009,6 +3033,46 @@ fn build_virtual_loop_region_subgraphs(
         return Err("no loop region indices survived descriptor compaction".to_string());
     }
     Ok((descriptors, loop_region_indices))
+}
+
+/// Recursively compute a structural hash of an HLIR node. Two nodes with the
+/// same hash produce the same value (e.g., `Iota(z, (d,d))` or `Constant(1.0)`
+/// appearing separately per layer all hash identically). Used by the rolling
+/// prepass to detect "per-iter boundary inputs" that are actually one shared
+/// value, so they can be left unwrapped instead of hidden behind a LoopInput
+/// (which breaks downstream egglog rules that pattern-match on op kind).
+fn structural_hash_of(
+    graph: &HLIRGraph,
+    node: NodeIndex,
+    cache: &mut FxHashMap<NodeIndex, u64>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    if let Some(&h) = cache.get(&node) {
+        return h;
+    }
+    // Cycle-break: insert a placeholder before recursing. In a DAG this
+    // shouldn't fire, but is a safety net.
+    cache.insert(node, 0);
+    let sources: Vec<NodeIndex> = graph
+        .edges_directed(node, Direction::Incoming)
+        .sorted_by_key(|e| e.id())
+        .map(|e| e.source())
+        .collect();
+    let source_names: Vec<(NodeIndex, String)> = sources
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| (s, format!("src{i}")))
+        .collect();
+    let op_repr = graph[node].to_egglog(&source_names);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    op_repr.hash(&mut hasher);
+    for &src in &sources {
+        let child = structural_hash_of(graph, src, cache);
+        child.hash(&mut hasher);
+    }
+    let h = hasher.finish();
+    cache.insert(node, h);
+    h
 }
 
 fn infer_input_shape_for_port(op: &Box<dyn HLIROp>, port: usize) -> Option<ShapeTracker> {
