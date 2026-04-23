@@ -365,6 +365,12 @@ impl Graph {
         }
 
         let mut created = 0usize;
+        // Track all NodeIndex slots we newly assign for loop-marker ops.
+        // StableGraph reuses freed node indices; removals later in this
+        // function might target slots that happen to coincide with a new
+        // loop-marker's NodeIndex, so we explicitly exclude those.
+        let mut added_loop_ops: FxHashSet<NodeIndex> = FxHashSet::default();
+        let mut pending_output_removals: FxHashSet<NodeIndex> = FxHashSet::default();
 
         for (slot_idx, (&p, &out_pos)) in candidate
             .state_param_indices
@@ -383,6 +389,7 @@ impl Graph {
                 iters: Expression::from(n_iters as i32),
                 dtype,
             }));
+            added_loop_ops.insert(loop_start);
             self.graph.add_edge(initial, loop_start, ());
 
             let edges_out_of_initial: Vec<_> = self
@@ -401,6 +408,7 @@ impl Graph {
                 slot_idx,
                 dtype,
             }));
+            added_loop_ops.insert(loop_end);
             self.graph.add_edge(body_state_out, loop_end, ());
 
             let external_edges: Vec<_> = self
@@ -440,6 +448,7 @@ impl Graph {
                 stream_id: p,
                 dtype,
             }));
+            added_loop_ops.insert(loop_input);
             for &src in &per_iter_sources {
                 self.graph.add_edge(src, loop_input, ());
             }
@@ -534,15 +543,32 @@ impl Graph {
                 targets,
             }));
             self.graph.add_edge(body_output, loop_output, ());
+            added_loop_ops.insert(loop_output);
 
+            // Mark iter 1..N's Output HLIR nodes for removal (defer so we
+            // don't free NodeIndex slots that subsequent LoopOutput adds
+            // would reuse — that reuse caused newly-created LoopOutputs to
+            // be misidentified as duplicates below).
             for &out_node in &target_output_nodes[1..] {
-                self.graph.remove_node(out_node);
+                pending_output_removals.insert(out_node);
             }
 
             created += 1;
         }
 
+        // Perform deferred Output HLIR removals (iter 1..N's Outputs whose
+        // ids are now owned by LoopOutput.targets).
+        for node in &pending_output_removals {
+            self.graph.remove_node(*node);
+        }
+
+        // Delete duplicate body nodes. Skip any node that we just ADDED as
+        // a LoopOutput (its NodeIndex might collide with a removed node's
+        // slot).
         for &node in &duplicate_body_nodes {
+            if added_loop_ops.contains(&node) {
+                continue;
+            }
             self.graph.remove_node(node);
         }
 
@@ -554,7 +580,6 @@ impl Graph {
                 duplicate_body_nodes.len(),
             );
         }
-
         created
     }
 
@@ -3487,19 +3512,30 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
         })
         .collect();
 
-    for i in 0..iters {
+    // For iter 0, we rebuild each body node's incoming edges in place: we
+    // remove each old edge and immediately re-add a new edge with the
+    // resolved source. petgraph::stable_graph reuses freed edge indices
+    // LIFO, so interleaving remove+add for each edge causes the new edge
+    // to reuse exactly the freed slot, preserving edge-id ordering (which
+    // the runtime relies on for input positions).
+    for &b in &body_nodes {
+        let pairs: Vec<(NodeIndex, petgraph::graph::EdgeIndex)> = llir
+            .edges_directed(b, Direction::Incoming)
+            .sorted_by_key(|e| e.id())
+            .map(|e| (e.source(), e.id()))
+            .collect();
+        for (src, eid) in pairs {
+            let new_src = resolve_src(src, 0, &clone_map);
+            llir.remove_edge(eid);
+            llir.add_edge(new_src, b, ());
+        }
+    }
+    // For iter > 0 clones, there are no existing edges — add fresh ones in
+    // body_incoming order so edge-id ordering matches.
+    for i in 1..iters {
         for &b in &body_nodes {
             let target = clone_map[i][&b];
             let srcs = &body_incoming[&b];
-            if i == 0 {
-                let edges: Vec<_> = llir
-                    .edges_directed(b, Direction::Incoming)
-                    .map(|e| e.id())
-                    .collect();
-                for eid in edges {
-                    llir.remove_edge(eid);
-                }
-            }
             for &src in srcs {
                 let new_src = resolve_src(src, i, &clone_map);
                 llir.add_edge(new_src, target, ());
@@ -3535,15 +3571,16 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
             .sorted_by_key(|e| e.id())
             .map(|e| e.source())
             .collect();
-        let edges: Vec<_> = llir
+        // Per-edge replace to preserve edge-id ordering via LIFO reuse.
+        let pairs: Vec<(NodeIndex, petgraph::graph::EdgeIndex)> = llir
             .edges_directed(consumer, Direction::Incoming)
-            .map(|e| e.id())
+            .sorted_by_key(|e| e.id())
+            .map(|e| (e.source(), e.id()))
             .collect();
-        for eid in edges {
-            llir.remove_edge(eid);
-        }
-        for &src in &srcs {
+        let _ = srcs;
+        for (src, eid) in pairs {
             let new_src = marker_post_sub.get(&src).copied().unwrap_or(src);
+            llir.remove_edge(eid);
             llir.add_edge(new_src, consumer, ());
         }
     }
@@ -3582,6 +3619,55 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
         0,
         "unroll left stray loop marker ops in LLIR"
     );
+
+    // Compact the graph into a freshly-allocated StableGraph so all edge
+    // IDs are re-assigned sequentially in our chosen insertion order.
+    // Without this, later kernel_to_host add_edge calls can reuse edge
+    // indices that our unroll freed via remove_node on loop markers,
+    // producing sort-by-edge-id orderings where a later-added scheduling
+    // edge ends up at a low index — which the runtime interprets as a
+    // primary input position and crashes looking up a buffer.
+    let compacted = compact_llir_preserving_input_order(llir);
+    *llir = compacted;
+}
+
+/// Rebuild an LLIR graph into a fresh StableGraph, copying nodes and edges
+/// such that edge IDs are sequential in the insertion order we choose
+/// (per-node incoming edges in their original edge-id order). This erases
+/// any free-list reuse artifacts from prior `remove_edge` / `remove_node`
+/// calls.
+fn compact_llir_preserving_input_order(old: &LLIRGraph) -> LLIRGraph {
+    use petgraph::visit::EdgeRef;
+    let mut new_graph = LLIRGraph::default();
+    let mut old_to_new: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
+    // Topo sort to add nodes in a deterministic order. If the graph has
+    // cycles (shouldn't for LLIR), fall back to node_indices order.
+    let topo = match petgraph::algo::toposort(old, None) {
+        Ok(v) => v,
+        Err(_) => old.node_indices().collect(),
+    };
+    for n in &topo {
+        let new_n = new_graph.add_node(old[*n].clone());
+        old_to_new.insert(*n, new_n);
+    }
+    // Add edges in topo order, per-node incoming sorted by old edge id.
+    // This reassigns new edge indices sequentially so sort-by-id matches
+    // the intended input position.
+    for n in &topo {
+        let incoming: Vec<NodeIndex> = old
+            .edges_directed(*n, Direction::Incoming)
+            .sorted_by_key(|e| e.id())
+            .map(|e| e.source())
+            .collect();
+        for src in incoming {
+            if let (Some(&new_src), Some(&new_dst)) =
+                (old_to_new.get(&src), old_to_new.get(n))
+            {
+                new_graph.add_edge(new_src, new_dst, ());
+            }
+        }
+    }
+    new_graph
 }
 
 #[cfg(test)]
