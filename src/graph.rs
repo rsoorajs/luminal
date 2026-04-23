@@ -318,7 +318,11 @@ impl Graph {
 
     fn run_auto_loop_rolling_prepass(&mut self) {
         let before = self.graph.node_count();
-        let inserted = self.auto_roll_loops_prepass();
+        let inserted = if std::env::var("LUMINAL_NO_ROLL").is_ok() {
+            0
+        } else {
+            self.auto_roll_loops_prepass()
+        };
         if inserted == 0 {
             println!(
                 "   {:>6}  no loop regions found (max body={})",
