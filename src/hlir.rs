@@ -572,6 +572,35 @@ impl EgglogOp for LoopInput {
     fn rewrites(&self) -> Vec<Rule> {
         vec![dtype_from_kind_field(&self.sort(), "dtype")]
     }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
+        _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        _: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        let loop_id = egraph.enodes[kind_children[0]]
+            .0
+            .replace("\"", "")
+            .parse::<usize>()
+            .unwrap();
+        let stream_id = egraph.enodes[kind_children[1]]
+            .0
+            .replace("\"", "")
+            .parse::<usize>()
+            .unwrap();
+        let dtype = extract_dtype(egraph, kind_children[2]);
+        (
+            LLIROp::new::<LoopInput>(Box::new(Self {
+                loop_id,
+                stream_id,
+                dtype,
+            })),
+            input_enodes,
+        )
+    }
 }
 
 impl HLIROp for LoopInput {
@@ -622,21 +651,68 @@ impl EgglogOp for LoopOutput {
         sort(
             OP_KIND,
             "LoopOutput",
-            &[("loop_id", I64), ("stream_id", I64)],
+            &[
+                ("loop_id", I64),
+                ("stream_id", I64),
+                ("targets_csv", STRING),
+            ],
         )
     }
 
     fn cleanup(&self) -> bool {
         false
     }
+
+    fn extract<'a>(
+        &'a self,
+        egraph: &'a SerializedEGraph,
+        kind_children: &[&'a ENodeId],
+        input_enodes: Vec<&'a ENodeId>,
+        _: &mut FxHashMap<&'a ENodeId, Vec<Expression>>,
+        _: &mut FxHashMap<&'a ENodeId, Expression>,
+    ) -> (LLIROp, Vec<&'a ENodeId>) {
+        let loop_id = egraph.enodes[kind_children[0]]
+            .0
+            .replace("\"", "")
+            .parse::<usize>()
+            .unwrap();
+        let stream_id = egraph.enodes[kind_children[1]]
+            .0
+            .replace("\"", "")
+            .parse::<usize>()
+            .unwrap();
+        let csv = egraph.enodes[kind_children[2]].0.replace("\"", "");
+        let targets = if csv.is_empty() {
+            Vec::new()
+        } else {
+            csv.split(',')
+                .map(|s| s.parse::<usize>().expect("invalid LoopOutput target id"))
+                .collect()
+        };
+        (
+            LLIROp::new::<LoopOutput>(Box::new(Self {
+                loop_id,
+                stream_id,
+                targets,
+            })),
+            input_enodes,
+        )
+    }
 }
 
 impl HLIROp for LoopOutput {
     fn to_egglog(&self, inp: &[(NodeIndex, String)]) -> String {
+        let targets_csv = self
+            .targets
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "(Op (LoopOutput {} {}) {})",
+            "(Op (LoopOutput {} {} \"{}\") {})",
             self.loop_id,
             self.stream_id,
+            targets_csv,
             list_to_egglog(&inp.iter().map(|i| &i.1).collect_vec(), "ICons", "INil"),
         )
     }

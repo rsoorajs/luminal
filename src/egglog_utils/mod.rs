@@ -1464,6 +1464,7 @@ pub fn egglog_to_llir_from_root<'a>(
     //     )
     //     .unwrap();
     // }
+    crate::graph::unroll_loops_in_llir(&mut graph);
     graph
 }
 

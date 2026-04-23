@@ -236,7 +236,11 @@ impl LLIROp {
         assert!(
             op.type_name().contains("dyn")
                 || op.type_name().contains("Input")
-                || op.type_name().contains("Output"),
+                || op.type_name().contains("Output")
+                || op.type_name().contains("LoopStart")
+                || op.type_name().contains("LoopEnd")
+                || op.type_name().contains("LoopInput")
+                || op.type_name().contains("LoopOutput"),
             "op types must be erased into dialect traits for dialect casting to work!"
         );
         Self(Arc::new(Box::new(DialectOp::new(op))))

@@ -317,38 +317,269 @@ impl Graph {
     }
 
     fn run_auto_loop_rolling_prepass(&mut self) {
-        let max_region_size = self.graph.node_count() / 2;
-        self.auto_roll_loops_prepass();
-        if !self.auto_rolled_regions {
+        let before = self.graph.node_count();
+        let inserted = self.auto_roll_loops_prepass();
+        if inserted == 0 {
             println!(
                 "   {:>6}  no loop regions found (max body={})",
                 "Rolled".cyan().bold(),
-                max_region_size,
+                before / 2,
             );
-            return;
+        }
+    }
+
+    /// Mutate the HLIR graph in place to fold N repeated body occurrences into
+    /// a single body plus loop-marker ops. See `auto_roll_loops_prepass`.
+    fn insert_loop_region_ops(&mut self, candidate: RollingCandidate) -> usize {
+        use crate::hlir::{LoopEnd, LoopInput, LoopOutput, LoopStart};
+        use petgraph::visit::EdgeRef;
+
+        let n_iters = candidate.occurrences.len();
+        let loop_id = 0usize;
+
+        let body_nodes: FxHashSet<NodeIndex> =
+            candidate.occurrences[0].nodes.iter().copied().collect();
+        let mut duplicate_body_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
+        for occ in &candidate.occurrences[1..] {
+            for &n in &occ.nodes {
+                duplicate_body_nodes.insert(n);
+            }
         }
 
-        let Some(plan) = &self.auto_region_plan else {
-            self.auto_rolled_regions = false;
-            return;
-        };
-        let groups = self.auto_rolled_region_groups(&plan.descriptors);
-        let regionalized_nodes = self.regionalized_hlir_node_count(&plan.descriptors, &groups);
-        let full_nodes = self.graph.node_count();
-        let regionalized_ops = self.regionalized_hlir_op_count(&plan.descriptors, &groups);
-        let full_ops = self.full_hlir_op_count();
-        if regionalized_ops * 2 >= full_ops {
-            println!(
-                "   {:>6}  ignoring regionalization: {} -> {} ops ({} -> {} nodes, needs >50% op reduction)",
-                "Rolled".yellow().bold(),
-                full_ops,
-                regionalized_ops,
-                full_nodes,
-                regionalized_nodes,
-            );
-            self.auto_rolled_regions = false;
-            self.auto_region_plan = None;
+        let n_boundary = candidate.occurrences[0].boundary_inputs.len();
+        let state_set: FxHashSet<usize> =
+            candidate.state_param_indices.iter().copied().collect();
+
+        let mut state_out_pos_per_slot: Vec<usize> =
+            Vec::with_capacity(candidate.state_param_indices.len());
+        let mut state_output_positions: FxHashSet<usize> = FxHashSet::default();
+        for &p in &candidate.state_param_indices {
+            let next_val = candidate.occurrences[1].boundary_inputs[p];
+            let pos = candidate.occurrences[0]
+                .output_nodes
+                .iter()
+                .position(|&n| n == next_val)
+                .expect("state param must have a producer in output_nodes");
+            state_out_pos_per_slot.push(pos);
+            state_output_positions.insert(pos);
         }
+
+        let mut created = 0usize;
+
+        for (slot_idx, (&p, &out_pos)) in candidate
+            .state_param_indices
+            .iter()
+            .zip(state_out_pos_per_slot.iter())
+            .enumerate()
+        {
+            let initial = candidate.occurrences[0].boundary_inputs[p];
+            let body_state_out = candidate.occurrences[0].output_nodes[out_pos];
+            let last_state_out = candidate.occurrences[n_iters - 1].output_nodes[out_pos];
+            let dtype = self.infer_node_dtype(initial);
+
+            let loop_start = self.graph.add_node(Box::new(LoopStart {
+                loop_id,
+                slot_idx,
+                iters: Expression::from(n_iters as i32),
+                dtype,
+            }));
+            self.graph.add_edge(initial, loop_start, ());
+
+            let edges_out_of_initial: Vec<_> = self
+                .graph
+                .edges_directed(initial, Direction::Outgoing)
+                .filter(|e| body_nodes.contains(&e.target()))
+                .map(|e| (e.id(), e.target()))
+                .collect();
+            for (eid, dst) in edges_out_of_initial {
+                self.graph.remove_edge(eid);
+                self.graph.add_edge(loop_start, dst, ());
+            }
+
+            let loop_end = self.graph.add_node(Box::new(LoopEnd {
+                loop_id,
+                slot_idx,
+                dtype,
+            }));
+            self.graph.add_edge(body_state_out, loop_end, ());
+
+            let external_edges: Vec<_> = self
+                .graph
+                .edges_directed(last_state_out, Direction::Outgoing)
+                .filter(|e| {
+                    let t = e.target();
+                    !body_nodes.contains(&t) && !duplicate_body_nodes.contains(&t)
+                })
+                .map(|e| (e.id(), e.target()))
+                .collect();
+            for (eid, dst) in external_edges {
+                self.graph.remove_edge(eid);
+                self.graph.add_edge(loop_end, dst, ());
+            }
+
+            created += 2;
+        }
+
+        for p in 0..n_boundary {
+            if state_set.contains(&p) {
+                continue;
+            }
+            let per_iter_sources: Vec<NodeIndex> = candidate
+                .occurrences
+                .iter()
+                .map(|occ| occ.boundary_inputs[p])
+                .collect();
+            if per_iter_sources.windows(2).all(|w| w[0] == w[1]) {
+                continue;
+            }
+
+            let body_input = candidate.occurrences[0].boundary_inputs[p];
+            let dtype = self.infer_node_dtype(body_input);
+            let loop_input = self.graph.add_node(Box::new(LoopInput {
+                loop_id,
+                stream_id: p,
+                dtype,
+            }));
+            for &src in &per_iter_sources {
+                self.graph.add_edge(src, loop_input, ());
+            }
+
+            let body_edges: Vec<_> = self
+                .graph
+                .edges_directed(body_input, Direction::Outgoing)
+                .filter(|e| body_nodes.contains(&e.target()))
+                .map(|e| (e.id(), e.target()))
+                .collect();
+            for (eid, dst) in body_edges {
+                self.graph.remove_edge(eid);
+                self.graph.add_edge(loop_input, dst, ());
+            }
+
+            created += 1;
+        }
+
+        let n_outputs = candidate.occurrences[0].output_nodes.len();
+        for q in 0..n_outputs {
+            if state_output_positions.contains(&q) {
+                continue;
+            }
+
+            // Two shapes are possible at position q:
+            //   (a) the body exposes an intermediate value that downstream
+            //       (outside-body) code then wraps in an Output HLIR node.
+            //   (b) the body contains the Output HLIR directly (the `.output()`
+            //       call put it inside the rolling window).
+            // In (b) each occurrence's `output_nodes[q]` IS an Output node;
+            // in (a) each needs an Output consumer via an outgoing edge.
+            let mut targets: Vec<usize> = Vec::with_capacity(n_iters);
+            let mut target_output_nodes: Vec<NodeIndex> = Vec::with_capacity(n_iters);
+            let mut body_producer_for_loopoutput: Option<NodeIndex> = None;
+            let mut complete = true;
+            for occ in &candidate.occurrences {
+                let node = occ.output_nodes[q];
+                if let Some(op) = self.try_get_op::<crate::hlir::Output>(node) {
+                    // Case (b): the node itself is an Output. Its producer is
+                    // what LoopOutput will wrap.
+                    let pred = self
+                        .graph
+                        .neighbors_directed(node, Direction::Incoming)
+                        .next();
+                    match pred {
+                        Some(p) => {
+                            if body_producer_for_loopoutput.is_none() {
+                                body_producer_for_loopoutput = Some(p);
+                            }
+                            target_output_nodes.push(node);
+                            targets.push(op.node);
+                        }
+                        None => {
+                            complete = false;
+                            break;
+                        }
+                    }
+                } else {
+                    // Case (a): find an Output consumer.
+                    let out = self
+                        .graph
+                        .edges_directed(node, Direction::Outgoing)
+                        .filter_map(|e| {
+                            let t = e.target();
+                            self.try_get_op::<crate::hlir::Output>(t).map(|op| (t, op.node))
+                        })
+                        .next();
+                    match out {
+                        Some((out_node, out_id)) => {
+                            if body_producer_for_loopoutput.is_none() {
+                                body_producer_for_loopoutput = Some(node);
+                            }
+                            target_output_nodes.push(out_node);
+                            targets.push(out_id);
+                        }
+                        None => {
+                            complete = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !complete {
+                continue;
+            }
+            let body_output = body_producer_for_loopoutput
+                .expect("complete LoopOutput detection must have set body_producer");
+
+            let loop_output = self.graph.add_node(Box::new(LoopOutput {
+                loop_id,
+                stream_id: q,
+                targets,
+            }));
+            self.graph.add_edge(body_output, loop_output, ());
+
+            for &out_node in &target_output_nodes[1..] {
+                self.graph.remove_node(out_node);
+            }
+
+            created += 1;
+        }
+
+        for &node in &duplicate_body_nodes {
+            self.graph.remove_node(node);
+        }
+
+        if created > 0 {
+            println!(
+                "   {:>6}  rolled HLIR: {} loop ops inserted, {} duplicate body nodes deleted",
+                "Rolled".cyan().bold(),
+                created,
+                duplicate_body_nodes.len(),
+            );
+        }
+
+        created
+    }
+
+    /// Best-effort dtype lookup for a NodeIndex in the HLIR graph.
+    fn infer_node_dtype(&self, node: NodeIndex) -> DType {
+        if let Some((_, dt)) = self.input_meta.get(&node) {
+            return *dt;
+        }
+        if let Some(op) = self.try_get_op::<crate::hlir::Input>(node) {
+            return op.dtype;
+        }
+        if let Some(op) = self.try_get_op::<crate::hlir::Cast>(node) {
+            return op.1;
+        }
+        for pred in self
+            .graph
+            .neighbors_directed(node, Direction::Incoming)
+            .collect::<Vec<_>>()
+        {
+            let dt = self.infer_node_dtype(pred);
+            if dt != DType::F32 || self.input_meta.contains_key(&pred) {
+                return dt;
+            }
+        }
+        DType::F32
     }
 
     fn regionalized_hlir_node_count(
@@ -567,46 +798,12 @@ impl Graph {
             return 0;
         }
 
-        let (descriptors, loop_region_indices) = match build_virtual_loop_region_subgraphs(
-            self,
-            &candidate,
-            &candidate.state_param_indices,
-        ) {
-            Ok(v) => v,
-            Err(err) => {
-                println!(
-                    "   {:>6}  candidate rejected during region construction",
-                    "Rolled".yellow().bold(),
-                );
-                println!("   {:>6}  reason: {err}", "Rolled".yellow().bold(),);
-                return 0;
-            }
-        };
-        let inserted = descriptors
-            .iter()
-            .map(|d| d.boundary_inputs.len())
-            .sum::<usize>();
-        if inserted > 0 {
-            self.auto_rolled_regions = true;
-            self.auto_region_plan = Some(AutoRegionPlan {
-                descriptors,
-                loop_region_indices,
-            });
-            println!(
-                "   {:>6}  created {} loop boundaries ({}, trips={}, body={})",
-                "Rolled".cyan().bold(),
-                inserted,
-                candidate.signature,
-                candidate.occurrences.len(),
-                candidate.occurrences[0].nodes.len(),
-            );
-        } else {
-            println!(
-                "   {:>6}  candidate produced 0 explicit loop boundaries",
-                "Rolled".yellow().bold(),
-            );
-        }
-        inserted
+        // Mutate the HLIR in place — insert LoopStart/LoopEnd/LoopInput/
+        // LoopOutput markers, delete N-1 duplicate bodies. `auto_rolled_regions`
+        // and `auto_region_plan` remain false/None so downstream takes the
+        // plain single-root egglog path; the loop structure is encoded in the
+        // HLIR graph itself.
+        self.insert_loop_region_ops(candidate)
     }
 
     fn print_rolling_search_diagnostics(&self, diagnostics: &RollingSearchDiagnostics) {
@@ -3154,6 +3351,237 @@ impl RegionalLLIR {
 
         stitch_llir_graphs(&chunk_best_llirs, &self.region_descriptors)
     }
+}
+
+/// Expand all loop-region markers in an LLIR graph into fully unrolled bodies.
+///
+/// Reads `LoopStart` / `LoopEnd` / `LoopInput` / `LoopOutput` metadata placed
+/// by the auto-roll prepass, clones the loop body `iters-1` additional times,
+/// threads loop-carried state between clones, routes per-iteration inputs and
+/// per-iteration outputs, and removes the four marker op types.
+///
+/// Incoming-edge ORDER is preserved for every affected node — ops read their
+/// inputs by edge-id order, so edges are rebuilt in position.
+pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
+    use crate::hlir::{LoopEnd, LoopInput, LoopOutput, LoopStart, Output};
+    use petgraph::visit::EdgeRef;
+    use std::collections::BTreeMap;
+
+    let mut starts: BTreeMap<usize, NodeIndex> = BTreeMap::new();
+    let mut ends: BTreeMap<usize, NodeIndex> = BTreeMap::new();
+    let mut inputs: BTreeMap<usize, NodeIndex> = BTreeMap::new();
+    let mut outputs: BTreeMap<usize, (NodeIndex, Vec<usize>)> = BTreeMap::new();
+
+    let mut iters = 0usize;
+    for n in llir.node_indices() {
+        let op = &llir[n];
+        if let Some(ls) = op.to_op::<LoopStart>() {
+            iters = iters.max(ls.iters.to_usize().unwrap_or(1));
+            starts.insert(ls.slot_idx, n);
+        } else if let Some(le) = op.to_op::<LoopEnd>() {
+            ends.insert(le.slot_idx, n);
+        } else if let Some(li) = op.to_op::<LoopInput>() {
+            inputs.insert(li.stream_id, n);
+        } else if let Some(lo) = op.to_op::<LoopOutput>() {
+            outputs.insert(lo.stream_id, (n, lo.targets.clone()));
+        }
+    }
+    if iters <= 1 || starts.is_empty() {
+        return;
+    }
+
+    let loop_markers: FxHashSet<NodeIndex> = starts
+        .values()
+        .copied()
+        .chain(ends.values().copied())
+        .chain(inputs.values().copied())
+        .chain(outputs.values().map(|(n, _)| *n))
+        .collect();
+
+    let mut body_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
+    let mut worklist: Vec<NodeIndex> = starts
+        .values()
+        .flat_map(|n| llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>())
+        .chain(
+            inputs
+                .values()
+                .flat_map(|n| llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>()),
+        )
+        .collect();
+    while let Some(n) = worklist.pop() {
+        if body_nodes.contains(&n) || loop_markers.contains(&n) {
+            continue;
+        }
+        if llir[n].to_op::<Output>().is_some() {
+            continue;
+        }
+        body_nodes.insert(n);
+        for succ in llir.neighbors_directed(n, Direction::Outgoing).collect::<Vec<_>>() {
+            worklist.push(succ);
+        }
+    }
+
+    let mut start_meta: FxHashMap<NodeIndex, (NodeIndex, NodeIndex)> = FxHashMap::default();
+    for (slot_idx, &start_node) in &starts {
+        let end_node = *ends
+            .get(slot_idx)
+            .unwrap_or_else(|| panic!("missing LoopEnd for slot {slot_idx}"));
+        let initial = llir
+            .neighbors_directed(start_node, Direction::Incoming)
+            .next()
+            .expect("LoopStart must have an initial-value producer");
+        let body_producer = llir
+            .neighbors_directed(end_node, Direction::Incoming)
+            .next()
+            .expect("LoopEnd must have a body producer");
+        start_meta.insert(start_node, (initial, body_producer));
+    }
+
+    let mut input_per_iter: FxHashMap<NodeIndex, Vec<NodeIndex>> = FxHashMap::default();
+    for input_node in inputs.values() {
+        let srcs: Vec<NodeIndex> = llir
+            .edges_directed(*input_node, Direction::Incoming)
+            .sorted_by_key(|e| e.id())
+            .map(|e| e.source())
+            .collect();
+        assert_eq!(srcs.len(), iters, "LoopInput stream must have `iters` sources");
+        input_per_iter.insert(*input_node, srcs);
+    }
+
+    let mut clone_map: Vec<FxHashMap<NodeIndex, NodeIndex>> = vec![FxHashMap::default(); iters];
+    for &b in &body_nodes {
+        clone_map[0].insert(b, b);
+    }
+    for i in 1..iters {
+        for &b in &body_nodes {
+            let cloned = llir.add_node(llir[b].clone());
+            clone_map[i].insert(b, cloned);
+        }
+    }
+
+    let resolve_src = |src: NodeIndex, i: usize, clone_map: &[FxHashMap<NodeIndex, NodeIndex>]| {
+        if let Some(&(initial, body_producer)) = start_meta.get(&src) {
+            if i == 0 {
+                initial
+            } else {
+                clone_map[i - 1][&body_producer]
+            }
+        } else if let Some(sources) = input_per_iter.get(&src) {
+            sources[i]
+        } else if body_nodes.contains(&src) {
+            clone_map[i][&src]
+        } else {
+            src
+        }
+    };
+
+    let body_incoming: FxHashMap<NodeIndex, Vec<NodeIndex>> = body_nodes
+        .iter()
+        .map(|&b| {
+            let srcs: Vec<NodeIndex> = llir
+                .edges_directed(b, Direction::Incoming)
+                .sorted_by_key(|e| e.id())
+                .map(|e| e.source())
+                .collect();
+            (b, srcs)
+        })
+        .collect();
+
+    for i in 0..iters {
+        for &b in &body_nodes {
+            let target = clone_map[i][&b];
+            let srcs = &body_incoming[&b];
+            if i == 0 {
+                let edges: Vec<_> = llir
+                    .edges_directed(b, Direction::Incoming)
+                    .map(|e| e.id())
+                    .collect();
+                for eid in edges {
+                    llir.remove_edge(eid);
+                }
+            }
+            for &src in srcs {
+                let new_src = resolve_src(src, i, &clone_map);
+                llir.add_edge(new_src, target, ());
+            }
+        }
+    }
+
+    let post_loop_consumers: FxHashSet<NodeIndex> = loop_markers
+        .iter()
+        .flat_map(|n| llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>())
+        .filter(|n| !loop_markers.contains(n) && !body_nodes.contains(n))
+        .collect();
+
+    let mut marker_post_sub: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
+    for &end_node in ends.values() {
+        let body_producer = llir
+            .neighbors_directed(end_node, Direction::Incoming)
+            .next()
+            .expect("LoopEnd missing body producer during rewire");
+        marker_post_sub.insert(end_node, clone_map[iters - 1][&body_producer]);
+    }
+    for (output_node, _) in outputs.values() {
+        let body_producer = llir
+            .neighbors_directed(*output_node, Direction::Incoming)
+            .next()
+            .expect("LoopOutput missing body producer during rewire");
+        marker_post_sub.insert(*output_node, clone_map[iters - 1][&body_producer]);
+    }
+
+    for &consumer in &post_loop_consumers {
+        let srcs: Vec<NodeIndex> = llir
+            .edges_directed(consumer, Direction::Incoming)
+            .sorted_by_key(|e| e.id())
+            .map(|e| e.source())
+            .collect();
+        let edges: Vec<_> = llir
+            .edges_directed(consumer, Direction::Incoming)
+            .map(|e| e.id())
+            .collect();
+        for eid in edges {
+            llir.remove_edge(eid);
+        }
+        for &src in &srcs {
+            let new_src = marker_post_sub.get(&src).copied().unwrap_or(src);
+            llir.add_edge(new_src, consumer, ());
+        }
+    }
+
+    for (output_node, targets) in outputs.values() {
+        let body_producer = llir
+            .neighbors_directed(*output_node, Direction::Incoming)
+            .next()
+            .expect("LoopOutput missing body producer during output lift");
+        for i in 1..iters {
+            let Some(&target_id) = targets.get(i) else {
+                break;
+            };
+            let new_output = llir.add_node(LLIROp::new::<Output>(Box::new(Output {
+                node: target_id,
+            })));
+            let src = clone_map[i][&body_producer];
+            llir.add_edge(src, new_output, ());
+        }
+    }
+
+    for &n in &loop_markers {
+        llir.remove_node(n);
+    }
+
+    debug_assert_eq!(
+        llir.node_indices()
+            .filter(|n| {
+                let op = &llir[*n];
+                op.to_op::<LoopStart>().is_some()
+                    || op.to_op::<LoopEnd>().is_some()
+                    || op.to_op::<LoopInput>().is_some()
+                    || op.to_op::<LoopOutput>().is_some()
+            })
+            .count(),
+        0,
+        "unroll left stray loop marker ops in LLIR"
+    );
 }
 
 #[cfg(test)]
