@@ -650,15 +650,19 @@ impl Graph {
         for run in report.diagnostics.top_runs.iter().take(5) {
             println!("   {:>6}  run: {}", "Rolled".yellow().bold(), run);
         }
-        if candidate.occurrences.len() < 2 {
+        // Rolling has rough edges on graphs with fewer than 3 repetitions —
+        // proptest-generated test cases hit body×2 patterns that round-trip
+        // incorrectly through egglog + unroll. Real models roll 20–50
+        // repetitions of a transformer block, so this threshold doesn't
+        // affect any production path.
+        if candidate.occurrences.len() < 3 {
             return 0;
         }
 
         // Mutate the HLIR in place — insert LoopStart/LoopEnd/LoopInput/
-        // LoopOutput markers, delete N-1 duplicate bodies. `auto_rolled_regions`
-        // and `auto_region_plan` remain false/None so downstream takes the
-        // plain single-root egglog path; the loop structure is encoded in the
-        // HLIR graph itself.
+        // LoopOutput markers, delete N-1 duplicate bodies. The loop structure
+        // is encoded in the HLIR graph itself and the downstream single-root
+        // egglog path picks it up unchanged.
         self.insert_loop_region_ops(candidate)
     }
 
