@@ -2066,6 +2066,7 @@ extern \"C\" {{
 // collapsed. No egglog rules emit them yet — rules come in follow-up commits.
 // =========================================================================
 
+#[allow(clippy::type_complexity)]
 fn compile_identity_kernel(
     stream: &Arc<CudaStream>,
     compile_cache: &mut FxHashMap<String, (Arc<CudaModule>, CudaFunction)>,
@@ -2154,6 +2155,13 @@ impl EgglogOp for FusionStart {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
+        // No idempotence rule. `FusionStart(FusionStart(x)) ≡ FusionStart(x)`
+        // would look nice algebraically, but unioning nested markers creates
+        // eclass cycles with the pair-fuse rules (the new FusionEnd ends up
+        // referencing its own eclass via the input chain). Without the rule,
+        // the pair-fuse rule still cascades on re-firing, but each layer sits
+        // in its own fresh eclass — bounded by the `repeat 10` run schedule,
+        // and the extra layers are semantically-correct identity passthroughs.
         Vec::new()
     }
 
@@ -2255,7 +2263,59 @@ impl EgglogOp for FusionEnd {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        Vec::new()
+        let mut rules = Vec::new();
+
+        // No idempotence rule — see FusionStart::rewrites for why. Pair-fuse
+        // cascades are bounded by the run schedule's `repeat 10`; each layer
+        // of re-firing creates fresh eclasses, so no self-referential cycle.
+
+        // Pair-fuse: Binary -> Unary. For every compatible (binary, unary) pair
+        // where the unary consumes the binary's output with matching strides,
+        // wrap the two-op chain in markers:
+        //   FusionEnd(Unary(Binary(FusionStart(a), FusionStart(b))))
+        // The unary's in_strides must equal the binary's out_strides (the
+        // `?o_s ?o_s` on the unary pattern) — that's the elementwise
+        // compatibility guard. Idempotence rules above ensure saturation when
+        // this rule re-fires on the newly-created inner ops.
+        let binaries = [("KernelAdd", "Add"), ("KernelMul", "Mul")];
+        let unaries = [
+            "KernelSin",
+            "KernelSqrt",
+            "KernelExp",
+            "KernelExp2",
+            "KernelLog2",
+            "KernelRecip",
+        ];
+        for (bin_kind, bin_label) in binaries {
+            for unary_kind in unaries {
+                rules.push(Rule::raw(format!(
+                    "(rule
+                        (
+                            (= ?inner (Op ({bin_kind} ?shape ?a_s ?b_s ?o_s ?dt)
+                                           (ICons ?a_in (ICons ?b_in (INil)))))
+                            (= ?outer (Op ({unary_kind} ?shape ?o_s ?o_s ?dt)
+                                           (ICons ?inner (INil))))
+                        )
+                        (
+                            (let ?fs_a (Op (FusionStart ?shape ?a_s ?dt)
+                                            (ICons ?a_in (INil))))
+                            (let ?fs_b (Op (FusionStart ?shape ?b_s ?dt)
+                                            (ICons ?b_in (INil))))
+                            (let ?new_inner (Op ({bin_kind} ?shape ?a_s ?b_s ?o_s ?dt)
+                                                 (ICons ?fs_a (ICons ?fs_b (INil)))))
+                            (let ?new_outer (Op ({unary_kind} ?shape ?o_s ?o_s ?dt)
+                                                 (ICons ?new_inner (INil))))
+                            (let ?end (Op (FusionEnd ?shape ?o_s ?dt)
+                                           (ICons ?new_outer (INil))))
+                            (union ?outer ?end)
+                        )
+                        :name \"pair-fuse-{bin_label}-{unary_kind}\"
+                    )"
+                )));
+            }
+        }
+
+        rules
     }
 
     fn cleanup(&self) -> bool {
