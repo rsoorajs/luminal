@@ -1801,27 +1801,22 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
         }
     }
 
-    // For each state slot, track:
-    //   - `initial`: LoopStart's incoming source (state at iter 0).
-    //   - `body_producer`: LoopEnd's incoming source (state value the body
-    //     produces in each iter).
+    // start_meta[loop_start] = (initial, body_producer):
+    //   - `initial` = LoopStart's incoming (state at iter 0).
+    //   - `body_producer` = LoopEnd's incoming (state value the body
+    //     produces each iter).
     //
-    // A slot is **iteration-invariant** when `body_producer` is *not* in
-    // `body_nodes`. `body_nodes` is the set of ops reachable forward from
-    // the loop's input markers (LoopStart/LoopInput/LoopInputStatic), so a
-    // body producer outside it has no input-marker ancestor — its value
-    // does not depend on the loop's per-iteration state. egglog rewrites +
-    // extraction can produce this when the body chain provably reduces to
-    // a constant or external value (gemma's RoPE frequency factors are a
-    // real example: `Log2(10000)` and `log2(e)` end up unioned with the
-    // body's state slot through the kernel-level rewrite chain).
-    //
-    // For an iteration-invariant slot, every iter sees the same state
-    // value, so per-iter cloning is unnecessary; the unroll uses
-    // `body_producer` directly for both the iter > 0 state references in
-    // `resolve_src` and the post-loop substitution in `marker_post_sub`.
+    // A state slot is **iteration-invariant** iff `body_producer` is not
+    // in `body_nodes` (the forward-walk set from input markers). Such a
+    // producer has no input-marker ancestor, so its value can't depend on
+    // per-iter state — egglog rewrites prove the body chain reduces to a
+    // constant or external value, and extraction picks that directly. A
+    // real example is gemma's RoPE frequency factors (`Log2(10000)`,
+    // `log2(e)`), which the kernel-rewrite chain folds onto the body slot.
+    // For these, every iter sees the same state, so per-iter cloning is
+    // skipped — `resolve_src` and `marker_post_sub` use `body_producer`
+    // directly, recognised by `clone_map.get(&body_producer).is_none()`.
     let mut start_meta: FxHashMap<NodeIndex, (NodeIndex, NodeIndex)> = FxHashMap::default();
-    let mut iteration_invariant_slots: FxHashSet<NodeIndex> = FxHashSet::default();
     for (slot_idx, &start_node) in &starts {
         let end_node = *ends
             .get(slot_idx)
@@ -1834,9 +1829,6 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
             .neighbors_directed(end_node, Direction::Incoming)
             .next()
             .expect("LoopEnd must have a body producer");
-        if !body_nodes.contains(&body_producer) {
-            iteration_invariant_slots.insert(start_node);
-        }
         start_meta.insert(start_node, (initial, body_producer));
     }
 
@@ -1886,13 +1878,13 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
         if let Some(&(initial, body_producer)) = start_meta.get(&src) {
             if i == 0 {
                 initial
-            } else if iteration_invariant_slots.contains(&src) {
-                // State doesn't change between iters; `body_producer` is
-                // the single value carried for every iter > 0. See
-                // `iteration_invariant_slots` definition above.
-                body_producer
             } else {
-                clone_map[i - 1][&body_producer]
+                // Iteration-invariant slot fallback: `body_producer` not in
+                // `body_nodes` ⇒ not cloned per iter ⇒ all iters share it.
+                clone_map[i - 1]
+                    .get(&body_producer)
+                    .copied()
+                    .unwrap_or(body_producer)
             }
         } else if let Some(sources) = input_per_iter.get(&src) {
             sources[i]
@@ -1970,34 +1962,24 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
     }
 
     let mut marker_post_sub: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
-    for (&slot_idx, &end_node) in &ends {
+    for &end_node in ends.values() {
         let body_producer = llir
             .neighbors_directed(end_node, Direction::Incoming)
             .next()
             .expect("LoopEnd missing body producer during rewire");
-        let start_node = *starts
-            .get(&slot_idx)
-            .unwrap_or_else(|| panic!("missing LoopStart for slot {slot_idx}"));
-        let sub = if iteration_invariant_slots.contains(&start_node) {
-            // State is invariant across iters; post-loop value of the
-            // slot is just `body_producer` (no per-iter clone exists).
-            body_producer
-        } else {
-            clone_map[iters - 1][&body_producer]
-        };
+        // Same iteration-invariant fallback as `resolve_src`.
+        let sub = clone_map[iters - 1]
+            .get(&body_producer)
+            .copied()
+            .unwrap_or(body_producer);
         marker_post_sub.insert(end_node, sub);
     }
     // Each LoopOutputSelect(stream, iter) routes to iter's clone of that
-    // stream's body producer. Skip if extraction produced an orphan select
-    // whose stream has no LoopOutput — leaving it un-substituted lets the
-    // post-loop edge fall through to the select node itself, which gets
-    // removed with the rest of the loop markers (the consumer's edge then
-    // points to a removed node, but that's a separate concern from the
-    // unroll mechanism's correctness invariants here).
+    // stream's body producer. Same iteration-invariant fallback as for
+    // LoopEnd above: if the body producer isn't in `body_nodes`, it wasn't
+    // cloned per iter and every iter shares the single `body_producer`.
     for (&select_node, &(stream_id, iter)) in &output_selects {
-        let Some(&body_producer) = output_body_producer.get(&stream_id) else {
-            continue;
-        };
+        let body_producer = output_body_producer[&stream_id];
         let sub = clone_map[iter]
             .get(&body_producer)
             .copied()
@@ -2167,16 +2149,6 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
             .expect("LoopInputStatic must have a source");
         static_source.insert(static_node, src);
     }
-
-    // Iteration-invariant state slots (see same concept in
-    // `unroll_loops_in_llir`): for collapse this is purely informational —
-    // collapse iterates `body_nodes` to rewire incoming edges, but an
-    // iteration-invariant `body_producer` (a Constant or external input)
-    // either has no incoming edges at all, or its incoming edges aren't
-    // marker references that need rewiring. The post-loop substitution
-    // below uses `body_producer` directly (same as for non-invariant
-    // slots), so collapse needs no special handling — it works correctly
-    // on the forward-walk-only `body_nodes` for both cases.
 
     // Resolve a source reference to its iter-0 equivalent.
     let resolve_src = |src: NodeIndex| -> NodeIndex {

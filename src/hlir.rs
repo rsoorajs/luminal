@@ -123,23 +123,27 @@ pub fn binary_sort(name: &str) -> SortDef {
 /// single-binary-op loop with its fully-unrolled equivalent in the same
 /// eclass. Both representations coexist; the cost-based extractor picks
 /// whichever one downstream patterns prefer — the unrolled form when fusions
-/// (e.g. GLUMoE GemmaGELU) match through the flat chain, the rolled form
-/// otherwise. Without these unions, rolling a tiny chain blocks the fusion
-/// entirely and the extracted graph is strictly worse than not rolling.
+/// (e.g. GLUMoE GemmaGELU, KernelExp's `direct-exp-fusion`) match through
+/// the flat chain, the rolled form otherwise. Without these unions, rolling
+/// a tiny chain blocks the fusion entirely and the extracted graph is
+/// strictly worse than not rolling.
 ///
-/// Generates 2 rules per iter count (state at body input position 0 vs 1) for
-/// every `n_iters` in `2..=max_trips`. Larger trips stay rolled-only — the
-/// search-time cost of carrying both forms outweighs any fusion benefit at
-/// that scale (and real transformer-block rolls are body ≫ 1 anyway).
+/// **Register in both `EgglogOp::early_rewrites()` AND `rewrites()`.** The
+/// driver feeds `early_rewrites` into the early-stage program only and
+/// `rewrites` into the full-stage program only; we need the unrolled chain
+/// visible in both stages so early-stage fusion patterns (GLUMoE) AND
+/// full-stage kernel rewrites (`direct-exp-fusion`) can both match it.
 ///
-/// Each rule matches:
-///   `LoopStart(initial)` ← carries the state's initial value
-///   `LoopInput(s0..s_{N-1})` ← per-iter non-state input
-///   body op = `(<kind> ?ls ?li)` or `(<kind> ?li ?ls)` depending on state pos
-///   `LoopEnd(body)` ← post-loop result
+/// Generates 2 rules per iter count (state at body input position 0 vs 1)
+/// for every `n_iters` in `2..=max_trips`. Larger trips stay rolled-only —
+/// real transformer-block rolls are body ≫ 1 anyway, and carrying both
+/// forms beyond a small N adds search-time cost without an upside.
+///
+/// Each rule matches the rolled shape `LoopEnd(body)` where `body` is the
+/// binary op consuming `LoopStart(initial)` and `LoopInput(s0..s_{N-1})`,
 /// and unions `LoopEnd` with the chain
-///   `u0 = <kind>(initial, s0); u1 = <kind>(u0, s1); … u_{N-1} = …`
-/// (or the symmetric form for state at position 1).
+///   `u0 = <kind>(initial, s0); u1 = <kind>(u0, s1); … u_{N-1}`.
+/// (or symmetric for state at position 1.)
 pub fn binary_op_unroll_rules(op_kind: &str, max_trips: usize) -> Vec<Rule> {
     let mut rules = Vec::with_capacity((max_trips.saturating_sub(1)) * 2);
     for n_iters in 2..=max_trips {
@@ -151,54 +155,51 @@ pub fn binary_op_unroll_rules(op_kind: &str, max_trips: usize) -> Vec<Rule> {
 }
 
 fn binary_op_unroll_rule(op_kind: &str, n_iters: usize, state_pos: usize) -> Rule {
-    // LoopInput's source IList: (ICons ?s0 (ICons ?s1 … (INil)))
+    // Swap (state, per_iter) → (input0, input1) by `state_pos`. Both the
+    // body match pattern and the unrolled chain bodies follow this mapping
+    // so a/b stride positions stay aligned.
+    debug_assert!(state_pos < 2);
+    let order = |state: &str, per_iter: &str| -> String {
+        if state_pos == 0 {
+            format!("(ICons {state} (ICons {per_iter} (INil)))")
+        } else {
+            format!("(ICons {per_iter} (ICons {state} (INil)))")
+        }
+    };
     let li_sources = (0..n_iters).rev().fold(String::from("(INil)"), |acc, i| {
         format!("(ICons ?s{i} {acc})")
     });
-
-    // Body op pattern. For state_pos=0 the body reads (LoopStart, LoopInput);
-    // for state_pos=1 it reads (LoopInput, LoopStart). The unrolled chain
-    // mirrors the body's argument order so a/b strides stay aligned.
-    let (body_in0, body_in1) = match state_pos {
-        0 => ("?ls", "?li"),
-        1 => ("?li", "?ls"),
-        _ => unreachable!(),
-    };
-
-    let mut chain = String::new();
-    for i in 0..n_iters {
-        let prev = if i == 0 {
-            "?initial".to_string()
-        } else {
-            format!("?u{}", i - 1)
-        };
-        let s_i = format!("?s{i}");
-        let (a, b) = match state_pos {
-            0 => (prev, s_i),
-            1 => (s_i, prev),
-            _ => unreachable!(),
-        };
-        chain.push_str(&format!(
-            "                (let ?u{i} (Op ({op_kind} ?sh ?as ?bs ?os) (ICons {a} (ICons {b} (INil)))))\n"
-        ));
-    }
-    let last = format!("?u{}", n_iters - 1);
-    let name = format!("unroll {op_kind} body trips={n_iters} state={state_pos}");
-
+    let chain = (0..n_iters)
+        .map(|i| {
+            let prev = if i == 0 {
+                "?initial".to_string()
+            } else {
+                format!("?u{}", i - 1)
+            };
+            format!(
+                "                (let ?u{i} (Op ({op_kind} ?sh ?as ?bs ?os) {}))",
+                order(&prev, &format!("?s{i}"))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     Rule::raw(format!(
         "(rule
             (
                 (= ?ls (LoopStart ?initial ?loop_id ?slot_idx (MNum {n_iters}) ?dt))
                 (= ?li (Op (LoopInput ?loop_id ?stream ?dt) {li_sources}))
-                (= ?body (Op ({op_kind} ?sh ?as ?bs ?os) (ICons {body_in0} (ICons {body_in1} (INil)))))
+                (= ?body (Op ({op_kind} ?sh ?as ?bs ?os) {body_pat}))
                 (= ?le (LoopEnd ?body ?loop_id ?slot_idx ?dt))
             )
             (
-{chain}                (union ?le {last})
+{chain}
+                (union ?le ?u{last})
             )
             :ruleset expr
-            :name \"{name}\"
-        )"
+            :name \"unroll {op_kind} body trips={n_iters} state={state_pos}\"
+        )",
+        body_pat = order("?ls", "?li"),
+        last = n_iters - 1,
     ))
 }
 
@@ -1677,15 +1678,8 @@ impl EgglogOp for Add {
         2
     }
     fn rewrites(&self) -> Vec<Rule> {
-        // Unroll-union rules need to fire in BOTH stages: early so fusion
-        // patterns (e.g. GLUMoE GemmaGELU) can match the unrolled chain
-        // before the early→full extract collapses it, and full so kernel-
-        // level rewrites (e.g. direct-exp-fusion: Mul(?x, log2_e) + Exp2 →
-        // KernelExp) can match through the unrolled chain in the full
-        // stage. early_rewrites only flow into the early egglog program;
-        // rewrites flow only into full. So we register in both.
         let mut r = vec![dtype_propagation_op(&self.sort())];
-        r.extend(binary_op_unroll_rules("Add", 4));
+        r.extend(self.early_rewrites());
         r
     }
     fn early_rewrites(&self) -> Vec<Rule> {
@@ -1774,10 +1768,8 @@ impl EgglogOp for Mul {
         2
     }
     fn rewrites(&self) -> Vec<Rule> {
-        // See `Add::rewrites` for why the unroll-union rules are registered
-        // in both early and full stages.
         let mut r = vec![dtype_propagation_op(&self.sort())];
-        r.extend(binary_op_unroll_rules("Mul", 4));
+        r.extend(self.early_rewrites());
         r
     }
     fn early_rewrites(&self) -> Vec<Rule> {
@@ -1866,10 +1858,8 @@ impl EgglogOp for Mod {
         2
     }
     fn rewrites(&self) -> Vec<Rule> {
-        // See `Add::rewrites` for why the unroll-union rules are registered
-        // in both early and full stages.
         let mut r = vec![dtype_propagation_op(&self.sort())];
-        r.extend(binary_op_unroll_rules("Mod", 4));
+        r.extend(self.early_rewrites());
         r
     }
     fn early_rewrites(&self) -> Vec<Rule> {
@@ -1958,11 +1948,9 @@ impl EgglogOp for LessThan {
         2
     }
     fn rewrites(&self) -> Vec<Rule> {
-        // Comparison operations always output Bool. See `Add::rewrites` for
-        // why the unroll-union rules are registered in both early and full
-        // stages.
+        // Comparisons output Bool, not the input dtype.
         let mut r = vec![dtype_fixed_op(&self.sort(), &SORTS.bool_dt)];
-        r.extend(binary_op_unroll_rules("LessThan", 4));
+        r.extend(self.early_rewrites());
         r
     }
     fn early_rewrites(&self) -> Vec<Rule> {

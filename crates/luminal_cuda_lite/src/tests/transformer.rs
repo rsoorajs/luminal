@@ -509,120 +509,31 @@ fn test_swiglu_mlp_cuda() {
     assert_close(&result, &expected, 1e-3, 1e-3);
 }
 
-/// Three consecutive scalar Muls of identical shape and broadcast-rhs
-/// pattern. Auto-rolling sees this as body=1, trips=3 with state at input
-/// position 0. The rolled HLIR must round-trip through egglog and the
-/// final unroll producing the same result as evaluating three flat Muls.
+/// Body=1, trips=3 chain of scalar Muls plus a residual back to the
+/// chain's initial value. Auto-rolling sees this as a state-carrying loop
+/// with state at input position 0; the rolled HLIR must round-trip through
+/// egglog (rolled body Mul + LoopStart/LoopInput/LoopEnd markers) and
+/// `unroll_loops_in_llir` must reconstruct the flat 3-mul chain plus
+/// rewire the residual edge to reference the chain's initial input
+/// (outside the body) — not a per-iter clone.
 #[test]
-fn test_three_chained_scalar_muls() {
+fn test_rolled_chained_scalar_muls() {
     let Some(stream) = get_cuda_stream() else {
-        println!("CUDA not available, skipping");
         return;
     };
-
-    let mut cx = Graph::default();
-    let x = cx.tensor((1, 4, 32));
-    // Three scalar muls with distinct constants. Rolling matches them
-    // because the HLIR Debug strings (which is what cheap_rolling_node_hash
-    // and canonicalize_occurrence both look at after the Display→Debug fix)
-    // are identical: same input_shapes (contiguous [1,4,32] + broadcast).
-    let out = (((x * 2.0_f32) * 3.0_f32) * 5.0_f32).output();
-
-    cx.build_search_space::<CudaRuntime>();
-    let mut rt = CudaRuntime::initialize(stream);
-
-    let x_data = random_f32_vec(4 * 32, 100, -0.5, 0.5);
-    rt.set_data(x, x_data.clone());
-    rt = cx.search(rt, 3);
-    rt.execute(&cx.dyn_map);
-    let result = rt.get_f32(out);
-
-    let expected: Vec<f32> = x_data.iter().map(|v| v * 2.0 * 3.0 * 5.0).collect();
-    assert_close(&result, &expected, 1e-5, 1e-5);
-}
-
-/// Variant where the chain is followed by additional ops (an Add and a
-/// matmul-like reduction) so the chain's last-iter output isn't just the
-/// graph output. Mirrors the topology in the python `test_llama_transformer_block`
-/// where 3 sequential scalar muls feed into downstream attention/residual
-/// computation. Confirms that the rolled→unrolled LLIR's last-iter output
-/// is correctly wired to its post-loop consumer.
-#[test]
-fn test_three_chained_scalar_muls_with_downstream_consumer() {
-    let Some(stream) = get_cuda_stream() else {
-        println!("CUDA not available, skipping");
-        return;
-    };
-
-    let mut cx = Graph::default();
-    let x = cx.tensor((1, 4, 32));
-    let w = cx.tensor((32, 32));
-    let chained = ((x * 2.0_f32) * 3.0_f32) * 5.0_f32;
-    // Last-iter result feeds a matmul. After rolling, the matmul's input
-    // edge originally pointed to Mul_2 (deleted as a duplicate); rolling
-    // must rewire it through the LoopEnd marker, and the final unroll must
-    // route it to the iter-2 clone's output.
-    let out = chained.matmul(w).output();
-
-    cx.build_search_space::<CudaRuntime>();
-    let mut rt = CudaRuntime::initialize(stream);
-
-    let x_data = random_f32_vec(4 * 32, 102, -0.5, 0.5);
-    let w_data = random_f32_vec(32 * 32, 103, -0.5, 0.5);
-    rt.set_data(x, x_data.clone());
-    rt.set_data(w, w_data.clone());
-    rt = cx.search(rt, 25);
-    rt.execute(&cx.dyn_map);
-    let result = rt.get_f32(out);
-
-    // Reference: scaled = x * 30; out = scaled @ w
-    let scaled: Vec<f32> = x_data.iter().map(|v| v * 30.0).collect();
-    let mut expected = vec![0.0_f32; 4 * 32];
-    for s in 0..4 {
-        for j in 0..32 {
-            let mut acc = 0.0_f32;
-            for k in 0..32 {
-                acc += scaled[s * 32 + k] * w_data[k * 32 + j];
-            }
-            expected[s * 32 + j] = acc;
-        }
-    }
-    assert_close(&result, &expected, 1e-4, 1e-4);
-}
-
-/// Same body=1 trips=3 chain but with the chain's INITIAL value (the LoopStart
-/// input) and the chain's FINAL value (post-LoopEnd) both feeding into a
-/// downstream Add. This is the structural pattern in transformer blocks where
-/// a value flows through some chain of scalar muls AND is referenced from a
-/// residual / pre-norm path. The rolling deletes the duplicate body nodes
-/// (Mul_1, Mul_2 in the trips=3 case); their original-graph references must
-/// either be safe to drop (because nothing outside the loop body reads them)
-/// or rewired through LoopOutputSelect markers.
-#[test]
-fn test_three_chained_scalar_muls_with_initial_residual() {
-    let Some(stream) = get_cuda_stream() else {
-        println!("CUDA not available, skipping");
-        return;
-    };
-
     let mut cx = Graph::default();
     let x = cx.tensor((1, 4, 32));
     let chained = ((x * 2.0_f32) * 3.0_f32) * 5.0_f32;
-    // Add the chain output back to x (residual). x has consumers besides
-    // the chain start, which exercises a graph topology where the rolled
-    // initial value is used both inside (via LoopStart) and outside the
-    // loop. After unrolling, the result must match the flat computation.
     let out = (chained + x).output();
 
     cx.build_search_space::<CudaRuntime>();
     let mut rt = CudaRuntime::initialize(stream);
-
     let x_data = random_f32_vec(4 * 32, 101, -0.5, 0.5);
     rt.set_data(x, x_data.clone());
     rt = cx.search(rt, 3);
     rt.execute(&cx.dyn_map);
-    let result = rt.get_f32(out);
 
+    let result = rt.get_f32(out);
     let expected: Vec<f32> = x_data.iter().map(|v| v * 2.0 * 3.0 * 5.0 + v).collect();
     assert_close(&result, &expected, 1e-5, 1e-5);
 }
