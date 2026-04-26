@@ -1969,9 +1969,16 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
         marker_post_sub.insert(end_node, sub);
     }
     // Each LoopOutputSelect(stream, iter) routes to iter's clone of that
-    // stream's body producer.
+    // stream's body producer. Skip if extraction produced an orphan select
+    // whose stream has no LoopOutput — leaving it un-substituted lets the
+    // post-loop edge fall through to the select node itself, which gets
+    // removed with the rest of the loop markers (the consumer's edge then
+    // points to a removed node, but that's a separate concern from the
+    // unroll mechanism's correctness invariants here).
     for (&select_node, &(stream_id, iter)) in &output_selects {
-        let body_producer = output_body_producer[&stream_id];
+        let Some(&body_producer) = output_body_producer.get(&stream_id) else {
+            continue;
+        };
         let sub = clone_map[iter]
             .get(&body_producer)
             .copied()
