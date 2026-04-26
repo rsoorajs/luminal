@@ -301,6 +301,7 @@ impl Graph {
         use crate::hlir::{LoopEnd, LoopInput, LoopOutput, LoopStart};
         use petgraph::visit::EdgeRef;
 
+        let nodes_before = self.graph.node_count();
         let n_iters = candidate.occurrences.len();
         let loop_id = 0usize;
 
@@ -540,9 +541,12 @@ impl Graph {
         }
 
         if created > 0 {
+            let nodes_after = self.graph.node_count();
             println!(
-                "   {:>6}  rolled HLIR: {} loop ops inserted, {} duplicate body nodes deleted",
+                "   {:>6}  rolled HLIR: {} -> {} nodes ({} loop ops inserted, {} duplicate body nodes deleted)",
                 "Rolled".cyan().bold(),
+                nodes_before,
+                nodes_after,
                 created,
                 duplicate_body_nodes.len(),
             );
