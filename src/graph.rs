@@ -268,19 +268,30 @@ impl Graph {
     /// Mutate the HLIR graph in place to fold N repeated body occurrences into
     /// a single body plus loop-marker ops. See `auto_roll_loops_prepass`.
     fn insert_loop_region_ops(&mut self, candidate: RollingCandidate) -> usize {
-        use crate::hlir::{LoopEnd, LoopInput, LoopOutput, LoopStart};
+        use crate::hlir::{LoopEnd, LoopInput, LoopOutput, LoopOutputSelect, LoopStart, Output};
         use petgraph::visit::EdgeRef;
 
         let nodes_before = self.graph.node_count();
         let n_iters = candidate.occurrences.len();
         let loop_id = 0usize;
 
-        let body_nodes: FxHashSet<NodeIndex> =
-            candidate.occurrences[0].nodes.iter().copied().collect();
+        // Build the body-node sets EXCLUDING `Output` HLIR nodes. An Output
+        // inside a rolled occurrence is a graph-external sink for that
+        // iteration's value, not body computation; we treat it as a cross-
+        // region consumer so each iteration's Output survives all the way
+        // through and gets rewired to its `LoopOutputSelect(i)` below.
+        let body_nodes: FxHashSet<NodeIndex> = candidate.occurrences[0]
+            .nodes
+            .iter()
+            .copied()
+            .filter(|&n| self.try_get_op::<Output>(n).is_none())
+            .collect();
         let mut duplicate_body_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
         for occ in &candidate.occurrences[1..] {
             for &n in &occ.nodes {
-                duplicate_body_nodes.insert(n);
+                if self.try_get_op::<Output>(n).is_none() {
+                    duplicate_body_nodes.insert(n);
+                }
             }
         }
 
@@ -308,7 +319,6 @@ impl Graph {
         // function might target slots that happen to coincide with a new
         // loop-marker's NodeIndex, so we explicitly exclude those.
         let mut added_loop_ops: FxHashSet<NodeIndex> = FxHashSet::default();
-        let mut pending_output_removals: FxHashSet<NodeIndex> = FxHashSet::default();
 
         for (slot_idx, (&p, &out_pos)) in candidate
             .state_param_indices
@@ -411,33 +421,30 @@ impl Graph {
                 continue;
             }
 
-            // Two shapes are possible at position q:
-            //   (a) the body exposes an intermediate value that downstream
-            //       (outside-body) code then wraps in an Output HLIR node.
-            //   (b) the body contains the Output HLIR directly (the `.output()`
-            //       call put it inside the rolling window).
-            // In (b) each occurrence's `output_nodes[q]` IS an Output node;
-            // in (a) each needs an Output consumer via an outgoing edge.
-            let mut targets: Vec<usize> = Vec::with_capacity(n_iters);
-            let mut target_output_nodes: Vec<NodeIndex> = Vec::with_capacity(n_iters);
-            let mut body_producer_for_loopoutput: Option<NodeIndex> = None;
+            // Per iteration, determine (body_producer, edges_to_rewire):
+            //  * If `output_nodes[q]` is an Output HLIR (graph sink): the
+            //    body producer is that Output's predecessor, and the edge to
+            //    rewire is the predecessor → Output edge itself.
+            //  * Otherwise: body producer is `output_nodes[q]`; the edges to
+            //    rewire are all of its outgoing edges whose target is OUTSIDE
+            //    the rolled region (post-loop consumers — Output HLIR or any
+            //    downstream computation, treated identically).
+            let mut per_iter_plan: Vec<(NodeIndex, Vec<(petgraph::graph::EdgeIndex, NodeIndex)>)> =
+                Vec::with_capacity(n_iters);
             let mut complete = true;
             for occ in &candidate.occurrences {
                 let node = occ.output_nodes[q];
-                if let Some(op) = self.try_get_op::<crate::hlir::Output>(node) {
-                    // Case (b): the node itself is an Output. Its producer is
-                    // what LoopOutput will wrap.
-                    let pred = self
+                if self.try_get_op::<Output>(node).is_some() {
+                    // Output HLIR sink. Its predecessor is the body producer;
+                    // the single (pred → Output) edge is what we rewire.
+                    let pred_edge = self
                         .graph
-                        .neighbors_directed(node, Direction::Incoming)
-                        .next();
-                    match pred {
-                        Some(p) => {
-                            if body_producer_for_loopoutput.is_none() {
-                                body_producer_for_loopoutput = Some(p);
-                            }
-                            target_output_nodes.push(node);
-                            targets.push(op.node);
+                        .edges_directed(node, Direction::Incoming)
+                        .next()
+                        .map(|e| (e.id(), e.source(), node));
+                    match pred_edge {
+                        Some((eid, pred, output)) => {
+                            per_iter_plan.push((pred, vec![(eid, output)]));
                         }
                         None => {
                             complete = false;
@@ -445,64 +452,67 @@ impl Graph {
                         }
                     }
                 } else {
-                    // Case (a): find an Output consumer.
-                    let out = self
+                    // Internal body producer. Cross-region edges = its
+                    // outgoing edges whose target is not in any iter's body.
+                    let edges: Vec<_> = self
                         .graph
                         .edges_directed(node, Direction::Outgoing)
-                        .filter_map(|e| {
+                        .filter(|e| {
                             let t = e.target();
-                            self.try_get_op::<crate::hlir::Output>(t).map(|op| (t, op.node))
+                            !body_nodes.contains(&t) && !duplicate_body_nodes.contains(&t)
                         })
-                        .next();
-                    match out {
-                        Some((out_node, out_id)) => {
-                            if body_producer_for_loopoutput.is_none() {
-                                body_producer_for_loopoutput = Some(node);
-                            }
-                            target_output_nodes.push(out_node);
-                            targets.push(out_id);
-                        }
-                        None => {
-                            complete = false;
-                            break;
-                        }
+                        .map(|e| (e.id(), e.target()))
+                        .collect();
+                    if edges.is_empty() {
+                        // Nothing actually crosses the region for this iter.
+                        // Skip the whole stream — without a consumer the
+                        // Select would dangle.
+                        complete = false;
+                        break;
                     }
+                    per_iter_plan.push((node, edges));
                 }
             }
             if !complete {
                 continue;
             }
-            let body_output = body_producer_for_loopoutput
-                .expect("complete LoopOutput detection must have set body_producer");
+
+            // Iter-0 body producer feeds the LoopOutput marker.
+            let body_output = per_iter_plan[0].0;
+            let dtype = self.infer_node_dtype(body_output);
 
             let loop_output = self.graph.add_node(Box::new(LoopOutput {
                 loop_id,
                 stream_id: q,
-                targets,
+                dtype,
             }));
             self.graph.add_edge(body_output, loop_output, ());
             added_loop_ops.insert(loop_output);
 
-            // Mark iter 1..N's Output HLIR nodes for removal (defer so we
-            // don't free NodeIndex slots that subsequent LoopOutput adds
-            // would reuse — that reuse caused newly-created LoopOutputs to
-            // be misidentified as duplicates below).
-            for &out_node in &target_output_nodes[1..] {
-                pending_output_removals.insert(out_node);
+            // For each iter, create a LoopOutputSelect(i) and rewire the
+            // cross-region edges to flow through it.
+            for (i, (_, edges)) in per_iter_plan.into_iter().enumerate() {
+                let select = self.graph.add_node(Box::new(LoopOutputSelect {
+                    loop_id,
+                    stream_id: q,
+                    iter: i,
+                    dtype,
+                }));
+                self.graph.add_edge(loop_output, select, ());
+                added_loop_ops.insert(select);
+
+                for (edge_id, consumer) in edges {
+                    self.graph.remove_edge(edge_id);
+                    self.graph.add_edge(select, consumer, ());
+                }
+                created += 1;
             }
-
-            created += 1;
+            created += 1; // for the LoopOutput marker itself
         }
 
-        // Perform deferred Output HLIR removals (iter 1..N's Outputs whose
-        // ids are now owned by LoopOutput.targets).
-        for node in &pending_output_removals {
-            self.graph.remove_node(*node);
-        }
-
-        // Delete duplicate body nodes. Skip any node that we just ADDED as
-        // a LoopOutput (its NodeIndex might collide with a removed node's
-        // slot).
+        // Delete duplicate body nodes. Skip any node we just added as a
+        // loop-marker op (StableGraph may reuse NodeIndex slots, so an
+        // added marker could collide with a previously-freed body node id).
         for &node in &duplicate_body_nodes {
             if added_loop_ops.contains(&node) {
                 continue;
@@ -1723,7 +1733,9 @@ fn grow_rolling_candidate(
 /// Incoming-edge ORDER is preserved for every affected node — ops read their
 /// inputs by edge-id order, so edges are rebuilt in position.
 pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
-    use crate::hlir::{LoopEnd, LoopInput, LoopInputStatic, LoopOutput, LoopStart, Output};
+    use crate::hlir::{
+        LoopEnd, LoopInput, LoopInputStatic, LoopOutput, LoopOutputSelect, LoopStart, Output,
+    };
     use petgraph::visit::EdgeRef;
     use std::collections::BTreeMap;
 
@@ -1734,7 +1746,11 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
     // unique when a single LoopInput splits into multiple LoopInputStatics via
     // egglog rewrites of the same stream).
     let mut static_inputs: FxHashSet<NodeIndex> = FxHashSet::default();
-    let mut outputs: BTreeMap<usize, (NodeIndex, Vec<usize>)> = BTreeMap::new();
+    // LoopOutput stream → its NodeIndex. Each stream has one LoopOutput.
+    let mut outputs: BTreeMap<usize, NodeIndex> = BTreeMap::new();
+    // (stream_id, iter) → LoopOutputSelect NodeIndex.
+    let mut output_selects: FxHashMap<NodeIndex, (usize /*stream*/, usize /*iter*/)> =
+        FxHashMap::default();
 
     let mut iters = 0usize;
     for n in llir.node_indices() {
@@ -1751,8 +1767,10 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
             static_inputs.insert(n);
         } else if let Some(li) = op.to_op::<LoopInput>() {
             inputs.insert(li.stream_id, n);
+        } else if let Some(los) = op.to_op::<LoopOutputSelect>() {
+            output_selects.insert(n, (los.stream_id, los.iter));
         } else if let Some(lo) = op.to_op::<LoopOutput>() {
-            outputs.insert(lo.stream_id, (n, lo.targets.clone()));
+            outputs.insert(lo.stream_id, n);
         }
     }
     if iters <= 1 || starts.is_empty() {
@@ -1765,7 +1783,8 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
         .chain(ends.values().copied())
         .chain(inputs.values().copied())
         .chain(static_inputs.iter().copied())
-        .chain(outputs.values().map(|(n, _)| *n))
+        .chain(outputs.values().copied())
+        .chain(output_selects.keys().copied())
         .collect();
 
     let mut body_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
@@ -1916,6 +1935,17 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
         .filter(|n| !loop_markers.contains(n) && !body_nodes.contains(n))
         .collect();
 
+    // Resolve each LoopOutput stream's body producer (its single incoming
+    // edge in the LLIR).
+    let mut output_body_producer: FxHashMap<usize /*stream_id*/, NodeIndex> = FxHashMap::default();
+    for (&stream_id, &output_node) in &outputs {
+        let body_producer = llir
+            .neighbors_directed(output_node, Direction::Incoming)
+            .next()
+            .expect("LoopOutput missing body producer during rewire");
+        output_body_producer.insert(stream_id, body_producer);
+    }
+
     let mut marker_post_sub: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
     for &end_node in ends.values() {
         let body_producer = llir
@@ -1924,48 +1954,24 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
             .expect("LoopEnd missing body producer during rewire");
         marker_post_sub.insert(end_node, clone_map[iters - 1][&body_producer]);
     }
-    for (output_node, _) in outputs.values() {
-        let body_producer = llir
-            .neighbors_directed(*output_node, Direction::Incoming)
-            .next()
-            .expect("LoopOutput missing body producer during rewire");
-        marker_post_sub.insert(*output_node, clone_map[iters - 1][&body_producer]);
+    // Each LoopOutputSelect(stream, iter) routes to iter's clone of that
+    // stream's body producer.
+    for (&select_node, &(stream_id, iter)) in &output_selects {
+        let body_producer = output_body_producer[&stream_id];
+        marker_post_sub.insert(select_node, clone_map[iter][&body_producer]);
     }
 
     for &consumer in &post_loop_consumers {
-        let srcs: Vec<NodeIndex> = llir
-            .edges_directed(consumer, Direction::Incoming)
-            .sorted_by_key(|e| e.id())
-            .map(|e| e.source())
-            .collect();
         // Per-edge replace to preserve edge-id ordering via LIFO reuse.
         let pairs: Vec<(NodeIndex, petgraph::graph::EdgeIndex)> = llir
             .edges_directed(consumer, Direction::Incoming)
             .sorted_by_key(|e| e.id())
             .map(|e| (e.source(), e.id()))
             .collect();
-        let _ = srcs;
         for (src, eid) in pairs {
             let new_src = marker_post_sub.get(&src).copied().unwrap_or(src);
             llir.remove_edge(eid);
             llir.add_edge(new_src, consumer, ());
-        }
-    }
-
-    for (output_node, targets) in outputs.values() {
-        let body_producer = llir
-            .neighbors_directed(*output_node, Direction::Incoming)
-            .next()
-            .expect("LoopOutput missing body producer during output lift");
-        for i in 1..iters {
-            let Some(&target_id) = targets.get(i) else {
-                break;
-            };
-            let new_output = llir.add_node(LLIROp::new::<Output>(Box::new(Output {
-                node: target_id,
-            })));
-            let src = clone_map[i][&body_producer];
-            llir.add_edge(src, new_output, ());
         }
     }
 
@@ -1980,7 +1986,9 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
                 op.to_op::<LoopStart>().is_some()
                     || op.to_op::<LoopEnd>().is_some()
                     || op.to_op::<LoopInput>().is_some()
+                    || op.to_op::<LoopInputStatic>().is_some()
                     || op.to_op::<LoopOutput>().is_some()
+                    || op.to_op::<LoopOutputSelect>().is_some()
             })
             .count(),
         0,
@@ -2011,7 +2019,9 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
 /// targets[0] }`. After collapse the LLIR has no marker ops left and contains
 /// exactly the iter-0 body plus the surrounding non-loop graph.
 pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
-    use crate::hlir::{LoopEnd, LoopInput, LoopInputStatic, LoopOutput, LoopStart, Output};
+    use crate::hlir::{
+        LoopEnd, LoopInput, LoopInputStatic, LoopOutput, LoopOutputSelect, LoopStart, Output,
+    };
     use petgraph::visit::EdgeRef;
     use std::collections::BTreeMap;
 
@@ -2019,7 +2029,8 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
     let mut ends: BTreeMap<usize, NodeIndex> = BTreeMap::new();
     let mut inputs: BTreeMap<usize, NodeIndex> = BTreeMap::new();
     let mut static_inputs: FxHashSet<NodeIndex> = FxHashSet::default();
-    let mut outputs: BTreeMap<usize, (NodeIndex, Vec<usize>)> = BTreeMap::new();
+    let mut outputs: BTreeMap<usize, NodeIndex> = BTreeMap::new();
+    let mut output_selects: FxHashSet<NodeIndex> = FxHashSet::default();
 
     for n in llir.node_indices() {
         let op = &llir[n];
@@ -2031,8 +2042,10 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
             static_inputs.insert(n);
         } else if let Some(li) = op.to_op::<LoopInput>() {
             inputs.insert(li.stream_id, n);
+        } else if op.to_op::<LoopOutputSelect>().is_some() {
+            output_selects.insert(n);
         } else if let Some(lo) = op.to_op::<LoopOutput>() {
-            outputs.insert(lo.stream_id, (n, lo.targets.clone()));
+            outputs.insert(lo.stream_id, n);
         }
     }
     if starts.is_empty() {
@@ -2045,7 +2058,8 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
         .chain(ends.values().copied())
         .chain(inputs.values().copied())
         .chain(static_inputs.iter().copied())
-        .chain(outputs.values().map(|(n, _)| *n))
+        .chain(outputs.values().copied())
+        .chain(output_selects.iter().copied())
         .collect();
 
     // body_nodes = forward-reachable from any marker outgoing, stopping at
@@ -2133,8 +2147,21 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
         }
     }
 
-    // Post-loop consumers reading from LoopEnd / LoopOutput must instead read
-    // from the body producer (iter-0's last value) directly.
+    // Per LoopOutput stream, find the body producer (its single incoming edge).
+    let mut output_body_producer: FxHashMap<usize, NodeIndex> = FxHashMap::default();
+    for (&stream_id, &output_node) in &outputs {
+        let body_producer = llir
+            .neighbors_directed(output_node, Direction::Incoming)
+            .next()
+            .expect("LoopOutput missing body producer during rewire");
+        output_body_producer.insert(stream_id, body_producer);
+    }
+
+    // Post-loop consumers reading from LoopEnd / LoopOutputSelect must
+    // instead read from the body producer (iter-0's value) directly. In the
+    // collapsed form every Select(i) — regardless of i — re-routes to iter-0's
+    // body producer; iter > 0 Selects don't have a real value to forward, so
+    // they alias iter 0's. This keeps post-loop graph topology unchanged.
     let mut marker_post_sub: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
     for &end_node in ends.values() {
         let body_producer = llir
@@ -2143,12 +2170,14 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
             .expect("LoopEnd missing body producer during rewire");
         marker_post_sub.insert(end_node, body_producer);
     }
-    for (output_node, _) in outputs.values() {
-        let body_producer = llir
-            .neighbors_directed(*output_node, Direction::Incoming)
-            .next()
-            .expect("LoopOutput missing body producer during rewire");
-        marker_post_sub.insert(*output_node, body_producer);
+    for &select_node in &output_selects {
+        let stream_id = llir[select_node]
+            .to_op::<LoopOutputSelect>()
+            .map(|s| s.stream_id)
+            .expect("output_selects entries must be LoopOutputSelect");
+        if let Some(&body_producer) = output_body_producer.get(&stream_id) {
+            marker_post_sub.insert(select_node, body_producer);
+        }
     }
     let post_loop_consumers: FxHashSet<NodeIndex> = loop_markers
         .iter()
@@ -2167,10 +2196,6 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
             llir.add_edge(new_src, consumer, ());
         }
     }
-
-    // No new Output nodes are needed: each LoopOutput's `targets[0]` is the
-    // iter-0 Output that the prepass left in place when it inserted the
-    // marker, so post-loop consumers already see the iter-0 result.
 
     for &n in &loop_markers {
         llir.remove_node(n);
