@@ -1677,7 +1677,16 @@ impl EgglogOp for Add {
         2
     }
     fn rewrites(&self) -> Vec<Rule> {
-        vec![dtype_propagation_op(&self.sort())]
+        // Unroll-union rules need to fire in BOTH stages: early so fusion
+        // patterns (e.g. GLUMoE GemmaGELU) can match the unrolled chain
+        // before the early→full extract collapses it, and full so kernel-
+        // level rewrites (e.g. direct-exp-fusion: Mul(?x, log2_e) + Exp2 →
+        // KernelExp) can match through the unrolled chain in the full
+        // stage. early_rewrites only flow into the early egglog program;
+        // rewrites flow only into full. So we register in both.
+        let mut r = vec![dtype_propagation_op(&self.sort())];
+        r.extend(binary_op_unroll_rules("Add", 4));
+        r
     }
     fn early_rewrites(&self) -> Vec<Rule> {
         binary_op_unroll_rules("Add", 4)
@@ -1765,7 +1774,11 @@ impl EgglogOp for Mul {
         2
     }
     fn rewrites(&self) -> Vec<Rule> {
-        vec![dtype_propagation_op(&self.sort())]
+        // See `Add::rewrites` for why the unroll-union rules are registered
+        // in both early and full stages.
+        let mut r = vec![dtype_propagation_op(&self.sort())];
+        r.extend(binary_op_unroll_rules("Mul", 4));
+        r
     }
     fn early_rewrites(&self) -> Vec<Rule> {
         binary_op_unroll_rules("Mul", 4)
@@ -1853,7 +1866,11 @@ impl EgglogOp for Mod {
         2
     }
     fn rewrites(&self) -> Vec<Rule> {
-        vec![dtype_propagation_op(&self.sort())]
+        // See `Add::rewrites` for why the unroll-union rules are registered
+        // in both early and full stages.
+        let mut r = vec![dtype_propagation_op(&self.sort())];
+        r.extend(binary_op_unroll_rules("Mod", 4));
+        r
     }
     fn early_rewrites(&self) -> Vec<Rule> {
         binary_op_unroll_rules("Mod", 4)
@@ -1941,8 +1958,12 @@ impl EgglogOp for LessThan {
         2
     }
     fn rewrites(&self) -> Vec<Rule> {
-        // Comparison operations always output Bool
-        vec![dtype_fixed_op(&self.sort(), &SORTS.bool_dt)]
+        // Comparison operations always output Bool. See `Add::rewrites` for
+        // why the unroll-union rules are registered in both early and full
+        // stages.
+        let mut r = vec![dtype_fixed_op(&self.sort(), &SORTS.bool_dt)];
+        r.extend(binary_op_unroll_rules("LessThan", 4));
+        r
     }
     fn early_rewrites(&self) -> Vec<Rule> {
         binary_op_unroll_rules("LessThan", 4)
