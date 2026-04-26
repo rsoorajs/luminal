@@ -633,12 +633,7 @@ impl Graph {
         for run in report.diagnostics.top_runs.iter().take(5) {
             println!("   {:>6}  run: {}", "Rolled".yellow().bold(), run);
         }
-        // Rolling has rough edges on graphs with fewer than 3 repetitions —
-        // proptest-generated test cases hit body×2 patterns that round-trip
-        // incorrectly through egglog + unroll. Real models roll 20–50
-        // repetitions of a transformer block, so this threshold doesn't
-        // affect any production path.
-        if candidate.occurrences.len() < 3 {
+        if candidate.occurrences.len() < 2 {
             return 0;
         }
 
@@ -1444,7 +1439,12 @@ impl RollingHash64 {
 }
 
 fn cheap_rolling_node_hash(graph: &HLIRGraph, node: NodeIndex) -> u64 {
-    let op = graph[node].to_string();
+    // Use Debug, NOT Display — Display for many HLIR ops drops their
+    // shape/stride metadata (e.g. `Display for Mul` emits just "Mul"), so
+    // two structurally-different ops with the same kind would hash equal
+    // and get falsely grouped as a repeating pattern. Debug captures all
+    // op fields, which is the correct notion of op identity for rolling.
+    let op = format!("{:?}", graph[node]);
     let mut hash: u64 = 1469598103934665603;
     for byte in op.as_bytes() {
         hash ^= u64::from(*byte);
@@ -1485,7 +1485,10 @@ fn canonicalize_occurrence(
     let mut node_parts = vec![];
 
     for &node in ordered_nodes {
-        let op = graph[node].to_string();
+        // Debug, not Display — see `cheap_rolling_node_hash` for why op
+        // identity must include all fields (shape/strides), which Display
+        // drops for many HLIR ops.
+        let op = format!("{:?}", graph[node]);
         let inputs: Vec<NodeIndex> = graph
             .edges_directed(node, Direction::Incoming)
             .sorted_by_key(|e| e.id())
