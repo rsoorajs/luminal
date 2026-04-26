@@ -990,7 +990,6 @@ impl Graph {
         self.ops = Some(ops);
     }
 
-
     /// Get a reference to the first e-graph search space (if built)
     pub fn egraph(&self) -> Option<&SerializedEGraph> {
         self.egraphs.first()
