@@ -559,11 +559,7 @@ impl EgglogOp for LoopInput {
         sort(
             OP_KIND,
             "LoopInput",
-            &[
-                ("loop_id", I64),
-                ("stream_id", I64),
-                ("dtype", DTYPE),
-            ],
+            &[("loop_id", I64), ("stream_id", I64), ("dtype", DTYPE)],
         )
     }
 
@@ -699,11 +695,7 @@ impl EgglogOp for LoopInputStatic {
         sort(
             OP_KIND,
             "LoopInputStatic",
-            &[
-                ("loop_id", I64),
-                ("stream_id", I64),
-                ("dtype", DTYPE),
-            ],
+            &[("loop_id", I64), ("stream_id", I64), ("dtype", DTYPE)],
         )
     }
 
@@ -790,11 +782,7 @@ impl EgglogOp for LoopOutput {
         sort(
             OP_KIND,
             "LoopOutput",
-            &[
-                ("loop_id", I64),
-                ("stream_id", I64),
-                ("dtype", DTYPE),
-            ],
+            &[("loop_id", I64), ("stream_id", I64), ("dtype", DTYPE)],
         )
     }
 

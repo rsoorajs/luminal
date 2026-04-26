@@ -210,7 +210,7 @@ impl SearchOptions {
 /// A Luminal compute graph.
 ///
 /// All computation is represented as a directed acyclic graph.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Graph {
     /// A map of dynamic dimensions to concrete dimension sizes
     pub dyn_map: FxHashMap<char, usize>,
@@ -231,20 +231,6 @@ pub struct Graph {
     /// Stored as plain data so it survives cross-binary type identity mismatches
     /// when external backend plugins are compiled separately.
     pub input_meta: FxHashMap<NodeIndex, (String, DType)>,
-}
-
-impl Default for Graph {
-    fn default() -> Self {
-        Self {
-            dyn_map: Default::default(),
-            graph: Default::default(),
-            egraphs: Default::default(),
-            ops: Default::default(),
-            custom_ops: Default::default(),
-            dim_buckets: Default::default(),
-            input_meta: Default::default(),
-        }
-    }
 }
 
 impl Graph {
@@ -296,8 +282,7 @@ impl Graph {
         }
 
         let n_boundary = candidate.occurrences[0].boundary_inputs.len();
-        let state_set: FxHashSet<usize> =
-            candidate.state_param_indices.iter().copied().collect();
+        let state_set: FxHashSet<usize> = candidate.state_param_indices.iter().copied().collect();
 
         let mut state_out_pos_per_slot: Vec<usize> =
             Vec::with_capacity(candidate.state_param_indices.len());
@@ -572,7 +557,6 @@ impl Graph {
         }
         DType::F32
     }
-
 
     /// Set a runtime dimension
     pub fn set_dim(&mut self, dimension: char, val: usize) {
@@ -1148,23 +1132,22 @@ impl Graph {
             }
         }
 
-        let render_bars = |n_graphs: usize,
-                           limit: usize,
-                           bucket_progress: Option<(usize, usize)>| {
-            print!(
-                "\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
-                "Search".cyan().bold(),
-                make_bar(n_graphs, limit),
-            );
-            if let Some((bucket_idx, n_buckets)) = bucket_progress {
+        let render_bars =
+            |n_graphs: usize, limit: usize, bucket_progress: Option<(usize, usize)>| {
                 print!(
-                    "\n\x1b[2K  {:>6}  {} {}/{n_buckets}",
-                    "Bucket".cyan().bold(),
-                    make_bar(bucket_idx, n_buckets),
-                    bucket_idx,
+                    "\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
+                    "Search".cyan().bold(),
+                    make_bar(n_graphs, limit),
                 );
-            }
-        };
+                if let Some((bucket_idx, n_buckets)) = bucket_progress {
+                    print!(
+                        "\n\x1b[2K  {:>6}  {} {}/{n_buckets}",
+                        "Bucket".cyan().bold(),
+                        make_bar(bucket_idx, n_buckets),
+                        bucket_idx,
+                    );
+                }
+            };
 
         let group_start = std::time::Instant::now();
         let mut prev_selected: FxHashSet<u64> = FxHashSet::default();
@@ -1278,26 +1261,25 @@ impl Graph {
                 list_cache.clear();
                 expr_cache.clear();
 
-                let profile_result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let mut llir_graph = egglog_to_llir(
-                            egraph,
-                            genome.clone(),
-                            ops,
-                            &self.custom_ops,
-                            &mut list_cache,
-                            &mut expr_cache,
-                            None,
-                        );
-                        // Collapse the rolled body to a single iteration
-                        // before profiling — see initial-genome path.
-                        collapse_loops_to_first_iter(&mut llir_graph);
-                        runtime.clear_intermediate_buffers();
-                        let (rep_metric, rep_display) =
-                            runtime.profile(&llir_graph, &profile_dyn_map, options.trials);
-                        let has_nan = runtime.has_nan_outputs(&llir_graph, &profile_dyn_map);
-                        (rep_metric, rep_display, has_nan)
-                    }));
+                let profile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut llir_graph = egglog_to_llir(
+                        egraph,
+                        genome.clone(),
+                        ops,
+                        &self.custom_ops,
+                        &mut list_cache,
+                        &mut expr_cache,
+                        None,
+                    );
+                    // Collapse the rolled body to a single iteration
+                    // before profiling — see initial-genome path.
+                    collapse_loops_to_first_iter(&mut llir_graph);
+                    runtime.clear_intermediate_buffers();
+                    let (rep_metric, rep_display) =
+                        runtime.profile(&llir_graph, &profile_dyn_map, options.trials);
+                    let has_nan = runtime.has_nan_outputs(&llir_graph, &profile_dyn_map);
+                    (rep_metric, rep_display, has_nan)
+                }));
 
                 let (new_metric, display_metric) = match profile_result {
                     Ok((metric, display, false)) => {
@@ -1394,9 +1376,6 @@ impl Graph {
 
         stitched
     }
-
-
-
 }
 
 impl Deref for Graph {
@@ -1485,7 +1464,6 @@ fn rolling_probe_window_sizes(max_window: usize) -> Vec<usize> {
     }
     (1..=max_window).rev().collect()
 }
-
 
 fn canonicalize_occurrence(
     graph: &HLIRGraph,
@@ -1644,6 +1622,9 @@ fn grow_rolling_candidate(
                 }
 
                 let mut merged_occs = Vec::with_capacity(candidate.occurrences.len());
+                // `i` indexes the candidate side while `i + shift` indexes the
+                // run side — explicit range is clearer than zip-with-skip.
+                #[allow(clippy::needless_range_loop)]
                 for i in 0..candidate.occurrences.len() {
                     let run_occ = &run.occurrences[i + shift];
                     let mut nodes = if run.starts[i + shift] + run.window == candidate_starts[i] {
@@ -1721,7 +1702,6 @@ fn grow_rolling_candidate(
     }
 }
 
-
 /// Expand all loop-region markers in an LLIR graph into fully unrolled bodies.
 ///
 /// Reads `LoopStart` / `LoopEnd` / `LoopInput` / `LoopOutput` metadata placed
@@ -1789,14 +1769,17 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
     let mut body_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
     let mut worklist: Vec<NodeIndex> = starts
         .values()
-        .flat_map(|n| llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>())
-        .chain(
-            inputs
-                .values()
-                .flat_map(|n| llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>()),
-        )
+        .flat_map(|n| {
+            llir.neighbors_directed(*n, Direction::Outgoing)
+                .collect::<Vec<_>>()
+        })
+        .chain(inputs.values().flat_map(|n| {
+            llir.neighbors_directed(*n, Direction::Outgoing)
+                .collect::<Vec<_>>()
+        }))
         .chain(static_inputs.iter().flat_map(|n| {
-            llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>()
+            llir.neighbors_directed(*n, Direction::Outgoing)
+                .collect::<Vec<_>>()
         }))
         .collect();
     while let Some(n) = worklist.pop() {
@@ -1807,7 +1790,10 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
             continue;
         }
         body_nodes.insert(n);
-        for succ in llir.neighbors_directed(n, Direction::Outgoing).collect::<Vec<_>>() {
+        for succ in llir
+            .neighbors_directed(n, Direction::Outgoing)
+            .collect::<Vec<_>>()
+        {
             worklist.push(succ);
         }
     }
@@ -1835,7 +1821,11 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
             .sorted_by_key(|e| e.id())
             .map(|e| e.source())
             .collect();
-        assert_eq!(srcs.len(), iters, "LoopInput stream must have `iters` sources");
+        assert_eq!(
+            srcs.len(),
+            iters,
+            "LoopInput stream must have `iters` sources"
+        );
         input_per_iter.insert(*input_node, srcs);
     }
     // LoopInputStatic: single shared source reused across all iterations.
@@ -1859,10 +1849,10 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
     for &b in &body_nodes {
         clone_map[0].insert(b, b);
     }
-    for i in 1..iters {
+    for clone in clone_map.iter_mut().skip(1) {
         for &b in &body_nodes {
             let cloned = llir.add_node(llir[b].clone());
-            clone_map[i].insert(b, cloned);
+            clone.insert(b, cloned);
         }
     }
 
@@ -1930,7 +1920,10 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
 
     let post_loop_consumers: FxHashSet<NodeIndex> = loop_markers
         .iter()
-        .flat_map(|n| llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>())
+        .flat_map(|n| {
+            llir.neighbors_directed(*n, Direction::Outgoing)
+                .collect::<Vec<_>>()
+        })
         .filter(|n| !loop_markers.contains(n) && !body_nodes.contains(n))
         .collect();
 
@@ -2066,14 +2059,17 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
     let mut body_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
     let mut worklist: Vec<NodeIndex> = starts
         .values()
-        .flat_map(|n| llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>())
-        .chain(
-            inputs
-                .values()
-                .flat_map(|n| llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>()),
-        )
+        .flat_map(|n| {
+            llir.neighbors_directed(*n, Direction::Outgoing)
+                .collect::<Vec<_>>()
+        })
+        .chain(inputs.values().flat_map(|n| {
+            llir.neighbors_directed(*n, Direction::Outgoing)
+                .collect::<Vec<_>>()
+        }))
         .chain(static_inputs.iter().flat_map(|n| {
-            llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>()
+            llir.neighbors_directed(*n, Direction::Outgoing)
+                .collect::<Vec<_>>()
         }))
         .collect();
     while let Some(n) = worklist.pop() {
@@ -2084,7 +2080,10 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
             continue;
         }
         body_nodes.insert(n);
-        for succ in llir.neighbors_directed(n, Direction::Outgoing).collect::<Vec<_>>() {
+        for succ in llir
+            .neighbors_directed(n, Direction::Outgoing)
+            .collect::<Vec<_>>()
+        {
             worklist.push(succ);
         }
     }
@@ -2180,7 +2179,10 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
     }
     let post_loop_consumers: FxHashSet<NodeIndex> = loop_markers
         .iter()
-        .flat_map(|n| llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>())
+        .flat_map(|n| {
+            llir.neighbors_directed(*n, Direction::Outgoing)
+                .collect::<Vec<_>>()
+        })
         .filter(|n| !loop_markers.contains(n) && !body_nodes.contains(n))
         .collect();
     for &consumer in &post_loop_consumers {
@@ -2233,9 +2235,7 @@ fn compact_llir_preserving_input_order(old: &LLIRGraph) -> LLIRGraph {
             .map(|e| e.source())
             .collect();
         for src in incoming {
-            if let (Some(&new_src), Some(&new_dst)) =
-                (old_to_new.get(&src), old_to_new.get(n))
-            {
+            if let (Some(&new_src), Some(&new_dst)) = (old_to_new.get(&src), old_to_new.get(n)) {
                 new_graph.add_edge(new_src, new_dst, ());
             }
         }
@@ -2307,7 +2307,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_hash_egglog_normalized_custom_op_id() {
         // CustomOpKind lines differ only in the integer ID (layer index)
@@ -2374,5 +2373,4 @@ mod tests {
         let inserted = cx.auto_roll_loops_prepass();
         assert_eq!(inserted, 0, "branch-only reuse should not roll into loops");
     }
-
 }

@@ -1116,6 +1116,7 @@ pub fn egglog_to_llir<'a>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn egglog_to_llir_from_root<'a>(
     egraph: &'a SerializedEGraph,
     choices: EGraphChoiceSet<'a>,
@@ -1257,4 +1258,3 @@ pub fn egglog_to_llir_from_root<'a>(
     // before it is loaded into the runtime.
     graph
 }
-
