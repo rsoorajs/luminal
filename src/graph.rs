@@ -1863,8 +1863,19 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
         if let Some(&(initial, body_producer)) = start_meta.get(&src) {
             if i == 0 {
                 initial
-            } else {
+            } else if body_nodes.contains(&body_producer) {
                 clone_map[i - 1][&body_producer]
+            } else {
+                // Iteration-invariant body producer: extracted LLIRs from
+                // some genomes can put an op at LoopEnd's incoming whose
+                // only ancestors are non-marker (e.g. a constant that
+                // egglog congruence collapsed onto the body slot). It
+                // doesn't depend on iteration, so every iter > 0 carries
+                // forward the same single value rather than a per-iter
+                // clone. Without this fallback, `clone_map[i-1][&body]`
+                // panics with "no entry found for key" because the body
+                // producer isn't in the forward-walk-derived `body_nodes`.
+                body_producer
             }
         } else if let Some(sources) = input_per_iter.get(&src) {
             sources[i]
@@ -1947,13 +1958,25 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
             .neighbors_directed(end_node, Direction::Incoming)
             .next()
             .expect("LoopEnd missing body producer during rewire");
-        marker_post_sub.insert(end_node, clone_map[iters - 1][&body_producer]);
+        // Mirror the iteration-invariant fallback in `resolve_src`: if the
+        // body producer isn't in the forward-walk-derived `body_nodes`, it
+        // wasn't cloned per iter, so the post-loop substitution is just the
+        // body producer itself (used as the loop's final value).
+        let sub = clone_map[iters - 1]
+            .get(&body_producer)
+            .copied()
+            .unwrap_or(body_producer);
+        marker_post_sub.insert(end_node, sub);
     }
     // Each LoopOutputSelect(stream, iter) routes to iter's clone of that
     // stream's body producer.
     for (&select_node, &(stream_id, iter)) in &output_selects {
         let body_producer = output_body_producer[&stream_id];
-        marker_post_sub.insert(select_node, clone_map[iter][&body_producer]);
+        let sub = clone_map[iter]
+            .get(&body_producer)
+            .copied()
+            .unwrap_or(body_producer);
+        marker_post_sub.insert(select_node, sub);
     }
 
     for &consumer in &post_loop_consumers {
@@ -2117,6 +2140,35 @@ pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
             .next()
             .expect("LoopInputStatic must have a source");
         static_source.insert(static_node, src);
+    }
+
+    // Mirror the backward-walk patch in `unroll_loops_in_llir` so the body-
+    // node set is closed under "feeds a LoopEnd / LoopOutput" — without it
+    // a forward-walk-only set can miss body ops on LLIRs extracted from
+    // genomes that picked structurally unusual representatives.
+    let end_producers: Vec<NodeIndex> = ends
+        .values()
+        .chain(outputs.values())
+        .flat_map(|n| {
+            llir.neighbors_directed(*n, Direction::Incoming)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut backfill_stack: Vec<NodeIndex> = end_producers;
+    while let Some(n) = backfill_stack.pop() {
+        if body_nodes.contains(&n) || loop_markers.contains(&n) {
+            continue;
+        }
+        if llir[n].to_op::<Output>().is_some() {
+            continue;
+        }
+        body_nodes.insert(n);
+        for pred in llir
+            .neighbors_directed(n, Direction::Incoming)
+            .collect::<Vec<_>>()
+        {
+            backfill_stack.push(pred);
+        }
     }
 
     // Resolve a source reference to its iter-0 equivalent.
