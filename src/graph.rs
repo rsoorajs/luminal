@@ -542,6 +542,13 @@ impl Graph {
 
         if created > 0 {
             let nodes_after = self.graph.node_count();
+            // Region partition: body_nodes is the surviving one-iteration body,
+            // `created` is the marker scaffold (LoopStart/End/Input/Output),
+            // and the rest is graph outside the loop region (embedding,
+            // weights, post-loop / lm-head).
+            let inside_body = body_nodes.len();
+            let inside_markers = created;
+            let outside = nodes_after - inside_body - inside_markers;
             println!(
                 "   {:>6}  rolled HLIR: {} -> {} nodes ({} loop ops inserted, {} duplicate body nodes deleted)",
                 "Rolled".cyan().bold(),
@@ -549,6 +556,14 @@ impl Graph {
                 nodes_after,
                 created,
                 duplicate_body_nodes.len(),
+            );
+            println!(
+                "   {:>6}  region partition: {} inside ({} body + {} markers) / {} outside",
+                "Rolled".cyan().bold(),
+                inside_body + inside_markers,
+                inside_body,
+                inside_markers,
+                outside,
             );
         }
         created
