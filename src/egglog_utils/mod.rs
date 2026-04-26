@@ -1189,7 +1189,11 @@ pub fn egglog_to_llir_from_root<'a>(
     //     )
     //     .unwrap();
     // }
-    crate::graph::unroll_loops_in_llir(&mut graph);
+    // Loop markers (LoopStart/End/Input/InputStatic/Output) are intentionally
+    // preserved here — `crate::graph::collapse_loops_to_first_iter` produces
+    // a single-iteration LLIR for fast per-candidate profiling, and the full
+    // `crate::graph::unroll_loops_in_llir` runs once on the chosen best LLIR
+    // before it is loaded into the runtime.
     graph
 }
 

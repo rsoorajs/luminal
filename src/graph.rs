@@ -24,22 +24,6 @@ pub type LLIRGraph = StableGraph<LLIROp, ()>;
 pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ()>;
 
 #[derive(Debug, Clone)]
-pub struct RegionalLLIRRegion {
-    /// Representative chunk index this region was optimized from.
-    pub representative_region: usize,
-    /// All chunk indices covered by this region (including representative).
-    pub member_regions: Vec<usize>,
-    /// Best LLIR found for the representative.
-    pub representative_llir: LLIRGraph,
-}
-
-#[derive(Debug, Clone)]
-pub struct RegionalLLIR {
-    pub region_descriptors: Vec<SubgraphDescriptor>,
-    pub regions: Vec<RegionalLLIRRegion>,
-}
-
-#[derive(Debug, Clone)]
 struct RollingOccurrence {
     nodes: Vec<NodeIndex>,
     boundary_inputs: Vec<NodeIndex>,
@@ -87,15 +71,6 @@ struct RollingSearchReport {
 
 /// A compiled bucket: (bucket_indices, representative_dyn_map, stitched_llir).
 pub type BucketLLIR = (FxHashMap<char, usize>, FxHashMap<char, usize>, LLIRGraph);
-
-/// A group of structurally identical chunks that share the same e-graph.
-#[derive(Debug, Clone)]
-struct RegionGroup {
-    /// The representative chunk index (used for e-graph building and search)
-    representative: usize,
-    /// All chunk indices in this group (including the representative)
-    members: Vec<usize>,
-}
 
 /// A bucket for a dynamic dimension, defining a range of valid values.
 /// For an exact value, use `min == max` (zero-length range).
@@ -241,12 +216,9 @@ pub struct Graph {
     pub dyn_map: FxHashMap<char, usize>,
     /// Edge weights: (Input index, Output index, Input shape)
     pub graph: HLIRGraph,
-    /// E-Graph search spaces (one per unique group when graph breaks are used)
+    /// E-Graph search space. Always exactly one e-graph; the `Vec` is kept
+    /// for the public `Graph::egraph()` accessor's `Option<&...>` shape.
     egraphs: Vec<SerializedEGraph>,
-    /// Subgraph descriptors (one per chunk when graph breaks are used)
-    region_descriptors: Vec<SubgraphDescriptor>,
-    /// Groups of structurally identical chunks
-    region_groups: Vec<RegionGroup>,
     /// Available ops
     pub ops: Option<Vec<Arc<Box<dyn EgglogOp>>>>,
     /// Custom ops
@@ -267,8 +239,6 @@ impl Default for Graph {
             dyn_map: Default::default(),
             graph: Default::default(),
             egraphs: Default::default(),
-            region_descriptors: Default::default(),
-            region_groups: Default::default(),
             ops: Default::default(),
             custom_ops: Default::default(),
             dim_buckets: Default::default(),
@@ -990,11 +960,6 @@ impl Graph {
 
         let (program, root) = hlir_to_egglog(self);
         self.egraphs = vec![run_egglog(&program, &root, &ops, cleanup_hlir).unwrap()];
-        self.region_descriptors = default_region_descriptors(self);
-        self.region_groups = vec![RegionGroup {
-            representative: 0,
-            members: vec![0],
-        }];
         self.ops = Some(ops);
     }
 
@@ -1012,11 +977,6 @@ impl Graph {
 
         let (program, root) = hlir_to_egglog(self);
         self.egraphs = vec![run_egglog(&program, &root, &ops, cleanup_hlir).unwrap()];
-        self.region_descriptors = default_region_descriptors(self);
-        self.region_groups = vec![RegionGroup {
-            representative: 0,
-            members: vec![0],
-        }];
         self.ops = Some(ops);
     }
 
@@ -1138,10 +1098,9 @@ impl Graph {
         parts.join(", ")
     }
 
-    /// Run the genetic search for all chunk groups using the given dyn_map for profiling.
-    /// Returns the stitched LLIR graph.
-    /// `bucket_progress`: if `Some((current_bucket_idx, total_buckets))`, shows an extra
-    /// "Bucket" bar for bucket-level progress and renames the group-level "Bucket" to "Group".
+    /// Run the genetic search and return the unrolled LLIR for the winning
+    /// genome. `bucket_progress`: if `Some((current_bucket_idx, total_buckets))`
+    /// adds a second "Bucket" progress bar.
     fn search_single<R: Runtime + 'static, G: rand::Rng>(
         &mut self,
         runtime: &mut R,
@@ -1155,46 +1114,12 @@ impl Graph {
             profile_dyn_map.insert(dim, value);
         }
         let limit = options.limit;
-        let n_chunks = self.region_descriptors.len();
-        let n_groups = self.region_groups.len();
-        let multi_chunk = n_chunks > 1;
         let ops = self.ops.as_ref().unwrap();
+        let egraph = &self.egraphs[0];
         let start = std::time::Instant::now();
 
-        // Label for the group-level "total" bar: "Group" when in bucketed mode, "Bucket" otherwise
-        let group_total_label = if bucket_progress.is_some() {
-            "Group"
-        } else {
-            "Bucket"
-        };
-        // How many progress bar lines we render (for ANSI cursor management)
-        // multi_chunk without buckets: 2 lines (Graph + Bucket)
-        // multi_chunk with buckets: 3 lines (Graph + Group + Bucket)
-        // single chunk without buckets: 1 line (Search)
-        // single chunk with buckets: 2 lines (Search + Bucket)
-        let n_bar_lines =
-            if multi_chunk { 2 } else { 1 } + if bucket_progress.is_some() { 1 } else { 0 };
-
-        // Allocate dummy buffers for boundary inputs so groups can be profiled
-        for desc in &self.region_descriptors {
-            for bi in &desc.boundary_inputs {
-                if !runtime.has_hlir_buffer(bi.break_node.index()) {
-                    let n_elements = bi
-                        .shape
-                        .n_elements()
-                        .exec(&profile_dyn_map)
-                        .expect("Failed to resolve boundary input shape");
-                    let n_bytes = n_elements * bi.dtype.bits() / 8;
-                    runtime.allocate_dummy_input(bi.break_node.index(), n_bytes);
-                }
-            }
-        }
-
-        // Search each group's representative.
-        let mut group_best_llirs: Vec<Option<LLIRGraph>> = (0..n_groups).map(|_| None).collect();
-        let mut group_best_genomes: Vec<Option<crate::egglog_utils::EGraphChoiceSet>> =
-            (0..n_groups).map(|_| None).collect();
-        let mut bars_drawn = false;
+        // Bar layout: one Search bar, plus an optional Bucket bar.
+        let n_bar_lines = 1 + if bucket_progress.is_some() { 1 } else { 0 };
 
         fn make_bar(searched: usize, total: usize) -> String {
             let bar_width = 24;
@@ -1214,38 +1139,14 @@ impl Graph {
             }
         }
 
-        // Render progress bars. Prints the right number of lines depending on mode.
-        // Returns the number of lines printed (for ANSI cursor management).
         let render_bars = |n_graphs: usize,
                            limit: usize,
-                           group_idx: usize,
-                           n_groups: usize,
-                           multi_chunk: bool,
-                           group_total_label: &str,
-                           bucket_progress: Option<(usize, usize)>|
-         -> usize {
-            let mut lines = 0;
-            if multi_chunk {
-                print!(
-                    "\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
-                    "Graph".cyan().bold(),
-                    make_bar(n_graphs, limit),
-                );
-                lines += 1;
-                print!(
-                    "\n\x1b[2K  {:>6}  {} {group_idx}/{n_groups}",
-                    group_total_label.cyan().bold(),
-                    make_bar(group_idx, n_groups),
-                );
-                lines += 1;
-            } else {
-                print!(
-                    "\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
-                    "Search".cyan().bold(),
-                    make_bar(n_graphs, limit),
-                );
-                lines += 1;
-            }
+                           bucket_progress: Option<(usize, usize)>| {
+            print!(
+                "\x1b[2K  {:>6}  {} {n_graphs}/{limit}",
+                "Search".cyan().bold(),
+                make_bar(n_graphs, limit),
+            );
             if let Some((bucket_idx, n_buckets)) = bucket_progress {
                 print!(
                     "\n\x1b[2K  {:>6}  {} {}/{n_buckets}",
@@ -1253,301 +1154,232 @@ impl Graph {
                     make_bar(bucket_idx, n_buckets),
                     bucket_idx,
                 );
-                lines += 1;
             }
-            lines
         };
 
-        for (group_idx, group) in self.region_groups.iter().enumerate() {
-            let group_start = std::time::Instant::now();
-            let egraph = &self.egraphs[group_idx];
-            let mut prev_selected: FxHashSet<u64> = FxHashSet::default();
-            let mut list_cache = FxHashMap::default();
-            let mut expr_cache = FxHashMap::default();
+        let group_start = std::time::Instant::now();
+        let mut prev_selected: FxHashSet<u64> = FxHashSet::default();
+        let mut list_cache = FxHashMap::default();
+        let mut expr_cache = FxHashMap::default();
+        runtime.clear_intermediate_buffers();
 
-            // Clear intermediate buffers from previous group's profiling
-            runtime.clear_intermediate_buffers();
+        // Find a viable initial genome (may need multiple attempts if some panic)
+        let (mut best_genome, mut best_metric, display, mut n_graphs);
+        let mut init_attempts = 0;
+        loop {
+            init_attempts += 1;
+            if init_attempts > 100 {
+                panic!("Failed to find a viable initial genome after 100 attempts");
+            }
+            let genome = random_initial_choice(egraph, rng);
+            prev_selected.insert(hash_choice_set(&genome));
 
-            // Find a viable initial genome (may need multiple attempts if some panic)
-            let (mut best_genome, mut best_graph, mut best_metric, display, mut n_graphs);
-            let mut init_attempts = 0;
-            loop {
-                init_attempts += 1;
-                if init_attempts > 100 {
-                    panic!(
-                        "Failed to find a viable initial genome for group {group_idx} after 100 attempts"
-                    );
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut graph = egglog_to_llir(
+                    egraph,
+                    genome.clone(),
+                    ops,
+                    &self.custom_ops,
+                    &mut list_cache,
+                    &mut expr_cache,
+                    None,
+                );
+                // Collapse the rolled body to a single iteration before
+                // profiling — one transformer block instead of N×block, so
+                // per-candidate profile time scales with body size, not the
+                // unrolled graph size.
+                collapse_loops_to_first_iter(&mut graph);
+                runtime.clear_intermediate_buffers();
+                let (rep_metric, rep_display) =
+                    runtime.profile(&graph, &profile_dyn_map, options.trials);
+                let has_nan = runtime.has_nan_outputs(&graph, &profile_dyn_map);
+                (rep_metric, rep_display, has_nan)
+            }));
+
+            match result {
+                Ok((metric, disp, false)) => {
+                    best_genome = genome;
+                    best_metric = R::aggregate_profile_metrics(&[metric]);
+                    display = disp;
+                    n_graphs = 1;
+                    break;
                 }
-                let genome = random_initial_choice(egraph, rng);
-                prev_selected.insert(hash_choice_set(&genome));
-
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let graph = egglog_to_llir(
-                        egraph,
-                        genome.clone(),
-                        ops,
-                        &self.custom_ops,
-                        &mut list_cache,
-                        &mut expr_cache,
-                        None,
-                    );
-                    runtime.clear_intermediate_buffers();
-                    let (rep_metric, rep_display) =
-                        runtime.profile(&graph, &profile_dyn_map, options.trials);
-                    let metrics = vec![rep_metric.clone()];
-                    let has_nan = runtime.has_nan_outputs(&graph, &profile_dyn_map);
-
-                    let combined_metric = R::aggregate_profile_metrics(&metrics);
-                    let display = rep_display;
-                    (graph, (combined_metric, display), has_nan)
-                }));
-
-                match result {
-                    Ok((graph, (metric, disp), has_nan)) if !has_nan => {
-                        best_genome = genome;
-                        best_graph = graph;
-                        best_metric = metric;
-                        display = disp;
-                        n_graphs = 1;
-                        break;
+                Ok(_) | Err(_) => {
+                    if options
+                        .group_timeout
+                        .is_some_and(|timeout| group_start.elapsed() >= timeout)
+                    {
+                        panic!("Failed to find a viable initial genome before timeout");
                     }
-                    Ok(_) | Err(_) => {
-                        if options
-                            .group_timeout
-                            .is_some_and(|timeout| group_start.elapsed() >= timeout)
-                        {
-                            panic!(
-                                "Failed to find a viable initial genome for group {group_idx} before timeout"
-                            );
-                        }
-                        list_cache.clear();
-                        expr_cache.clear();
-                        continue;
-                    }
+                    list_cache.clear();
+                    expr_cache.clear();
+                    continue;
                 }
             }
+        }
 
-            // Print initial result and progress
+        // Print initial result and progress
+        let msg = format!("   {:>6} {}", "Search".cyan().bold(), display);
+        println!("{msg}");
+        render_bars(n_graphs, limit, bucket_progress);
+        std::io::stdout().flush().unwrap();
+
+        // Track top-N parents for offspring generation
+        let mut parents: Vec<(R::ProfileMetric, crate::egglog_utils::EGraphChoiceSet<'_>)> =
+            vec![(best_metric.clone(), best_genome.clone())];
+
+        while n_graphs < limit {
+            if options
+                .group_timeout
+                .is_some_and(|timeout| group_start.elapsed() >= timeout)
             {
-                let multiplier = if group.members.len() > 1 {
-                    format!(" ({}x)", group.members.len())
-                } else {
-                    String::new()
-                };
-                let msg = format!(
-                    "   {:>8} {}{multiplier}",
-                    format!("Graph {group_idx}").cyan().bold(),
-                    display,
-                );
-                if bars_drawn {
-                    // Move up past existing bar lines to overwrite them
-                    for _ in 1..n_bar_lines {
-                        print!("\x1b[1A");
-                    }
-                    print!("\r\x1b[2K");
-                }
-                println!("{msg}");
-                render_bars(
-                    n_graphs,
-                    limit,
-                    group_idx,
-                    n_groups,
-                    multi_chunk,
-                    group_total_label,
-                    bucket_progress,
-                );
-                std::io::stdout().flush().unwrap();
-                bars_drawn = true;
+                break;
             }
 
-            // Track top-N parents for offspring generation
-            let mut parents: Vec<(R::ProfileMetric, crate::egglog_utils::EGraphChoiceSet<'_>)> =
-                vec![(best_metric.clone(), best_genome.clone())];
+            // Generate offspring from all parents, dividing budget evenly
+            let budget = (limit - n_graphs).min(options.generation_size);
+            let per_parent = budget.div_ceil(parents.len());
+            let mut all_offspring = Vec::new();
+            for (_, parent_genome) in &parents {
+                let remaining = budget.saturating_sub(all_offspring.len());
+                if remaining == 0 {
+                    break;
+                }
+                all_offspring.extend(extract_generation(
+                    egraph,
+                    parent_genome,
+                    per_parent.min(remaining),
+                    options.mutations,
+                    &mut prev_selected,
+                    rng,
+                ));
+            }
+            if all_offspring.is_empty() {
+                break;
+            }
 
-            while n_graphs < limit {
+            for genome in all_offspring {
                 if options
                     .group_timeout
                     .is_some_and(|timeout| group_start.elapsed() >= timeout)
                 {
                     break;
                 }
+                n_graphs += 1;
+                list_cache.clear();
+                expr_cache.clear();
 
-                // Generate offspring from all parents, dividing budget evenly
-                let budget = (limit - n_graphs).min(options.generation_size);
-                let per_parent = budget.div_ceil(parents.len());
-                let mut all_offspring = Vec::new();
-                for (_, parent_genome) in &parents {
-                    let remaining = budget.saturating_sub(all_offspring.len());
-                    if remaining == 0 {
-                        break;
+                let profile_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let mut llir_graph = egglog_to_llir(
+                            egraph,
+                            genome.clone(),
+                            ops,
+                            &self.custom_ops,
+                            &mut list_cache,
+                            &mut expr_cache,
+                            None,
+                        );
+                        // Collapse the rolled body to a single iteration
+                        // before profiling — see initial-genome path.
+                        collapse_loops_to_first_iter(&mut llir_graph);
+                        runtime.clear_intermediate_buffers();
+                        let (rep_metric, rep_display) =
+                            runtime.profile(&llir_graph, &profile_dyn_map, options.trials);
+                        let has_nan = runtime.has_nan_outputs(&llir_graph, &profile_dyn_map);
+                        (rep_metric, rep_display, has_nan)
+                    }));
+
+                let (new_metric, display_metric) = match profile_result {
+                    Ok((metric, display, false)) => {
+                        (R::aggregate_profile_metrics(&[metric]), display)
                     }
-                    all_offspring.extend(extract_generation(
-                        egraph,
-                        parent_genome,
-                        per_parent.min(remaining),
-                        options.mutations,
-                        &mut prev_selected,
-                        rng,
-                    ));
-                }
-                if all_offspring.is_empty() {
-                    break;
-                }
-
-                for genome in all_offspring {
-                    if options
-                        .group_timeout
-                        .is_some_and(|timeout| group_start.elapsed() >= timeout)
-                    {
-                        break;
-                    }
-                    n_graphs += 1;
-                    list_cache.clear();
-                    expr_cache.clear();
-
-                    let profile_result =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let llir_graph = egglog_to_llir(
-                                egraph,
-                                genome.clone(),
-                                ops,
-                                &self.custom_ops,
-                                &mut list_cache,
-                                &mut expr_cache,
-                                None,
-                            );
-                            runtime.clear_intermediate_buffers();
-                            let (rep_metric, rep_display) =
-                                runtime.profile(&llir_graph, &profile_dyn_map, options.trials);
-                            let metrics = vec![rep_metric.clone()];
-                            let has_nan =
-                                runtime.has_nan_outputs(&llir_graph, &profile_dyn_map);
-
-                            let combined_metric = R::aggregate_profile_metrics(&metrics);
-                            let display = rep_display;
-                            (((combined_metric, display), llir_graph), has_nan)
-                        }));
-
-                    let ((new_metric, display_metric), llir_graph) = match profile_result {
-                        Ok((((metric, display), graph), false)) => ((metric, display), graph),
-                        Ok((_, true)) | Err(_) => {
-                            // NaN or panic — redraw bars and skip
-                            for _ in 1..n_bar_lines {
-                                print!("\x1b[1A");
-                            }
-                            print!("\r\x1b[2K");
-                            render_bars(
-                                n_graphs,
-                                limit,
-                                group_idx,
-                                n_groups,
-                                multi_chunk,
-                                group_total_label,
-                                bucket_progress,
-                            );
-                            std::io::stdout().flush().unwrap();
-                            continue;
-                        }
-                    };
-
-                    // Update parents list (keep top-N for next generation)
-                    let dominated_by_all = parents.len() >= options.keep_best
-                        && !parents.last().unwrap().0.gt(&new_metric);
-                    if !dominated_by_all {
-                        let pos = parents
-                            .iter()
-                            .position(|(m, _)| {
-                                new_metric
-                                    .partial_cmp(m)
-                                    .is_some_and(|o| o == std::cmp::Ordering::Less)
-                            })
-                            .unwrap_or(parents.len());
-                        parents.insert(pos, (new_metric.clone(), genome.clone()));
-                        if parents.len() > options.keep_best {
-                            parents.truncate(options.keep_best);
-                        }
-                    }
-
-                    let new_best = best_metric.gt(&new_metric);
-                    if new_best {
-                        best_metric = new_metric;
-                        best_graph = llir_graph;
-                        best_genome = genome.clone();
-                    }
-
-                    if new_best {
-                        let msg = format!("   {:>6} {display_metric}", "Searched".green().bold());
-                        // Move cursor up to overwrite bars, print new best, re-render bars
+                    Ok((_, _, true)) | Err(_) => {
+                        // NaN or panic — redraw bars and skip
                         for _ in 1..n_bar_lines {
                             print!("\x1b[1A");
                         }
                         print!("\r\x1b[2K");
-                        println!("{msg}");
-                    } else {
-                        // Just move cursor up to overwrite bars
-                        for _ in 1..n_bar_lines {
-                            print!("\x1b[1A");
-                        }
-                        print!("\r\x1b[2K");
+                        render_bars(n_graphs, limit, bucket_progress);
+                        std::io::stdout().flush().unwrap();
+                        continue;
                     }
-                    render_bars(
-                        n_graphs,
-                        limit,
-                        group_idx,
-                        n_groups,
-                        multi_chunk,
-                        group_total_label,
-                        bucket_progress,
-                    );
-                    std::io::stdout().flush().unwrap();
+                };
+
+                // Update parents list (keep top-N for next generation)
+                let dominated_by_all = parents.len() >= options.keep_best
+                    && !parents.last().unwrap().0.gt(&new_metric);
+                if !dominated_by_all {
+                    let pos = parents
+                        .iter()
+                        .position(|(m, _)| {
+                            new_metric
+                                .partial_cmp(m)
+                                .is_some_and(|o| o == std::cmp::Ordering::Less)
+                        })
+                        .unwrap_or(parents.len());
+                    parents.insert(pos, (new_metric.clone(), genome.clone()));
+                    if parents.len() > options.keep_best {
+                        parents.truncate(options.keep_best);
+                    }
                 }
+
+                let new_best = best_metric.gt(&new_metric);
+                if new_best {
+                    best_metric = new_metric;
+                    best_genome = genome.clone();
+                }
+
+                if new_best {
+                    let msg = format!("   {:>6} {display_metric}", "Searched".green().bold());
+                    for _ in 1..n_bar_lines {
+                        print!("\x1b[1A");
+                    }
+                    print!("\r\x1b[2K");
+                    println!("{msg}");
+                } else {
+                    for _ in 1..n_bar_lines {
+                        print!("\x1b[1A");
+                    }
+                    print!("\r\x1b[2K");
+                }
+                render_bars(n_graphs, limit, bucket_progress);
+                std::io::stdout().flush().unwrap();
             }
-
-            group_best_llirs[group_idx] = Some(best_graph);
-            group_best_genomes[group_idx] = Some(best_genome);
         }
 
         // Clear progress bars
-        if bars_drawn {
-            // Move up to first bar line and clear all bar lines
-            for _ in 1..n_bar_lines {
-                print!("\x1b[1A");
-            }
-            print!("\r");
-            for _ in 0..n_bar_lines {
-                println!("\x1b[2K");
-            }
-            // Move back up to where we started
-            for _ in 0..n_bar_lines {
-                print!("\x1b[1A");
-            }
-            print!("\r");
-            std::io::stdout().flush().unwrap();
+        for _ in 1..n_bar_lines {
+            print!("\x1b[1A");
         }
+        print!("\r");
+        for _ in 0..n_bar_lines {
+            println!("\x1b[2K");
+        }
+        for _ in 0..n_bar_lines {
+            print!("\x1b[1A");
+        }
+        print!("\r");
+        std::io::stdout().flush().unwrap();
 
-        // Build explicit regionalized LLIR, then unroll into full LLIR.
-        let mut regions = Vec::with_capacity(self.region_groups.len());
-        for (group_idx, group) in self.region_groups.iter().enumerate() {
-            let representative_llir = group_best_llirs[group_idx]
-                .take()
-                .unwrap_or_else(|| panic!("Missing representative LLIR for group {group_idx}"));
-            regions.push(RegionalLLIRRegion {
-                representative_region: group.representative,
-                member_regions: group.members.clone(),
-                representative_llir,
-            });
-        }
-        let regional = RegionalLLIR {
-            region_descriptors: self.region_descriptors.clone(),
-            regions,
-        };
-        let stitched = regional.unroll(&self.graph);
+        // Re-extract the winning genome WITHOUT the per-candidate
+        // single-iteration collapse, then run the real loop unroll. The
+        // resulting LLIR is the full N-iteration graph the runtime executes;
+        // the per-candidate collapsed form was used only for ranking.
+        let mut stitched = egglog_to_llir(
+            egraph,
+            best_genome,
+            ops,
+            &self.custom_ops,
+            &mut FxHashMap::default(),
+            &mut FxHashMap::default(),
+            None,
+        );
+        unroll_loops_in_llir(&mut stitched);
 
         println!(
-            "   {:>6}  {} groups ({} regions) in {}",
+            "   {:>6}  in {}",
             "Searched".green().bold(),
-            n_groups,
-            n_chunks,
             pretty_duration::pretty_duration(&start.elapsed(), None)
         );
 
@@ -1881,68 +1713,6 @@ fn grow_rolling_candidate(
 }
 
 
-/// Describes a tensor value crossing a region boundary.
-#[derive(Debug, Clone)]
-pub struct BoundaryInput {
-    /// The HLIR NodeIndex used as the boundary identifier for matching.
-    pub break_node: NodeIndex,
-    /// Shape of the tensor at the boundary
-    pub shape: ShapeTracker,
-    /// DType of the tensor at the boundary
-    pub dtype: DType,
-}
-
-/// Describes a region of the HLIR graph.
-#[derive(Debug, Clone)]
-pub struct SubgraphDescriptor {
-    /// HLIR nodes in this region
-    pub nodes: FxHashSet<NodeIndex>,
-    /// Boundary inputs entering from prior regions
-    pub boundary_inputs: Vec<BoundaryInput>,
-    /// Boundary output node indices produced by this region
-    pub boundary_outputs: Vec<NodeIndex>,
-}
-
-/// Default regionization fallback when no explicit auto-rolling plan is present.
-/// Produces a single region spanning the full HLIR graph.
-pub fn default_region_descriptors(graph: &Graph) -> Vec<SubgraphDescriptor> {
-    vec![SubgraphDescriptor {
-        nodes: graph.graph.node_indices().collect(),
-        boundary_inputs: vec![],
-        boundary_outputs: vec![],
-    }]
-}
-
-/// Clone a representative chunk's LLIR graph and remap Input/Output node indices
-/// to match a different (structurally identical) target chunk.
-///
-/// The remapping handles three categories of nodes:
-/// 1. **Boundary inputs**: Matched positionally via SubgraphDescriptor.boundary_inputs
-/// 2. **Boundary outputs**: Matched positionally via SubgraphDescriptor.boundary_outputs
-/// 3. **Weight/data inputs**: Chunk-specific Input nodes (in one subgraph but not the other) are sorted by index and matched positionally.
-///
-/// Shared Input nodes (same NodeIndex in both subgraphs) need no remapping.
-/// Build remapping tables for cloning a representative chunk's LLIR to a target chunk.
-///
-/// Returns:
-/// - `node_remap`: maps rep HLIR node indices → target HLIR node indices (for Input/Output nodes)
-/// - `custom_op_id_remap`: maps rep CustomOpKind IDs → target CustomOpKind IDs
-
-impl RegionalLLIR {
-    /// Expand a regionalized LLIR artifact into a full stitched LLIR graph.
-    /// With the loop-rolling refactor the search pipeline always produces a
-    /// single region whose representative LLIR is the full graph, so unroll
-    /// is just a clone.
-    pub fn unroll(&self, _hlir_graph: &HLIRGraph) -> LLIRGraph {
-        assert_eq!(
-            self.regions.len(),
-            1,
-            "RegionalLLIR now always holds exactly one region"
-        );
-        self.regions[0].representative_llir.clone()
-    }
-}
-
 /// Expand all loop-region markers in an LLIR graph into fully unrolled bodies.
 ///
 /// Reads `LoopStart` / `LoopEnd` / `LoopInput` / `LoopOutput` metadata placed
@@ -2224,6 +1994,188 @@ pub fn unroll_loops_in_llir(llir: &mut LLIRGraph) {
     // producing sort-by-edge-id orderings where a later-added scheduling
     // edge ends up at a low index — which the runtime interprets as a
     // primary input position and crashes looking up a buffer.
+    let compacted = compact_llir_preserving_input_order(llir);
+    *llir = compacted;
+}
+
+/// Collapse all loop markers in an LLIR graph down to a SINGLE iteration's
+/// body, with first-iteration inputs and outputs only. This is the cheap
+/// per-candidate form used by the genetic search — profiling one transformer
+/// block instead of N×block makes the search ~N× faster, and the relative
+/// cost of any extraction choice is preserved on the body shape.
+///
+/// LoopStart consumers re-route to the initial value, LoopInput consumers
+/// re-route to `sources[0]`, LoopInputStatic consumers re-route to the single
+/// shared source, LoopEnd's post-loop consumers re-route to the body producer
+/// directly, and each `LoopOutput` is replaced with a single `Output { node:
+/// targets[0] }`. After collapse the LLIR has no marker ops left and contains
+/// exactly the iter-0 body plus the surrounding non-loop graph.
+pub fn collapse_loops_to_first_iter(llir: &mut LLIRGraph) {
+    use crate::hlir::{LoopEnd, LoopInput, LoopInputStatic, LoopOutput, LoopStart, Output};
+    use petgraph::visit::EdgeRef;
+    use std::collections::BTreeMap;
+
+    let mut starts: BTreeMap<usize, NodeIndex> = BTreeMap::new();
+    let mut ends: BTreeMap<usize, NodeIndex> = BTreeMap::new();
+    let mut inputs: BTreeMap<usize, NodeIndex> = BTreeMap::new();
+    let mut static_inputs: FxHashSet<NodeIndex> = FxHashSet::default();
+    let mut outputs: BTreeMap<usize, (NodeIndex, Vec<usize>)> = BTreeMap::new();
+
+    for n in llir.node_indices() {
+        let op = &llir[n];
+        if op.to_op::<LoopStart>().is_some() {
+            starts.insert(op.to_op::<LoopStart>().unwrap().slot_idx, n);
+        } else if let Some(le) = op.to_op::<LoopEnd>() {
+            ends.insert(le.slot_idx, n);
+        } else if op.to_op::<LoopInputStatic>().is_some() {
+            static_inputs.insert(n);
+        } else if let Some(li) = op.to_op::<LoopInput>() {
+            inputs.insert(li.stream_id, n);
+        } else if let Some(lo) = op.to_op::<LoopOutput>() {
+            outputs.insert(lo.stream_id, (n, lo.targets.clone()));
+        }
+    }
+    if starts.is_empty() {
+        return;
+    }
+
+    let loop_markers: FxHashSet<NodeIndex> = starts
+        .values()
+        .copied()
+        .chain(ends.values().copied())
+        .chain(inputs.values().copied())
+        .chain(static_inputs.iter().copied())
+        .chain(outputs.values().map(|(n, _)| *n))
+        .collect();
+
+    // body_nodes = forward-reachable from any marker outgoing, stopping at
+    // markers and Output ops. This matches `unroll_loops_in_llir`.
+    let mut body_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
+    let mut worklist: Vec<NodeIndex> = starts
+        .values()
+        .flat_map(|n| llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>())
+        .chain(
+            inputs
+                .values()
+                .flat_map(|n| llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>()),
+        )
+        .chain(static_inputs.iter().flat_map(|n| {
+            llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>()
+        }))
+        .collect();
+    while let Some(n) = worklist.pop() {
+        if body_nodes.contains(&n) || loop_markers.contains(&n) {
+            continue;
+        }
+        if llir[n].to_op::<Output>().is_some() {
+            continue;
+        }
+        body_nodes.insert(n);
+        for succ in llir.neighbors_directed(n, Direction::Outgoing).collect::<Vec<_>>() {
+            worklist.push(succ);
+        }
+    }
+
+    // Initial value per LoopStart, body producer per LoopEnd / LoopOutput.
+    let mut start_initial: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
+    for &start_node in starts.values() {
+        let initial = llir
+            .neighbors_directed(start_node, Direction::Incoming)
+            .next()
+            .expect("LoopStart must have an initial-value producer");
+        start_initial.insert(start_node, initial);
+    }
+    let mut input_first_source: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
+    for input_node in inputs.values() {
+        let first = llir
+            .edges_directed(*input_node, Direction::Incoming)
+            .sorted_by_key(|e| e.id())
+            .map(|e| e.source())
+            .next()
+            .expect("LoopInput must have at least one source");
+        input_first_source.insert(*input_node, first);
+    }
+    let mut static_source: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
+    for &static_node in &static_inputs {
+        let src = llir
+            .neighbors_directed(static_node, Direction::Incoming)
+            .next()
+            .expect("LoopInputStatic must have a source");
+        static_source.insert(static_node, src);
+    }
+
+    // Resolve a source reference to its iter-0 equivalent.
+    let resolve_src = |src: NodeIndex| -> NodeIndex {
+        if let Some(&initial) = start_initial.get(&src) {
+            initial
+        } else if let Some(&first) = input_first_source.get(&src) {
+            first
+        } else if let Some(&shared) = static_source.get(&src) {
+            shared
+        } else {
+            src
+        }
+    };
+
+    // Rewrite every body node's incoming edges. Per-edge remove+add to keep
+    // edge-id ordering via LIFO reuse — runtime reads inputs sorted by edge
+    // id so position must be preserved.
+    for &b in &body_nodes {
+        let pairs: Vec<(NodeIndex, petgraph::graph::EdgeIndex)> = llir
+            .edges_directed(b, Direction::Incoming)
+            .sorted_by_key(|e| e.id())
+            .map(|e| (e.source(), e.id()))
+            .collect();
+        for (src, eid) in pairs {
+            let new_src = resolve_src(src);
+            llir.remove_edge(eid);
+            llir.add_edge(new_src, b, ());
+        }
+    }
+
+    // Post-loop consumers reading from LoopEnd / LoopOutput must instead read
+    // from the body producer (iter-0's last value) directly.
+    let mut marker_post_sub: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
+    for &end_node in ends.values() {
+        let body_producer = llir
+            .neighbors_directed(end_node, Direction::Incoming)
+            .next()
+            .expect("LoopEnd missing body producer during rewire");
+        marker_post_sub.insert(end_node, body_producer);
+    }
+    for (output_node, _) in outputs.values() {
+        let body_producer = llir
+            .neighbors_directed(*output_node, Direction::Incoming)
+            .next()
+            .expect("LoopOutput missing body producer during rewire");
+        marker_post_sub.insert(*output_node, body_producer);
+    }
+    let post_loop_consumers: FxHashSet<NodeIndex> = loop_markers
+        .iter()
+        .flat_map(|n| llir.neighbors_directed(*n, Direction::Outgoing).collect::<Vec<_>>())
+        .filter(|n| !loop_markers.contains(n) && !body_nodes.contains(n))
+        .collect();
+    for &consumer in &post_loop_consumers {
+        let pairs: Vec<(NodeIndex, petgraph::graph::EdgeIndex)> = llir
+            .edges_directed(consumer, Direction::Incoming)
+            .sorted_by_key(|e| e.id())
+            .map(|e| (e.source(), e.id()))
+            .collect();
+        for (src, eid) in pairs {
+            let new_src = marker_post_sub.get(&src).copied().unwrap_or(src);
+            llir.remove_edge(eid);
+            llir.add_edge(new_src, consumer, ());
+        }
+    }
+
+    // No new Output nodes are needed: each LoopOutput's `targets[0]` is the
+    // iter-0 Output that the prepass left in place when it inserted the
+    // marker, so post-loop consumers already see the iter-0 result.
+
+    for &n in &loop_markers {
+        llir.remove_node(n);
+    }
+
     let compacted = compact_llir_preserving_input_order(llir);
     *llir = compacted;
 }
