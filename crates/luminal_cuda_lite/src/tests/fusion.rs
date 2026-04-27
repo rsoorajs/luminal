@@ -1,97 +1,29 @@
-use as_any::Downcast;
 use luminal::egglog_utils::{egglog_to_llir, random_initial_choice};
 use luminal::prelude::*;
 
 use crate::kernel::KernelOp;
-use crate::kernel::other_ops::{KernelFusedElementwise, UnaryFn};
 use crate::runtime::CudaRuntime;
 use crate::tests::utilities::{
     TOLERANCE_SAFETY_FACTOR, dtype_epsilon, random_f32_vec, test_binary_cuda, test_unary_cuda,
 };
 
-/// Return every distinct kernel_name that appears across many random extractions
-/// of the search space. Used to check whether fusion produces a reachable
-/// `KernelFusedElementwise` node (or, negatively, that it never does).
-fn extract_all_kernel_names(cx: &mut Graph) -> Vec<String> {
-    cx.build_search_space::<CudaRuntime>();
-    let egraph = cx.egraph().expect("egraph not built");
-    let ops = cx.egglog_ops().expect("ops not built");
-    let custom_ops = &cx.custom_ops;
-
-    let mut all_names = Vec::new();
-    for _ in 0..50 {
-        let choices = random_initial_choice(egraph, &mut rand::rng());
-        let mut list_cache = Default::default();
-        let mut expr_cache = Default::default();
-        let llir = egglog_to_llir(
-            egraph,
-            choices,
-            ops,
-            custom_ops,
-            &mut list_cache,
-            &mut expr_cache,
-            None,
-        );
-        for op in llir.node_weights() {
-            if let Some(k) = op.to_dialect::<dyn KernelOp>() {
-                let name = k.kernel_name().to_string();
-                if !all_names.contains(&name) {
-                    all_names.push(name);
-                }
-            }
-        }
-    }
-    all_names
-}
-
-/// Return every distinct `Vec<UnaryFn>` that appears inside a reachable
-/// `KernelFusedElementwise` across many random extractions. Used to verify
-/// that a specific fused configuration (e.g. a 3-op chain) is reachable.
-fn extract_all_fused_configs(cx: &mut Graph) -> Vec<Vec<UnaryFn>> {
-    cx.build_search_space::<CudaRuntime>();
-    let egraph = cx.egraph().expect("egraph not built");
-    let ops = cx.egglog_ops().expect("ops not built");
-    let custom_ops = &cx.custom_ops;
-
-    let mut all_configs: Vec<Vec<UnaryFn>> = Vec::new();
-    for _ in 0..200 {
-        let choices = random_initial_choice(egraph, &mut rand::rng());
-        let mut list_cache = Default::default();
-        let mut expr_cache = Default::default();
-        let llir = egglog_to_llir(
-            egraph,
-            choices,
-            ops,
-            custom_ops,
-            &mut list_cache,
-            &mut expr_cache,
-            None,
-        );
-        for op in llir.node_weights() {
-            if let Some(kop) = op.to_dialect::<dyn KernelOp>()
-                && let Some(fused) = (***kop).downcast_ref::<KernelFusedElementwise>()
-            {
-                let cfg = fused.ops().to_vec();
-                if !all_configs.contains(&cfg) {
-                    all_configs.push(cfg);
-                }
-            }
-        }
-    }
-    all_configs
-}
-
 #[test]
 fn test_two_unary_ops_fuse() {
+    // Marker form: `a.sin().sqrt()` should fuse into a region with FusedSin
+    // and FusedSqrt under one FusionEnd (per pair-fuse U→U).
     let mut cx = Graph::new();
     let a = cx.tensor(8);
     let _b = a.sin().sqrt().output();
 
-    let names = extract_all_kernel_names(&mut cx);
+    let regions = extract_all_fused_regions(&mut cx);
+    let expected = sorted_names(&["FusedSin", "FusedSqrt"]);
     assert!(
-        names.iter().any(|n| n == "FusedElementwise"),
-        "expected KernelSin→KernelSqrt on contiguous strides to be fusable into \
-         a single FusedElementwise kernel, but reachable kernels were: {names:?}",
+        regions
+            .iter()
+            .any(|r| r.internal_ops_sorted == expected
+                && r.start_count == 1
+                && r.end_count == 1),
+        "expected a marker region of {expected:?} with 1 FusionStart, got: {regions:#?}"
     );
 }
 
@@ -99,33 +31,42 @@ fn test_two_unary_ops_fuse() {
 fn test_stride_mismatch_prevents_fusion() {
     // A permute between sin and sqrt gives sqrt a non-contiguous view of sin's
     // contiguous output, so sqrt's in_strides != its out_strides and the
-    // non-linear `?strides` match in the fusion rule can't fire.
+    // non-linear `?s ?s` match in the pair-fuse U→U rule can't fire.
     let mut cx = Graph::new();
     let a = cx.tensor((3, 4));
     let _b = a.sin().permute((1, 0)).sqrt().output();
 
-    let names = extract_all_kernel_names(&mut cx);
-    assert!(
-        !names.iter().any(|n| n == "FusedElementwise"),
-        "a permute between sin and sqrt must prevent fusion, but \
-         FusedElementwise appeared in reachable kernels: {names:?}",
-    );
+    let regions = extract_all_fused_regions(&mut cx);
+    for r in &regions {
+        let has_sin = r.internal_ops_sorted.iter().any(|n| n == "FusedSin");
+        let has_sqrt = r.internal_ops_sorted.iter().any(|n| n == "FusedSqrt");
+        assert!(
+            !(has_sin && has_sqrt),
+            "permute between sin and sqrt must prevent them sharing a fused region, \
+             but found: {r:#?}"
+        );
+    }
 }
 
 #[test]
 fn test_reduction_prevents_unary_fusion() {
-    // A reduction between two unaries is not elementwise, so the fusion rule
-    // (which only matches unary+unary pairs) must not fire.
+    // A reduction between two unaries is not elementwise, so pair-fuse U→U
+    // (which only matches adjacent elementwise pairs) must not fire across
+    // the reduction.
     let mut cx = Graph::new();
     let a = cx.tensor((4, 4));
     let _b = a.sin().sum(1).sqrt().output();
 
-    let names = extract_all_kernel_names(&mut cx);
-    assert!(
-        !names.iter().any(|n| n == "FusedElementwise"),
-        "a reduction between sin and sqrt must prevent fusion, but \
-         FusedElementwise appeared in reachable kernels: {names:?}",
-    );
+    let regions = extract_all_fused_regions(&mut cx);
+    for r in &regions {
+        let has_sin = r.internal_ops_sorted.iter().any(|n| n == "FusedSin");
+        let has_sqrt = r.internal_ops_sorted.iter().any(|n| n == "FusedSqrt");
+        assert!(
+            !(has_sin && has_sqrt),
+            "reduction between sin and sqrt must prevent them sharing a fused region, \
+             but found: {r:#?}"
+        );
+    }
 }
 
 #[test]
@@ -147,31 +88,40 @@ fn test_unary_fusion_preserves_output() {
 #[test]
 fn test_three_unary_ops_fuse() {
     // A chain of 3 pure-elementwise unaries with matching strides should be
-    // reachable as a single FusedElementwise containing all three ops.
+    // reachable as a single marker region containing all three FusedX ops.
     let mut cx = Graph::new();
     let a = cx.tensor(16);
     let _b = a.sin().sqrt().exp2().output();
 
-    let configs = extract_all_fused_configs(&mut cx);
-    let expected = vec![UnaryFn::Sin, UnaryFn::Sqrt, UnaryFn::Exp2];
+    let regions = extract_all_fused_regions(&mut cx);
+    let expected = sorted_names(&["FusedSin", "FusedSqrt", "FusedExp2"]);
     assert!(
-        configs.contains(&expected),
-        "expected a Fused[Sin, Sqrt, Exp2] in reachable configs, got: {configs:?}",
+        regions
+            .iter()
+            .any(|r| r.internal_ops_sorted == expected
+                && r.start_count == 1
+                && r.end_count == 1),
+        "expected a marker region of {expected:?} with 1 FusionStart, got: {regions:#?}"
     );
 }
 
 #[test]
 fn test_four_unary_ops_fuse() {
-    // 4-op chain should collapse into a single Fused containing all four ops.
+    // 4-op chain should collapse into a single marker region containing all
+    // four FusedX ops (one pair-fuse + repeated grow-FE→U firings).
     let mut cx = Graph::new();
     let a = cx.tensor(16);
     let _b = a.sin().sqrt().exp2().log2().output();
 
-    let configs = extract_all_fused_configs(&mut cx);
-    let expected = vec![UnaryFn::Sin, UnaryFn::Sqrt, UnaryFn::Exp2, UnaryFn::Log2];
+    let regions = extract_all_fused_regions(&mut cx);
+    let expected = sorted_names(&["FusedSin", "FusedSqrt", "FusedExp2", "FusedLog2"]);
     assert!(
-        configs.contains(&expected),
-        "expected a Fused[Sin, Sqrt, Exp2, Log2] in reachable configs, got: {configs:?}",
+        regions
+            .iter()
+            .any(|r| r.internal_ops_sorted == expected
+                && r.start_count == 1
+                && r.end_count == 1),
+        "expected a marker region of {expected:?} with 1 FusionStart, got: {regions:#?}"
     );
 }
 
@@ -345,8 +295,7 @@ struct FusedRegion {
 }
 
 /// Helper: collect every distinct fused region reachable across many random
-/// extractions. Parallel to `extract_all_fused_configs` but for the marker
-/// encoding.
+/// extractions of the search space.
 fn extract_all_fused_regions(cx: &mut Graph) -> Vec<FusedRegion> {
     cx.build_search_space::<CudaRuntime>();
     let egraph = cx.egraph().expect("egraph not built");
@@ -784,8 +733,6 @@ fn test_fused_region_starts_match_distinct_external_tensors() {
 fn test_pair_fuse_unary_unary_marker_form() {
     // Pair-fuse U→U: `a.sin().sqrt()` should be reachable as a marker-bracketed
     // region containing FusedSin and FusedSqrt (with one FusionStart for `a`).
-    // The old `KernelFusedElementwise` form is also reachable via KFE's rules
-    // (still alive in PR1) — we only assert the marker form is present.
     let mut cx = Graph::new();
     let a = cx.tensor(8);
     let _b = a.sin().sqrt().output();
