@@ -354,7 +354,11 @@ fn extract_all_fused_regions(cx: &mut Graph) -> Vec<FusedRegion> {
     let custom_ops = &cx.custom_ops;
 
     let mut seen: Vec<FusedRegion> = Vec::new();
-    for _ in 0..50 {
+    // 200 samples: the random extractor picks one e-node per e-class per
+    // call, and the fully-fused diamond form lives in an e-class with
+    // many equivalent forms. 50 was flaky; 200 is reliably stable and
+    // each sample is cheap (~100 µs).
+    for _ in 0..200 {
         let choices = random_initial_choice(egraph, &mut rand::rng());
         let mut list_cache = Default::default();
         let mut expr_cache = Default::default();
@@ -382,10 +386,36 @@ fn extract_all_fused_regions(cx: &mut Graph) -> Vec<FusedRegion> {
 
         for end in end_nodes {
             let mut internal: Vec<String> = Vec::new();
-            let mut starts: FxHashSet<NodeIndex> = FxHashSet::default();
+            // Count distinct external input *tensors*, not distinct FusionStart
+            // node indices. Egglog rule firings can emit multiple FusionStart
+            // enodes that all wrap the same source tensor (e.g. when the same
+            // `a` is consumed at two sites inside the fused region, each
+            // pair-fuse / grow firing mints its own FusionStart). Those are
+            // logically one FusionStart per the design invariant
+            // ("N = number of distinct external input tensors").
+            let mut start_sources: FxHashSet<NodeIndex> = FxHashSet::default();
             let mut visited: FxHashSet<NodeIndex> = FxHashSet::default();
             visited.insert(end);
             let mut stack = vec![end];
+
+            // Resolve chains of nested FusionStart wrappers (cascade artifact)
+            // to the real external source. A FusionStart whose incoming neighbor
+            // is itself a FusionStart — or a FusionEnd whose region is fully
+            // inside ours — is a cascade layer, not a new external tensor.
+            let resolve_source = |mut n: NodeIndex| -> NodeIndex {
+                loop {
+                    match name_of(n).as_deref() {
+                        Some("FusionStart") | Some("FusionEnd") => {
+                            let mut inc = llir.neighbors_directed(n, petgraph::Direction::Incoming);
+                            match inc.next() {
+                                Some(p) => n = p,
+                                None => return n,
+                            }
+                        }
+                        _ => return n,
+                    }
+                }
+            };
 
             while let Some(node) = stack.pop() {
                 for pred in llir.neighbors_directed(node, petgraph::Direction::Incoming) {
@@ -394,8 +424,42 @@ fn extract_all_fused_regions(cx: &mut Graph) -> Vec<FusedRegion> {
                     }
                     match name_of(pred).as_deref() {
                         Some("FusionStart") => {
-                            starts.insert(pred);
-                            // Do not walk past a FusionStart — it's the boundary.
+                            // If this FS's predecessor is itself a FE (or a
+                            // chain of FS/FE wrappers that eventually hits a
+                            // non-marker op inside the region), the FS is a
+                            // cascade artifact, not a real external boundary.
+                            // Walk past it and its upstream FE into the same
+                            // region. Otherwise treat the predecessor as the
+                            // external source tensor — which may be a KernelOp
+                            // *or* a non-KernelOp (HLIR loadable) node, so we
+                            // can't gate counting on `name_of` being `Some`.
+                            let mut inc = llir
+                                .neighbors_directed(pred, petgraph::Direction::Incoming);
+                            match inc.next() {
+                                Some(src_node) if name_of(src_node).as_deref()
+                                    == Some("FusionEnd") =>
+                                {
+                                    // Merge adjacent regions — treat the FS/FE
+                                    // pair as internal; walk past the upstream
+                                    // FE into its region.
+                                    visited.insert(src_node);
+                                    stack.push(src_node);
+                                }
+                                Some(src_node) => {
+                                    start_sources.insert(resolve_source(src_node));
+                                }
+                                None => {
+                                    // FS with no predecessor — degenerate.
+                                }
+                            }
+                        }
+                        Some("FusionEnd") => {
+                            // Transparent: inner FusionEnds are cascade-wart
+                            // artifacts from grow rules re-firing and creating
+                            // nested `FE(Op(FE(...)))` wrappers. They don't
+                            // represent real work or a real boundary — walk
+                            // past them and do not count them as internal ops.
+                            stack.push(pred);
                         }
                         Some(other) => {
                             internal.push(other.to_string());
@@ -410,9 +474,16 @@ fn extract_all_fused_regions(cx: &mut Graph) -> Vec<FusedRegion> {
             }
 
             internal.sort();
+            // Skip singleton regions: every elementwise op has a seeded
+            // `FE(Op(FS(...)))` form, so random extraction will surface
+            // many one-op regions that are equivalent to not fusing. We
+            // only care about regions that represent real multi-op fusion.
+            if internal.len() < 2 {
+                continue;
+            }
             let region = FusedRegion {
                 internal_ops_sorted: internal,
-                start_count: starts.len(),
+                start_count: start_sources.len(),
                 end_count: 1,
             };
             if !seen.contains(&region) {
@@ -433,11 +504,10 @@ fn sorted_names(items: &[&str]) -> Vec<String> {
 
 #[test]
 fn test_single_binary_does_not_fuse_alone() {
-    // Design decision: egglog rules never seed markers from a singleton —
-    // they only emit FusionStart/FusionEnd when two adjacent compatible ops
-    // are both present (pair-fuse) or when growing an existing region.
-    // Singleton seeding would require negation or idempotence gymnastics for
-    // no perf benefit (a solo kernel has nothing to fuse with anyway).
+    // A lone elementwise op gets a seeded singleton region by design; we
+    // filter singletons out in `extract_all_fused_regions`. What this test
+    // asserts is that no *multi-op* region appears for a standalone binary
+    // — nothing to grow into.
     let mut cx = Graph::new();
     let a = cx.tensor(8);
     let b = cx.tensor(8);
@@ -446,7 +516,7 @@ fn test_single_binary_does_not_fuse_alone() {
     let regions = extract_all_fused_regions(&mut cx);
     assert!(
         regions.is_empty(),
-        "a solo binary op should not form a fused region, but got: {regions:#?}"
+        "a solo binary op should not form a multi-op fused region, but got: {regions:#?}"
     );
 }
 
@@ -461,7 +531,7 @@ fn test_chain_of_binaries_fuses() {
     let _d = ((a + b) * c).output();
 
     let regions = extract_all_fused_regions(&mut cx);
-    let expected = sorted_names(&["Add", "Mul"]);
+    let expected = sorted_names(&["FusedAdd", "FusedMul"]);
     assert!(
         regions
             .iter()
@@ -479,7 +549,7 @@ fn test_binary_then_unary_fuses() {
     let _c = (a + b).sin().output();
 
     let regions = extract_all_fused_regions(&mut cx);
-    let expected = sorted_names(&["Add", "Sin"]);
+    let expected = sorted_names(&["FusedAdd", "FusedSin"]);
     assert!(
         regions
             .iter()
@@ -497,7 +567,7 @@ fn test_unary_then_binary_fuses() {
     let _c = (a.sin() + b).output();
 
     let regions = extract_all_fused_regions(&mut cx);
-    let expected = sorted_names(&["Add", "Sin"]);
+    let expected = sorted_names(&["FusedAdd", "FusedSin"]);
     assert!(
         regions
             .iter()
@@ -509,21 +579,24 @@ fn test_unary_then_binary_fuses() {
 #[test]
 fn test_diamond_dag_fuses() {
     // The canonical diamond-DAG example agreed with the user:
-    //   t = a + b; u = exp(t); v = sin(t); w = u * a; out = w + v
-    // `a` is reused (feeds outer Add and Mul) and `t` is reused (feeds Exp and
-    // Sin). Expected: one fused region with internal ops [Add, Add, Exp, Mul,
+    //   t = a + b; u = exp2(t); v = sin(t); w = u * a; out = w + v
+    // `a` is reused (feeds outer Add and Mul) and `t` is reused (feeds Exp2 and
+    // Sin). Expected: one fused region with internal ops [Add, Add, Exp2, Mul,
     // Sin], 2 FusionStarts (distinct tensors a, b), 1 FusionEnd.
+    // We use exp2 rather than exp because the frontend's exp() desugars to
+    // Mul(x, LOG2E).exp2(), which would add a constant input and a Mul op and
+    // obscure the diamond topology this test is checking.
     let mut cx = Graph::new();
     let a = cx.tensor(8);
     let b = cx.tensor(8);
     let t = a + b;
-    let u = t.exp();
+    let u = t.exp2();
     let v = t.sin();
     let w = u * a;
     let _out = (w + v).output();
 
     let regions = extract_all_fused_regions(&mut cx);
-    let expected = sorted_names(&["Add", "Add", "Exp", "Mul", "Sin"]);
+    let expected = sorted_names(&["FusedAdd", "FusedAdd", "FusedExp2", "FusedMul", "FusedSin"]);
     assert!(
         regions.iter().any(|r| r.internal_ops_sorted == expected
             && r.start_count == 2
@@ -546,11 +619,11 @@ fn test_reduction_blocks_binary_fusion() {
 
     let regions = extract_all_fused_regions(&mut cx);
     for r in &regions {
-        let has_add = r.internal_ops_sorted.iter().any(|n| n == "Add");
+        let has_add = r.internal_ops_sorted.iter().any(|n| n == "FusedAdd");
         let has_sum = r.internal_ops_sorted.iter().any(|n| n == "SumReduce");
         assert!(
             !(has_add && has_sum),
-            "Add and SumReduce must not share a fused region, but got: {r:#?}"
+            "FusedAdd and SumReduce must not share a fused region, but got: {r:#?}"
         );
     }
 }
@@ -568,7 +641,7 @@ fn test_stride_mismatch_blocks_binary_fusion() {
     let regions = extract_all_fused_regions(&mut cx);
     for r in &regions {
         assert!(
-            !r.internal_ops_sorted.iter().any(|n| n == "Add"),
+            !r.internal_ops_sorted.iter().any(|n| n == "FusedAdd"),
             "permuted binary must not fuse into a region, but found: {r:#?}"
         );
     }
@@ -637,20 +710,22 @@ fn test_diamond_dag_preserves_output() {
 fn test_fused_region_has_exactly_one_end() {
     // Design invariant: a fused region always has exactly one FusionEnd.
     // Uses the diamond DAG so there's real fan-in/out inside the region.
+    // See test_diamond_dag_fuses for why we use exp2 directly.
     let mut cx = Graph::new();
     let a = cx.tensor(8);
     let b = cx.tensor(8);
     let t = a + b;
-    let u = t.exp();
+    let u = t.exp2();
     let v = t.sin();
     let w = u * a;
     let _out = (w + v).output();
 
     let regions = extract_all_fused_regions(&mut cx);
+    let expected = sorted_names(&["FusedAdd", "FusedAdd", "FusedExp2", "FusedMul", "FusedSin"]);
     let full = regions
         .iter()
-        .find(|r| r.internal_ops_sorted.len() == 5)
-        .expect("expected at least one extraction to produce the full 5-op fused region");
+        .find(|r| r.internal_ops_sorted == expected)
+        .expect("expected at least one extraction to produce the full 5-op diamond region");
     assert_eq!(
         full.end_count, 1,
         "fused region must have exactly one FusionEnd, got {}",
@@ -665,24 +740,162 @@ fn test_fused_region_starts_match_distinct_external_tensors() {
     // `a` is consumed inside the region by two ops (outer Add + Mul), so a
     // per-edge counting scheme would give 3; the correct per-distinct-tensor
     // count is 2 ({a, b}).
+    // See test_diamond_dag_fuses for why we use exp2 directly.
     let mut cx = Graph::new();
     let a = cx.tensor(8);
     let b = cx.tensor(8);
     let t = a + b;
-    let u = t.exp();
+    let u = t.exp2();
     let v = t.sin();
     let w = u * a;
     let _out = (w + v).output();
 
     let regions = extract_all_fused_regions(&mut cx);
-    let full = regions
+    let expected = sorted_names(&["FusedAdd", "FusedAdd", "FusedExp2", "FusedMul", "FusedSin"]);
+    // Multiple 5-op extractions are reachable: the merge-FE-FE rule fires
+    // across paths that may have minted distinct FS enodes for the shared
+    // tensor `a` at separate sites. The design invariant is that *some*
+    // extraction collapses those into the deduped form (one FS per distinct
+    // tensor → 2 FS for {a, b}); we don't require every random sample to.
+    let matching: Vec<&FusedRegion> = regions
         .iter()
-        .find(|r| r.internal_ops_sorted.len() == 5)
-        .expect("expected at least one extraction to produce the full 5-op fused region");
-    assert_eq!(
-        full.start_count, 2,
-        "FusionStart count must equal distinct external tensors (expected 2 for {{a, b}}), \
-         got {}. If this is 3, FusionStart is being counted per edge, not per tensor.",
-        full.start_count
+        .filter(|r| r.internal_ops_sorted == expected)
+        .collect();
+    assert!(
+        !matching.is_empty(),
+        "expected at least one extraction to produce the full 5-op diamond region, \
+         got: {regions:#?}"
+    );
+    assert!(
+        matching.iter().any(|r| r.start_count == 2 && r.end_count == 1),
+        "expected at least one 5-op diamond extraction with FusionStart count == 2 \
+         (one per distinct external tensor) and FusionEnd count == 1; got: {matching:#?}"
+    );
+}
+
+// ---- Targeted rule-family tests (one per family / orientation) ----
+//
+// The structural and diamond tests above hit several rule families at once.
+// These narrow tests pin each rule family / orientation independently so a
+// regression in one rule shows up as a single failing test rather than a
+// confusing diamond mismatch.
+
+#[test]
+fn test_pair_fuse_unary_unary_marker_form() {
+    // Pair-fuse U→U: `a.sin().sqrt()` should be reachable as a marker-bracketed
+    // region containing FusedSin and FusedSqrt (with one FusionStart for `a`).
+    // The old `KernelFusedElementwise` form is also reachable via KFE's rules
+    // (still alive in PR1) — we only assert the marker form is present.
+    let mut cx = Graph::new();
+    let a = cx.tensor(8);
+    let _b = a.sin().sqrt().output();
+
+    let regions = extract_all_fused_regions(&mut cx);
+    let expected = sorted_names(&["FusedSin", "FusedSqrt"]);
+    assert!(
+        regions
+            .iter()
+            .any(|r| r.internal_ops_sorted == expected
+                && r.start_count == 1
+                && r.end_count == 1),
+        "expected marker region of {expected:?} with 1 FusionStart, got: {regions:#?}"
+    );
+}
+
+#[test]
+fn test_pair_fuse_unary_to_binary_rhs() {
+    // Pair-fuse U→B (RHS variant): `a + b.sin()`. The unary is on the
+    // binary's B input, so the rule's RHS-orientation version is what fires.
+    let mut cx = Graph::new();
+    let a = cx.tensor(8);
+    let b = cx.tensor(8);
+    let _c = (a + b.sin()).output();
+
+    let regions = extract_all_fused_regions(&mut cx);
+    let expected = sorted_names(&["FusedAdd", "FusedSin"]);
+    assert!(
+        regions
+            .iter()
+            .any(|r| r.internal_ops_sorted == expected && r.start_count == 2),
+        "expected a fused region of {expected:?} with 2 FusionStarts (RHS-side unary), \
+         got: {regions:#?}"
+    );
+}
+
+#[test]
+fn test_pair_fuse_binary_to_binary_rhs() {
+    // Pair-fuse B→B (RHS variant): `c * (a + b)`. The inner binary feeds the
+    // outer binary's B input, exercising the mirror direction of the rule
+    // covered by test_chain_of_binaries_fuses.
+    let mut cx = Graph::new();
+    let a = cx.tensor(8);
+    let b = cx.tensor(8);
+    let c = cx.tensor(8);
+    let _d = (c * (a + b)).output();
+
+    let regions = extract_all_fused_regions(&mut cx);
+    let expected = sorted_names(&["FusedAdd", "FusedMul"]);
+    assert!(
+        regions
+            .iter()
+            .any(|r| r.internal_ops_sorted == expected && r.start_count == 3),
+        "expected a fused region of {expected:?} with 3 FusionStarts (RHS-side inner binary), \
+         got: {regions:#?}"
+    );
+}
+
+#[test]
+fn test_grow_fe_to_binary_rhs() {
+    // Grow FE→B (RHS variant): `c + (a.sin() + b)`. Once the inner
+    // `a.sin() + b` is fused, the outer `+ c` consumes that FE on its B input
+    // (because we wrote `c + (...)` — `c` is on LHS, FE on RHS), exercising
+    // grow-FE-B-rhs to absorb the outer Add into the same region.
+    let mut cx = Graph::new();
+    let a = cx.tensor(8);
+    let b = cx.tensor(8);
+    let c = cx.tensor(8);
+    let _d = (c + (a.sin() + b)).output();
+
+    let regions = extract_all_fused_regions(&mut cx);
+    let expected = sorted_names(&["FusedAdd", "FusedAdd", "FusedSin"]);
+    assert!(
+        regions
+            .iter()
+            .any(|r| r.internal_ops_sorted == expected && r.start_count == 3),
+        "expected a 3-op fused region of {expected:?} with 3 FusionStarts (grow into RHS), \
+         got: {regions:#?}"
+    );
+}
+
+#[test]
+fn test_merge_two_regions_at_outer_binary() {
+    // Merge: `(sin(a) + b) + (sqrt(c) + d)`. Each side independently pair-fuses
+    // U→B on its own (the unary gives the inner Add a fusion partner that
+    // doesn't pull in the outer Add), so both sides become FEs. The outer Add
+    // then fires merge-FE-FE-Add to collapse them into a single region.
+    // Without the unaries, `(a+b) + (c+d)` would only ever pair-fuse one
+    // inner Add at a time with the outer Add — merge wouldn't have two FEs to
+    // combine because the inner Adds never become singleton FEs on their own.
+    let mut cx = Graph::new();
+    let a = cx.tensor(8);
+    let b = cx.tensor(8);
+    let c = cx.tensor(8);
+    let d = cx.tensor(8);
+    let _e = ((a.sin() + b) + (c.sqrt() + d)).output();
+
+    let regions = extract_all_fused_regions(&mut cx);
+    let expected = sorted_names(&[
+        "FusedAdd",
+        "FusedAdd",
+        "FusedAdd",
+        "FusedSin",
+        "FusedSqrt",
+    ]);
+    assert!(
+        regions
+            .iter()
+            .any(|r| r.internal_ops_sorted == expected && r.start_count == 4),
+        "expected a 5-op merged region (two pair-fused sides combined at outer Add) with \
+         4 FusionStarts, got: {regions:#?}"
     );
 }

@@ -2263,57 +2263,365 @@ impl EgglogOp for FusionEnd {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
+        // Rule-set design (2026-04-27): pair-fuse + grow + merge, with
+        // FusedX-typed RHS ops blocking cascade.
+        //
+        // Each pair-fuse rule's LHS pattern matches *un-fused* `KernelX`
+        // ops; the RHS produces `FusedX` variants bracketed by FS / FE.
+        // Because FusedX is a different egglog sort than KernelX, the
+        // rule's own output cannot re-match its LHS — cascade is
+        // prevented by typing rather than by a discriminator field.
+        //
+        // Grow rules absorb a `KernelX` op directly adjacent to a
+        // FusionEnd into the existing region by substituting the FE's
+        // inner expression in place of the FE and re-typing the absorbed
+        // op as `FusedX`. Merge collapses two FE regions meeting at a
+        // binary into a single region.
+        //
+        // Stride compatibility is expressed by reusing variable names:
+        // a unary inside a region always matches `(KernelU ?shape ?s ?s
+        // ?dt)` (in-stride equals out-stride — no transpose); a binary
+        // feeding a downstream op binds the binary's out-stride to the
+        // downstream op's in-stride along the connecting side.
+        //
         let mut rules = Vec::new();
 
-        // No idempotence rule — see FusionStart::rewrites for why. Pair-fuse
-        // cascades are bounded by the run schedule's `repeat 10`; each layer
-        // of re-firing creates fresh eclasses, so no self-referential cycle.
-
-        // Pair-fuse: Binary -> Unary. For every compatible (binary, unary) pair
-        // where the unary consumes the binary's output with matching strides,
-        // wrap the two-op chain in markers:
-        //   FusionEnd(Unary(Binary(FusionStart(a), FusionStart(b))))
-        // The unary's in_strides must equal the binary's out_strides (the
-        // `?o_s ?o_s` on the unary pattern) — that's the elementwise
-        // compatibility guard. Idempotence rules above ensure saturation when
-        // this rule re-fires on the newly-created inner ops.
-        let binaries = [("KernelAdd", "Add"), ("KernelMul", "Mul")];
-        let unaries = [
-            "KernelSin",
-            "KernelSqrt",
-            "KernelExp",
-            "KernelExp2",
-            "KernelLog2",
-            "KernelRecip",
+        // (KernelX kind, FusedX kind)
+        let unaries: &[(&str, &str)] = &[
+            ("KernelSin", "FusedSin"),
+            ("KernelSqrt", "FusedSqrt"),
+            ("KernelExp", "FusedExp"),
+            ("KernelExp2", "FusedExp2"),
+            ("KernelLog2", "FusedLog2"),
+            ("KernelRecip", "FusedRecip"),
         ];
-        for (bin_kind, bin_label) in binaries {
-            for unary_kind in unaries {
+        // (KernelX kind, FusedX kind, rule-name label)
+        let binaries: &[(&str, &str, &str)] = &[
+            ("KernelAdd", "FusedAdd", "Add"),
+            ("KernelMul", "FusedMul", "Mul"),
+        ];
+
+        // =========================================================
+        // 1. Pair-fuse U → U. Adjacent unaries with matching strides
+        //    fuse into a two-op region: U2(U1(x)) → FE(FU2(FU1(FS(x)))).
+        // =========================================================
+        for (ki1, fi1) in unaries {
+            for (ko2, fo2) in unaries {
                 rules.push(Rule::raw(format!(
                     "(rule
                         (
-                            (= ?inner (Op ({bin_kind} ?shape ?a_s ?b_s ?o_s ?dt)
-                                           (ICons ?a_in (ICons ?b_in (INil)))))
-                            (= ?outer (Op ({unary_kind} ?shape ?o_s ?o_s ?dt)
-                                           (ICons ?inner (INil))))
+                            (= ?u1 (Op ({ki1} ?shape ?s ?s ?dt)
+                                        (ICons ?x (INil))))
+                            (= ?u2 (Op ({ko2} ?shape ?s ?s ?dt)
+                                        (ICons ?u1 (INil))))
                         )
                         (
-                            (let ?fs_a (Op (FusionStart ?shape ?a_s ?dt)
-                                            (ICons ?a_in (INil))))
-                            (let ?fs_b (Op (FusionStart ?shape ?b_s ?dt)
-                                            (ICons ?b_in (INil))))
-                            (let ?new_inner (Op ({bin_kind} ?shape ?a_s ?b_s ?o_s ?dt)
-                                                 (ICons ?fs_a (ICons ?fs_b (INil)))))
-                            (let ?new_outer (Op ({unary_kind} ?shape ?o_s ?o_s ?dt)
-                                                 (ICons ?new_inner (INil))))
-                            (let ?end (Op (FusionEnd ?shape ?o_s ?dt)
-                                           (ICons ?new_outer (INil))))
-                            (union ?outer ?end)
+                            (let ?fs (Op (FusionStart ?shape ?s ?dt)
+                                          (ICons ?x (INil))))
+                            (let ?fu1 (Op ({fi1} ?shape ?s ?s ?dt)
+                                            (ICons ?fs (INil))))
+                            (let ?fu2 (Op ({fo2} ?shape ?s ?s ?dt)
+                                            (ICons ?fu1 (INil))))
+                            (let ?fe (Op (FusionEnd ?shape ?s ?dt)
+                                          (ICons ?fu2 (INil))))
+                            (union ?u2 ?fe)
                         )
-                        :name \"pair-fuse-{bin_label}-{unary_kind}\"
+                        :name \"pair-fuse-U-U-{ki1}-{ko2}\"
                     )"
                 )));
             }
         }
+
+        // =========================================================
+        // 2. Pair-fuse B → U. A unary consuming a binary's output:
+        //    U(B(a, b)) → FE(FU(FB(FS(a), FS(b)))).
+        // =========================================================
+        for (kb, fb, lb) in binaries {
+            for (ku, fu) in unaries {
+                rules.push(Rule::raw(format!(
+                    "(rule
+                        (
+                            (= ?bin (Op ({kb} ?shape ?a_s ?b_s ?o_s ?dt)
+                                         (ICons ?a (ICons ?b (INil)))))
+                            (= ?u (Op ({ku} ?shape ?o_s ?o_s ?dt)
+                                        (ICons ?bin (INil))))
+                        )
+                        (
+                            (let ?fs_a (Op (FusionStart ?shape ?a_s ?dt)
+                                            (ICons ?a (INil))))
+                            (let ?fs_b (Op (FusionStart ?shape ?b_s ?dt)
+                                            (ICons ?b (INil))))
+                            (let ?fbin (Op ({fb} ?shape ?a_s ?b_s ?o_s ?dt)
+                                            (ICons ?fs_a (ICons ?fs_b (INil)))))
+                            (let ?fu (Op ({fu} ?shape ?o_s ?o_s ?dt)
+                                          (ICons ?fbin (INil))))
+                            (let ?fe (Op (FusionEnd ?shape ?o_s ?dt)
+                                          (ICons ?fu (INil))))
+                            (union ?u ?fe)
+                        )
+                        :name \"pair-fuse-B-U-{lb}-{ku}\"
+                    )"
+                )));
+            }
+        }
+
+        // =========================================================
+        // 3a. Pair-fuse U → B (LHS variant). Unary feeds binary's A
+        //     input: B(U(a), b) → FE(FB(FU(FS(a)), FS(b))).
+        // =========================================================
+        for (ku, fu) in unaries {
+            for (kb, fb, lb) in binaries {
+                rules.push(Rule::raw(format!(
+                    "(rule
+                        (
+                            (= ?u (Op ({ku} ?shape ?u_s ?u_s ?dt)
+                                        (ICons ?a (INil))))
+                            (= ?bin (Op ({kb} ?shape ?u_s ?b_s ?o_s ?dt)
+                                         (ICons ?u (ICons ?b (INil)))))
+                        )
+                        (
+                            (let ?fs_a (Op (FusionStart ?shape ?u_s ?dt)
+                                            (ICons ?a (INil))))
+                            (let ?fs_b (Op (FusionStart ?shape ?b_s ?dt)
+                                            (ICons ?b (INil))))
+                            (let ?fu (Op ({fu} ?shape ?u_s ?u_s ?dt)
+                                          (ICons ?fs_a (INil))))
+                            (let ?fbin (Op ({fb} ?shape ?u_s ?b_s ?o_s ?dt)
+                                             (ICons ?fu (ICons ?fs_b (INil)))))
+                            (let ?fe (Op (FusionEnd ?shape ?o_s ?dt)
+                                          (ICons ?fbin (INil))))
+                            (union ?bin ?fe)
+                        )
+                        :name \"pair-fuse-U-B-lhs-{ku}-{lb}\"
+                    )"
+                )));
+            }
+        }
+
+        // =========================================================
+        // 3b. Pair-fuse U → B (RHS variant). Unary feeds binary's B
+        //     input: B(a, U(b)) → FE(FB(FS(a), FU(FS(b)))).
+        // =========================================================
+        for (ku, fu) in unaries {
+            for (kb, fb, lb) in binaries {
+                rules.push(Rule::raw(format!(
+                    "(rule
+                        (
+                            (= ?u (Op ({ku} ?shape ?u_s ?u_s ?dt)
+                                        (ICons ?b (INil))))
+                            (= ?bin (Op ({kb} ?shape ?a_s ?u_s ?o_s ?dt)
+                                         (ICons ?a (ICons ?u (INil)))))
+                        )
+                        (
+                            (let ?fs_a (Op (FusionStart ?shape ?a_s ?dt)
+                                            (ICons ?a (INil))))
+                            (let ?fs_b (Op (FusionStart ?shape ?u_s ?dt)
+                                            (ICons ?b (INil))))
+                            (let ?fu (Op ({fu} ?shape ?u_s ?u_s ?dt)
+                                          (ICons ?fs_b (INil))))
+                            (let ?fbin (Op ({fb} ?shape ?a_s ?u_s ?o_s ?dt)
+                                             (ICons ?fs_a (ICons ?fu (INil)))))
+                            (let ?fe (Op (FusionEnd ?shape ?o_s ?dt)
+                                          (ICons ?fbin (INil))))
+                            (union ?bin ?fe)
+                        )
+                        :name \"pair-fuse-U-B-rhs-{ku}-{lb}\"
+                    )"
+                )));
+            }
+        }
+
+        // =========================================================
+        // 4a. Pair-fuse B → B (LHS variant). Inner binary feeds outer
+        //     binary's A input: BO(BI(a, b), c) →
+        //     FE(FBO(FBI(FS(a), FS(b)), FS(c))).
+        // =========================================================
+        for (kbi, fbi, lbi) in binaries {
+            for (kbo, fbo, lbo) in binaries {
+                rules.push(Rule::raw(format!(
+                    "(rule
+                        (
+                            (= ?bi (Op ({kbi} ?shape ?ai_s ?bi_s ?oi_s ?dt)
+                                        (ICons ?a (ICons ?b (INil)))))
+                            (= ?bo (Op ({kbo} ?shape ?oi_s ?co_s ?oo_s ?dt)
+                                        (ICons ?bi (ICons ?c (INil)))))
+                        )
+                        (
+                            (let ?fs_a (Op (FusionStart ?shape ?ai_s ?dt)
+                                            (ICons ?a (INil))))
+                            (let ?fs_b (Op (FusionStart ?shape ?bi_s ?dt)
+                                            (ICons ?b (INil))))
+                            (let ?fs_c (Op (FusionStart ?shape ?co_s ?dt)
+                                            (ICons ?c (INil))))
+                            (let ?fbi (Op ({fbi} ?shape ?ai_s ?bi_s ?oi_s ?dt)
+                                            (ICons ?fs_a (ICons ?fs_b (INil)))))
+                            (let ?fbo (Op ({fbo} ?shape ?oi_s ?co_s ?oo_s ?dt)
+                                            (ICons ?fbi (ICons ?fs_c (INil)))))
+                            (let ?fe (Op (FusionEnd ?shape ?oo_s ?dt)
+                                          (ICons ?fbo (INil))))
+                            (union ?bo ?fe)
+                        )
+                        :name \"pair-fuse-B-B-lhs-{lbi}-{lbo}\"
+                    )"
+                )));
+            }
+        }
+
+        // =========================================================
+        // 4b. Pair-fuse B → B (RHS variant). Inner binary feeds outer
+        //     binary's B input: BO(c, BI(a, b)) →
+        //     FE(FBO(FS(c), FBI(FS(a), FS(b)))).
+        // =========================================================
+        for (kbi, fbi, lbi) in binaries {
+            for (kbo, fbo, lbo) in binaries {
+                rules.push(Rule::raw(format!(
+                    "(rule
+                        (
+                            (= ?bi (Op ({kbi} ?shape ?ai_s ?bi_s ?oi_s ?dt)
+                                        (ICons ?a (ICons ?b (INil)))))
+                            (= ?bo (Op ({kbo} ?shape ?co_s ?oi_s ?oo_s ?dt)
+                                        (ICons ?c (ICons ?bi (INil)))))
+                        )
+                        (
+                            (let ?fs_a (Op (FusionStart ?shape ?ai_s ?dt)
+                                            (ICons ?a (INil))))
+                            (let ?fs_b (Op (FusionStart ?shape ?bi_s ?dt)
+                                            (ICons ?b (INil))))
+                            (let ?fs_c (Op (FusionStart ?shape ?co_s ?dt)
+                                            (ICons ?c (INil))))
+                            (let ?fbi (Op ({fbi} ?shape ?ai_s ?bi_s ?oi_s ?dt)
+                                            (ICons ?fs_a (ICons ?fs_b (INil)))))
+                            (let ?fbo (Op ({fbo} ?shape ?co_s ?oi_s ?oo_s ?dt)
+                                            (ICons ?fs_c (ICons ?fbi (INil)))))
+                            (let ?fe (Op (FusionEnd ?shape ?oo_s ?dt)
+                                          (ICons ?fbo (INil))))
+                            (union ?bo ?fe)
+                        )
+                        :name \"pair-fuse-B-B-rhs-{lbi}-{lbo}\"
+                    )"
+                )));
+            }
+        }
+
+        // =========================================================
+        // 5. Grow FE → U. A KernelU directly consuming a FusionEnd is
+        //    absorbed into the region: U(FE(inner)) → FE(FU(inner)).
+        //    No new FS — the existing region's boundary just slides
+        //    forward past the unary.
+        // =========================================================
+        for (ku, fu) in unaries {
+            rules.push(Rule::raw(format!(
+                "(rule
+                    (
+                        (= ?fe (Op (FusionEnd ?shape ?s ?dt)
+                                    (ICons ?inner (INil))))
+                        (= ?u (Op ({ku} ?shape ?s ?s ?dt)
+                                    (ICons ?fe (INil))))
+                    )
+                    (
+                        (let ?fu (Op ({fu} ?shape ?s ?s ?dt)
+                                      (ICons ?inner (INil))))
+                        (let ?new_fe (Op (FusionEnd ?shape ?s ?dt)
+                                          (ICons ?fu (INil))))
+                        (union ?u ?new_fe)
+                    )
+                    :name \"grow-FE-U-{ku}\"
+                )"
+            )));
+        }
+
+        // =========================================================
+        // 6a. Grow FE → B (LHS variant). Binary's A input is a FE,
+        //     B input is external: B(FE(inner_a), b) →
+        //     FE(FB(inner_a, FS(b))).
+        // =========================================================
+        for (kb, fb, lb) in binaries {
+            rules.push(Rule::raw(format!(
+                "(rule
+                    (
+                        (= ?fe (Op (FusionEnd ?shape ?a_s ?dt)
+                                    (ICons ?inner_a (INil))))
+                        (= ?bin (Op ({kb} ?shape ?a_s ?b_s ?o_s ?dt)
+                                     (ICons ?fe (ICons ?b (INil)))))
+                    )
+                    (
+                        (let ?fs_b (Op (FusionStart ?shape ?b_s ?dt)
+                                        (ICons ?b (INil))))
+                        (let ?fbin (Op ({fb} ?shape ?a_s ?b_s ?o_s ?dt)
+                                         (ICons ?inner_a (ICons ?fs_b (INil)))))
+                        (let ?new_fe (Op (FusionEnd ?shape ?o_s ?dt)
+                                          (ICons ?fbin (INil))))
+                        (union ?bin ?new_fe)
+                    )
+                    :name \"grow-FE-B-lhs-{lb}\"
+                )"
+            )));
+        }
+
+        // =========================================================
+        // 6b. Grow FE → B (RHS variant). Symmetric to 6a.
+        // =========================================================
+        for (kb, fb, lb) in binaries {
+            rules.push(Rule::raw(format!(
+                "(rule
+                    (
+                        (= ?fe (Op (FusionEnd ?shape ?b_s ?dt)
+                                    (ICons ?inner_b (INil))))
+                        (= ?bin (Op ({kb} ?shape ?a_s ?b_s ?o_s ?dt)
+                                     (ICons ?a (ICons ?fe (INil)))))
+                    )
+                    (
+                        (let ?fs_a (Op (FusionStart ?shape ?a_s ?dt)
+                                        (ICons ?a (INil))))
+                        (let ?fbin (Op ({fb} ?shape ?a_s ?b_s ?o_s ?dt)
+                                         (ICons ?fs_a (ICons ?inner_b (INil)))))
+                        (let ?new_fe (Op (FusionEnd ?shape ?o_s ?dt)
+                                          (ICons ?fbin (INil))))
+                        (union ?bin ?new_fe)
+                    )
+                    :name \"grow-FE-B-rhs-{lb}\"
+                )"
+            )));
+        }
+
+        // =========================================================
+        // 7. Merge two FEs at a binary. Both inputs are existing
+        //    regions: B(FE(ia), FE(ib)) → FE(FB(ia, ib)). No new FS;
+        //    both inner expressions are reused, so a shared external
+        //    tensor that already has a FS upstream stays at one FS.
+        // =========================================================
+        for (kb, fb, lb) in binaries {
+            rules.push(Rule::raw(format!(
+                "(rule
+                    (
+                        (= ?fe_a (Op (FusionEnd ?shape ?a_s ?dt)
+                                      (ICons ?inner_a (INil))))
+                        (= ?fe_b (Op (FusionEnd ?shape ?b_s ?dt)
+                                      (ICons ?inner_b (INil))))
+                        (= ?bin (Op ({kb} ?shape ?a_s ?b_s ?o_s ?dt)
+                                     (ICons ?fe_a (ICons ?fe_b (INil)))))
+                    )
+                    (
+                        (let ?fbin (Op ({fb} ?shape ?a_s ?b_s ?o_s ?dt)
+                                         (ICons ?inner_a (ICons ?inner_b (INil)))))
+                        (let ?new_fe (Op (FusionEnd ?shape ?o_s ?dt)
+                                          (ICons ?fbin (INil))))
+                        (union ?bin ?new_fe)
+                    )
+                    :name \"merge-FE-FE-{lb}\"
+                )"
+            )));
+        }
+
+        // NOTE: no dissolve rule (`FS(FE(x)) → x`). It looks
+        // algebraically tempting but unions FS's eclass with FE's
+        // inner eclass; when that inner transitively references
+        // FS's original eclass (after grow rules extend the
+        // downstream region) the result is a self-referential
+        // eclass, and extraction produces a cyclic LLIR that panics
+        // the scheduler with `Cycle(NodeIndex(_))`. The grow rules
+        // already compose adjacent regions correctly without
+        // dissolve.
 
         rules
     }
