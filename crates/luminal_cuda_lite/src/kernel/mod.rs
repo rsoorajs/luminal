@@ -13,6 +13,7 @@ pub mod cuda_graph;
 pub mod fused_ops;
 pub mod hlir;
 pub mod other_ops;
+mod region_codegen;
 
 pub use cuda_graph::*;
 

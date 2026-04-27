@@ -899,3 +899,149 @@ fn test_merge_two_regions_at_outer_binary() {
          4 FusionStarts, got: {regions:#?}"
     );
 }
+
+/// Microbench: time three unfused kernels (`add_k` → `sin_k` → `sqrt_k`)
+/// vs one fused kernel (`(a + b).sin().sqrt()` in a single launch) on a
+/// fixed-size input, using CUDA events for device-side timing. Mirrors
+/// the existing sqrt→recip bench but on the binary-inclusive 3-op DAG
+/// PR2's region codegen targets.
+///
+/// Ignored by default — run with
+/// `cargo test -p luminal_cuda_lite -- --ignored bench_fused_region_vs_unfused_3op --nocapture`.
+#[test]
+#[ignore]
+fn bench_fused_region_vs_unfused_3op() {
+    use crate::compile_module_image_for_current_device;
+    use cudarc::driver::{CudaContext, LaunchConfig, PushKernelArg};
+
+    const N: usize = 1 << 20; // 1M elements
+    const WARMUP: usize = 100;
+    const TRIALS: usize = 2000;
+
+    let ctx = match CudaContext::new(0) {
+        Ok(c) => c,
+        Err(_) => return, // no GPU available, skip
+    };
+    ctx.bind_to_thread().unwrap();
+    let stream = ctx.default_stream();
+
+    // Inputs in (0, 1] keep `sin` < 1 and `sqrt` well-defined post-add.
+    let host_a: Vec<f32> = (0..N).map(|i| (i as f32 + 1.0) / (N as f32) * 0.5).collect();
+    let host_b: Vec<f32> = (0..N).map(|i| (i as f32 + 1.0) / (N as f32) * 0.5).collect();
+    let d_a = stream.clone_htod(&host_a).unwrap();
+    let d_b = stream.clone_htod(&host_b).unwrap();
+    let mut d_scratch1 = stream.alloc_zeros::<f32>(N).unwrap();
+    let mut d_scratch2 = stream.alloc_zeros::<f32>(N).unwrap();
+    let mut d_out = stream.alloc_zeros::<f32>(N).unwrap();
+
+    let compile = |src: &str, name: &str| {
+        let ptx = compile_module_image_for_current_device(stream.context(), src).unwrap();
+        let module = stream.context().load_module(ptx).unwrap();
+        module.load_function(name).unwrap()
+    };
+
+    let add_k = compile(
+        r#"
+extern "C" __global__ void add_k(float* out, const float* a, const float* b, long long n) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = a[i] + b[i];
+}
+"#,
+        "add_k",
+    );
+    let sin_k = compile(
+        r#"
+extern "C" __global__ void sin_k(float* out, const float* in, long long n) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = sinf(in[i]);
+}
+"#,
+        "sin_k",
+    );
+    let sqrt_k = compile(
+        r#"
+extern "C" __global__ void sqrt_k(float* out, const float* in, long long n) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = sqrtf(in[i]);
+}
+"#,
+        "sqrt_k",
+    );
+    let fused_k = compile(
+        r#"
+extern "C" __global__ void fused_k(float* out, const float* a, const float* b, long long n) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float v = a[i] + b[i];
+    v = sinf(v);
+    v = sqrtf(v);
+    out[i] = v;
+}
+"#,
+        "fused_k",
+    );
+
+    let cfg = LaunchConfig::for_num_elems(N as u32);
+    let n_arg: i64 = N as i64;
+
+    let launch_unfused = |d_out: &mut cudarc::driver::CudaSlice<f32>,
+                          d_scratch1: &mut cudarc::driver::CudaSlice<f32>,
+                          d_scratch2: &mut cudarc::driver::CudaSlice<f32>| {
+        let mut b = stream.launch_builder(&add_k);
+        b.arg(&mut *d_scratch1).arg(&d_a).arg(&d_b).arg(&n_arg);
+        unsafe { b.launch(cfg) }.unwrap();
+        let mut b = stream.launch_builder(&sin_k);
+        b.arg(&mut *d_scratch2).arg(&*d_scratch1).arg(&n_arg);
+        unsafe { b.launch(cfg) }.unwrap();
+        let mut b = stream.launch_builder(&sqrt_k);
+        b.arg(d_out).arg(&*d_scratch2).arg(&n_arg);
+        unsafe { b.launch(cfg) }.unwrap();
+    };
+    let launch_fused = |d_out: &mut cudarc::driver::CudaSlice<f32>| {
+        let mut b = stream.launch_builder(&fused_k);
+        b.arg(d_out).arg(&d_a).arg(&d_b).arg(&n_arg);
+        unsafe { b.launch(cfg) }.unwrap();
+    };
+
+    // Warmup
+    for _ in 0..WARMUP {
+        launch_unfused(&mut d_out, &mut d_scratch1, &mut d_scratch2);
+        launch_fused(&mut d_out);
+    }
+    stream.synchronize().unwrap();
+
+    // Host-side wall-clock timing: synchronize before/after each batch so the
+    // measured interval covers exactly the GPU work for `TRIALS` iterations.
+    // (CUDA event-based timing is the more precise option in principle, but
+    // `event.elapsed_ms` on this driver/cudarc combo errors with
+    // CUDA_ERROR_INVALID_HANDLE — see bench_fused_vs_unfused_sqrt_recip
+    // above which fails the same way. Wall-clock is reliable here.)
+    let unfused_start = std::time::Instant::now();
+    for _ in 0..TRIALS {
+        launch_unfused(&mut d_out, &mut d_scratch1, &mut d_scratch2);
+    }
+    stream.synchronize().unwrap();
+    let unfused_total_ms = unfused_start.elapsed().as_secs_f64() * 1_000.0;
+
+    let fused_start = std::time::Instant::now();
+    for _ in 0..TRIALS {
+        launch_fused(&mut d_out);
+    }
+    stream.synchronize().unwrap();
+    let fused_total_ms = fused_start.elapsed().as_secs_f64() * 1_000.0;
+
+    let unfused_us = unfused_total_ms * 1_000.0 / TRIALS as f64;
+    let fused_us = fused_total_ms * 1_000.0 / TRIALS as f64;
+    let speedup = unfused_us / fused_us;
+
+    println!(
+        "\n[fusion microbench, (a+b).sin().sqrt(), N={N}, trials={TRIALS}]\n\
+         unfused (add_k; sin_k; sqrt_k): {unfused_us:8.3} us/iter ({unfused_total_ms:.2} ms total)\n\
+         fused   (one kernel):           {fused_us:8.3} us/iter ({fused_total_ms:.2} ms total)\n\
+         speedup: {speedup:.2}x"
+    );
+}
+

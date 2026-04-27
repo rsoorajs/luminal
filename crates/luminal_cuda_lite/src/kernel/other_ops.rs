@@ -2132,9 +2132,9 @@ extern \"C\" {{
 
 #[derive(Default, Debug, Clone)]
 pub struct FusionStart {
-    shape: Vec<Expression>,
-    strides: Vec<Expression>,
-    dtype: DType,
+    pub(crate) shape: Vec<Expression>,
+    pub(crate) strides: Vec<Expression>,
+    pub(crate) dtype: DType,
 }
 
 impl EgglogOp for FusionStart {
@@ -2240,9 +2240,9 @@ impl KernelOp for FusionStart {
 
 #[derive(Default, Debug, Clone)]
 pub struct FusionEnd {
-    shape: Vec<Expression>,
-    strides: Vec<Expression>,
-    dtype: DType,
+    pub(crate) shape: Vec<Expression>,
+    pub(crate) strides: Vec<Expression>,
+    pub(crate) dtype: DType,
 }
 
 impl EgglogOp for FusionEnd {

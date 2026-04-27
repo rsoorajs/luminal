@@ -27,6 +27,7 @@ use crate::{
         CudaFunctionExt, CudaGraphExecHandle, CudaGraphHandle, KernelOp, create_cuda_event,
         destroy_cuda_event,
         hlir::{clear_global_dyn_dims, get_global_dyn_dims, set_global_dyn_dims},
+        region_codegen::{self, CompileUnit},
     },
     runtime::partition_marked_convex,
 };
@@ -689,45 +690,97 @@ pub fn kernel_to_host(
             set_global_dyn_dims(global_dyn_dims.clone());
         }
 
-        // Compile all kernels with global ordering for correct dyn_dims indices
-        let mut kernels = Vec::with_capacity(topo_order.len());
-        for kernel_node_idx in &topo_order {
-            let kernel_op_ref = llir_graph[*kernel_node_idx]
-                .to_dialect::<dyn KernelOp>()
-                .unwrap();
+        // Group the topo order into compile units: each FusionEnd-rooted
+        // region collapses to a single CompileUnit::Region (one fused
+        // CUDA kernel for the whole DAG); everything else stays as
+        // CompileUnit::Single (the existing per-op compile path).
+        let compile_units = region_codegen::build_compile_units(&topo_order, llir_graph);
 
-            let (kernel_function, _, _kernel_str, grid, block, shared_mem, constants) =
-                kernel_op_ref.compile(cuda_stream, kernel_cache);
+        // Compile all units with global ordering for correct dyn_dims indices
+        let mut kernels = Vec::with_capacity(compile_units.len());
+        for unit in &compile_units {
+            match unit {
+                CompileUnit::Single(kernel_node_idx) => {
+                    let kernel_op_ref = llir_graph[*kernel_node_idx]
+                        .to_dialect::<dyn KernelOp>()
+                        .unwrap();
 
-            // Collect inputs from graph edges
-            let mut inputs: Vec<NodeIndex> = llir_graph
-                .edges_directed(*kernel_node_idx, Direction::Incoming)
-                .sorted_by_key(|e| e.id())
-                .map(|e| e.source())
-                .collect_vec();
+                    let (kernel_function, _, _kernel_str, grid, block, shared_mem, constants) =
+                        kernel_op_ref.compile(cuda_stream, kernel_cache);
 
-            // Collect buffer nodes and sizes
-            // Only add kernel nodes with non-zero output size (MegakernelOps have size 0)
-            let output_size = kernel_op_ref.output_size();
-            if output_size.exec(&FxHashMap::default()).unwrap_or(1) != 0 {
-                all_buffer_nodes.insert(*kernel_node_idx);
-                all_buffer_sizes.insert(*kernel_node_idx, output_size);
+                    // Collect inputs from graph edges
+                    let inputs: Vec<NodeIndex> = llir_graph
+                        .edges_directed(*kernel_node_idx, Direction::Incoming)
+                        .sorted_by_key(|e| e.id())
+                        .map(|e| e.source())
+                        .collect_vec();
+
+                    // Collect buffer nodes and sizes
+                    // Only add kernel nodes with non-zero output size (MegakernelOps have size 0)
+                    let output_size = kernel_op_ref.output_size();
+                    if output_size.exec(&FxHashMap::default()).unwrap_or(1) != 0 {
+                        all_buffer_nodes.insert(*kernel_node_idx);
+                        all_buffer_sizes.insert(*kernel_node_idx, output_size);
+                    }
+                    all_buffer_nodes.extend(inputs.iter().copied());
+
+                    let kernel_op: Arc<Box<dyn KernelOp>> = Arc::clone(kernel_op_ref);
+
+                    kernels.push(CompiledKernel::new(
+                        *kernel_node_idx,
+                        kernel_function,
+                        grid,
+                        block,
+                        shared_mem,
+                        inputs,
+                        kernel_op.clone(),
+                        constants,
+                        kernel_op.kernel_name(),
+                    ));
+                }
+                CompileUnit::Region(region) => {
+                    // Generate one fused CUDA kernel for the whole region.
+                    let compiled = region_codegen::compile_region(
+                        region,
+                        llir_graph,
+                        cuda_stream,
+                        kernel_cache,
+                    );
+
+                    // The region's CompiledKernel is keyed on the FE node
+                    // (so FE provides trait methods like output_size /
+                    // build_params) but its `inputs` are the external
+                    // producers, not FE's literal LLIR predecessors —
+                    // those are interior FusedX nodes that don't exist
+                    // as buffer-bearing nodes from the host's view.
+                    let fe_op_ref = llir_graph[region.fe_node]
+                        .to_dialect::<dyn KernelOp>()
+                        .unwrap();
+
+                    let inputs: Vec<NodeIndex> = region.external_inputs.clone();
+
+                    let output_size = fe_op_ref.output_size();
+                    if output_size.exec(&FxHashMap::default()).unwrap_or(1) != 0 {
+                        all_buffer_nodes.insert(region.fe_node);
+                        all_buffer_sizes.insert(region.fe_node, output_size);
+                    }
+                    all_buffer_nodes.extend(inputs.iter().copied());
+
+                    let kernel_op: Arc<Box<dyn KernelOp>> = Arc::clone(fe_op_ref);
+
+                    kernels.push(CompiledKernel::new(
+                        region.fe_node,
+                        compiled.function,
+                        compiled.grid,
+                        compiled.block,
+                        compiled.shared_mem,
+                        inputs,
+                        kernel_op,
+                        compiled.constants,
+                        "FusedRegion",
+                    ));
+                }
             }
-            all_buffer_nodes.extend(inputs.iter().copied());
-
-            let kernel_op: Arc<Box<dyn KernelOp>> = Arc::clone(kernel_op_ref);
-
-            kernels.push(CompiledKernel::new(
-                *kernel_node_idx,
-                kernel_function,
-                grid,
-                block,
-                shared_mem,
-                inputs,
-                kernel_op.clone(),
-                constants,
-                kernel_op.kernel_name(),
-            ));
         }
 
         // Get the possibly-extended global ordering (kernels may have discovered new dims)
