@@ -302,7 +302,7 @@ impl Gemma4MoE {
                 kv_cache.v_caches[layer_idx],
                 kv_cache.max_seq,
             );
-            x = x_new.graph_break();
+            x = x_new;
             cache_outputs.push((k_out, v_out));
         }
 
