@@ -1636,6 +1636,21 @@ def test_or(device: torch.device):
     assert torch.allclose(output, original)
 
 
+def test_bitwise_or(device: torch.device):
+    """Test bitwise_or on boolean tensors. PyTorch's `a | b` on Bool tensors
+    emits `aten.bitwise_or.Tensor`, NOT `aten.logical_or.default` — Gemma-style
+    sliding+full attention mask fusion takes this path."""
+    from test_models import BitwiseOrTestModel
+
+    model: torch.nn.Module = BitwiseOrTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    a = torch.tensor([True, False, True, False, True, True], device=device)
+    b = torch.tensor([False, True, True, False, False, True], device=device)
+    original = model(a, b)
+    output = model_compiled(a, b)
+    assert torch.equal(output, original)
+
+
 # ========== PT2 Xor Node Tests ==========
 
 
@@ -2064,6 +2079,29 @@ def test_scatter_nd(device: torch.device):
     original: torch.Tensor = model(x)
     output: torch.Tensor = model_compiled(x)
     assert torch.allclose(output, original)
+
+
+def test_grouped_mm_fallback(device: torch.device):
+    """Tests transformers::grouped_mm_fallback — the per-expert batched matmul
+    used by HF MoE forward passes (DeepSeek-V2/V3, Qwen2/3-MoE, Mixtral, ...).
+
+    Importing transformers.integrations.moe registers the custom_op via
+    `torch.library.custom_op("transformers::grouped_mm_fallback", ...)`. After
+    import, `torch.ops.transformers.grouped_mm_fallback` is callable directly.
+    """
+    import transformers.integrations.moe  # registers the custom_op
+    from test_models import GroupedMMFallbackTestModel
+
+    model: torch.nn.Module = GroupedMMFallbackTestModel().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    # 2 experts, 4 tokens, K=8, N=16. Tokens [0,1] go to expert 0, [2,3] to expert 1.
+    g, s, k, n = 2, 4, 8, 16
+    input = torch.randn(s, k, device=device)
+    weight = torch.randn(g, k, n, device=device)
+    offs = torch.tensor([2, 4], device=device, dtype=torch.int32)
+    original: torch.Tensor = model(input, weight, offs)
+    output: torch.Tensor = model_compiled(input, weight, offs)
+    assert torch.allclose(output, original, atol=1e-4)
 
 
 # ========== Dtype Round-Trip Tests ==========
