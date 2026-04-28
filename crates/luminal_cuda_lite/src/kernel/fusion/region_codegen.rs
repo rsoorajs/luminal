@@ -302,10 +302,21 @@ pub(crate) fn compile_region(
     let signature = signature_params.join(", ");
 
     // Body: read FS leaves, then walk FusedX in topo order emitting a
-    // local per op, then write FE output. Every node gets a local
-    // `v_<idx>` keyed by its NodeIndex, so an op's inputs are resolved
-    // by looking up its predecessors' locals.
-    let local_name = |n: NodeIndex| format!("v_{}", n.index());
+    // local per op, then write FE output. Every node gets a local keyed
+    // by a position-in-region index so the kernel string is invariant
+    // under NodeIndex churn (each `egglog_to_llir` reissues NodeIndexes,
+    // so naming locals by `n.index()` would invalidate the kernel
+    // string cache on every search candidate). Indices: FS leaves get
+    // 0..fs_nodes.len(), FusedX get fs_nodes.len()..(+ fusedx_topo.len()).
+    let mut local_idx_map: FxHashMap<NodeIndex, usize> = FxHashMap::default();
+    for (i, &fs_idx) in region.fs_nodes.iter().enumerate() {
+        local_idx_map.insert(fs_idx, i);
+    }
+    let fs_count = region.fs_nodes.len();
+    for (i, &op_idx) in region.fusedx_topo.iter().enumerate() {
+        local_idx_map.insert(op_idx, fs_count + i);
+    }
+    let local_name = |n: NodeIndex| format!("v_{}", local_idx_map[&n]);
 
     let mut body = String::new();
     body.push_str(&format!(
