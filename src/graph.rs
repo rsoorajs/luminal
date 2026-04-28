@@ -9,7 +9,7 @@ use crate::{
 use crate::{hlir::CustomOpKind, op::*, prelude::*};
 use colored::Colorize;
 use itertools::Itertools;
-use petgraph::{Direction, algo::toposort, stable_graph::StableGraph, visit::EdgeRef};
+use petgraph::{Direction, stable_graph::StableGraph, visit::EdgeRef};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     any::TypeId,
@@ -299,6 +299,7 @@ impl Graph {
         }
 
         let mut created = 0usize;
+        let mut dtype_cache: FxHashMap<NodeIndex, DType> = FxHashMap::default();
         // Track all NodeIndex slots we newly assign for loop-marker ops.
         // StableGraph reuses freed node indices; removals later in this
         // function might target slots that happen to coincide with a new
@@ -314,7 +315,7 @@ impl Graph {
             let initial = candidate.occurrences[0].boundary_inputs[p];
             let body_state_out = candidate.occurrences[0].output_nodes[out_pos];
             let last_state_out = candidate.occurrences[n_iters - 1].output_nodes[out_pos];
-            let dtype = self.infer_node_dtype(initial);
+            let dtype = self.infer_node_dtype_cached(initial, &mut dtype_cache);
 
             let loop_start = self.graph.add_node(Box::new(LoopStart {
                 loop_id,
@@ -375,7 +376,7 @@ impl Graph {
             }
 
             let body_input = candidate.occurrences[0].boundary_inputs[p];
-            let dtype = self.infer_node_dtype(body_input);
+            let dtype = self.infer_node_dtype_cached(body_input, &mut dtype_cache);
             let loop_input = self.graph.add_node(Box::new(LoopInput {
                 loop_id,
                 stream_id: p,
@@ -464,7 +465,7 @@ impl Graph {
 
             // Iter-0 body producer feeds the LoopOutput marker.
             let body_output = per_iter_plan[0].0;
-            let dtype = self.infer_node_dtype(body_output);
+            let dtype = self.infer_node_dtype_cached(body_output, &mut dtype_cache);
 
             let loop_output = self.graph.add_node(Box::new(LoopOutput {
                 loop_id,
@@ -535,14 +536,25 @@ impl Graph {
     }
 
     /// Best-effort dtype lookup for a NodeIndex in the HLIR graph.
-    fn infer_node_dtype(&self, node: NodeIndex) -> DType {
+    fn infer_node_dtype_cached(
+        &self,
+        node: NodeIndex,
+        cache: &mut FxHashMap<NodeIndex, DType>,
+    ) -> DType {
+        if let Some(&dt) = cache.get(&node) {
+            return dt;
+        }
+
         if let Some((_, dt)) = self.input_meta.get(&node) {
+            cache.insert(node, *dt);
             return *dt;
         }
         if let Some(op) = self.try_get_op::<crate::hlir::Input>(node) {
+            cache.insert(node, op.dtype);
             return op.dtype;
         }
         if let Some(op) = self.try_get_op::<crate::hlir::Cast>(node) {
+            cache.insert(node, op.1);
             return op.1;
         }
         for pred in self
@@ -550,11 +562,13 @@ impl Graph {
             .neighbors_directed(node, Direction::Incoming)
             .collect::<Vec<_>>()
         {
-            let dt = self.infer_node_dtype(pred);
+            let dt = self.infer_node_dtype_cached(pred, cache);
             if dt != DType::F32 || self.input_meta.contains_key(&pred) {
+                cache.insert(node, dt);
                 return dt;
             }
         }
+        cache.insert(node, DType::F32);
         DType::F32
     }
 
@@ -674,7 +688,7 @@ impl Graph {
     }
 
     fn best_rolling_candidate(&self, max_region_size: usize) -> RollingSearchReport {
-        let Some(full_topo) = toposort(&self.graph, None).ok() else {
+        let Some(full_topo) = stable_toposort_by_node_index(&self.graph) else {
             return RollingSearchReport {
                 candidate: None,
                 diagnostics: RollingSearchDiagnostics::default(),
@@ -682,7 +696,10 @@ impl Graph {
         };
         let topo: Vec<NodeIndex> = full_topo
             .into_iter()
-            .filter(|n| self.try_get_op::<crate::hlir::Input>(*n).is_none())
+            .filter(|n| {
+                self.try_get_op::<crate::hlir::Input>(*n).is_none()
+                    && self.try_get_op::<crate::hlir::Output>(*n).is_none()
+            })
             .collect();
         if topo.len() < 2 {
             return RollingSearchReport {
@@ -806,7 +823,12 @@ impl Graph {
                     continue;
                 }
 
-                let savings = window * (occs.len() - 1);
+                let Some(savings) =
+                    estimate_rolling_savings(&occs, &state_params, &uses, &self.graph)
+                else {
+                    start = pos.saturating_sub(window).max(start + 1);
+                    continue;
+                };
                 let _ = sig;
                 let candidate = RollingCandidate {
                     occurrences: occs,
@@ -823,17 +845,30 @@ impl Graph {
                 start = pos.saturating_sub(window).max(start + 1);
             }
         }
-        if let Some(best) = best_overall.take() {
-            best_overall = Some(grow_rolling_candidate(
-                &self.graph,
-                &uses,
-                &topo_index,
-                best,
-                &discovered_runs,
-            ));
+        let mut grown_best = best_overall.take().map(|best| {
+            grow_rolling_candidate(&self.graph, &uses, &topo_index, best, &discovered_runs)
+        });
+        for run in &discovered_runs {
+            let state_param_indices = collect_state_params(&run.occurrences, &uses, &self.graph);
+            let seed = RollingCandidate {
+                occurrences: run.occurrences.clone(),
+                state_param_indices,
+                savings: 0,
+            };
+            let grown =
+                grow_rolling_candidate(&self.graph, &uses, &topo_index, seed, &discovered_runs);
+            if grown.state_param_indices.is_empty() {
+                continue;
+            }
+            let replace = grown_best.as_ref().is_none_or(|best| {
+                (grown.savings, grown.occurrences.len()) > (best.savings, best.occurrences.len())
+            });
+            if replace {
+                grown_best = Some(grown);
+            }
         }
         RollingSearchReport {
-            candidate: best_overall,
+            candidate: grown_best,
             diagnostics,
         }
     }
@@ -1406,6 +1441,37 @@ fn build_uses(graph: &HLIRGraph) -> FxHashMap<NodeIndex, Vec<(NodeIndex, usize)>
     uses
 }
 
+fn stable_toposort_by_node_index(graph: &HLIRGraph) -> Option<Vec<NodeIndex>> {
+    let mut indegree: FxHashMap<NodeIndex, usize> = FxHashMap::default();
+    for n in graph.node_indices() {
+        indegree.insert(n, graph.edges_directed(n, Direction::Incoming).count());
+    }
+
+    let mut ready = std::collections::BTreeSet::new();
+    for (&node, &degree) in &indegree {
+        if degree == 0 {
+            ready.insert(node);
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(graph.node_count());
+    while let Some(node) = ready.pop_first() {
+        ordered.push(node);
+        for edge in graph.edges_directed(node, Direction::Outgoing) {
+            let target = edge.target();
+            let degree = indegree
+                .get_mut(&target)
+                .expect("toposort target must exist in indegree map");
+            *degree -= 1;
+            if *degree == 0 {
+                ready.insert(target);
+            }
+        }
+    }
+
+    (ordered.len() == graph.node_count()).then_some(ordered)
+}
+
 struct RollingHash64 {
     prefix: Vec<u64>,
     powers: Vec<u64>,
@@ -1439,12 +1505,7 @@ impl RollingHash64 {
 }
 
 fn cheap_rolling_node_hash(graph: &HLIRGraph, node: NodeIndex) -> u64 {
-    // Use Debug, NOT Display — Display for many HLIR ops drops their
-    // shape/stride metadata (e.g. `Display for Mul` emits just "Mul"), so
-    // two structurally-different ops with the same kind would hash equal
-    // and get falsely grouped as a repeating pattern. Debug captures all
-    // op fields, which is the correct notion of op identity for rolling.
-    let op = format!("{:?}", graph[node]);
+    let op = rolling_op_signature(graph, node);
     let mut hash: u64 = 1469598103934665603;
     for byte in op.as_bytes() {
         hash ^= u64::from(*byte);
@@ -1456,6 +1517,21 @@ fn cheap_rolling_node_hash(graph: &HLIRGraph, node: NodeIndex) -> u64 {
     hash = hash.rotate_left(13);
     hash ^= out_degree.wrapping_mul(0xc2b2ae3d27d4eb4f);
     hash
+}
+
+fn rolling_op_signature(graph: &HLIRGraph, node: NodeIndex) -> String {
+    if graph[node].as_any().is::<crate::hlir::Output>() {
+        return "Output".to_string();
+    }
+
+    // Use Debug, NOT Display — Display for many HLIR ops drops their
+    // shape/stride metadata (e.g. `Display for Mul` emits just "Mul"), so
+    // two structurally-different ops with the same kind would hash equal
+    // and get falsely grouped as a repeating pattern. Debug captures those
+    // fields. Output is the exception: its `node` field is only the source
+    // slot for runtime storage, so it must not participate in rolling
+    // identity.
+    format!("{:?}", graph[node])
 }
 
 fn rolling_probe_window_sizes(max_window: usize) -> Vec<usize> {
@@ -1485,10 +1561,7 @@ fn canonicalize_occurrence(
     let mut node_parts = vec![];
 
     for &node in ordered_nodes {
-        // Debug, not Display — see `cheap_rolling_node_hash` for why op
-        // identity must include all fields (shape/strides), which Display
-        // drops for many HLIR ops.
-        let op = format!("{:?}", graph[node]);
+        let op = rolling_op_signature(graph, node);
         let inputs: Vec<NodeIndex> = graph
             .edges_directed(node, Direction::Incoming)
             .sorted_by_key(|e| e.id())
@@ -1586,6 +1659,87 @@ fn collect_state_params(
     state_params
 }
 
+fn estimate_rolling_savings(
+    occurrences: &[RollingOccurrence],
+    state_param_indices: &[usize],
+    uses: &FxHashMap<NodeIndex, Vec<(NodeIndex, usize)>>,
+    graph: &HLIRGraph,
+) -> Option<usize> {
+    use crate::hlir::Output;
+
+    if occurrences.len() < 2 {
+        return None;
+    }
+
+    let body_nodes: FxHashSet<NodeIndex> = occurrences[0]
+        .nodes
+        .iter()
+        .copied()
+        .filter(|&n| graph[n].as_any().downcast_ref::<Output>().is_none())
+        .collect();
+    let mut duplicate_body_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
+    for occ in &occurrences[1..] {
+        for &node in &occ.nodes {
+            if graph[node].as_any().downcast_ref::<Output>().is_none() {
+                duplicate_body_nodes.insert(node);
+            }
+        }
+    }
+
+    let state_set: FxHashSet<usize> = state_param_indices.iter().copied().collect();
+    let mut state_output_positions: FxHashSet<usize> = FxHashSet::default();
+    for &p in state_param_indices {
+        let next_val = occurrences[1].boundary_inputs[p];
+        let pos = occurrences[0]
+            .output_nodes
+            .iter()
+            .position(|&n| n == next_val)?;
+        state_output_positions.insert(pos);
+    }
+
+    let mut markers = state_param_indices.len() * 2;
+    for p in 0..occurrences[0].boundary_inputs.len() {
+        if state_set.contains(&p) {
+            continue;
+        }
+        let mut iter_sources = occurrences.iter().map(|occ| occ.boundary_inputs[p]);
+        let Some(first) = iter_sources.next() else {
+            continue;
+        };
+        if iter_sources.any(|src| src != first) {
+            markers += 1;
+        }
+    }
+
+    for q in 0..occurrences[0].output_nodes.len() {
+        if state_output_positions.contains(&q) {
+            continue;
+        }
+
+        let complete = occurrences.iter().all(|occ| {
+            let node = occ.output_nodes[q];
+            if graph[node].as_any().downcast_ref::<Output>().is_some() {
+                graph
+                    .edges_directed(node, Direction::Incoming)
+                    .next()
+                    .is_some()
+            } else {
+                uses.get(&node).is_some_and(|out_uses| {
+                    out_uses.iter().any(|(target, _)| {
+                        !body_nodes.contains(target) && !duplicate_body_nodes.contains(target)
+                    })
+                })
+            }
+        });
+        if complete {
+            markers += occurrences.len() + 1;
+        }
+    }
+
+    let savings = duplicate_body_nodes.len().checked_sub(markers)?;
+    (savings > 0).then_some(savings)
+}
+
 fn grow_rolling_candidate(
     graph: &HLIRGraph,
     uses: &FxHashMap<NodeIndex, Vec<(NodeIndex, usize)>>,
@@ -1674,7 +1828,11 @@ fn grow_rolling_candidate(
                 if state_param_indices.is_empty() {
                     continue;
                 }
-                let savings = merged_occs[0].nodes.len() * (merged_occs.len() - 1);
+                let Some(savings) =
+                    estimate_rolling_savings(&merged_occs, &state_param_indices, uses, graph)
+                else {
+                    continue;
+                };
                 let _ = first_sig;
                 let grown = RollingCandidate {
                     occurrences: merged_occs,
@@ -2395,6 +2553,48 @@ mod tests {
             .map(|v| v.exp2().sin().exp2().sin().exp2().sin())
             .collect::<Vec<f32>>();
         assert_close(rt.get_f32(out.id), &expected);
+    }
+
+    #[test]
+    fn test_auto_roll_loops_prepass_rolls_recurrence_with_interleaved_outputs() {
+        let mut cx = Graph::new();
+        let x = cx.tensor(8);
+        let mut y = x;
+        for _ in 0..10 {
+            y.exp2().output();
+            y = y.sin();
+        }
+        let y = y.output();
+
+        let before = cx.graph.node_count();
+        let inserted = cx.auto_roll_loops_prepass();
+        let after = cx.graph.node_count();
+        assert!(
+            inserted >= 2,
+            "expected loop markers for recurrence split by Output nodes, got {inserted}"
+        );
+        assert!(
+            after < before,
+            "expected rolling to reduce nodes for recurrence split by Output nodes ({before} -> {after})"
+        );
+
+        let vals = random_vec(8);
+        let mut rt = NativeRuntime::default();
+        cx.build_search_space::<NativeRuntime>();
+        rt = cx.search(rt, 1);
+        rt.set_data(x.id, vals.clone());
+        rt.execute(&cx.dyn_map);
+
+        let expected = vals
+            .into_iter()
+            .map(|mut v| {
+                for _ in 0..10 {
+                    v = v.sin();
+                }
+                v
+            })
+            .collect::<Vec<f32>>();
+        assert_close(rt.get_f32(y.id), &expected);
     }
 
     #[test]
