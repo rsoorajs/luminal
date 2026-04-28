@@ -1,0 +1,56 @@
+digraph fanout {
+  rankdir=BT; nodesep=0.5; ranksep=0.5;
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=12, penwidth=1.2];
+
+  in [label="in", fillcolor="#f8f9fa"];
+
+  // Original (unfused) chain still present in U1's e-class
+  U1 [label="U1", fillcolor="#cfe2ff"];
+
+  // Shared fused inner — both pair-fuse firings hash-cons to the SAME enodes
+  FS     [label="FS\n(shared)",     fillcolor="#d1e7dd", color="#0066cc", penwidth=2.5];
+  U1_sep [label="U1_sep\n(shared)", fillcolor="#cfe2ff", color="#0066cc", penwidth=2.5];
+
+  // Per-region inner copies (different ops -> separate enodes)
+  U2_sep [label="U2_sep", fillcolor="#cfe2ff"];
+  UX_sep [label="UX_sep", fillcolor="#cfe2ff"];
+
+  subgraph cluster_u2 {
+    label="e-class: U2 = FE_A";
+    style="dashed,filled"; fillcolor="#fff3cd";
+    fontname="Helvetica"; fontsize=11;
+    U2 [label="U2", fillcolor="#cfe2ff"];
+    FE_A [label="FE_A", fillcolor="#f8d7da"];
+  }
+
+  subgraph cluster_uX {
+    label="e-class: UX = FE_B";
+    style="dashed,filled"; fillcolor="#fff3cd";
+    fontname="Helvetica"; fontsize=11;
+    UX [label="UX", fillcolor="#cfe2ff"];
+    FE_B [label="FE_B", fillcolor="#f8d7da"];
+  }
+
+  out_a [label="out_a", fillcolor="#f8f9fa"];
+  out_b [label="out_b", fillcolor="#f8f9fa"];
+
+  in -> U1;
+  in -> FS;
+  FS -> U1_sep;
+
+  // Sharing: U1_sep feeds BOTH region inner copies
+  U1_sep -> U2_sep [color="#0066cc", penwidth=2];
+  U1_sep -> UX_sep [color="#0066cc", penwidth=2];
+
+  U2_sep -> FE_A;
+  UX_sep -> FE_B;
+
+  U1 -> U2;
+  U1 -> UX;
+  U2 -> out_a;
+  UX -> out_b;
+
+  labelloc=b;
+  fontname="Helvetica"; fontsize=12;
+  label="Hash consing DOES preserve sharing in the e-graph: FS and U1_sep are one enode each (blue borders),\nshared between both regions. BUT codegen walks backward from FE_A and FE_B SEPARATELY:\n  FE_A walk: FE_A -> U2_sep -> U1_sep -> FS -> in   (kernel A's body contains U1)\n  FE_B walk: FE_B -> UX_sep -> U1_sep -> FS -> in   (kernel B's body ALSO contains U1)\nResult: at runtime, U1(in) is computed twice -- once inside kernel A, once inside kernel B.";
+}

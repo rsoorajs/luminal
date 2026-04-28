@@ -1,0 +1,11 @@
+digraph rule6_rhs {
+  rankdir=TB; nodesep=0.35; ranksep=0.4;
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=14, penwidth=1.2];
+  edge [arrowsize=0.7, color="#444"];
+
+  FE      [label="FE",      fillcolor="#f8d7da"];
+  B       [label="B",       fillcolor="#e0cffc"];
+  inner_a [label="inner_a", fillcolor="#fff3cd"];
+  inner_b [label="inner_b", fillcolor="#fff3cd"];
+  FE -> B; B -> inner_a; B -> inner_b;
+}

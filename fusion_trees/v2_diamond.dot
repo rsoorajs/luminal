@@ -1,0 +1,40 @@
+digraph v2_diamond {
+  rankdir=BT; nodesep=0.35; ranksep=0.4;
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=12, penwidth=1.2];
+  edge [arrowsize=0.7];
+
+  // External tensors
+  a [label="a", fillcolor="#f8f9fa"];
+  b [label="b", fillcolor="#f8f9fa"];
+
+  // Single FS per distinct external tensor (the headline invariant).
+  FSa [label="FS(a)", fillcolor="#d1e7dd", penwidth=2.5, color="#198754"];
+  FSb [label="FS(b)", fillcolor="#d1e7dd", penwidth=2.5, color="#198754"];
+
+  a -> FSa; b -> FSb;
+
+  // Inside-true body, fully shared via e-class refs.
+  iAdd_t [label="Add (true)\n(t = a+b)", fillcolor="#e0cffc"];
+  iExp2  [label="Exp2 (true)\n(u = exp2 t)", fillcolor="#e0cffc"];
+  iSin   [label="Sin (true)\n(v = sin t)",   fillcolor="#e0cffc"];
+  iMul   [label="Mul (true)\n(w = u * a)",   fillcolor="#e0cffc"];
+  iAdd_o [label="Add (true)\n(out = w+v)",   fillcolor="#e0cffc"];
+
+  FSa -> iAdd_t; FSb -> iAdd_t;
+  iAdd_t -> iExp2; iAdd_t -> iSin;
+  iExp2 -> iMul; FSa -> iMul;          // <- a is REUSED here, same FS_a node
+  iMul -> iAdd_o; iSin -> iAdd_o;
+
+  // The full FE
+  FE_full [label="FE_full", fillcolor="#f8d7da", penwidth=2.5, color="#198754"];
+  iAdd_o -> FE_full;
+
+  // out
+  out [label="out", fillcolor="#f8f9fa"];
+  FE_full -> out;
+
+  labelloc=b;
+  fontname="Helvetica"; fontsize=11;
+  label="Diamond DAG (5 ops, 2 distinct externals {a, b}). After running pair-fuse + grow + merge:\nExactly 2 FS enodes (green-bordered) regardless of how many rules wrap a or b — congruence folds them.\nThe inner Add (t = a+b) is a single e-class shared between Exp2 and Sin paths — no duplication.\nFour FE alternatives exist in the e-graph (only the full one is shown); cost-extraction picks this one.";
+
+}

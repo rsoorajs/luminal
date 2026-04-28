@@ -1,0 +1,34 @@
+digraph grow_quadratic {
+  rankdir=LR; nodesep=0.3; ranksep=0.4;
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11];
+
+  // 4-op chain U1-U2-U3-U4, each box represents one FE alternative
+  // arranged by region size (rows) and starting position (columns)
+
+  subgraph cluster_size2 {
+    label="Size 2 alternatives (3 FEs)"; style=filled; fillcolor="#fff3cd"; fontsize=10;
+    F12 [label="FE_12\n{U1,U2}", fillcolor="#f8d7da"];
+    F23 [label="FE_23\n{U2,U3}", fillcolor="#f8d7da"];
+    F34 [label="FE_34\n{U3,U4}", fillcolor="#f8d7da"];
+  }
+  subgraph cluster_size3 {
+    label="Size 3 alternatives (2 FEs)"; style=filled; fillcolor="#fff3cd"; fontsize=10;
+    F123 [label="FE_123\n{U1,U2,U3}", fillcolor="#f8d7da"];
+    F234 [label="FE_234\n{U2,U3,U4}", fillcolor="#f8d7da"];
+  }
+  subgraph cluster_size4 {
+    label="Size 4 alternative (1 FE)"; style=filled; fillcolor="#fff3cd"; fontsize=10;
+    F1234 [label="FE_1234\n{U1,U2,U3,U4}", fillcolor="#f8d7da", penwidth=3, color="#198754"];
+  }
+
+  F12  -> F123  [label="grow past U3", fontsize=9];
+  F23  -> F123  [label="grow past U1?\n(no — only forward)", fontsize=9, style=dashed, color=gray];
+  F23  -> F234  [label="grow past U4", fontsize=9];
+  F34  -> F234  [label="grow past U2?\n(no)", fontsize=9, style=dashed, color=gray];
+  F123 -> F1234 [label="grow past U4", fontsize=9];
+  F234 -> F1234 [label="grow past U1?\n(no)", fontsize=9, style=dashed, color=gray];
+
+  labelloc=b;
+  fontname="Helvetica"; fontsize=11;
+  label="Trial 1 on a 4-op chain. Six FEs total = N(N-1)/2 for chain length N.\nGreen = the optimal extraction (one big region). The other 5 are valid but smaller alternatives.\nGrowth path: pair-fuse seeds size-2 FEs, forward-grow extends each to longer regions.\nWith only forward-grow, some alternatives can't be reached (gray dashed).";
+}

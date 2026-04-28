@@ -20,9 +20,7 @@ fn test_two_unary_ops_fuse() {
     assert!(
         regions
             .iter()
-            .any(|r| r.internal_ops_sorted == expected
-                && r.start_count == 1
-                && r.end_count == 1),
+            .any(|r| r.internal_ops_sorted == expected && r.start_count == 1 && r.end_count == 1),
         "expected a marker region of {expected:?} with 1 FusionStart, got: {regions:#?}"
     );
 }
@@ -98,9 +96,7 @@ fn test_three_unary_ops_fuse() {
     assert!(
         regions
             .iter()
-            .any(|r| r.internal_ops_sorted == expected
-                && r.start_count == 1
-                && r.end_count == 1),
+            .any(|r| r.internal_ops_sorted == expected && r.start_count == 1 && r.end_count == 1),
         "expected a marker region of {expected:?} with 1 FusionStart, got: {regions:#?}"
     );
 }
@@ -118,9 +114,7 @@ fn test_four_unary_ops_fuse() {
     assert!(
         regions
             .iter()
-            .any(|r| r.internal_ops_sorted == expected
-                && r.start_count == 1
-                && r.end_count == 1),
+            .any(|r| r.internal_ops_sorted == expected && r.start_count == 1 && r.end_count == 1),
         "expected a marker region of {expected:?} with 1 FusionStart, got: {regions:#?}"
     );
 }
@@ -382,11 +376,11 @@ fn extract_all_fused_regions(cx: &mut Graph) -> Vec<FusedRegion> {
                             // external source tensor — which may be a KernelOp
                             // *or* a non-KernelOp (HLIR loadable) node, so we
                             // can't gate counting on `name_of` being `Some`.
-                            let mut inc = llir
-                                .neighbors_directed(pred, petgraph::Direction::Incoming);
+                            let mut inc =
+                                llir.neighbors_directed(pred, petgraph::Direction::Incoming);
                             match inc.next() {
-                                Some(src_node) if name_of(src_node).as_deref()
-                                    == Some("FusionEnd") =>
+                                Some(src_node)
+                                    if name_of(src_node).as_deref() == Some("FusionEnd") =>
                                 {
                                     // Merge adjacent regions — treat the FS/FE
                                     // pair as internal; walk past the upstream
@@ -547,9 +541,9 @@ fn test_diamond_dag_fuses() {
     let regions = extract_all_fused_regions(&mut cx);
     let expected = sorted_names(&["FusedAdd", "FusedAdd", "FusedExp2", "FusedMul", "FusedSin"]);
     assert!(
-        regions.iter().any(|r| r.internal_ops_sorted == expected
-            && r.start_count == 2
-            && r.end_count == 1),
+        regions
+            .iter()
+            .any(|r| r.internal_ops_sorted == expected && r.start_count == 2 && r.end_count == 1),
         "expected diamond DAG to fuse into one region with ops {expected:?}, \
          2 FusionStarts, 1 FusionEnd. Got: {regions:#?}"
     );
@@ -716,7 +710,9 @@ fn test_fused_region_starts_match_distinct_external_tensors() {
          got: {regions:#?}"
     );
     assert!(
-        matching.iter().any(|r| r.start_count == 2 && r.end_count == 1),
+        matching
+            .iter()
+            .any(|r| r.start_count == 2 && r.end_count == 1),
         "expected at least one 5-op diamond extraction with FusionStart count == 2 \
          (one per distinct external tensor) and FusionEnd count == 1; got: {matching:#?}"
     );
@@ -742,9 +738,7 @@ fn test_pair_fuse_unary_unary_marker_form() {
     assert!(
         regions
             .iter()
-            .any(|r| r.internal_ops_sorted == expected
-                && r.start_count == 1
-                && r.end_count == 1),
+            .any(|r| r.internal_ops_sorted == expected && r.start_count == 1 && r.end_count == 1),
         "expected marker region of {expected:?} with 1 FusionStart, got: {regions:#?}"
     );
 }
@@ -831,13 +825,7 @@ fn test_merge_two_regions_at_outer_binary() {
     let _e = ((a.sin() + b) + (c.sqrt() + d)).output();
 
     let regions = extract_all_fused_regions(&mut cx);
-    let expected = sorted_names(&[
-        "FusedAdd",
-        "FusedAdd",
-        "FusedAdd",
-        "FusedSin",
-        "FusedSqrt",
-    ]);
+    let expected = sorted_names(&["FusedAdd", "FusedAdd", "FusedAdd", "FusedSin", "FusedSqrt"]);
     assert!(
         regions
             .iter()
@@ -873,8 +861,12 @@ fn bench_fused_region_vs_unfused_3op() {
     let stream = ctx.default_stream();
 
     // Inputs in (0, 1] keep `sin` < 1 and `sqrt` well-defined post-add.
-    let host_a: Vec<f32> = (0..N).map(|i| (i as f32 + 1.0) / (N as f32) * 0.5).collect();
-    let host_b: Vec<f32> = (0..N).map(|i| (i as f32 + 1.0) / (N as f32) * 0.5).collect();
+    let host_a: Vec<f32> = (0..N)
+        .map(|i| (i as f32 + 1.0) / (N as f32) * 0.5)
+        .collect();
+    let host_b: Vec<f32> = (0..N)
+        .map(|i| (i as f32 + 1.0) / (N as f32) * 0.5)
+        .collect();
     let d_a = stream.clone_htod(&host_a).unwrap();
     let d_b = stream.clone_htod(&host_b).unwrap();
     let mut d_scratch1 = stream.alloc_zeros::<f32>(N).unwrap();
@@ -934,19 +926,20 @@ extern "C" __global__ void fused_k(float* out, const float* a, const float* b, l
     let cfg = LaunchConfig::for_num_elems(N as u32);
     let n_arg: i64 = N as i64;
 
-    let launch_unfused = |d_out: &mut cudarc::driver::CudaSlice<f32>,
-                          d_scratch1: &mut cudarc::driver::CudaSlice<f32>,
-                          d_scratch2: &mut cudarc::driver::CudaSlice<f32>| {
-        let mut b = stream.launch_builder(&add_k);
-        b.arg(&mut *d_scratch1).arg(&d_a).arg(&d_b).arg(&n_arg);
-        unsafe { b.launch(cfg) }.unwrap();
-        let mut b = stream.launch_builder(&sin_k);
-        b.arg(&mut *d_scratch2).arg(&*d_scratch1).arg(&n_arg);
-        unsafe { b.launch(cfg) }.unwrap();
-        let mut b = stream.launch_builder(&sqrt_k);
-        b.arg(d_out).arg(&*d_scratch2).arg(&n_arg);
-        unsafe { b.launch(cfg) }.unwrap();
-    };
+    let launch_unfused =
+        |d_out: &mut cudarc::driver::CudaSlice<f32>,
+         d_scratch1: &mut cudarc::driver::CudaSlice<f32>,
+         d_scratch2: &mut cudarc::driver::CudaSlice<f32>| {
+            let mut b = stream.launch_builder(&add_k);
+            b.arg(&mut *d_scratch1).arg(&d_a).arg(&d_b).arg(&n_arg);
+            unsafe { b.launch(cfg) }.unwrap();
+            let mut b = stream.launch_builder(&sin_k);
+            b.arg(&mut *d_scratch2).arg(&*d_scratch1).arg(&n_arg);
+            unsafe { b.launch(cfg) }.unwrap();
+            let mut b = stream.launch_builder(&sqrt_k);
+            b.arg(d_out).arg(&*d_scratch2).arg(&n_arg);
+            unsafe { b.launch(cfg) }.unwrap();
+        };
     let launch_fused = |d_out: &mut cudarc::driver::CudaSlice<f32>| {
         let mut b = stream.launch_builder(&fused_k);
         b.arg(d_out).arg(&d_a).arg(&d_b).arg(&n_arg);
@@ -991,4 +984,3 @@ extern "C" __global__ void fused_k(float* out, const float* a, const float* b, l
          speedup: {speedup:.2}x"
     );
 }
-

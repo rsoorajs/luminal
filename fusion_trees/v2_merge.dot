@@ -1,0 +1,29 @@
+digraph v2_merge {
+  rankdir=BT; nodesep=0.35; ranksep=0.4;
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=12, penwidth=1.2];
+  edge [arrowsize=0.7];
+
+  subgraph cluster_lhs {
+    label="LHS: outer binary takes two FE inputs"; style="dashed,filled"; fillcolor="#fffaeb"; fontsize=11;
+    a_outer [label="?outer (Add, false)", fillcolor="#cfe2ff"];
+    a_FEa   [label="FE_a", fillcolor="#f8d7da"];
+    a_FEb   [label="FE_b", fillcolor="#f8d7da"];
+    a_ia    [label="?inner_a", fillcolor="#fff3cd"];
+    a_ib    [label="?inner_b", fillcolor="#fff3cd"];
+    a_ia -> a_FEa; a_ib -> a_FEb;
+    a_FEa -> a_outer; a_FEb -> a_outer;
+  }
+  subgraph cluster_rhs {
+    label="RHS: one merged FE wrapping inside-true Add; both inners reused"; style="dashed,filled"; fillcolor="#fffaeb"; fontsize=11;
+    b_newFE  [label="new FE", fillcolor="#f8d7da"];
+    b_inside [label="Add (true)", fillcolor="#e0cffc"];
+    b_ia     [label="?inner_a", fillcolor="#fff3cd"];
+    b_ib     [label="?inner_b", fillcolor="#fff3cd"];
+    b_ia -> b_inside; b_ib -> b_inside; b_inside -> b_newFE;
+  }
+  a_outer -> b_newFE [style=invis];
+  labelloc=b;
+  fontname="Helvetica"; fontsize=11;
+  label="Both inners reused — no new FS minted. Two regions collapse into one without duplicating shared subgraphs.";
+
+}

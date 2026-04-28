@@ -1,0 +1,24 @@
+digraph v2_base1_uu {
+  rankdir=BT; nodesep=0.35; ranksep=0.4;
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=12, penwidth=1.2];
+  edge [arrowsize=0.7];
+
+  subgraph cluster_lhs {
+    label="LHS"; style="dashed,filled"; fillcolor="#fffaeb"; fontsize=11;
+    a_U2 [label="U2 (false)", fillcolor="#cfe2ff"];
+    a_U1 [label="U1 (false)", fillcolor="#cfe2ff"];
+    a_x  [label="?x",         fillcolor="#f8f9fa"];
+    a_x -> a_U1 -> a_U2;
+  }
+  subgraph cluster_rhs {
+    label="RHS"; style="dashed,filled"; fillcolor="#fffaeb"; fontsize=11;
+    b_FE  [label="FE",        fillcolor="#f8d7da"];
+    b_U2  [label="U2 (true)", fillcolor="#e0cffc"];
+    b_U1  [label="U1 (true)", fillcolor="#e0cffc"];
+    b_FS  [label="FS",        fillcolor="#d1e7dd"];
+    b_x   [label="?x",        fillcolor="#f8f9fa"];
+    b_x -> b_FS -> b_U1 -> b_U2 -> b_FE;
+  }
+  a_U2 -> b_FE [style=invis];
+
+}

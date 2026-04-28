@@ -26,8 +26,8 @@ use crate::{
     kernel::{
         CudaFunctionExt, CudaGraphExecHandle, CudaGraphHandle, KernelOp, create_cuda_event,
         destroy_cuda_event,
+        fusion::region_codegen::{self, CompileUnit},
         hlir::{clear_global_dyn_dims, get_global_dyn_dims, set_global_dyn_dims},
-        region_codegen::{self, CompileUnit},
     },
     runtime::partition_marked_convex,
 };

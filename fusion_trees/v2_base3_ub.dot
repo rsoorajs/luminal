@@ -1,0 +1,29 @@
+digraph v2_base3_ub {
+  rankdir=BT; nodesep=0.35; ranksep=0.4;
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=12, penwidth=1.2];
+  edge [arrowsize=0.7];
+
+  subgraph cluster_lhs {
+    label="LHS (LHS variant; mirror exists for RHS)"; style="dashed,filled"; fillcolor="#fffaeb"; fontsize=11;
+    a_B  [label="B (false)", fillcolor="#cfe2ff"];
+    a_U  [label="U (false)", fillcolor="#cfe2ff"];
+    a_a  [label="?a",        fillcolor="#f8f9fa"];
+    a_b  [label="?b",        fillcolor="#f8f9fa"];
+    a_a -> a_U; a_U -> a_B; a_b -> a_B;
+  }
+  subgraph cluster_rhs {
+    label="RHS"; style="dashed,filled"; fillcolor="#fffaeb"; fontsize=11;
+    b_FE  [label="FE",        fillcolor="#f8d7da"];
+    b_B   [label="B (true)",  fillcolor="#e0cffc"];
+    b_U   [label="U (true)",  fillcolor="#e0cffc"];
+    b_FSa [label="FS",        fillcolor="#d1e7dd"];
+    b_FSb [label="FS",        fillcolor="#d1e7dd"];
+    b_a   [label="?a",        fillcolor="#f8f9fa"];
+    b_b   [label="?b",        fillcolor="#f8f9fa"];
+    b_a -> b_FSa; b_FSa -> b_U; b_U -> b_B;
+    b_b -> b_FSb; b_FSb -> b_B;
+    b_B -> b_FE;
+  }
+  a_B -> b_FE [style=invis];
+
+}

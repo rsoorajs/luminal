@@ -40,8 +40,8 @@ use as_any::Downcast;
 use crate::{
     compile_module_image_for_current_device, cuda_dtype,
     kernel::KernelOp,
+    kernel::fusion::markers::{FusionEnd, FusionStart},
     kernel::hlir::{dtype_includes, generate_dyn_dims_defines},
-    kernel::other_ops::{FusionEnd, FusionStart},
 };
 
 // =========================================================================
@@ -365,9 +365,7 @@ pub(crate) fn compile_region(
         .expect("FusionEnd with no predecessor");
     let fe_input_local = local_name(fe_input);
     let write_idx = flatten_strides(out_shape, out_strides).to_kernel();
-    body.push_str(&format!(
-        "        out[{write_idx}] = {fe_input_local};\n"
-    ));
+    body.push_str(&format!("        out[{write_idx}] = {fe_input_local};\n"));
 
     let kernel = format!(
         "{includes}\n\
@@ -384,7 +382,10 @@ pub(crate) fn compile_region(
     } else {
         let ptx = compile_module_image_for_current_device(stream.context(), &kernel)
             .expect("region kernel PTX compile failed");
-        let module = stream.context().load_module(ptx).expect("module load failed");
+        let module = stream
+            .context()
+            .load_module(ptx)
+            .expect("module load failed");
         let function = module
             .load_function("fused_region_k")
             .expect("region kernel function not found");
