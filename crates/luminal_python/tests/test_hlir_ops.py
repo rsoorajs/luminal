@@ -2089,7 +2089,9 @@ def test_grouped_mm_fallback(device: torch.device):
     `torch.library.custom_op("transformers::grouped_mm_fallback", ...)`. After
     import, `torch.ops.transformers.grouped_mm_fallback` is callable directly.
     """
-    import transformers.integrations.moe  # registers the custom_op
+    # Side-effect import: registers the custom_op via torch.library.custom_op.
+    # The name itself isn't referenced — ruff's F401 must be suppressed.
+    import transformers.integrations.moe  # noqa: F401
     from test_models import GroupedMMFallbackTestModel
 
     model: torch.nn.Module = GroupedMMFallbackTestModel().to(device)
