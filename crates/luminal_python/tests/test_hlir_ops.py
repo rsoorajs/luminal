@@ -2106,6 +2106,91 @@ def test_grouped_mm_fallback(device: torch.device):
     assert torch.allclose(output, original, atol=1e-4)
 
 
+def test_grouped_mm_fallback_routing_invariance(device: torch.device):
+    """The MoE forest, not just the trees: one compile must correctly handle
+    *any* routing pattern at the same shape.
+
+    `translate_grouped_mm` is correct only if `offs` flows through as a runtime
+    tensor — the gate's top-k decision varies per token batch, and the same
+    compiled graph has to dispatch tokens to the right experts for whatever
+    `offs` arrives at execution. If our lowering accidentally specialized on a
+    particular `offs` value (baking in expert assignments), `compiled(input_b,
+    weight, offs_b)` would either silently produce wrong-expert output or
+    trigger a recompile.
+
+    This test asserts three things at once:
+      (a) Different `offs` (= different routing) doesn't trigger a recompile.
+      (b) `offs` appears as an FX graph node, not a baked constant.
+      (c) The same compiled graph produces correct output for both routings,
+          and outputs *differ* between routings (else the test is moot).
+    """
+    import transformers.integrations.moe  # noqa: F401
+    from test_models import GroupedMMFallbackTestModel
+
+    g, s, k, n = 2, 4, 8, 16
+
+    # Wrap luminal_backend to capture the FX graph(s) dynamo hands us.
+    captured = []
+
+    def capturing_backend(gm, example_inputs):
+        captured.append(gm)
+        return luminal_backend(gm, example_inputs)
+
+    model = GroupedMMFallbackTestModel().to(device)
+    compiled = torch.compile(model, backend=capturing_backend)
+
+    # Same shapes, different data → different routing patterns.
+    weight = torch.randn(g, k, n, device=device)
+    input_a = torch.randn(s, k, device=device)
+    input_b = torch.randn(s, k, device=device)
+    offs_a = torch.tensor([1, 4], device=device, dtype=torch.int32)  # 1 to expert 0, 3 to expert 1
+    offs_b = torch.tensor([3, 4], device=device, dtype=torch.int32)  # 3 to expert 0, 1 to expert 1
+
+    with torch.no_grad():
+        ref_a = model(input_a, weight, offs_a)
+        out_a = compiled(input_a, weight, offs_a)
+        n_compiles_after_first = len(captured)
+
+        ref_b = model(input_b, weight, offs_b)
+        out_b = compiled(input_b, weight, offs_b)
+
+    # (a) No recompile between distinct routings.
+    assert len(captured) == n_compiles_after_first, (
+        f"Different routings triggered a recompile: "
+        f"{n_compiles_after_first} → {len(captured)}"
+    )
+
+    # (b) offs is an FX graph node, not a baked constant.
+    grouped_nodes = [
+        node for node in captured[0].graph.nodes if "grouped_mm" in str(node.target)
+    ]
+    assert len(grouped_nodes) == 1, (
+        f"Expected exactly one grouped_mm node, got {len(grouped_nodes)}"
+    )
+    grouped_node = grouped_nodes[0]
+    # transformers::grouped_mm_fallback emits offs as a kwarg; aten._grouped_mm
+    # may emit it as a positional. Accept either.
+    offs_arg = grouped_node.kwargs.get("offs")
+    if offs_arg is None and len(grouped_node.args) > 2:
+        offs_arg = grouped_node.args[2]
+    assert hasattr(offs_arg, "op"), (
+        f"offs argument should be an FX graph node, got {offs_arg!r} "
+        f"({type(offs_arg).__name__}) — looks baked as constant"
+    )
+
+    # (c) Both routings produce correct output, and outputs differ.
+    assert torch.allclose(out_a, ref_a, atol=1e-4), (
+        f"routing A: max_diff={torch.max(torch.abs(out_a - ref_a)).item():.2e}"
+    )
+    assert torch.allclose(out_b, ref_b, atol=1e-4), (
+        f"routing B: max_diff={torch.max(torch.abs(out_b - ref_b)).item():.2e}"
+    )
+    assert not torch.allclose(out_a, out_b, atol=1e-3), (
+        "Outputs of routing A and B should differ — otherwise routing isn't "
+        "actually being exercised."
+    )
+
+
 # ========== Dtype Round-Trip Tests ==========
 
 
