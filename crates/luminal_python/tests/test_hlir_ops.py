@@ -2143,8 +2143,11 @@ def test_grouped_mm_fallback_routing_invariance(device: torch.device):
     weight = torch.randn(g, k, n, device=device)
     input_a = torch.randn(s, k, device=device)
     input_b = torch.randn(s, k, device=device)
-    offs_a = torch.tensor([1, 4], device=device, dtype=torch.int32)  # 1 to expert 0, 3 to expert 1
-    offs_b = torch.tensor([3, 4], device=device, dtype=torch.int32)  # 3 to expert 0, 1 to expert 1
+    # offs[i] = cumulative tokens through expert i. Different routings:
+    #   offs_a: 1 token to expert 0, 3 to expert 1
+    #   offs_b: 3 tokens to expert 0, 1 to expert 1
+    offs_a = torch.tensor([1, 4], device=device, dtype=torch.int32)
+    offs_b = torch.tensor([3, 4], device=device, dtype=torch.int32)
 
     with torch.no_grad():
         ref_a = model(input_a, weight, offs_a)
