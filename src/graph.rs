@@ -823,12 +823,7 @@ impl Graph {
                     continue;
                 }
 
-                let Some(savings) =
-                    estimate_rolling_savings(&occs, &state_params, &uses, &self.graph)
-                else {
-                    start = pos.saturating_sub(window).max(start + 1);
-                    continue;
-                };
+                let savings = window * (occs.len() - 1);
                 let _ = sig;
                 let candidate = RollingCandidate {
                     occurrences: occs,
@@ -1659,87 +1654,6 @@ fn collect_state_params(
     state_params
 }
 
-fn estimate_rolling_savings(
-    occurrences: &[RollingOccurrence],
-    state_param_indices: &[usize],
-    uses: &FxHashMap<NodeIndex, Vec<(NodeIndex, usize)>>,
-    graph: &HLIRGraph,
-) -> Option<usize> {
-    use crate::hlir::Output;
-
-    if occurrences.len() < 2 {
-        return None;
-    }
-
-    let body_nodes: FxHashSet<NodeIndex> = occurrences[0]
-        .nodes
-        .iter()
-        .copied()
-        .filter(|&n| graph[n].as_any().downcast_ref::<Output>().is_none())
-        .collect();
-    let mut duplicate_body_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
-    for occ in &occurrences[1..] {
-        for &node in &occ.nodes {
-            if graph[node].as_any().downcast_ref::<Output>().is_none() {
-                duplicate_body_nodes.insert(node);
-            }
-        }
-    }
-
-    let state_set: FxHashSet<usize> = state_param_indices.iter().copied().collect();
-    let mut state_output_positions: FxHashSet<usize> = FxHashSet::default();
-    for &p in state_param_indices {
-        let next_val = occurrences[1].boundary_inputs[p];
-        let pos = occurrences[0]
-            .output_nodes
-            .iter()
-            .position(|&n| n == next_val)?;
-        state_output_positions.insert(pos);
-    }
-
-    let mut markers = state_param_indices.len() * 2;
-    for p in 0..occurrences[0].boundary_inputs.len() {
-        if state_set.contains(&p) {
-            continue;
-        }
-        let mut iter_sources = occurrences.iter().map(|occ| occ.boundary_inputs[p]);
-        let Some(first) = iter_sources.next() else {
-            continue;
-        };
-        if iter_sources.any(|src| src != first) {
-            markers += 1;
-        }
-    }
-
-    for q in 0..occurrences[0].output_nodes.len() {
-        if state_output_positions.contains(&q) {
-            continue;
-        }
-
-        let complete = occurrences.iter().all(|occ| {
-            let node = occ.output_nodes[q];
-            if graph[node].as_any().downcast_ref::<Output>().is_some() {
-                graph
-                    .edges_directed(node, Direction::Incoming)
-                    .next()
-                    .is_some()
-            } else {
-                uses.get(&node).is_some_and(|out_uses| {
-                    out_uses.iter().any(|(target, _)| {
-                        !body_nodes.contains(target) && !duplicate_body_nodes.contains(target)
-                    })
-                })
-            }
-        });
-        if complete {
-            markers += occurrences.len() + 1;
-        }
-    }
-
-    let savings = duplicate_body_nodes.len().checked_sub(markers)?;
-    (savings > 0).then_some(savings)
-}
-
 fn grow_rolling_candidate(
     graph: &HLIRGraph,
     uses: &FxHashMap<NodeIndex, Vec<(NodeIndex, usize)>>,
@@ -1828,11 +1742,7 @@ fn grow_rolling_candidate(
                 if state_param_indices.is_empty() {
                     continue;
                 }
-                let Some(savings) =
-                    estimate_rolling_savings(&merged_occs, &state_param_indices, uses, graph)
-                else {
-                    continue;
-                };
+                let savings = merged_occs[0].nodes.len() * (merged_occs.len() - 1);
                 let _ = first_sig;
                 let grown = RollingCandidate {
                     occurrences: merged_occs,
