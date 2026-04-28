@@ -656,6 +656,11 @@ pub fn kernel_to_host(
     }
 
     let kernel_subgraphs = partition_marked_convex(llir_graph, &kernel_ops_in_graph).unwrap();
+    // Compute the set of FS / FE / FusedX nodes globally absorbed by some
+    // FusionEnd in the LLIR. Used by `build_compile_units` to suppress the
+    // identity-memcpy fallback for shared FS leaves whose consumers live
+    // in a different convex subgraph than the FS itself.
+    let globally_absorbed = region_codegen::globally_absorbed_markers(llir_graph);
 
     // Track which kernel node belongs to which CudaGraphOp (for later edge creation)
     let mut kernel_to_cuda_graph: FxHashMap<NodeIndex, NodeIndex> = FxHashMap::default();
@@ -694,7 +699,8 @@ pub fn kernel_to_host(
         // region collapses to a single CompileUnit::Region (one fused
         // CUDA kernel for the whole DAG); everything else stays as
         // CompileUnit::Single (the existing per-op compile path).
-        let compile_units = region_codegen::build_compile_units(&topo_order, llir_graph);
+        let compile_units =
+            region_codegen::build_compile_units(&topo_order, llir_graph, &globally_absorbed);
 
         // Compile all units with global ordering for correct dyn_dims indices
         let mut kernels = Vec::with_capacity(compile_units.len());

@@ -82,9 +82,64 @@ pub(crate) enum CompileUnit {
 /// FusedX and FusionStart nodes are absorbed into that region and removed
 /// from the per-node iteration. Anything else is wrapped in
 /// `CompileUnit::Single`.
+/// Globally-absorbed FS / FE markers — the set of marker nodes that any
+/// `FusionEnd` in the LLIR walks back to during region detection. A
+/// marker is "absorbed" iff some FE in the LLIR can reach it by walking
+/// incoming edges through `FusionEnd` / `FusedX` nodes, stopping at
+/// `FusionStart` leaves.
+///
+/// This is computed once over the full LLIR rather than per-convex-
+/// subgraph, because `partition_marked_convex` may put a shared FS leaf
+/// (one whose e-graph congruence-deduplicated it across multiple
+/// regions) into a different subgraph than the FE that absorbs it.
+/// Without this global view, `build_compile_units` running on the FS's
+/// subgraph would not see any FE walking back to the FS, would emit the
+/// FS as `CompileUnit::Single`, and the markers' identity-memcpy
+/// fallback would compile and launch — pure overhead at runtime.
+pub(crate) fn globally_absorbed_markers(llir_graph: &LLIRGraph) -> FxHashSet<NodeIndex> {
+    let name_of = |idx: NodeIndex| -> Option<&'static str> {
+        llir_graph
+            .node_weight(idx)
+            .and_then(|op| op.to_dialect::<dyn KernelOp>().map(|k| k.kernel_name()))
+    };
+
+    let mut absorbed: FxHashSet<NodeIndex> = FxHashSet::default();
+    for fe in llir_graph.node_indices() {
+        if name_of(fe) != Some("FusionEnd") {
+            continue;
+        }
+        let mut visited: FxHashSet<NodeIndex> = FxHashSet::default();
+        let mut stack: Vec<NodeIndex> = vec![fe];
+        visited.insert(fe);
+        while let Some(cur) = stack.pop() {
+            for pred in llir_graph.neighbors_directed(cur, Direction::Incoming) {
+                if !visited.insert(pred) {
+                    continue;
+                }
+                match name_of(pred) {
+                    Some("FusionStart") => {
+                        absorbed.insert(pred);
+                    }
+                    Some("FusionEnd") => {
+                        absorbed.insert(pred);
+                        stack.push(pred);
+                    }
+                    Some(other) if other.starts_with("Fused") => {
+                        absorbed.insert(pred);
+                        stack.push(pred);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    absorbed
+}
+
 pub(crate) fn build_compile_units(
     topo_order: &[NodeIndex],
     llir_graph: &LLIRGraph,
+    globally_absorbed: &FxHashSet<NodeIndex>,
 ) -> Vec<CompileUnit> {
     let name_of = |idx: NodeIndex| -> Option<&'static str> {
         llir_graph
@@ -195,13 +250,19 @@ pub(crate) fn build_compile_units(
     }
 
     // Second pass: emit compile units in original topo order, replacing
-    // FE nodes with their RegionUnit and skipping anything absorbed.
+    // FE nodes with their RegionUnit and skipping anything absorbed —
+    // either by a region in *this* subgraph (`absorbed`) or by any
+    // region anywhere in the LLIR (`globally_absorbed`). Skipping the
+    // latter prevents the identity-memcpy fallback from firing on
+    // shared FS markers whose consumers live in other convex subgraphs:
+    // those FSes are absorbed by some other region, and the consuming
+    // region reads from FS's external producer, so the FS never needs
+    // its own kernel.
     let mut units: Vec<CompileUnit> = Vec::new();
     for &node in topo_order {
         if let Some(region) = regions.remove(&node) {
             units.push(CompileUnit::Region(region));
-        } else if absorbed.contains(&node) {
-            // Interior FusedX / FS / nested FE — folded into a region.
+        } else if absorbed.contains(&node) || globally_absorbed.contains(&node) {
             continue;
         } else {
             units.push(CompileUnit::Single(node));
