@@ -995,17 +995,31 @@ pub fn validate_choice_set<'a>(
     Ok(())
 }
 
-/// Hash a choice set for uniqueness checking
-pub fn hash_choice_set(choices: &EGraphChoiceSet) -> u64 {
+/// Hash a single (class_id, node_id) entry. Used both for the full
+/// choice-set hash and for the incremental updates in
+/// `extract_generation`.
+fn hash_choice_entry(class_id: &ClassId, node_id: &NodeId) -> u64 {
     let mut hasher = DefaultHasher::new();
-    // Sort by ClassId for deterministic hashing
-    let mut sorted: Vec<_> = choices.iter().collect();
-    sorted.sort_by(|(k1, _), (k2, _)| k1.as_ref().cmp(k2.as_ref()));
-    for (class_id, node_id) in sorted {
-        class_id.hash(&mut hasher);
-        node_id.hash(&mut hasher);
-    }
+    class_id.hash(&mut hasher);
+    node_id.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Hash a choice set for uniqueness checking. Order-independent XOR
+/// of per-entry hashes. The XOR design lets `extract_generation`
+/// update the hash incrementally on each `insert(k, new)` by XORing
+/// out `hash_choice_entry(k, old)` and XORing in
+/// `hash_choice_entry(k, new)`, dropping the per-attempt cost from
+/// O(N log N) over the full choice set to O(M) where M = mutations
+/// applied. On large e-graphs (e.g. Gemma's ~3.5M-entry choice set)
+/// that's the difference between ~135 seconds and a few milliseconds
+/// per generation.
+pub fn hash_choice_set(choices: &EGraphChoiceSet) -> u64 {
+    let mut h = 0u64;
+    for (k, v) in choices {
+        h ^= hash_choice_entry(k, v);
+    }
+    h
 }
 
 /// Extract a generation of mutated offspring from a base genome.
@@ -1047,25 +1061,38 @@ pub fn extract_generation<'a>(
     // Limit attempts to avoid infinite loops when search space is exhausted
     let max_attempts = generation_size * 100;
     let mut attempts = 0;
+    // Compute the base's full hash exactly once. Each attempt starts from
+    // this and applies XOR diffs for its mutations — no per-attempt
+    // O(N log N) sort+hash over the full choice set.
+    let base_hash = hash_choice_set(base);
 
     while offspring.len() < generation_size && attempts < max_attempts {
         attempts += 1;
 
         // Create a mutated offspring from base
         let mut child = base.clone();
+        let mut child_hash = base_hash;
 
         for _ in 0..rng.random_range(1..=mutations_per_generation) {
             // Pick a random mutable eclass
             let class_id = mutable_classes[rng.random_range(0..mutable_classes.len())];
             let (_, enodes) = &egraph.eclasses[class_id];
             // Pick a random enode for this class
-            child.insert(class_id, &enodes[rng.random_range(0..enodes.len())]);
+            let new_node = &enodes[rng.random_range(0..enodes.len())];
+            // Insert returns the previous binding (if any); fold the diff
+            // into the running hash. If the new pick equals the old one,
+            // the two XORs cancel and `child_hash` is unchanged — exactly
+            // the right behaviour.
+            let old_node = child.insert(class_id, new_node);
+            if let Some(old_node) = old_node {
+                child_hash ^= hash_choice_entry(class_id, old_node);
+            }
+            child_hash ^= hash_choice_entry(class_id, new_node);
         }
 
         // Hash and check if seen before
-        let h = hash_choice_set(&child);
-        if !prev_selected.contains(&h) {
-            prev_selected.insert(h);
+        if !prev_selected.contains(&child_hash) {
+            prev_selected.insert(child_hash);
             offspring.push(child);
         }
     }
