@@ -1085,13 +1085,18 @@ impl Runtime for CudaRuntime {
             && dyn_map
                 .iter()
                 .filter(|(d, _)| bucket.intermediate_buffer_dims.contains(*d))
-                .all(|(d, v)| bucket.buffer_dyn_high_water.get(d).is_some_and(|hw| v <= hw));
+                .all(|(d, v)| {
+                    bucket
+                        .buffer_dyn_high_water
+                        .get(d)
+                        .is_some_and(|hw| v <= hw)
+                });
         let dyn_dims_changed = dyn_map
             .iter()
             .filter(|(d, _)| bucket.intermediate_buffer_dims.contains(*d))
             .any(|(d, v)| bucket.last_dyn_map.get(d).map(|n| *n != *v).unwrap_or(true));
-        let needs_realloc = !within_high_water
-            && (buffers_empty || dyn_map_len_changed || dyn_dims_changed);
+        let needs_realloc =
+            !within_high_water && (buffers_empty || dyn_map_len_changed || dyn_dims_changed);
         if !buffers_empty || dyn_dims_changed {
             // Always remember the latest dyn_map even when we skip the walk,
             // so tracing fields like last_dyn_map remain accurate.
