@@ -1,242 +1,0 @@
-Using model directory: /home/ubuntu/.cache/huggingface/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
-Building E-Graph...
-    Split  37 chunks from graph breaks
-   Graphs  4 unique groups from 37 chunks
-Loading weights...
-Compiling...
-    Graph 0 189 ms 780 µs | MBU: 0.0% | MFU: 0.0% [KRN: 143 HOST: 6]
-[2K   Graph  [>                       ] 1/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 7 ms 171 µs | MBU: 0.0% | MFU: 0.0% [KRN: 149 HOST: 6]
-[2K   Graph  [>                       ] 2/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 6 ms 459 µs | MBU: 0.0% | MFU: 0.0% [KRN: 146 HOST: 6]
-[2K   Graph  [>                       ] 3/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 6 ms 86 µs | MBU: 0.0% | MFU: 0.0% [KRN: 145 HOST: 6]
-[2K   Graph  [>                       ] 4/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 5 ms 952 µs | MBU: 0.0% | MFU: 0.0% [KRN: 143 HOST: 6]
-[2K   Graph  [>                       ] 5/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 5 ms 593 µs | MBU: 0.0% | MFU: 0.0% [KRN: 146 HOST: 6]
-[2K   Graph  [>                       ] 6/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [>                       ] 7/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [>                       ] 8/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 4 ms 676 µs | MBU: 0.0% | MFU: 0.0% [KRN: 149 HOST: 6]
-[2K   Graph  [>                       ] 9/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 3 ms 3 µs | MBU: 0.0% | MFU: 0.0% [KRN: 147 HOST: 6]
-[2K   Graph  [>                       ] 10/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 2 ms 816 µs | MBU: 0.0% | MFU: 0.0% [KRN: 149 HOST: 6]
-[2K   Graph  [>                       ] 11/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [>                       ] 12/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [>                       ] 13/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [>                       ] 14/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [>                       ] 15/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [>                       ] 16/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [>                       ] 17/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [>                       ] 18/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 2 ms 760 µs | MBU: 0.0% | MFU: 0.0% [KRN: 143 HOST: 6]
-[2K   Graph  [>                       ] 19/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [>                       ] 20/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 21/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 22/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 23/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 24/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 25/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 2 ms 745 µs | MBU: 0.0% | MFU: 0.0% [KRN: 146 HOST: 6]
-[2K   Graph  [=>                      ] 26/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 27/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 28/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 29/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 30/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 31/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 32/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 33/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 34/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 2 ms 728 µs | MBU: 0.0% | MFU: 0.0% [KRN: 151 HOST: 6]
-[2K   Graph  [=>                      ] 35/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 36/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 37/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 38/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 39/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 40/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [=>                      ] 41/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 42/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 43/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 44/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 45/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 2 ms 726 µs | MBU: 0.0% | MFU: 0.0% [KRN: 149 HOST: 6]
-[2K   Graph  [==>                     ] 46/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 47/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 48/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 49/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 50/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 2 ms 686 µs | MBU: 0.0% | MFU: 0.0% [KRN: 150 HOST: 6]
-[2K   Graph  [==>                     ] 51/500
-[2K  Bucket  [>                       ] 0/4[1A[2K   Searched 2 ms 601 µs | MBU: 0.0% | MFU: 0.0% [KRN: 145 HOST: 6]
-[2K   Graph  [==>                     ] 52/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 53/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 54/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 55/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 56/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 57/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 58/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 59/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 60/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 61/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [==>                     ] 62/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [===>                    ] 63/500
-[2K  Bucket  [>                       ] 0/4[1A[2K[2K   Graph  [===>                    ] 64/500
-[2K  Bucket  [>                       ] 0/4[1A[2K    Graph 1 3 ms 576 µs | MBU: 0.0% | MFU: 0.0% [KRN: 142 HOST: 6] (33x)
-[2K   Graph  [>                       ] 1/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K   Searched 2 ms 828 µs | MBU: 0.0% | MFU: 0.0% [KRN: 145 HOST: 6]
-[2K   Graph  [>                       ] 2/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 3/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 4/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K   Searched 2 ms 372 µs | MBU: 0.0% | MFU: 0.0% [KRN: 145 HOST: 6]
-[2K   Graph  [>                       ] 5/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K   Searched 2 ms 299 µs | MBU: 0.0% | MFU: 0.0% [KRN: 139 HOST: 6]
-[2K   Graph  [>                       ] 6/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 7/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 8/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 9/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 10/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 11/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 12/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 13/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 14/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 15/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 16/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 17/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 18/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 19/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [>                       ] 20/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 21/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 22/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 23/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 24/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 25/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 26/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 27/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 28/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 29/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 30/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 31/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 32/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 33/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 34/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 35/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 36/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 37/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 38/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 39/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 40/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [=>                      ] 41/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 42/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 43/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 44/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 45/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 46/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 47/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 48/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 49/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 50/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 51/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 52/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 53/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 54/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 55/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 56/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 57/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 58/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 59/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 60/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 61/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [==>                     ] 62/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [===>                    ] 63/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K[2K   Graph  [===>                    ] 64/500
-[2K  Bucket  [======>                 ] 1/4[1A[2K    Graph 2 3 ms 398 µs | MBU: 0.0% | MFU: 0.0% [KRN: 139 HOST: 6] (2x)
-[2K   Graph  [>                       ] 1/500
-[2K  Bucket  [============>           ] 2/4[1A[2K   Searched 3 ms 269 µs | MBU: 0.0% | MFU: 0.0% [KRN: 141 HOST: 6]
-[2K   Graph  [>                       ] 2/500
-[2K  Bucket  [============>           ] 2/4[1A[2K   Searched 2 ms 796 µs | MBU: 0.0% | MFU: 0.0% [KRN: 145 HOST: 6]
-[2K   Graph  [>                       ] 3/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 4/500
-[2K  Bucket  [============>           ] 2/4[1A[2K   Searched 2 ms 417 µs | MBU: 0.0% | MFU: 0.0% [KRN: 142 HOST: 6]
-[2K   Graph  [>                       ] 5/500
-[2K  Bucket  [============>           ] 2/4[1A[2K   Searched 2 ms 282 µs | MBU: 0.0% | MFU: 0.0% [KRN: 145 HOST: 6]
-[2K   Graph  [>                       ] 6/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 7/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 8/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 9/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 10/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 11/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 12/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 13/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 14/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 15/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 16/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 17/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 18/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 19/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [>                       ] 20/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 21/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 22/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 23/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 24/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 25/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 26/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 27/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 28/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 29/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 30/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 31/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 32/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 33/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 34/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 35/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 36/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 37/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 38/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 39/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 40/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [=>                      ] 41/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 42/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 43/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 44/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 45/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 46/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 47/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 48/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 49/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 50/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 51/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 52/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 53/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 54/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 55/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 56/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 57/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 58/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 59/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 60/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 61/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [==>                     ] 62/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [===>                    ] 63/500
-[2K  Bucket  [============>           ] 2/4[1A[2K[2K   Graph  [===>                    ] 64/500
-[2K  Bucket  [============>           ] 2/4[1A[2K    Graph 3 2 ms 633 µs | MBU: 0.0% | MFU: 0.0% [KRN: 12 HOST: 1]
-[2K   Graph  [>                       ] 1/500
-[2K  Bucket  [==================>     ] 3/4[1A[2K
-[2K
-[1A[1A   Searched  4 groups (37 chunks) in 18s 750ms
-Prompt: 11 tokens, generating up to 500 tokens
- A neural network is a computational model inspired by the structure and function of the human brain, consisting of layers of interconnected nodes or neurons that process information through weighted connections. These networks are capable of learning patterns from data by adjusting their internal parameters during training, making them highly effective for tasks such as image recognition, natural language processing, and predictive analytics. The key components include input layers, hidden layers, and output layers, with each neuron applying a nonlinear transformation to its inputs before passing the result to the next layer. Neural networks can handle complex, non-linear relationships in data and are widely used in various fields due to their adaptability and ability to model intricate patterns.
-Okay, so I need to explain what a neural network is in a paragraph. Let me start by recalling what I know. From what I remember, neural networks are like the human brain's structure. They have layers of nodes, right? Each node is like a neuron. But how exactly do they work?
-
-I think they process information through these layers. There's an input layer, then some hidden layers, and finally an output layer. Each neuron in a layer is connected to neurons in the next layer. The connections have weights, which determine the strength of the signal passed between neurons. During training, these weights are adjusted based on the error of the predictions, using something like backpropagation. That makes the network learn from the data.
-
-Wait, but how does the learning happen? Oh right, it's through an algorithm that minimizes the difference between the network's predictions and the actual outcomes. This is usually done using optimization techniques like gradient descent. The network can model complex, non-linear relationships because of the multiple layers and the non-linear activation functions applied at each step.
-
-So, neural networks are used for tasks like image recognition, speech processing, and even game playing. They're powerful because they can find patterns in data without being explicitly programmed for each task. But I should make sure I don't mix up the terms. For example, deep learning refers to neural networks with many layers, but the basic concept is similar.
-
-Let me check if I got the components right: input, hidden, output layers. Each neuron applies a non-linear transformation. The weights are adjusted during training. Also, the activation functions are crucial here. Maybe mention that the network learns by adjusting these weights through training data. And that they can handle complex data because of the multiple layers.
-
-Hmm, I should also mention that they are a type of
-  TTFT: 432.05 ms
-  TPOT: 37.49 ms

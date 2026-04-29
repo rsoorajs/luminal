@@ -1,9 +1,0 @@
-digraph rule1_lhs {
-  rankdir=TB; nodesep=0.35; ranksep=0.4;
-  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=14, penwidth=1.2];
-  edge [arrowsize=0.7, color="#444"];
-
-  U [label="U", fillcolor="#cfe2ff"];
-  x [label="x", fillcolor="#f8f9fa"];
-  U -> x;
-}

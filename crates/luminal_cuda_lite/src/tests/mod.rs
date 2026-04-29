@@ -5,8 +5,6 @@ mod bucket_tests;
 #[cfg(test)]
 mod consumed_buffer_tests;
 #[cfg(test)]
-mod discriminator_experiment;
-#[cfg(test)]
 mod fusion;
 #[cfg(test)]
 mod model_fuzz;
