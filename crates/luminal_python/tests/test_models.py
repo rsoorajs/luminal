@@ -2201,3 +2201,28 @@ class MambaConvBlockModel(torch.nn.Module):
         return self.out_proj(
             torch.nn.functional.silu(x_part) * torch.nn.functional.silu(z)
         )
+
+
+class BitwiseOrTestModel(torch.nn.Module):
+    """Tests bitwise_or on boolean tensors — the pattern Gemma-style models
+    emit when fusing sliding-window and full-attention masks
+    (`mask = sliding_mask | full_mask`)."""
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return a | b
+
+
+class GroupedMMFallbackTestModel(torch.nn.Module):
+    """Tests transformers::grouped_mm_fallback — the per-expert batched
+    matmul HF MoE models emit (DeepSeek-V2, Qwen-MoE, Mixtral, etc.).
+
+    Calls the registered custom_op directly with shapes that match a
+    realistic MoE expert dispatch: input is `(S, K)` of tokens already
+    sorted by expert, weight is `(G, K, N)` per-expert weights, offs is
+    `(G,)` cumulative token counts.
+    """
+
+    def forward(
+        self, input: torch.Tensor, weight: torch.Tensor, offs: torch.Tensor
+    ) -> torch.Tensor:
+        return torch.ops.transformers.grouped_mm_fallback(input, weight, offs)
