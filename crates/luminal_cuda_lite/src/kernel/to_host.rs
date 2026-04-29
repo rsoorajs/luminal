@@ -897,4 +897,22 @@ pub fn kernel_to_host(
             llir_graph.add_edge(src, dst, ());
         }
     }
+
+    // Strip fully-absorbed marker nodes (FusionStart, nested FusionEnd,
+    // FusedX) from the LLIR. Region codegen has already folded them into
+    // a single fused CUDA function anchored at each region's root
+    // FusionEnd; the absorbed nodes have no consumers outside the region
+    // and never need their own buffers. Removing them keeps later
+    // per-execute walks (e.g., `allocate_intermediate_buffers`) from
+    // chewing through dead nodes every decode token.
+    //
+    // Root FusionEnd nodes are NOT in `globally_absorbed` (they were the
+    // walks' starting points), so we keep them — they're the kernel
+    // anchor for the region's compiled kernel.
+    for node in globally_absorbed {
+        // Defensive: only remove if the node still exists.
+        if llir_graph.node_weight(node).is_some() {
+            llir_graph.remove_node(node);
+        }
+    }
 }

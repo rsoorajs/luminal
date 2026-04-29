@@ -209,6 +209,14 @@ impl EgglogOp for FusionEnd {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
+        // Ablation switch: with `LUMINAL_DISABLE_BINARY_FUSION=1` set, do
+        // not register any fusion rules. The e-graph never sees the FS/FE
+        // bracketed alternative, extraction always picks the un-fused
+        // form, and the runtime path matches main with no fusion at all.
+        // Used to A/B fusion's runtime impact on a single binary.
+        if std::env::var("LUMINAL_DISABLE_BINARY_FUSION").is_ok() {
+            return Vec::new();
+        }
         // Seven rule families build and extend FE-bracketed regions. Each
         // pair-fuse rule's LHS pattern matches *un-fused* `KernelX` ops; the
         // RHS produces `FusedX` variants in a different egglog sort, so the
