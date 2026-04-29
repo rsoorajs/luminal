@@ -1172,12 +1172,17 @@ pub fn egglog_to_llir_from_root<'a>(
     let mut graph = LLIRGraph::default();
     let mut edges_to_place = vec![];
     let mut enode_to_node = FxHashMap::default();
-    for &node in choices.values() {
-        if !reachable.contains(node) {
-            continue;
-        }
+    // Iterate the small reachable set rather than the full choice set.
+    // On large e-graphs (e.g., Gemma's ~3.48M-entry choice set produced
+    // by the binary-fusion grow rules cascading through super-block
+    // chains), `reachable` is ~3K nodes and the choice set is ~1000×
+    // larger. Filtering the choice set against `reachable` was
+    // dominating per-candidate `egglog_to_llir` time.
+    for &node in &reachable {
         if egraph.eclasses[&egraph.node_to_class[node]].0 != "IR" {
-            // Skip IList / OpKind
+            // Skip IList enodes — `reachable` includes them because the
+            // reachability walk follows IList children, but only IR
+            // enodes become LLIR nodes.
             continue;
         }
         let enode_label = egraph.enodes[node].0.as_str();
