@@ -2081,6 +2081,139 @@ def test_scatter_nd(device: torch.device):
     assert torch.allclose(output, original)
 
 
+# ========== Bool-mask index_put correctness tests ==========
+#
+# `x[bool_mask] = scalar` is semantically `where(mask, scalar, x)`, NOT a
+# scatter into Int(mask) positions. Pre-fix, the translator cast the Bool
+# mask to Int and routed through scatter_nd, reinterpreting True/False as
+# row indices 1/0 and silently corrupting `x`. Each variant below exercises
+# a different mask configuration; together they would catch any regression
+# in the bool-mask blend path.
+
+
+def _check_bool_mask(device: torch.device, model_cls, x: torch.Tensor, mask: torch.Tensor):
+    """Shared body: compile, run eager + compiled, assert exact equality."""
+    from test_models import (
+        BoolMaskAssign3DModel,
+        BoolMaskAssignFloatModel,
+        BoolMaskAssignIntModel,
+    )
+    _ = (BoolMaskAssign3DModel, BoolMaskAssignFloatModel, BoolMaskAssignIntModel)
+    model: torch.nn.Module = model_cls().to(device)
+    model_compiled: Callable = torch.compile(model, backend=luminal_backend)
+    original: torch.Tensor = model(x, mask)
+    output: torch.Tensor = model_compiled(x, mask)
+    # Bit-equal (not allclose) — the lowering should produce identical
+    # results to eager for bool-mask blends.
+    assert torch.equal(output, original), (
+        f"bool-mask index_put mismatch:\n"
+        f"  mask = {mask.flatten().tolist()}\n"
+        f"  eager = {original.flatten().tolist()}\n"
+        f"  out   = {output.flatten().tolist()}"
+    )
+
+
+def test_bool_mask_index_put_all_false(device: torch.device):
+    """All-False mask must be a no-op. Pre-fix this *silently* corrupted row 0
+    — the regression that drove the Gemma-4 ~30-magnitude logits drift."""
+    from test_models import BoolMaskAssignIntModel
+
+    x = torch.arange(16, device=device, dtype=torch.long).reshape(4, 4)
+    mask = torch.zeros(4, 4, dtype=torch.bool, device=device)
+    _check_bool_mask(device, BoolMaskAssignIntModel, x, mask)
+
+
+def test_bool_mask_index_put_one_true(device: torch.device):
+    """Single True position — only that position should change."""
+    from test_models import BoolMaskAssignIntModel
+
+    x = torch.arange(16, device=device, dtype=torch.long).reshape(4, 4)
+    mask = torch.zeros(4, 4, dtype=torch.bool, device=device)
+    mask[1, 2] = True
+    _check_bool_mask(device, BoolMaskAssignIntModel, x, mask)
+
+
+def test_bool_mask_index_put_many_true(device: torch.device):
+    """Multiple scattered True positions — each should be replaced independently."""
+    from test_models import BoolMaskAssignIntModel
+
+    x = torch.arange(16, device=device, dtype=torch.long).reshape(4, 4)
+    mask = torch.tensor(
+        [[True, False, False, True],
+         [False, False, True, False],
+         [True, False, False, False],
+         [False, True, False, True]],
+        dtype=torch.bool, device=device,
+    )
+    _check_bool_mask(device, BoolMaskAssignIntModel, x, mask)
+
+
+def test_bool_mask_index_put_all_true(device: torch.device):
+    """All-True mask — every element should become the scalar value."""
+    from test_models import BoolMaskAssignIntModel
+
+    x = torch.arange(16, device=device, dtype=torch.long).reshape(4, 4)
+    mask = torch.ones(4, 4, dtype=torch.bool, device=device)
+    _check_bool_mask(device, BoolMaskAssignIntModel, x, mask)
+
+
+def test_bool_mask_index_put_float(device: torch.device):
+    """Float data + float scalar value. Verifies the where-blend works for
+    non-integer dtypes — the blend formula `a*(1-mask) + value*mask` casts
+    mask to data's dtype, so dtype-specific paths must compose correctly."""
+    from test_models import BoolMaskAssignFloatModel
+
+    x = torch.arange(20, device=device, dtype=torch.float32).reshape(4, 5)
+    mask = torch.tensor(
+        [[True, False, False, True, False],
+         [False, True, False, False, True],
+         [True, True, False, False, False],
+         [False, False, False, True, True]],
+        dtype=torch.bool, device=device,
+    )
+    model = BoolMaskAssignFloatModel().to(device)
+    compiled = torch.compile(model, backend=luminal_backend)
+    original = model(x, mask)
+    output = compiled(x, mask)
+    assert torch.allclose(output, original)
+
+
+def test_bool_mask_index_put_3d(device: torch.device):
+    """3-D `x` with a 3-D bool mask of matching shape. Catches regressions
+    where the bool-mask detection only works at one specific rank — the
+    `idx_tensor.shape.dims == a.shape.dims` check has to handle arbitrary
+    ranks, not just 2-D."""
+    from test_models import BoolMaskAssign3DModel
+
+    x = torch.arange(24, device=device, dtype=torch.float32).reshape(2, 3, 4)
+    mask = torch.zeros(2, 3, 4, dtype=torch.bool, device=device)
+    mask[0, 1, 2] = True
+    mask[1, 0, 0] = True
+    mask[1, 2, 3] = True
+    model = BoolMaskAssign3DModel().to(device)
+    compiled = torch.compile(model, backend=luminal_backend)
+    original = model(x, mask)
+    output = compiled(x, mask)
+    assert torch.allclose(output, original)
+
+
+def test_int_index_put_scalar_src(device: torch.device):
+    """`x[indices] = scalar` with int indices: the scatter path receives a
+    scalar src against a 1D index tensor. Pre-fix `GraphTensor::scatter`
+    panicked at `flatten_strides` (rank mismatch: index_shape=[2],
+    src_strides=[]). With the zero-stride padding the scalar broadcasts
+    across all indexed positions correctly."""
+    from test_models import IntIndexAssignScalarModel
+
+    x = torch.arange(20, device=device, dtype=torch.float32).reshape(5, 4)
+    indices = torch.tensor([0, 3], device=device, dtype=torch.long)
+    model = IntIndexAssignScalarModel().to(device)
+    compiled = torch.compile(model, backend=luminal_backend)
+    original = model(x, indices)
+    output = compiled(x, indices)
+    assert torch.allclose(output, original)
+
+
 def test_grouped_mm_fallback(device: torch.device):
     """Tests transformers::grouped_mm_fallback — the per-expert batched matmul
     used by HF MoE forward passes (DeepSeek-V2/V3, Qwen2/3-MoE, Mixtral, ...).
