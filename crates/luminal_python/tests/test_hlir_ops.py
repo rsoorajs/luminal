@@ -2091,13 +2091,16 @@ def test_scatter_nd(device: torch.device):
 # in the bool-mask blend path.
 
 
-def _check_bool_mask(device: torch.device, model_cls, x: torch.Tensor, mask: torch.Tensor):
+def _check_bool_mask(
+    device: torch.device, model_cls, x: torch.Tensor, mask: torch.Tensor
+):
     """Shared body: compile, run eager + compiled, assert exact equality."""
     from test_models import (
         BoolMaskAssign3DModel,
         BoolMaskAssignFloatModel,
         BoolMaskAssignIntModel,
     )
+
     _ = (BoolMaskAssign3DModel, BoolMaskAssignFloatModel, BoolMaskAssignIntModel)
     model: torch.nn.Module = model_cls().to(device)
     model_compiled: Callable = torch.compile(model, backend=luminal_backend)
@@ -2139,11 +2142,14 @@ def test_bool_mask_index_put_many_true(device: torch.device):
 
     x = torch.arange(16, device=device, dtype=torch.long).reshape(4, 4)
     mask = torch.tensor(
-        [[True, False, False, True],
-         [False, False, True, False],
-         [True, False, False, False],
-         [False, True, False, True]],
-        dtype=torch.bool, device=device,
+        [
+            [True, False, False, True],
+            [False, False, True, False],
+            [True, False, False, False],
+            [False, True, False, True],
+        ],
+        dtype=torch.bool,
+        device=device,
     )
     _check_bool_mask(device, BoolMaskAssignIntModel, x, mask)
 
@@ -2165,11 +2171,14 @@ def test_bool_mask_index_put_float(device: torch.device):
 
     x = torch.arange(20, device=device, dtype=torch.float32).reshape(4, 5)
     mask = torch.tensor(
-        [[True, False, False, True, False],
-         [False, True, False, False, True],
-         [True, True, False, False, False],
-         [False, False, False, True, True]],
-        dtype=torch.bool, device=device,
+        [
+            [True, False, False, True, False],
+            [False, True, False, False, True],
+            [True, True, False, False, False],
+            [False, False, False, True, True],
+        ],
+        dtype=torch.bool,
+        device=device,
     )
     model = BoolMaskAssignFloatModel().to(device)
     compiled = torch.compile(model, backend=luminal_backend)
