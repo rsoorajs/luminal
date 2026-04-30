@@ -664,6 +664,22 @@ impl CudaRuntime {
             if bucket.llir_graph[node].to_op::<Input>().is_some() {
                 continue;
             }
+            // Skip fusion marker / interior nodes. Region codegen folds
+            // FusionStart / FusionEnd / FusedX into a single CUDA function
+            // anchored at the FusionEnd; these marker nodes never need a
+            // device buffer of their own at runtime, so walking them here
+            // each step (with `p` incrementing every decode token) is
+            // pure overhead. Skipping them recovers ~2 ms / token on
+            // llama with fusion enabled.
+            if let Some(op) = bucket.llir_graph[node].to_dialect::<dyn KernelOp>() {
+                let kn = op.kernel_name();
+                if kn == "FusionStart" || kn.starts_with("Fused") {
+                    continue;
+                }
+                // Note: we deliberately keep "FusionEnd" because it is the
+                // anchor for the region's compiled kernel and DOES need a
+                // buffer for the region's output.
+            }
             let needed_bytes =
                 if let Some(op) = bucket.llir_graph[node].to_dialect::<dyn KernelOp>() {
                     let out_bytes = op.output_bytes();
