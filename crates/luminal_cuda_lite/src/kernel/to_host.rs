@@ -879,20 +879,13 @@ pub fn kernel_to_host(
         }
     }
 
-    // Add collected edges (deduplicate), skipping back-edges to preserve DAG property
-    let edges_to_add: FxHashSet<(NodeIndex, NodeIndex)> = edges_to_add.into_iter().collect();
-    let topo = toposort(&*llir_graph, None).unwrap();
-    let mut topo_pos: FxHashMap<NodeIndex, usize> = FxHashMap::default();
-    for (i, n) in topo.iter().enumerate() {
-        topo_pos.insert(*n, i);
-    }
-    for (src, dst) in edges_to_add {
-        // Only add forward edges (src before dst in topo order) to avoid creating cycles
-        let src_pos = topo_pos.get(&src).copied().unwrap_or(usize::MAX);
-        let dst_pos = topo_pos.get(&dst).copied().unwrap_or(usize::MAX);
-        if src_pos >= dst_pos {
-            continue; // Skip back-edges
-        }
+    // `partition_marked_convex` produces convex kernel subgraphs, so every
+    // edge collected above is a real producer→consumer dependency that
+    // cannot close a cycle. Add them all (deduplicated). An earlier
+    // topo-position gate dropped edges where the freshly-added CudaGraphOp
+    // wrapper landed later in the toposort than its HostOp consumer,
+    // letting consumers run before their producer wrote the buffer.
+    for (src, dst) in edges_to_add.into_iter().collect::<FxHashSet<_>>() {
         if !llir_graph.edges_connecting(src, dst).any(|_| true) {
             llir_graph.add_edge(src, dst, ());
         }
