@@ -879,16 +879,24 @@ pub fn kernel_to_host(
         }
     }
 
-    // `partition_marked_convex` produces convex kernel subgraphs, so every
-    // edge collected above is a real producer→consumer dependency that
-    // cannot close a cycle. Add them all (deduplicated). An earlier
-    // topo-position gate dropped edges where the freshly-added CudaGraphOp
-    // wrapper landed later in the toposort than its HostOp consumer,
-    // letting consumers run before their producer wrote the buffer.
-    for (src, dst) in edges_to_add.into_iter().collect::<FxHashSet<_>>() {
-        if !llir_graph.edges_connecting(src, dst).any(|_| true) {
-            llir_graph.add_edge(src, dst, ());
+    // Add each cross-CudaGraphOp dep edge iff it would carry new ordering
+    // information without closing a cycle. The previous topo-position gate
+    // ("skip when src_pos >= dst_pos") was too coarse: it dropped edges
+    // whose src happened to land later in the toposort than their dst even
+    // when no path dst→src actually existed, leaving consumers free to run
+    // before the producer wrote their input buffer (wrong outputs); and it
+    // also added edges that were already implied by an existing src→dst
+    // path (extra serialization, no new info).
+    let edges_to_add: FxHashSet<(NodeIndex, NodeIndex)> = edges_to_add.into_iter().collect();
+    use petgraph::algo::has_path_connecting;
+    for (src, dst) in edges_to_add {
+        if has_path_connecting(&*llir_graph, src, dst, None) {
+            continue; // already ordered src→dst by some path; edge redundant
         }
+        if has_path_connecting(&*llir_graph, dst, src, None) {
+            continue; // adding src→dst would close a cycle
+        }
+        llir_graph.add_edge(src, dst, ());
     }
 
     // Strip fully-absorbed marker nodes (FusionStart, nested FusionEnd,
