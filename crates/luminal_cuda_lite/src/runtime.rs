@@ -77,12 +77,6 @@ pub(crate) struct CompiledBucket {
     pub(crate) output_alias_map: FxHashMap<NodeIndex, NodeIndex>,
     pub(crate) last_dyn_map: FxHashMap<char, usize>,
     pub(crate) intermediate_buffer_dims: FxHashSet<char>,
-    /// Per-dim high-water mark seen during `allocate_intermediate_buffers`.
-    /// If every current dyn-map value is `<=` the corresponding entry here
-    /// (for dims that show up in `intermediate_buffer_dims`), no buffer can
-    /// possibly need to grow, and the per-execute walk over `llir_graph`
-    /// can be skipped entirely. Saves ~2 ms per decode token on llama.
-    pub(crate) buffer_dyn_high_water: FxHashMap<char, usize>,
     /// Which bucket index per dim this compilation targets
     pub(crate) bucket_indices: FxHashMap<char, usize>,
     /// Whether HLIR pointers have been synced into this bucket's cached_buffer_ptrs
@@ -102,7 +96,6 @@ impl CompiledBucket {
             output_alias_map: FxHashMap::default(),
             last_dyn_map: FxHashMap::default(),
             intermediate_buffer_dims: FxHashSet::default(),
-            buffer_dyn_high_water: FxHashMap::default(),
             bucket_indices: FxHashMap::default(),
             hlir_synced: false,
         }
@@ -719,17 +712,6 @@ impl CudaRuntime {
             let ptr = bucket.buffers[&node].device_ptr(stream).0;
             bucket.cached_buffer_ptrs.insert(node, ptr);
         }
-        // Update the high-water mark for the dims that actually drive
-        // buffer sizing, so subsequent execute() calls can short-circuit
-        // the realloc walk while we're still within the envelope we sized
-        // for.
-        for d in &bucket.intermediate_buffer_dims {
-            let v = dyn_dims.get(d).copied().unwrap_or(0);
-            let entry = bucket.buffer_dyn_high_water.entry(*d).or_insert(0);
-            if v > *entry {
-                *entry = v;
-            }
-        }
         let _ = (realloc_count, total_alloc);
     }
 
@@ -1075,34 +1057,13 @@ impl Runtime for CudaRuntime {
         let bucket = &mut self.compiled_buckets[self.active_bucket];
         let buffers_empty = bucket.buffers.is_empty();
         let dyn_map_len_changed = dyn_map.len() != bucket.last_dyn_map.len();
-        // High-water-mark fast path: if buffers exist and every current
-        // dyn-map value (for dims that affect intermediate sizing) is
-        // already <= what we previously sized buffers for, nothing can
-        // need reallocation. Avoids walking ~6k LLIR nodes every decode
-        // token just to discover "still big enough".
-        let within_high_water = !buffers_empty
-            && !dyn_map_len_changed
-            && dyn_map
-                .iter()
-                .filter(|(d, _)| bucket.intermediate_buffer_dims.contains(*d))
-                .all(|(d, v)| {
-                    bucket
-                        .buffer_dyn_high_water
-                        .get(d)
-                        .is_some_and(|hw| v <= hw)
-                });
         let dyn_dims_changed = dyn_map
             .iter()
             .filter(|(d, _)| bucket.intermediate_buffer_dims.contains(*d))
             .any(|(d, v)| bucket.last_dyn_map.get(d).map(|n| *n != *v).unwrap_or(true));
-        let needs_realloc =
-            !within_high_water && (buffers_empty || dyn_map_len_changed || dyn_dims_changed);
-        if !buffers_empty || dyn_dims_changed {
-            // Always remember the latest dyn_map even when we skip the walk,
-            // so tracing fields like last_dyn_map remain accurate.
-            bucket.last_dyn_map = dyn_map.clone();
-        }
+        let needs_realloc = buffers_empty || dyn_map_len_changed || dyn_dims_changed;
         if needs_realloc {
+            bucket.last_dyn_map = dyn_map.clone();
             Self::allocate_intermediate_buffers(bucket, &self.cuda_stream, dyn_map);
         }
         // Cache HLIR input pointers
