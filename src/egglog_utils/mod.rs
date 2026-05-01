@@ -915,52 +915,6 @@ pub fn count_choice_sets_up_to(egraph: &SerializedEGraph, limit: usize) -> usize
     count
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{SerializedEGraph, count_choice_sets_up_to};
-    use crate::prelude::FxHashMap;
-    use egraph_serialize::{ClassId, NodeId};
-
-    fn eclass(id: &str, label: &str, n_nodes: usize) -> (ClassId, (String, Vec<NodeId>)) {
-        (
-            ClassId::from(id),
-            (
-                label.to_string(),
-                (0..n_nodes)
-                    .map(|i| NodeId::from(format!("{id}_{i}")))
-                    .collect(),
-            ),
-        )
-    }
-
-    fn egraph(eclasses: Vec<(ClassId, (String, Vec<NodeId>))>) -> SerializedEGraph {
-        SerializedEGraph {
-            enodes: FxHashMap::default(),
-            eclasses: eclasses.into_iter().collect(),
-            node_to_class: FxHashMap::default(),
-            roots: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn counts_ir_and_ilist_choice_sets() {
-        let egraph = egraph(vec![
-            eclass("a", "IR", 2),
-            eclass("b", "IList", 3),
-            eclass("c", "Shape", 99),
-        ]);
-
-        assert_eq!(count_choice_sets_up_to(&egraph, 100), 6);
-    }
-
-    #[test]
-    fn caps_count_at_limit() {
-        let egraph = egraph(vec![eclass("a", "IR", 1_000), eclass("b", "IList", 1_000)]);
-
-        assert_eq!(count_choice_sets_up_to(&egraph, 10), 10);
-    }
-}
-
 pub fn random_initial_choice<'a>(
     egraph: &'a SerializedEGraph,
     rng: &mut impl Rng,
@@ -1359,4 +1313,50 @@ pub fn egglog_to_llir_from_root<'a>(
     // `crate::graph::unroll_loops_in_llir` runs once on the chosen best LLIR
     // before it is loaded into the runtime.
     graph
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SerializedEGraph, count_choice_sets_up_to};
+    use crate::prelude::FxHashMap;
+    use egraph_serialize::{ClassId, NodeId};
+
+    fn eclass(id: &str, label: &str, n_nodes: usize) -> (ClassId, (String, Vec<NodeId>)) {
+        (
+            ClassId::from(id),
+            (
+                label.to_string(),
+                (0..n_nodes)
+                    .map(|i| NodeId::from(format!("{id}_{i}")))
+                    .collect(),
+            ),
+        )
+    }
+
+    fn egraph(eclasses: Vec<(ClassId, (String, Vec<NodeId>))>) -> SerializedEGraph {
+        SerializedEGraph {
+            enodes: FxHashMap::default(),
+            eclasses: eclasses.into_iter().collect(),
+            node_to_class: FxHashMap::default(),
+            roots: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn counts_ir_and_ilist_choice_sets() {
+        let egraph = egraph(vec![
+            eclass("a", "IR", 2),
+            eclass("b", "IList", 3),
+            eclass("c", "Shape", 99),
+        ]);
+
+        assert_eq!(count_choice_sets_up_to(&egraph, 100), 6);
+    }
+
+    #[test]
+    fn caps_count_at_limit() {
+        let egraph = egraph(vec![eclass("a", "IR", 1_000), eclass("b", "IList", 1_000)]);
+
+        assert_eq!(count_choice_sets_up_to(&egraph, 10), 10);
+    }
 }
