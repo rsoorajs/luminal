@@ -1,6 +1,6 @@
 use crate::egglog_utils::{
-    egglog_to_llir, extract_generation, hash_choice_set, hlir_to_egglog, random_initial_choice,
-    run_egglog,
+    count_choice_sets_up_to, egglog_to_llir, extract_generation, hash_choice_set, hlir_to_egglog,
+    random_initial_choice, run_egglog,
 };
 use crate::{
     egglog_utils::SerializedEGraph,
@@ -1134,6 +1134,7 @@ impl Graph {
         let limit = options.limit;
         let ops = self.ops.as_ref().unwrap();
         let egraph = &self.egraphs[0];
+        let search_limit = count_choice_sets_up_to(egraph, limit);
         let start = std::time::Instant::now();
 
         // Bar layout: one Search bar, plus an optional Bucket bar.
@@ -1238,14 +1239,14 @@ impl Graph {
         // Print initial result and progress
         let msg = format!("   {:>6} {}", "Search".cyan().bold(), display);
         println!("{msg}");
-        render_bars(n_graphs, limit, bucket_progress);
+        render_bars(n_graphs, search_limit, bucket_progress);
         std::io::stdout().flush().unwrap();
 
         // Track top-N parents for offspring generation
         let mut parents: Vec<(R::ProfileMetric, crate::egglog_utils::EGraphChoiceSet<'_>)> =
             vec![(best_metric.clone(), best_genome.clone())];
 
-        while n_graphs < limit {
+        while n_graphs < search_limit {
             if options
                 .group_timeout
                 .is_some_and(|timeout| group_start.elapsed() >= timeout)
@@ -1254,7 +1255,7 @@ impl Graph {
             }
 
             // Generate offspring from all parents, dividing budget evenly
-            let budget = (limit - n_graphs).min(options.generation_size);
+            let budget = (search_limit - n_graphs).min(options.generation_size);
             let per_parent = budget.div_ceil(parents.len());
             let mut all_offspring = Vec::new();
             for (_, parent_genome) in &parents {
@@ -1316,7 +1317,7 @@ impl Graph {
                             print!("\x1b[1A");
                         }
                         print!("\r\x1b[2K");
-                        render_bars(n_graphs, limit, bucket_progress);
+                        render_bars(n_graphs, search_limit, bucket_progress);
                         std::io::stdout().flush().unwrap();
                         continue;
                     }
@@ -1359,7 +1360,7 @@ impl Graph {
                     }
                     print!("\r\x1b[2K");
                 }
-                render_bars(n_graphs, limit, bucket_progress);
+                render_bars(n_graphs, search_limit, bucket_progress);
                 std::io::stdout().flush().unwrap();
             }
         }

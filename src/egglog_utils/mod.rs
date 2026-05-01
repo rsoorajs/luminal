@@ -891,6 +891,76 @@ pub fn extract_expr<'a>(
 
 pub type EGraphChoiceSet<'a> = FxHashMap<&'a ClassId, &'a NodeId>;
 
+/// Count the total number of possible IR/IList choice sets, capped at `limit`.
+///
+/// Search deduplicates candidates by `EGraphChoiceSet`, so this gives the exact
+/// number of candidates when it is below `limit` without risking overflow on
+/// large search spaces.
+pub fn count_choice_sets_up_to(egraph: &SerializedEGraph, limit: usize) -> usize {
+    if limit == 0 {
+        return 0;
+    }
+
+    let mut count = 1usize;
+    for (label, enodes) in egraph.eclasses.values() {
+        if !label.contains("IR") && !label.contains("IList") {
+            continue;
+        }
+
+        count = count.saturating_mul(enodes.len());
+        if count >= limit {
+            return limit;
+        }
+    }
+    count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SerializedEGraph, count_choice_sets_up_to};
+    use crate::prelude::FxHashMap;
+    use egraph_serialize::{ClassId, NodeId};
+
+    fn eclass(id: &str, label: &str, n_nodes: usize) -> (ClassId, (String, Vec<NodeId>)) {
+        (
+            ClassId::from(id),
+            (
+                label.to_string(),
+                (0..n_nodes)
+                    .map(|i| NodeId::from(format!("{id}_{i}")))
+                    .collect(),
+            ),
+        )
+    }
+
+    fn egraph(eclasses: Vec<(ClassId, (String, Vec<NodeId>))>) -> SerializedEGraph {
+        SerializedEGraph {
+            enodes: FxHashMap::default(),
+            eclasses: eclasses.into_iter().collect(),
+            node_to_class: FxHashMap::default(),
+            roots: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn counts_ir_and_ilist_choice_sets() {
+        let egraph = egraph(vec![
+            eclass("a", "IR", 2),
+            eclass("b", "IList", 3),
+            eclass("c", "Shape", 99),
+        ]);
+
+        assert_eq!(count_choice_sets_up_to(&egraph, 100), 6);
+    }
+
+    #[test]
+    fn caps_count_at_limit() {
+        let egraph = egraph(vec![eclass("a", "IR", 1_000), eclass("b", "IList", 1_000)]);
+
+        assert_eq!(count_choice_sets_up_to(&egraph, 10), 10);
+    }
+}
+
 pub fn random_initial_choice<'a>(
     egraph: &'a SerializedEGraph,
     rng: &mut impl Rng,
