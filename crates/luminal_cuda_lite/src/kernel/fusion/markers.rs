@@ -209,14 +209,6 @@ impl EgglogOp for FusionEnd {
     }
 
     fn rewrites(&self) -> Vec<Rule> {
-        // Ablation switch: with `LUMINAL_DISABLE_BINARY_FUSION=1` set, do
-        // not register any fusion rules. The e-graph never sees the FS/FE
-        // bracketed alternative, extraction always picks the un-fused
-        // form, and the runtime path matches main with no fusion at all.
-        // Used to A/B fusion's runtime impact on a single binary.
-        if std::env::var("LUMINAL_DISABLE_BINARY_FUSION").is_ok() {
-            return Vec::new();
-        }
         // Seven rule families build and extend FE-bracketed regions. Each
         // pair-fuse rule's LHS pattern matches *un-fused* `KernelX` ops; the
         // RHS produces `FusedX` variants in a different egglog sort, so the
@@ -409,8 +401,11 @@ impl EgglogOp for FusionEnd {
         }
 
         // 7. Merge two FEs at a binary: B(FE(ia), FE(ib)) → FE(FB(ia, ib)).
-        //    Both inners reused, no new FS — shared external tensors with
-        //    upstream FSes stay at one FS.
+        //
+        // This is destructive: after creating the larger region, subsume the
+        // two smaller FusionEnd rows. Without that, independently-grown left
+        // and right regions form a Cartesian product, then those alternatives
+        // can merge again higher in the graph.
         for (kb, fb, lb) in binaries {
             rules.push(Rule::raw(format!(
                 "(rule (
@@ -423,6 +418,8 @@ impl EgglogOp for FusionEnd {
                                    (ICons ?inner_a (ICons ?inner_b (INil)))))
                     (let ?new_fe (Op (FusionEnd ?shape ?o_s ?dt) (ICons ?fbin (INil))))
                     (union ?bin ?new_fe)
+                    (subsume (Op (FusionEnd ?shape ?a_s ?dt) (ICons ?inner_a (INil))))
+                    (subsume (Op (FusionEnd ?shape ?b_s ?dt) (ICons ?inner_b (INil))))
                  ) :name \"merge-FE-FE-{lb}\")"
             )));
         }
