@@ -142,7 +142,11 @@ def test_whisper_tiny_en_pretrained_first_token(device: torch.device):
 
         audio = whisper_demo.load_wav_16k_mono(audio_path)
         fe = WhisperFeatureExtractor.from_pretrained(whisper_demo.REPO_ID)
-        mel = fe(audio, sampling_rate=16000, return_tensors="pt").input_features[0].to(device)
+        mel = (
+            fe(audio, sampling_rate=16000, return_tensors="pt")
+            .input_features[0]
+            .to(device)
+        )
 
     tokens = torch.tensor(
         [whisper_demo.TOKEN_SOT, whisper_demo.TOKEN_NO_TIMESTAMPS],

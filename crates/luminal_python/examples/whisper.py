@@ -26,7 +26,11 @@ import numpy as np
 import torch
 import torch._dynamo
 import torch.nn.functional as F
-from transformers import WhisperFeatureExtractor, WhisperForConditionalGeneration, WhisperTokenizer
+from transformers import (
+    WhisperFeatureExtractor,
+    WhisperForConditionalGeneration,
+    WhisperTokenizer,
+)
 
 from luminal.pt2 import compile as luminal_compile
 
@@ -88,7 +92,7 @@ class WhisperAttention(torch.nn.Module):
         k = k.reshape(seq_kv, self.n_heads, self.head_dim).transpose(0, 1)
         v = v.reshape(seq_kv, self.n_heads, self.head_dim).transpose(0, 1)
 
-        scale = 1.0 / (self.head_dim ** 0.5)
+        scale = 1.0 / (self.head_dim**0.5)
         scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # (h, sq, sk)
         if causal:
             # Use a large finite negative instead of -inf so the export pipeline
@@ -124,11 +128,17 @@ class EncoderLayer(torch.nn.Module):
 class WhisperEncoder(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.conv1 = torch.nn.Conv1d(N_MELS, D_MODEL, kernel_size=3, padding=1, bias=True)
-        self.conv2 = torch.nn.Conv1d(D_MODEL, D_MODEL, kernel_size=3, stride=2, padding=1, bias=True)
+        self.conv1 = torch.nn.Conv1d(
+            N_MELS, D_MODEL, kernel_size=3, padding=1, bias=True
+        )
+        self.conv2 = torch.nn.Conv1d(
+            D_MODEL, D_MODEL, kernel_size=3, stride=2, padding=1, bias=True
+        )
         # Position embedding stored as a regular parameter (matches HF layout).
         self.embed_positions = torch.nn.Embedding(N_AUDIO_CTX, D_MODEL)
-        self.layers = torch.nn.ModuleList([EncoderLayer() for _ in range(N_AUDIO_LAYER)])
+        self.layers = torch.nn.ModuleList(
+            [EncoderLayer() for _ in range(N_AUDIO_LAYER)]
+        )
         self.layer_norm = torch.nn.LayerNorm(D_MODEL, eps=LAYER_NORM_EPS)
 
     def forward(self, mel: torch.Tensor) -> torch.Tensor:
@@ -236,20 +246,36 @@ def load_hf_weights_into(model: Whisper) -> None:
     enc.layer_norm.bias.data.copy_(get("encoder.layer_norm.bias"))
     for i, layer in enumerate(enc.layers):
         prefix = f"encoder.layers.{i}"
-        layer.self_attn.q_proj.weight.data.copy_(get(f"{prefix}.self_attn.q_proj.weight"))
+        layer.self_attn.q_proj.weight.data.copy_(
+            get(f"{prefix}.self_attn.q_proj.weight")
+        )
         layer.self_attn.q_proj.bias.data.copy_(get(f"{prefix}.self_attn.q_proj.bias"))
-        layer.self_attn.k_proj.weight.data.copy_(get(f"{prefix}.self_attn.k_proj.weight"))
-        layer.self_attn.v_proj.weight.data.copy_(get(f"{prefix}.self_attn.v_proj.weight"))
+        layer.self_attn.k_proj.weight.data.copy_(
+            get(f"{prefix}.self_attn.k_proj.weight")
+        )
+        layer.self_attn.v_proj.weight.data.copy_(
+            get(f"{prefix}.self_attn.v_proj.weight")
+        )
         layer.self_attn.v_proj.bias.data.copy_(get(f"{prefix}.self_attn.v_proj.bias"))
-        layer.self_attn.out_proj.weight.data.copy_(get(f"{prefix}.self_attn.out_proj.weight"))
-        layer.self_attn.out_proj.bias.data.copy_(get(f"{prefix}.self_attn.out_proj.bias"))
-        layer.self_attn_layer_norm.weight.data.copy_(get(f"{prefix}.self_attn_layer_norm.weight"))
-        layer.self_attn_layer_norm.bias.data.copy_(get(f"{prefix}.self_attn_layer_norm.bias"))
+        layer.self_attn.out_proj.weight.data.copy_(
+            get(f"{prefix}.self_attn.out_proj.weight")
+        )
+        layer.self_attn.out_proj.bias.data.copy_(
+            get(f"{prefix}.self_attn.out_proj.bias")
+        )
+        layer.self_attn_layer_norm.weight.data.copy_(
+            get(f"{prefix}.self_attn_layer_norm.weight")
+        )
+        layer.self_attn_layer_norm.bias.data.copy_(
+            get(f"{prefix}.self_attn_layer_norm.bias")
+        )
         layer.fc1.weight.data.copy_(get(f"{prefix}.fc1.weight"))
         layer.fc1.bias.data.copy_(get(f"{prefix}.fc1.bias"))
         layer.fc2.weight.data.copy_(get(f"{prefix}.fc2.weight"))
         layer.fc2.bias.data.copy_(get(f"{prefix}.fc2.bias"))
-        layer.final_layer_norm.weight.data.copy_(get(f"{prefix}.final_layer_norm.weight"))
+        layer.final_layer_norm.weight.data.copy_(
+            get(f"{prefix}.final_layer_norm.weight")
+        )
         layer.final_layer_norm.bias.data.copy_(get(f"{prefix}.final_layer_norm.bias"))
 
     dec = model.decoder
@@ -259,29 +285,63 @@ def load_hf_weights_into(model: Whisper) -> None:
     dec.layer_norm.bias.data.copy_(get("decoder.layer_norm.bias"))
     for i, layer in enumerate(dec.layers):
         prefix = f"decoder.layers.{i}"
-        layer.self_attn.q_proj.weight.data.copy_(get(f"{prefix}.self_attn.q_proj.weight"))
+        layer.self_attn.q_proj.weight.data.copy_(
+            get(f"{prefix}.self_attn.q_proj.weight")
+        )
         layer.self_attn.q_proj.bias.data.copy_(get(f"{prefix}.self_attn.q_proj.bias"))
-        layer.self_attn.k_proj.weight.data.copy_(get(f"{prefix}.self_attn.k_proj.weight"))
-        layer.self_attn.v_proj.weight.data.copy_(get(f"{prefix}.self_attn.v_proj.weight"))
+        layer.self_attn.k_proj.weight.data.copy_(
+            get(f"{prefix}.self_attn.k_proj.weight")
+        )
+        layer.self_attn.v_proj.weight.data.copy_(
+            get(f"{prefix}.self_attn.v_proj.weight")
+        )
         layer.self_attn.v_proj.bias.data.copy_(get(f"{prefix}.self_attn.v_proj.bias"))
-        layer.self_attn.out_proj.weight.data.copy_(get(f"{prefix}.self_attn.out_proj.weight"))
-        layer.self_attn.out_proj.bias.data.copy_(get(f"{prefix}.self_attn.out_proj.bias"))
-        layer.self_attn_layer_norm.weight.data.copy_(get(f"{prefix}.self_attn_layer_norm.weight"))
-        layer.self_attn_layer_norm.bias.data.copy_(get(f"{prefix}.self_attn_layer_norm.bias"))
-        layer.encoder_attn.q_proj.weight.data.copy_(get(f"{prefix}.encoder_attn.q_proj.weight"))
-        layer.encoder_attn.q_proj.bias.data.copy_(get(f"{prefix}.encoder_attn.q_proj.bias"))
-        layer.encoder_attn.k_proj.weight.data.copy_(get(f"{prefix}.encoder_attn.k_proj.weight"))
-        layer.encoder_attn.v_proj.weight.data.copy_(get(f"{prefix}.encoder_attn.v_proj.weight"))
-        layer.encoder_attn.v_proj.bias.data.copy_(get(f"{prefix}.encoder_attn.v_proj.bias"))
-        layer.encoder_attn.out_proj.weight.data.copy_(get(f"{prefix}.encoder_attn.out_proj.weight"))
-        layer.encoder_attn.out_proj.bias.data.copy_(get(f"{prefix}.encoder_attn.out_proj.bias"))
-        layer.encoder_attn_layer_norm.weight.data.copy_(get(f"{prefix}.encoder_attn_layer_norm.weight"))
-        layer.encoder_attn_layer_norm.bias.data.copy_(get(f"{prefix}.encoder_attn_layer_norm.bias"))
+        layer.self_attn.out_proj.weight.data.copy_(
+            get(f"{prefix}.self_attn.out_proj.weight")
+        )
+        layer.self_attn.out_proj.bias.data.copy_(
+            get(f"{prefix}.self_attn.out_proj.bias")
+        )
+        layer.self_attn_layer_norm.weight.data.copy_(
+            get(f"{prefix}.self_attn_layer_norm.weight")
+        )
+        layer.self_attn_layer_norm.bias.data.copy_(
+            get(f"{prefix}.self_attn_layer_norm.bias")
+        )
+        layer.encoder_attn.q_proj.weight.data.copy_(
+            get(f"{prefix}.encoder_attn.q_proj.weight")
+        )
+        layer.encoder_attn.q_proj.bias.data.copy_(
+            get(f"{prefix}.encoder_attn.q_proj.bias")
+        )
+        layer.encoder_attn.k_proj.weight.data.copy_(
+            get(f"{prefix}.encoder_attn.k_proj.weight")
+        )
+        layer.encoder_attn.v_proj.weight.data.copy_(
+            get(f"{prefix}.encoder_attn.v_proj.weight")
+        )
+        layer.encoder_attn.v_proj.bias.data.copy_(
+            get(f"{prefix}.encoder_attn.v_proj.bias")
+        )
+        layer.encoder_attn.out_proj.weight.data.copy_(
+            get(f"{prefix}.encoder_attn.out_proj.weight")
+        )
+        layer.encoder_attn.out_proj.bias.data.copy_(
+            get(f"{prefix}.encoder_attn.out_proj.bias")
+        )
+        layer.encoder_attn_layer_norm.weight.data.copy_(
+            get(f"{prefix}.encoder_attn_layer_norm.weight")
+        )
+        layer.encoder_attn_layer_norm.bias.data.copy_(
+            get(f"{prefix}.encoder_attn_layer_norm.bias")
+        )
         layer.fc1.weight.data.copy_(get(f"{prefix}.fc1.weight"))
         layer.fc1.bias.data.copy_(get(f"{prefix}.fc1.bias"))
         layer.fc2.weight.data.copy_(get(f"{prefix}.fc2.weight"))
         layer.fc2.bias.data.copy_(get(f"{prefix}.fc2.bias"))
-        layer.final_layer_norm.weight.data.copy_(get(f"{prefix}.final_layer_norm.weight"))
+        layer.final_layer_norm.weight.data.copy_(
+            get(f"{prefix}.final_layer_norm.weight")
+        )
         layer.final_layer_norm.bias.data.copy_(get(f"{prefix}.final_layer_norm.bias"))
 
 
@@ -303,7 +363,9 @@ def load_wav_16k_mono(path: Path) -> np.ndarray:
     elif sw == 4:
         samples = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
     elif sw == 1:
-        samples = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+        samples = (
+            np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0
+        ) / 128.0
     else:
         raise ValueError(f"unsupported sample width {sw}")
 
@@ -344,7 +406,10 @@ def main() -> None:
     else:
         audio_path = find_default_audio()
         if audio_path is None:
-            print("error: no audio file given and bundled jfk.wav not found", file=sys.stderr)
+            print(
+                "error: no audio file given and bundled jfk.wav not found",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -382,7 +447,9 @@ def main() -> None:
         example_tokens = torch.tensor(
             [TOKEN_SOT, TOKEN_NO_TIMESTAMPS], dtype=torch.long, device=device
         )
-        print(f"Compiling decoder with dynamic seq dim (search_iters={search_iters})...")
+        print(
+            f"Compiling decoder with dynamic seq dim (search_iters={search_iters})..."
+        )
         compile_start = time.time()
         compiled_decoder = luminal_compile(
             decoder_only,
@@ -396,6 +463,7 @@ def main() -> None:
             out = compiled_decoder(decoder_input_ids)
             return out[0] if isinstance(out, tuple) else out
     else:
+
         def step_logits(decoder_input_ids: torch.Tensor) -> torch.Tensor:
             return model(mel, decoder_input_ids)
 
