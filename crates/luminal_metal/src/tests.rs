@@ -1012,3 +1012,21 @@ fn test_scatter_all_positions() {
     let out = rt.get_f32(result);
     assert_close(&out, &[10.0, 20.0, 30.0, 40.0], 0.001);
 }
+
+#[test]
+fn test_gather_preserves_data_dtype() {
+    let mut cx = Graph::default();
+    let data = cx.tensor(2);
+    let indexes = cx.tensor(1).as_dtype(DType::Int);
+    let out = data.gather(indexes).output();
+
+    cx.build_search_space::<MetalRuntime>();
+    let mut rt = MetalRuntime::initialize(());
+    rt.set_data(data, &[1.25, 2.5]);
+    rt.set_data(indexes, &[1.0]);
+    rt = cx.search(rt, 1);
+    rt.allocate_intermediate_buffers(&cx.dyn_map);
+    rt.execute(&cx.dyn_map);
+
+    assert_close(&rt.get_f32(out), &[2.5], 0.001);
+}

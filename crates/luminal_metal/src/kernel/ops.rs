@@ -2056,6 +2056,10 @@ impl MetalKernelOp for MetalGather {
             .max(Expression::from(1))
     }
 
+    fn infer_output_dtype(&self, input_dtypes: &[DType]) -> DType {
+        input_dtypes.get(1).copied().unwrap_or(DType::F32)
+    }
+
     fn encode(
         &self,
         encoder: &ComputeCommandEncoderRef,
