@@ -12,16 +12,13 @@ use tracing::trace;
 pub mod api;
 pub mod base;
 
-pub const RUN_SCHEDULE: &str = "(run-schedule
-    (repeat 10
-        (saturate expr)
-        (saturate dtype_prop)
-        (run)
-    )
-    (saturate expr)
-    (saturate cleanup)
-    (saturate base_cleanup)
-)";
+const MAIN_SCHEDULE_PASSES: usize = 10;
+
+#[derive(Debug, Clone)]
+struct EgglogSchedulePhase {
+    name: String,
+    schedule: String,
+}
 
 fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     // Partition ops by sort class: IR-class (Input, Output) vs OpKind-class (everything else)
@@ -106,31 +103,19 @@ fn op_cleanups_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     )
 }
 
-pub fn early_egglog(
-    program: &str,
-    root: &str,
-    ops: &[Arc<Box<dyn EgglogOp>>],
-    cleanup: bool,
-) -> String {
-    let parts = OpTextParts::new(ops, cleanup);
-    early_egglog_with(program, root, &parts)
-}
-
 pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> String {
     let parts = OpTextParts::new(ops, cleanup);
     full_egglog_with(program, &parts)
 }
 
-/// Pre-computed per-op text fragments. `run_egglog` calls early + full back
-/// to back with identical `ops`; materialising all op-derived strings once
-/// up front means callers that want to drive multiple egglog runs in parallel
-/// only need to share `&str` references and never touch the non-Send trait
-/// objects in `ops`.
+/// Pre-computed per-op text fragments. Materialising all op-derived strings
+/// once up front means callers that want to drive multiple egglog runs in
+/// parallel only need to share `&str` references and never touch the non-Send
+/// trait objects in `ops`.
 pub struct OpTextParts {
     op_defs: String,
     cleanups: String,
-    early_rewrites: String,
-    full_rewrites: String,
+    rewrites: String,
 }
 
 impl OpTextParts {
@@ -142,12 +127,7 @@ impl OpTextParts {
             } else {
                 String::new()
             },
-            early_rewrites: ops
-                .iter()
-                .flat_map(|o| o.early_rewrites())
-                .map(|r| r.to_egglog_string())
-                .join("\n"),
-            full_rewrites: ops
+            rewrites: ops
                 .iter()
                 .flat_map(|o| o.rewrites())
                 .map(|r| r.to_egglog_string())
@@ -156,37 +136,74 @@ impl OpTextParts {
     }
 }
 
-fn early_egglog_with(program: &str, root: &str, parts: &OpTextParts) -> String {
-    [
-        base::base_expression_egglog(),
-        parts.op_defs.clone(),
-        parts.early_rewrites.clone(),
-        parts.cleanups.clone(),
-        base::base_cleanup_egglog(),
-        program.to_string(),
-        format!(
-            "(run-schedule
-                (repeat 6
-                    (saturate expr)
-                    (run)
-                )
-                (saturate base_cleanup)
-            )
-            (extract {root})"
-        ),
-    ]
-    .join("\n")
+fn full_egglog_with(program: &str, parts: &OpTextParts) -> String {
+    [egglog_setup_with(program, parts), egglog_schedule_program()].join("\n")
 }
 
-fn full_egglog_with(program: &str, parts: &OpTextParts) -> String {
+fn egglog_main_pass_phases(pass: usize) -> Vec<EgglogSchedulePhase> {
+    vec![
+        EgglogSchedulePhase {
+            name: format!("main {pass:02} expr"),
+            schedule: "(saturate expr)".to_string(),
+        },
+        EgglogSchedulePhase {
+            name: format!("main {pass:02} dtype"),
+            schedule: "(saturate dtype_prop)".to_string(),
+        },
+        EgglogSchedulePhase {
+            name: format!("main {pass:02} default"),
+            schedule: "(run)".to_string(),
+        },
+    ]
+}
+
+fn egglog_final_phases() -> Vec<EgglogSchedulePhase> {
+    vec![
+        EgglogSchedulePhase {
+            name: "final expr".to_string(),
+            schedule: "(saturate expr)".to_string(),
+        },
+        EgglogSchedulePhase {
+            name: "cleanup".to_string(),
+            schedule: "(saturate cleanup)".to_string(),
+        },
+        EgglogSchedulePhase {
+            name: "base cleanup".to_string(),
+            schedule: "(saturate base_cleanup)".to_string(),
+        },
+    ]
+}
+
+fn egglog_main_pass_schedule() -> String {
+    "(seq
+        (saturate expr)
+        (saturate dtype_prop)
+        (run)
+    )"
+    .to_string()
+}
+
+fn egglog_schedule_program() -> String {
+    let mut schedules = vec![format!(
+        "(run-schedule (repeat {MAIN_SCHEDULE_PASSES} {}))",
+        egglog_main_pass_schedule()
+    )];
+    schedules.extend(
+        egglog_final_phases()
+            .into_iter()
+            .map(|phase| format!("(run-schedule {})", phase.schedule)),
+    );
+    schedules.join("\n")
+}
+
+fn egglog_setup_with(program: &str, parts: &OpTextParts) -> String {
     [
         base::base_expression_egglog(),
         parts.op_defs.clone(),
         parts.cleanups.clone(),
         base::base_cleanup_egglog(),
-        parts.full_rewrites.clone(),
+        parts.rewrites.clone(),
         program.to_string(),
-        RUN_SCHEDULE.to_string(),
     ]
     .join("\n")
 }
@@ -220,8 +237,19 @@ pub struct EgglogStageReport {
 
 #[derive(Debug, Clone, Default)]
 pub struct EgglogRunReport {
-    pub early: EgglogStageReport,
     pub full: EgglogStageReport,
+    pub phases: Vec<EgglogPhaseReport>,
+    pub total_time: Duration,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EgglogPhaseReport {
+    pub name: String,
+    pub schedule: String,
+    pub updated: bool,
+    pub iterations: usize,
+    pub tuples_before: usize,
+    pub tuples_after: usize,
     pub total_time: Duration,
 }
 
@@ -238,7 +266,7 @@ impl SerializedEGraph {
         });
         // Convert to SerializedEGraph
         let mut classes = FxHashMap::default();
-        for (node_id, node) in &s.egraph.nodes {
+        for (node_id, node) in s.egraph.nodes.iter().filter(|(_, node)| !node.subsumed) {
             classes
                 .entry(node.eclass.clone())
                 .or_insert(vec![])
@@ -250,12 +278,14 @@ impl SerializedEGraph {
                 .egraph
                 .nodes
                 .iter()
+                .filter(|(_, enode)| !enode.subsumed)
                 .map(|(n, enode)| (n.clone(), enode.eclass.clone()))
                 .collect(),
             enodes: s
                 .egraph
                 .nodes
                 .iter()
+                .filter(|(_, enode)| !enode.subsumed)
                 .map(|(n, enode)| {
                     (
                         n.clone(),
@@ -274,7 +304,11 @@ impl SerializedEGraph {
                 .egraph
                 .class_data
                 .iter()
-                .map(|(c, eclass)| (c.clone(), (eclass.typ.clone().unwrap(), classes[c].clone())))
+                .filter_map(|(c, eclass)| {
+                    classes
+                        .get(c)
+                        .map(|nodes| (c.clone(), (eclass.typ.clone().unwrap(), nodes.clone())))
+                })
                 .collect(),
         };
         // Strip out all [...] enodes
@@ -283,10 +317,9 @@ impl SerializedEGraph {
             let mut to_remove = vec![];
             for (id, (_, children)) in &s_egraph.enodes {
                 if children.iter().any(|c| {
-                    !s_egraph.eclasses[c]
-                        .1
-                        .iter()
-                        .any(|n| s_egraph.enodes.contains_key(n))
+                    s_egraph.eclasses.get(c).is_none_or(|(_, nodes)| {
+                        !nodes.iter().any(|n| s_egraph.enodes.contains_key(n))
+                    })
                 }) {
                     to_remove.push(id.clone());
                 }
@@ -496,22 +529,6 @@ pub fn list_to_egglog(list: &[impl ToString], cons: &str, nil: &str) -> String {
     }
 }
 
-fn termdag_to_egglog(td: &egglog::TermDag, root: egglog::TermId) -> (String, String) {
-    let mut out = String::new();
-    for id in 0..td.size() {
-        let code = match td.get(id) {
-            egglog::Term::Lit(lit) => format!("{lit}"),
-            egglog::Term::Var(v) => v.clone(),
-            egglog::Term::App(head, args) => format!(
-                "({head} {})",
-                args.iter().map(|s| format!("t{s}")).join(" ")
-            ),
-        };
-        out.push_str(&format!("(let t{id} {code})\n"));
-    }
-    (out.replace("(MVar \"z\")", "(MIter)"), format!("t{root}"))
-}
-
 fn stage_report(egraph: &egglog::EGraph, total_time: Duration) -> EgglogStageReport {
     let run_report = egraph.get_overall_run_report();
     EgglogStageReport {
@@ -555,6 +572,156 @@ fn trace_stage_report(header: &str, report: &EgglogStageReport) {
     );
 }
 
+fn egglog_metrics_enabled() -> bool {
+    std::env::var("LUMINAL_EGGLOG_METRICS")
+        .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "off" | "OFF"))
+        .unwrap_or(true)
+}
+
+fn metric_duration(duration: Duration) -> String {
+    pretty_duration::pretty_duration(&duration, None)
+}
+
+fn metric_name(name: &str) -> String {
+    let mut name = name.split_whitespace().join(" ");
+    if name.len() > 96 {
+        name.truncate(93);
+        name.push_str("...");
+    }
+    name
+}
+
+fn run_schedule_phase(
+    egraph: &mut egglog::EGraph,
+    phases: &mut Vec<EgglogPhaseReport>,
+    metrics: bool,
+    phase: &EgglogSchedulePhase,
+) -> Result<bool, egglog::Error> {
+    let command = format!("(run-schedule {})", phase.schedule);
+    let tuples_before = egraph.num_tuples();
+    let start = std::time::Instant::now();
+    let outputs = egraph.parse_and_run_program(None, &command)?;
+    let elapsed = start.elapsed();
+    let tuples_after = egraph.num_tuples();
+
+    let report = outputs
+        .into_iter()
+        .find_map(|output| match output {
+            CommandOutput::RunSchedule(report) => Some(report),
+            _ => None,
+        })
+        .expect("run-schedule did not return a report");
+
+    let updated = report.updated;
+    let iterations = report.iterations.len();
+    if metrics {
+        let tuple_delta = tuples_after as isize - tuples_before as isize;
+        eprintln!(
+            "{}",
+            format!(
+                "   Egglog {:<28} {:>10} | tuples {} -> {} ({:+}) | updated={} | iterations={}",
+                phase.name,
+                metric_duration(elapsed),
+                tuples_before,
+                tuples_after,
+                tuple_delta,
+                updated,
+                iterations,
+            )
+            .cyan()
+        );
+
+        let mut rulesets = report
+            .search_and_apply_time_per_ruleset
+            .keys()
+            .chain(report.merge_time_per_ruleset.keys())
+            .chain(report.rebuild_time_per_ruleset.keys())
+            .map(|ruleset| ruleset.to_string())
+            .unique()
+            .collect_vec();
+        let ruleset_total = |ruleset: &str| {
+            report
+                .search_and_apply_time_per_ruleset
+                .get(ruleset)
+                .copied()
+                .unwrap_or(Duration::ZERO)
+                + report
+                    .merge_time_per_ruleset
+                    .get(ruleset)
+                    .copied()
+                    .unwrap_or(Duration::ZERO)
+                + report
+                    .rebuild_time_per_ruleset
+                    .get(ruleset)
+                    .copied()
+                    .unwrap_or(Duration::ZERO)
+        };
+        rulesets.sort_by_key(|ruleset| std::cmp::Reverse(ruleset_total(ruleset)));
+        for ruleset in rulesets.into_iter().take(4) {
+            let search = report
+                .search_and_apply_time_per_ruleset
+                .get(ruleset.as_str())
+                .copied()
+                .unwrap_or(Duration::ZERO);
+            let merge = report
+                .merge_time_per_ruleset
+                .get(ruleset.as_str())
+                .copied()
+                .unwrap_or(Duration::ZERO);
+            let rebuild = report
+                .rebuild_time_per_ruleset
+                .get(ruleset.as_str())
+                .copied()
+                .unwrap_or(Duration::ZERO);
+            eprintln!(
+                "      ruleset {:<18} search {:>10} | merge {:>10} | rebuild {:>10}",
+                metric_name(&ruleset),
+                metric_duration(search),
+                metric_duration(merge),
+                metric_duration(rebuild)
+            );
+        }
+
+        let mut rules = report
+            .search_and_apply_time_per_rule
+            .iter()
+            .map(|(rule, elapsed)| {
+                let matches = report
+                    .num_matches_per_rule
+                    .get(rule)
+                    .copied()
+                    .unwrap_or_default();
+                (rule.to_string(), *elapsed, matches)
+            })
+            .collect_vec();
+        rules.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
+        for (rule, elapsed, matches) in rules
+            .into_iter()
+            .filter(|(_, elapsed, matches)| *elapsed > Duration::ZERO || *matches > 0)
+            .take(5)
+        {
+            eprintln!(
+                "      rule    {:<96} {:>10} | matches {}",
+                metric_name(&rule),
+                metric_duration(elapsed),
+                matches
+            );
+        }
+    }
+
+    phases.push(EgglogPhaseReport {
+        name: phase.name.clone(),
+        schedule: phase.schedule.clone(),
+        updated,
+        iterations,
+        tuples_before,
+        tuples_after,
+        total_time: elapsed,
+    });
+
+    Ok(updated)
+}
+
 #[tracing::instrument(skip_all)]
 pub fn run_egglog_with_report(
     program: &str,
@@ -578,31 +745,51 @@ pub fn run_egglog_with_report_parts(
 ) -> Result<(SerializedEGraph, EgglogRunReport), egglog::Error> {
     let total_start = std::time::Instant::now();
 
-    let early_start = std::time::Instant::now();
-    let code = early_egglog_with(program, root, op_parts);
-    let mut egraph = egglog::EGraph::default();
-    let commands = egraph.parser.get_program_from_string(None, &code)?;
-    let outputs = egraph.run_program(commands)?;
-    let early_report = stage_report(&egraph, early_start.elapsed());
-
-    let CommandOutput::ExtractBest(termdag, _cost, term) = outputs.last().unwrap() else {
-        panic!();
-    };
-    let (program, root) = termdag_to_egglog(termdag, termdag.lookup(term));
-
     let full_start = std::time::Instant::now();
-    let code = full_egglog_with(&program, op_parts);
+    let setup_code = egglog_setup_with(program, op_parts);
     let mut egraph = egglog::EGraph::default();
-    let commands = egraph.parser.get_program_from_string(None, &code)?;
-    trace!("{}", "Egglog running...".green());
+    let setup_start = std::time::Instant::now();
+    let setup_tuples_before = egraph.num_tuples();
+    let commands = egraph.parser.get_program_from_string(None, &setup_code)?;
+    trace!("{}", "Egglog setup running...".green());
     let _outputs = egraph.run_program(commands)?;
+    let metrics = egglog_metrics_enabled();
+    if metrics {
+        let setup_tuples_after = egraph.num_tuples();
+        eprintln!(
+            "{}",
+            format!(
+                "   Egglog {:<28} {:>10} | tuples {} -> {} ({:+})",
+                "setup",
+                metric_duration(setup_start.elapsed()),
+                setup_tuples_before,
+                setup_tuples_after,
+                setup_tuples_after as isize - setup_tuples_before as isize,
+            )
+            .cyan()
+        );
+    }
+
+    trace!("{}", "Egglog running...".green());
+    let mut phases = Vec::new();
+    for pass in 1..=MAIN_SCHEDULE_PASSES {
+        let mut pass_updated = false;
+        for phase in egglog_main_pass_phases(pass) {
+            pass_updated |= run_schedule_phase(&mut egraph, &mut phases, metrics, &phase)?;
+        }
+        if !pass_updated {
+            break;
+        }
+    }
+    for phase in egglog_final_phases() {
+        run_schedule_phase(&mut egraph, &mut phases, metrics, &phase)?;
+    }
     let full_report = stage_report(&egraph, full_start.elapsed());
-    trace_stage_report("---- Egglog Early Rule Matches ----", &early_report);
-    trace_stage_report("---- Egglog Full Rule Matches ----", &full_report);
+    trace_stage_report("---- Egglog Rule Matches ----", &full_report);
 
     let run_report = EgglogRunReport {
-        early: early_report,
         full: full_report,
+        phases,
         total_time: total_start.elapsed(),
     };
     trace!(
@@ -623,7 +810,7 @@ pub fn run_egglog_with_report_parts(
     });
     // Convert to SerializedEGraph
     let mut classes = FxHashMap::default();
-    for (node_id, node) in &s.egraph.nodes {
+    for (node_id, node) in s.egraph.nodes.iter().filter(|(_, node)| !node.subsumed) {
         classes
             .entry(node.eclass.clone())
             .or_insert(vec![])
@@ -635,12 +822,14 @@ pub fn run_egglog_with_report_parts(
             .egraph
             .nodes
             .iter()
+            .filter(|(_, enode)| !enode.subsumed)
             .map(|(n, enode)| (n.clone(), enode.eclass.clone()))
             .collect(),
         enodes: s
             .egraph
             .nodes
             .iter()
+            .filter(|(_, enode)| !enode.subsumed)
             .map(|(n, enode)| {
                 (
                     n.clone(),
@@ -659,7 +848,11 @@ pub fn run_egglog_with_report_parts(
             .egraph
             .class_data
             .iter()
-            .map(|(c, eclass)| (c.clone(), (eclass.typ.clone().unwrap(), classes[c].clone())))
+            .filter_map(|(c, eclass)| {
+                classes
+                    .get(c)
+                    .map(|nodes| (c.clone(), (eclass.typ.clone().unwrap(), nodes.clone())))
+            })
             .collect(),
     };
     // Strip out all [...] enodes
@@ -670,10 +863,10 @@ pub fn run_egglog_with_report_parts(
         let mut to_remove = vec![];
         for (id, (_, children)) in &egraph.enodes {
             if children.iter().any(|c| {
-                !egraph.eclasses[c]
-                    .1
-                    .iter()
-                    .any(|n| egraph.enodes.contains_key(n))
+                egraph
+                    .eclasses
+                    .get(c)
+                    .is_none_or(|(_, nodes)| !nodes.iter().any(|n| egraph.enodes.contains_key(n)))
             }) {
                 to_remove.push(id.clone());
             }

@@ -1611,9 +1611,17 @@ impl EgglogOp for KernelSigmoid {
 
     fn rewrites(&self) -> Vec<Rule> {
         vec![
-            // Match the HLIR pattern directly: Recip(Add(Exp2(Mul(Mul(x, -1), log2e)), 1))
+            // Stage the HLIR sigmoid pattern through a small marker so repeated
+            // default passes do not re-run one large join over every Mul/Add/Recip.
             Rule::raw(
-                "(rule
+                "(datatype*
+                    (KernelSigmoidScaledState
+                        (MkKernelSigmoidScaledState IR EList EList DType)
+                    )
+                )
+                (function kernel_sigmoid_scaled (IR) KernelSigmoidScaledState :merge new)
+
+                (rule
                 (
                     (= ?neg1 (Op (Constant ?nv) (INil)))
                     (< ?nv -0.99)
@@ -1623,13 +1631,25 @@ impl EgglogOp for KernelSigmoid {
                     (> ?lv 1.44)
                     (< ?lv 1.45)
                     (= ?scaled (Op (Mul ?shape ?neg_out_stride ?log2e_stride ?scaled_stride) (ICons ?neg_x (ICons ?log2e (INil)))))
+                    (= ?dt (dtype ?x))
+                )
+                (
+                    (set (kernel_sigmoid_scaled ?scaled)
+                        (MkKernelSigmoidScaledState ?x ?shape ?x_stride ?dt))
+                )
+                :name \"direct-sigmoid-scaled-marker\"
+            )
+
+                (rule
+                (
+                    (= ?scaled_state (kernel_sigmoid_scaled ?scaled))
+                    (= ?scaled_state (MkKernelSigmoidScaledState ?x ?shape ?x_stride ?dt))
                     (= ?exp2 (Op (Exp2 ?shape ?scaled_stride ?exp_stride) (ICons ?scaled (INil))))
                     (= ?one (Op (Constant ?ov) (INil)))
                     (> ?ov 0.99)
                     (< ?ov 1.01)
                     (= ?plus_one (Op (Add ?shape ?exp_stride ?one_stride ?add_stride) (ICons ?exp2 (ICons ?one (INil)))))
                     (= ?sig_out (Op (Recip ?shape ?add_stride ?out_stride) (ICons ?plus_one (INil))))
-                    (= ?dt (dtype ?x))
                 )
                 (
                     (let ?ksig (Op (KernelSigmoid ?shape ?x_stride ?out_stride ?dt) (ICons ?x (INil))))

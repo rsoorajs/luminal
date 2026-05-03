@@ -172,9 +172,6 @@ pub trait EgglogOp: Debug {
     fn rewrites(&self) -> Vec<crate::egglog_utils::api::Rule> {
         vec![]
     }
-    fn early_rewrites(&self) -> Vec<crate::egglog_utils::api::Rule> {
-        vec![]
-    }
     fn cleanup(&self) -> bool;
 
     /// Additional IR datatype variants this op needs (e.g. `"(ConsumedBuffer IR)"`).
