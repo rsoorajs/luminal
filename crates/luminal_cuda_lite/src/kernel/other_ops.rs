@@ -304,6 +304,7 @@ impl EgglogOp for KernelScatterNoCopy {
                         (union ?scatter ?nocopy)
                         (set (dtype ?nocopy) ?dty)
                     )
+                    :ruleset buffer_reuse
                     :name \"scatter to scatter-no-copy\"
                 )",
             ),
@@ -313,6 +314,7 @@ impl EgglogOp for KernelScatterNoCopy {
                     ((= ?cb (ConsumedBuffer ?a))
                      (= ?dt (dtype ?a)))
                     ((set (dtype ?cb) ?dt))
+                    :ruleset dtype_prop
                     :name \"consumed-buffer-dtype\"
                 )",
             ),
@@ -659,6 +661,7 @@ impl EgglogOp for KernelBatchMatVec {
                     (union ?sum ?bmv)
                     (set (dtype ?bmv) (F32))
                 )
+                :ruleset matmul_backend
                 :name \"batch mat-vec\"
             )"
         )]
@@ -939,6 +942,7 @@ impl EgglogOp for KernelBatchMatMul {
                     (union ?sum ?bmm)
                     (set (dtype ?bmm) (F32))
                 )
+                :ruleset matmul_backend
                 :name \"batch matmul\"
             )"
         )]
@@ -1178,6 +1182,7 @@ impl EgglogOp for KernelSoftmax {
                     (union ?sm ?ksm)
                     (set (dtype ?ksm) (F32))
                 )
+                :ruleset kernel_lower
                 :name \"softmax-to-kernel-f32\"
             )",
             ),
@@ -1450,6 +1455,7 @@ impl EgglogOp for KernelExp {
                     (union ?exp2 ?kexp)
                     (set (dtype ?kexp) ?dt)
                 )
+                :ruleset direct_kernel
                 :name \"direct-exp-fusion\"
             )",
             ),
@@ -1637,6 +1643,7 @@ impl EgglogOp for KernelSigmoid {
                     (set (kernel_sigmoid_scaled ?scaled)
                         (MkKernelSigmoidScaledState ?x ?shape ?x_stride ?dt))
                 )
+                :ruleset direct_kernel
                 :name \"direct-sigmoid-scaled-marker\"
             )
 
@@ -1656,6 +1663,7 @@ impl EgglogOp for KernelSigmoid {
                     (union ?sig_out ?ksig)
                     (set (dtype ?ksig) ?dt)
                 )
+                :ruleset direct_kernel
                 :name \"direct-sigmoid-fusion\"
             )",
             ),

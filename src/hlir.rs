@@ -2053,7 +2053,8 @@ impl EgglogOp for Gather {
                     ),
                 ))
                 .fact(eq(dty.clone(), dtype(data)))
-                .action(Action::Set(dtype(e), dty)),
+                .action(Action::Set(dtype(e), dty))
+                .ruleset("dtype_prop"),
         ]
     }
     fn extract<'a>(
@@ -2202,7 +2203,8 @@ impl EgglogOp for Scatter {
                     ),
                 ))
                 .fact(eq(dty.clone(), dtype(src)))
-                .action(Action::Set(dtype(e), dty)),
+                .action(Action::Set(dtype(e), dty))
+                .ruleset("dtype_prop"),
         ]
     }
     fn extract<'a>(
