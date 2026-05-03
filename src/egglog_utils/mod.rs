@@ -13,6 +13,8 @@ pub mod api;
 pub mod base;
 
 const MAIN_SCHEDULE_PASSES: usize = 10;
+const SLOW_PHASE_TIME: Duration = Duration::from_secs(1);
+const BIG_TUPLE_DELTA: isize = 5_000;
 
 #[derive(Debug, Clone)]
 struct EgglogSchedulePhase {
@@ -216,6 +218,7 @@ use crate::{
     shape::Expression,
 };
 use egglog::{ArcSort, CommandOutput, EGraph, Value};
+use egglog_reports::ReportLevel;
 use egraph_serialize::{ClassId, NodeId};
 
 #[derive(Debug)]
@@ -572,12 +575,6 @@ fn trace_stage_report(header: &str, report: &EgglogStageReport) {
     );
 }
 
-fn egglog_metrics_enabled() -> bool {
-    std::env::var("LUMINAL_EGGLOG_METRICS")
-        .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "off" | "OFF"))
-        .unwrap_or(true)
-}
-
 fn metric_duration(duration: Duration) -> String {
     pretty_duration::pretty_duration(&duration, None)
 }
@@ -591,10 +588,289 @@ fn metric_name(name: &str) -> String {
     name
 }
 
+fn sorted_rule_metrics(report: &egglog_reports::RunReport) -> Vec<(String, Duration, usize)> {
+    let mut rules = report
+        .search_and_apply_time_per_rule
+        .iter()
+        .map(|(rule, elapsed)| {
+            (
+                rule.to_string(),
+                *elapsed,
+                report
+                    .num_matches_per_rule
+                    .get(rule)
+                    .copied()
+                    .unwrap_or_default(),
+            )
+        })
+        .collect_vec();
+    rules.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
+    rules
+}
+
+fn print_rule_plan_hotspots(
+    report: &egglog_reports::RunReport,
+    rules: &[(String, Duration, usize)],
+) {
+    for (rule, _, _) in rules.iter().take(3) {
+        let mut max_stage = None;
+        let mut max_shape = None;
+        for iteration in &report.iterations {
+            if let Some(rule_reports) = iteration.rule_reports().get(rule.as_str()) {
+                for rule_report in rule_reports {
+                    if let Some(plan) = &rule_report.plan {
+                        let scans = plan
+                            .stages
+                            .iter()
+                            .map(|(stage, _, _)| match stage {
+                                egglog_reports::Stage::Intersect { scans } => scans.len(),
+                                egglog_reports::Stage::FusedIntersect { to_intersect, .. } => {
+                                    to_intersect.len() + 1
+                                }
+                            })
+                            .sum::<usize>();
+                        max_shape = Some(
+                            max_shape
+                                .map(|(stages, shape_scans)| {
+                                    if plan.stages.len() > stages {
+                                        (plan.stages.len(), scans)
+                                    } else {
+                                        (stages, shape_scans)
+                                    }
+                                })
+                                .unwrap_or((plan.stages.len(), scans)),
+                        );
+                        for (_, stats, _) in &plan.stages {
+                            if let Some(stats) = stats {
+                                if max_stage
+                                    .map(|(candidates, _)| stats.num_candidates > candidates)
+                                    .unwrap_or(true)
+                                {
+                                    max_stage = Some((stats.num_candidates, stats.num_succeeded));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((stages, scans)) = max_shape {
+            eprintln!(
+                "      plan    {:<96} stages {:>2} scans {:>2} | max candidates {}",
+                metric_name(rule),
+                stages,
+                scans,
+                max_stage
+                    .map(|(candidates, succeeded)| format!("{candidates} -> {succeeded}"))
+                    .unwrap_or_else(|| "n/a".to_string())
+            );
+        }
+    }
+}
+
+fn print_slow_phase_detail(
+    phase: &EgglogSchedulePhase,
+    report: &egglog_reports::RunReport,
+    tuple_delta: isize,
+    elapsed: Duration,
+    rules: &[(String, Duration, usize)],
+) {
+    eprintln!("      detail  schedule {}", metric_name(&phase.schedule));
+    if tuple_delta > 0 && elapsed > Duration::ZERO {
+        eprintln!(
+            "      detail  growth {:.0} tuples/s | {:.3} ms/new tuple",
+            tuple_delta as f64 / elapsed.as_secs_f64(),
+            elapsed.as_secs_f64() * 1_000.0 / tuple_delta as f64
+        );
+    }
+    for (rule, elapsed, _) in rules
+        .iter()
+        .filter(|(_, elapsed, matches)| *elapsed > Duration::ZERO && *matches == 0)
+        .take(5)
+    {
+        eprintln!(
+            "      zero    {:<96} {:>10}",
+            metric_name(rule),
+            metric_duration(*elapsed)
+        );
+    }
+    let mut per_match = rules
+        .iter()
+        .filter(|(_, elapsed, matches)| *elapsed > Duration::ZERO && *matches > 0)
+        .map(|(rule, elapsed, matches)| {
+            (
+                rule,
+                elapsed.as_secs_f64() * 1_000.0 / *matches as f64,
+                *matches,
+            )
+        })
+        .collect_vec();
+    per_match.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (rule, ms_per_match, matches) in per_match.into_iter().take(3) {
+        eprintln!(
+            "      cost    {:<96} {:.3} ms/match | matches {}",
+            metric_name(rule),
+            ms_per_match,
+            matches
+        );
+    }
+    print_rule_plan_hotspots(report, rules);
+
+    let iteration_count = report.iterations.len();
+    for (index, iteration) in report.iterations.iter().enumerate() {
+        if iteration_count > 12 && (8..iteration_count.saturating_sub(3)).contains(&index) {
+            if index == 8 {
+                eprintln!("      iter   ...");
+            }
+            continue;
+        }
+        let (rule, elapsed, matches) = iteration
+            .rule_reports()
+            .iter()
+            .map(|(rule, reports)| {
+                (
+                    rule.to_string(),
+                    reports
+                        .iter()
+                        .map(|report| report.search_and_apply_time)
+                        .sum::<Duration>(),
+                    reports
+                        .iter()
+                        .map(|report| report.num_matches)
+                        .sum::<usize>(),
+                )
+            })
+            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)))
+            .unwrap_or_else(|| ("-".to_string(), Duration::ZERO, 0));
+        eprintln!(
+            "      iter   {:>2} changed={} | search {:>10} | merge {:>10} | rebuild {:>10} | top {:<64} {:>10} matches {}",
+            index + 1,
+            iteration.changed(),
+            metric_duration(iteration.search_and_apply_time()),
+            metric_duration(iteration.rule_set_report.merge_time),
+            metric_duration(iteration.rebuild_time),
+            metric_name(&rule),
+            metric_duration(elapsed),
+            matches
+        );
+    }
+}
+
+fn print_run_summary(run_report: &EgglogRunReport) {
+    eprintln!(
+        "{}",
+        format!(
+            "   Egglog summary total {} | phases {}",
+            metric_duration(run_report.total_time),
+            run_report.phases.len()
+        )
+        .cyan()
+    );
+    let mut phases = run_report.phases.iter().collect_vec();
+    phases.sort_by_key(|phase| std::cmp::Reverse(phase.total_time));
+    for phase in phases.into_iter().take(5) {
+        eprintln!(
+            "      phase   {:<28} {:>10} | tuples {:+} | iterations {}",
+            metric_name(&phase.name),
+            metric_duration(phase.total_time),
+            phase.tuples_after as isize - phase.tuples_before as isize,
+            phase.iterations
+        );
+    }
+    let mut growth = run_report
+        .phases
+        .iter()
+        .map(|phase| {
+            (
+                phase,
+                phase.tuples_after as isize - phase.tuples_before as isize,
+            )
+        })
+        .filter(|(_, delta)| *delta > 0)
+        .collect_vec();
+    growth.sort_by_key(|(_, delta)| std::cmp::Reverse(*delta));
+    for (phase, delta) in growth.into_iter().take(3) {
+        eprintln!(
+            "      growth  {:<28} tuples {:+} | {}",
+            metric_name(&phase.name),
+            delta,
+            metric_duration(phase.total_time)
+        );
+    }
+    let mut rules = run_report
+        .full
+        .search_and_apply_time_per_rule
+        .iter()
+        .map(|(rule, elapsed)| {
+            (
+                rule,
+                *elapsed,
+                run_report
+                    .full
+                    .num_matches_per_rule
+                    .get(rule)
+                    .copied()
+                    .unwrap_or_default(),
+            )
+        })
+        .collect_vec();
+    rules.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
+    for (rule, elapsed, matches) in rules
+        .iter()
+        .filter(|(_, elapsed, matches)| *elapsed > Duration::ZERO || *matches > 0)
+        .take(8)
+    {
+        eprintln!(
+            "      slow    {:<96} {:>10} | matches {}",
+            metric_name(rule),
+            metric_duration(*elapsed),
+            matches
+        );
+    }
+    for (rule, elapsed, _) in rules
+        .iter()
+        .filter(|(_, elapsed, matches)| *elapsed > Duration::ZERO && *matches == 0)
+        .take(8)
+    {
+        eprintln!(
+            "      zero    {:<96} {:>10}",
+            metric_name(rule),
+            metric_duration(*elapsed)
+        );
+    }
+}
+
+fn print_serialized_shape(s: &egglog::SerializeOutput) {
+    let mut classes = FxHashSet::default();
+    let mut labels: FxHashMap<String, usize> = FxHashMap::default();
+    let mut nodes = 0;
+    for node in s.egraph.nodes.values().filter(|node| !node.subsumed) {
+        nodes += 1;
+        classes.insert(node.eclass.clone());
+        *labels.entry(node.op.clone()).or_default() += 1;
+    }
+    let mut labels = labels.into_iter().collect_vec();
+    labels.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    eprintln!(
+        "{}",
+        format!(
+            "   Egglog extract root shape nodes={} classes={} roots={} top_ops={}",
+            nodes,
+            classes.len(),
+            s.egraph.root_eclasses.len(),
+            labels
+                .into_iter()
+                .take(8)
+                .map(|(label, count)| format!("{}={}", metric_name(&label), count))
+                .join(", ")
+        )
+        .cyan()
+    );
+}
+
 fn run_schedule_phase(
     egraph: &mut egglog::EGraph,
     phases: &mut Vec<EgglogPhaseReport>,
-    metrics: bool,
     phase: &EgglogSchedulePhase,
 ) -> Result<bool, egglog::Error> {
     let command = format!("(run-schedule {})", phase.schedule);
@@ -614,99 +890,88 @@ fn run_schedule_phase(
 
     let updated = report.updated;
     let iterations = report.iterations.len();
-    if metrics {
-        let tuple_delta = tuples_after as isize - tuples_before as isize;
-        eprintln!(
-            "{}",
-            format!(
-                "   Egglog {:<28} {:>10} | tuples {} -> {} ({:+}) | updated={} | iterations={}",
-                phase.name,
-                metric_duration(elapsed),
-                tuples_before,
-                tuples_after,
-                tuple_delta,
-                updated,
-                iterations,
-            )
-            .cyan()
-        );
+    let tuple_delta = tuples_after as isize - tuples_before as isize;
+    eprintln!(
+        "{}",
+        format!(
+            "   Egglog {:<28} {:>10} | tuples {} -> {} ({:+}) | updated={} | iterations={}",
+            phase.name,
+            metric_duration(elapsed),
+            tuples_before,
+            tuples_after,
+            tuple_delta,
+            updated,
+            iterations,
+        )
+        .cyan()
+    );
 
-        let mut rulesets = report
+    let mut rulesets = report
+        .search_and_apply_time_per_ruleset
+        .keys()
+        .chain(report.merge_time_per_ruleset.keys())
+        .chain(report.rebuild_time_per_ruleset.keys())
+        .map(|ruleset| ruleset.to_string())
+        .unique()
+        .collect_vec();
+    let ruleset_total = |ruleset: &str| {
+        report
             .search_and_apply_time_per_ruleset
-            .keys()
-            .chain(report.merge_time_per_ruleset.keys())
-            .chain(report.rebuild_time_per_ruleset.keys())
-            .map(|ruleset| ruleset.to_string())
-            .unique()
-            .collect_vec();
-        let ruleset_total = |ruleset: &str| {
-            report
-                .search_and_apply_time_per_ruleset
+            .get(ruleset)
+            .copied()
+            .unwrap_or(Duration::ZERO)
+            + report
+                .merge_time_per_ruleset
                 .get(ruleset)
                 .copied()
                 .unwrap_or(Duration::ZERO)
-                + report
-                    .merge_time_per_ruleset
-                    .get(ruleset)
-                    .copied()
-                    .unwrap_or(Duration::ZERO)
-                + report
-                    .rebuild_time_per_ruleset
-                    .get(ruleset)
-                    .copied()
-                    .unwrap_or(Duration::ZERO)
-        };
-        rulesets.sort_by_key(|ruleset| std::cmp::Reverse(ruleset_total(ruleset)));
-        for ruleset in rulesets.into_iter().take(4) {
-            let search = report
-                .search_and_apply_time_per_ruleset
-                .get(ruleset.as_str())
-                .copied()
-                .unwrap_or(Duration::ZERO);
-            let merge = report
-                .merge_time_per_ruleset
-                .get(ruleset.as_str())
-                .copied()
-                .unwrap_or(Duration::ZERO);
-            let rebuild = report
+            + report
                 .rebuild_time_per_ruleset
-                .get(ruleset.as_str())
+                .get(ruleset)
                 .copied()
-                .unwrap_or(Duration::ZERO);
-            eprintln!(
-                "      ruleset {:<18} search {:>10} | merge {:>10} | rebuild {:>10}",
-                metric_name(&ruleset),
-                metric_duration(search),
-                metric_duration(merge),
-                metric_duration(rebuild)
-            );
-        }
+                .unwrap_or(Duration::ZERO)
+    };
+    rulesets.sort_by_key(|ruleset| std::cmp::Reverse(ruleset_total(ruleset)));
+    for ruleset in rulesets.into_iter().take(4) {
+        let search = report
+            .search_and_apply_time_per_ruleset
+            .get(ruleset.as_str())
+            .copied()
+            .unwrap_or(Duration::ZERO);
+        let merge = report
+            .merge_time_per_ruleset
+            .get(ruleset.as_str())
+            .copied()
+            .unwrap_or(Duration::ZERO);
+        let rebuild = report
+            .rebuild_time_per_ruleset
+            .get(ruleset.as_str())
+            .copied()
+            .unwrap_or(Duration::ZERO);
+        eprintln!(
+            "      ruleset {:<18} search {:>10} | merge {:>10} | rebuild {:>10}",
+            metric_name(&ruleset),
+            metric_duration(search),
+            metric_duration(merge),
+            metric_duration(rebuild)
+        );
+    }
 
-        let mut rules = report
-            .search_and_apply_time_per_rule
-            .iter()
-            .map(|(rule, elapsed)| {
-                let matches = report
-                    .num_matches_per_rule
-                    .get(rule)
-                    .copied()
-                    .unwrap_or_default();
-                (rule.to_string(), *elapsed, matches)
-            })
-            .collect_vec();
-        rules.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
-        for (rule, elapsed, matches) in rules
-            .into_iter()
-            .filter(|(_, elapsed, matches)| *elapsed > Duration::ZERO || *matches > 0)
-            .take(5)
-        {
-            eprintln!(
-                "      rule    {:<96} {:>10} | matches {}",
-                metric_name(&rule),
-                metric_duration(elapsed),
-                matches
-            );
-        }
+    let rules = sorted_rule_metrics(&report);
+    for (rule, elapsed, matches) in rules
+        .iter()
+        .filter(|(_, elapsed, matches)| *elapsed > Duration::ZERO || *matches > 0)
+        .take(5)
+    {
+        eprintln!(
+            "      rule    {:<96} {:>10} | matches {}",
+            metric_name(rule),
+            metric_duration(*elapsed),
+            matches
+        );
+    }
+    if elapsed >= SLOW_PHASE_TIME || tuple_delta.abs() >= BIG_TUPLE_DELTA {
+        print_slow_phase_detail(phase, &report, tuple_delta, elapsed, &rules);
     }
 
     phases.push(EgglogPhaseReport {
@@ -746,43 +1011,53 @@ pub fn run_egglog_with_report_parts(
     let total_start = std::time::Instant::now();
 
     let full_start = std::time::Instant::now();
+    let setup_text_start = std::time::Instant::now();
     let setup_code = egglog_setup_with(program, op_parts);
+    let setup_text_elapsed = setup_text_start.elapsed();
+    let setup_lines = setup_code.lines().count();
     let mut egraph = egglog::EGraph::default();
+    egraph.set_report_level(ReportLevel::WithPlan);
     let setup_start = std::time::Instant::now();
     let setup_tuples_before = egraph.num_tuples();
+    let parse_start = std::time::Instant::now();
     let commands = egraph.parser.get_program_from_string(None, &setup_code)?;
+    let parse_elapsed = parse_start.elapsed();
     trace!("{}", "Egglog setup running...".green());
+    let setup_run_start = std::time::Instant::now();
     let _outputs = egraph.run_program(commands)?;
-    let metrics = egglog_metrics_enabled();
-    if metrics {
-        let setup_tuples_after = egraph.num_tuples();
-        eprintln!(
-            "{}",
-            format!(
-                "   Egglog {:<28} {:>10} | tuples {} -> {} ({:+})",
-                "setup",
-                metric_duration(setup_start.elapsed()),
-                setup_tuples_before,
-                setup_tuples_after,
-                setup_tuples_after as isize - setup_tuples_before as isize,
-            )
-            .cyan()
-        );
-    }
+    let setup_run_elapsed = setup_run_start.elapsed();
+    let setup_tuples_after = egraph.num_tuples();
+    eprintln!(
+        "{}",
+        format!(
+            "   Egglog {:<28} {:>10} | text {} parse {} run {} | lines {} bytes {} | tuples {} -> {} ({:+})",
+            "setup",
+            metric_duration(setup_start.elapsed()),
+            metric_duration(setup_text_elapsed),
+            metric_duration(parse_elapsed),
+            metric_duration(setup_run_elapsed),
+            setup_lines,
+            setup_code.len(),
+            setup_tuples_before,
+            setup_tuples_after,
+            setup_tuples_after as isize - setup_tuples_before as isize,
+        )
+        .cyan()
+    );
 
     trace!("{}", "Egglog running...".green());
     let mut phases = Vec::new();
     for pass in 1..=MAIN_SCHEDULE_PASSES {
         let mut pass_updated = false;
         for phase in egglog_main_pass_phases(pass) {
-            pass_updated |= run_schedule_phase(&mut egraph, &mut phases, metrics, &phase)?;
+            pass_updated |= run_schedule_phase(&mut egraph, &mut phases, &phase)?;
         }
         if !pass_updated {
             break;
         }
     }
     for phase in egglog_final_phases() {
-        run_schedule_phase(&mut egraph, &mut phases, metrics, &phase)?;
+        run_schedule_phase(&mut egraph, &mut phases, &phase)?;
     }
     let full_report = stage_report(&egraph, full_start.elapsed());
     trace_stage_report("---- Egglog Rule Matches ----", &full_report);
@@ -792,6 +1067,7 @@ pub fn run_egglog_with_report_parts(
         phases,
         total_time: total_start.elapsed(),
     };
+    print_run_summary(&run_report);
     trace!(
         "{}",
         format!(
@@ -808,6 +1084,7 @@ pub fn run_egglog_with_report_parts(
         include_temporary_functions: false,
         max_calls_per_function: None,
     });
+    print_serialized_shape(&s);
     // Convert to SerializedEGraph
     let mut classes = FxHashMap::default();
     for (node_id, node) in s.egraph.nodes.iter().filter(|(_, node)| !node.subsumed) {
