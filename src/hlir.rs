@@ -2885,6 +2885,7 @@ impl Runtime for NativeRuntime {
         _: &LLIRGraph,
         _: &FxHashMap<char, usize>,
         _: usize,
+        _: Option<std::time::Duration>,
     ) -> (Self::ProfileMetric, String) {
         (0, "0 ms".to_string())
     }
