@@ -36,6 +36,30 @@ struct EgglogSchedulePhase {
     schedule: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct LateEgglogPass {
+    /// Egglog declarations and rules for a backend-provided late pass.
+    ///
+    /// These fragments are appended after the core/backend rewrite declarations
+    /// and before the graph program itself, so they can refer to the full IR and
+    /// OpKind datatypes.
+    pub program: String,
+    /// Schedule to run after the normal full-egraph rewrite + cleanup schedule.
+    ///
+    /// Backends can use this for analysis-only layers or for analysis followed
+    /// by backend-specific cleanup rules.
+    pub schedule: String,
+}
+
+impl LateEgglogPass {
+    pub fn new(program: impl Into<String>, schedule: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+            schedule: schedule.into(),
+        }
+    }
+}
+
 fn op_defs_string(ops: &[Arc<Box<dyn EgglogOp>>]) -> String {
     // Partition ops by sort class: IR-class (Input, Output) vs OpKind-class (everything else)
     let mut ir_variants = Vec::new();
@@ -131,11 +155,21 @@ pub fn full_egglog(program: &str, ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool)
 pub struct OpTextParts {
     op_defs: String,
     cleanups: String,
+    late_program: String,
     rewrites: String,
+    late_phases: Vec<EgglogSchedulePhase>,
 }
 
 impl OpTextParts {
     pub fn new(ops: &[Arc<Box<dyn EgglogOp>>], cleanup: bool) -> Self {
+        Self::new_with_late_passes(ops, cleanup, &[])
+    }
+
+    pub fn new_with_late_passes(
+        ops: &[Arc<Box<dyn EgglogOp>>],
+        cleanup: bool,
+        late_passes: &[LateEgglogPass],
+    ) -> Self {
         Self {
             op_defs: op_defs_string(ops),
             cleanups: if cleanup {
@@ -148,12 +182,41 @@ impl OpTextParts {
                 .flat_map(|o| o.rewrites())
                 .map(|r| r.to_egglog_string())
                 .join("\n"),
+            late_program: late_passes.iter().map(|p| p.program.as_str()).join("\n"),
+            late_phases: late_passes
+                .iter()
+                .enumerate()
+                .filter_map(|(i, pass)| {
+                    let schedule = normalize_late_schedule(&pass.schedule);
+                    (!schedule.is_empty()).then(|| EgglogSchedulePhase {
+                        name: format!("late pass {:02}", i + 1),
+                        schedule,
+                    })
+                })
+                .collect(),
         }
     }
 }
 
 fn full_egglog_with(program: &str, parts: &OpTextParts) -> String {
-    [egglog_setup_with(program, parts), egglog_schedule_program()].join("\n")
+    let mut chunks = vec![egglog_setup_with(program, parts), egglog_schedule_program()];
+    chunks.extend(
+        parts
+            .late_phases
+            .iter()
+            .map(|phase| format!("(run-schedule {})", phase.schedule)),
+    );
+    chunks.join("\n")
+}
+
+fn normalize_late_schedule(schedule: &str) -> String {
+    let schedule = schedule.trim();
+    schedule
+        .strip_prefix("(run-schedule ")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(schedule)
+        .trim()
+        .to_string()
 }
 
 fn egglog_ruleset_declarations() -> String {
@@ -232,6 +295,7 @@ fn egglog_setup_with(program: &str, parts: &OpTextParts) -> String {
         parts.cleanups.clone(),
         base::base_cleanup_egglog(),
         parts.rewrites.clone(),
+        parts.late_program.clone(),
         program.to_string(),
     ]
     .join("\n")
@@ -1025,6 +1089,18 @@ pub fn run_egglog_with_report(
     run_egglog_with_report_parts(program, root, &op_parts)
 }
 
+#[tracing::instrument(skip_all)]
+pub fn run_egglog_with_report_and_late_passes(
+    program: &str,
+    root: &str,
+    ops: &[Arc<Box<dyn EgglogOp>>],
+    cleanup: bool,
+    late_passes: &[LateEgglogPass],
+) -> Result<(SerializedEGraph, EgglogRunReport), egglog::Error> {
+    let op_parts = OpTextParts::new_with_late_passes(ops, cleanup, late_passes);
+    run_egglog_with_report_parts(program, root, &op_parts)
+}
+
 /// Same as [`run_egglog_with_report`], but takes pre-computed [`OpTextParts`].
 /// Useful when a caller runs many egglog invocations with the same op set
 /// and wants to factor the op-derived text work out of a parallel loop.
@@ -1099,6 +1175,9 @@ pub fn run_egglog_with_report_parts(
     }
     for phase in egglog_final_phases() {
         run_schedule_phase(&mut egraph, &mut phases, &phase)?;
+    }
+    for phase in &op_parts.late_phases {
+        run_schedule_phase(&mut egraph, &mut phases, phase)?;
     }
     let full_report = stage_report(&egraph, full_start.elapsed());
     trace_stage_report("---- Egglog Rule Matches ----", &full_report);
@@ -1220,6 +1299,18 @@ pub fn run_egglog(
     cleanup: bool,
 ) -> Result<SerializedEGraph, egglog::Error> {
     run_egglog_with_report(program, root, ops, cleanup).map(|(egraph, _)| egraph)
+}
+
+#[tracing::instrument(skip_all)]
+pub fn run_egglog_with_late_passes(
+    program: &str,
+    root: &str,
+    ops: &[Arc<Box<dyn EgglogOp>>],
+    cleanup: bool,
+    late_passes: &[LateEgglogPass],
+) -> Result<SerializedEGraph, egglog::Error> {
+    run_egglog_with_report_and_late_passes(program, root, ops, cleanup, late_passes)
+        .map(|(egraph, _)| egraph)
 }
 
 /// Same as [`run_egglog`] but takes pre-computed [`OpTextParts`], so the
@@ -1828,8 +1919,11 @@ pub fn egglog_to_llir_from_root<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{SerializedEGraph, count_choice_sets_up_to};
+    use super::{
+        LateEgglogPass, SerializedEGraph, count_choice_sets_up_to, run_egglog_with_late_passes,
+    };
     use crate::prelude::FxHashMap;
+    use crate::{hlir::HLIROps, op::IntoEgglogOp};
     use egraph_serialize::{ClassId, NodeId};
 
     fn eclass(id: &str, label: &str, n_nodes: usize) -> (ClassId, (String, Vec<NodeId>)) {
@@ -1869,5 +1963,38 @@ mod tests {
         let egraph = egraph(vec![eclass("a", "IR", 1_000), eclass("b", "IList", 1_000)]);
 
         assert_eq!(count_choice_sets_up_to(&egraph, 10), 10);
+    }
+
+    #[test]
+    fn runs_late_pass_after_full_cleanup() {
+        let ops = <HLIROps as IntoEgglogOp>::into_vec();
+        let program = r#"
+            (let t0 (Input 0 "" (F32)))
+            (let t1 (Output t0 0))
+        "#;
+        let late_pass = LateEgglogPass::new(
+            r#"
+            (ruleset late_test)
+            (rule ((= ?out (Output ?inp ?id)))
+                  ((union ?out ?inp))
+                  :ruleset late_test
+                  :name "late-output-to-input")
+            "#,
+            "(run-schedule (saturate late_test))",
+        );
+
+        let egraph = run_egglog_with_late_passes(program, "t1", &ops, false, &[late_pass])
+            .expect("late pass should run");
+        let root = egraph.roots.first().expect("root eclass");
+        let root_labels: Vec<_> = egraph.eclasses[root]
+            .1
+            .iter()
+            .map(|node| egraph.enodes[node].0.as_str())
+            .collect();
+
+        assert!(
+            root_labels.contains(&"Input"),
+            "late union should add Input to root eclass, got {root_labels:?}"
+        );
     }
 }
