@@ -12,9 +12,23 @@ use tracing::trace;
 pub mod api;
 pub mod base;
 
-const MAIN_SCHEDULE_PASSES: usize = 10;
+const MAIN_SCHEDULE_MAX_CYCLES: usize = 256;
+const MAIN_SCHEDULE_MAX_TUPLES: usize = 10_000_000;
 const SLOW_PHASE_TIME: Duration = Duration::from_secs(1);
 const BIG_TUPLE_DELTA: isize = 5_000;
+
+const EGGLOG_RULESETS: &[&str] = &[
+    "matmul_flatten",
+    "kernel_lower",
+    "direct_kernel",
+    "kernel_specialize",
+    "buffer_reuse",
+    "matmul_backend",
+    "glumoe",
+    "fusion_pair",
+    "fusion_grow",
+    "fusion_merge",
+];
 
 #[derive(Debug, Clone)]
 struct EgglogSchedulePhase {
@@ -142,21 +156,18 @@ fn full_egglog_with(program: &str, parts: &OpTextParts) -> String {
     [egglog_setup_with(program, parts), egglog_schedule_program()].join("\n")
 }
 
-fn egglog_main_pass_phases(pass: usize) -> Vec<EgglogSchedulePhase> {
-    vec![
-        EgglogSchedulePhase {
-            name: format!("main {pass:02} expr"),
-            schedule: "(saturate expr)".to_string(),
-        },
-        EgglogSchedulePhase {
-            name: format!("main {pass:02} dtype"),
-            schedule: "(saturate dtype_prop)".to_string(),
-        },
-        EgglogSchedulePhase {
-            name: format!("main {pass:02} default"),
-            schedule: "(run)".to_string(),
-        },
-    ]
+fn egglog_ruleset_declarations() -> String {
+    EGGLOG_RULESETS
+        .iter()
+        .map(|ruleset| format!("(ruleset {ruleset})"))
+        .join("\n")
+}
+
+fn egglog_main_cycle_phases(cycle: usize) -> Vec<EgglogSchedulePhase> {
+    vec![EgglogSchedulePhase {
+        name: format!("cycle {cycle:03} main"),
+        schedule: egglog_main_schedule().to_string(),
+    }]
 }
 
 fn egglog_final_phases() -> Vec<EgglogSchedulePhase> {
@@ -176,20 +187,35 @@ fn egglog_final_phases() -> Vec<EgglogSchedulePhase> {
     ]
 }
 
-fn egglog_main_pass_schedule() -> String {
-    "(seq
-        (saturate expr)
-        (saturate dtype_prop)
-        (run)
-    )"
-    .to_string()
+fn egglog_main_schedule() -> &'static str {
+    // Producer rules create raw alternatives that downstream fusion consumes.
+    // Fusion grow/merge only consumes Kernel*/FusionEnd alternatives, so keeping
+    // producer discovery saturated before fusion reaches the same fixed point
+    // while avoiding repeated expensive pair-discovery scans during growth.
+    "(saturate (seq
+        (saturate (seq
+            (saturate expr)
+            (saturate dtype_prop)
+            (run matmul_flatten)
+            (run kernel_lower)
+            (run direct_kernel)
+            (run kernel_specialize)
+            (run buffer_reuse)
+            (run matmul_backend)
+            (run glumoe)
+            (run fusion_pair)
+        ))
+        (saturate (seq
+            (saturate expr)
+            (saturate dtype_prop)
+            (run fusion_grow)
+            (run fusion_merge)
+        ))
+    ))"
 }
 
 fn egglog_schedule_program() -> String {
-    let mut schedules = vec![format!(
-        "(run-schedule (repeat {MAIN_SCHEDULE_PASSES} {}))",
-        egglog_main_pass_schedule()
-    )];
+    let mut schedules = vec![format!("(run-schedule {})", egglog_main_schedule())];
     schedules.extend(
         egglog_final_phases()
             .into_iter()
@@ -200,6 +226,7 @@ fn egglog_schedule_program() -> String {
 
 fn egglog_setup_with(program: &str, parts: &OpTextParts) -> String {
     [
+        egglog_ruleset_declarations(),
         base::base_expression_egglog(),
         parts.op_defs.clone(),
         parts.cleanups.clone(),
@@ -1047,14 +1074,28 @@ pub fn run_egglog_with_report_parts(
 
     trace!("{}", "Egglog running...".green());
     let mut phases = Vec::new();
-    for pass in 1..=MAIN_SCHEDULE_PASSES {
-        let mut pass_updated = false;
-        for phase in egglog_main_pass_phases(pass) {
-            pass_updated |= run_schedule_phase(&mut egraph, &mut phases, &phase)?;
+    let mut reached_fixed_point = false;
+    for cycle in 1..=MAIN_SCHEDULE_MAX_CYCLES {
+        let mut cycle_updated = false;
+        for phase in egglog_main_cycle_phases(cycle) {
+            cycle_updated |= run_schedule_phase(&mut egraph, &mut phases, &phase)?;
         }
-        if !pass_updated {
+        if egraph.num_tuples() > MAIN_SCHEDULE_MAX_TUPLES {
+            return Err(egglog::Error::BackendError(format!(
+                "egglog saturation exceeded tuple budget: {} > {}",
+                egraph.num_tuples(),
+                MAIN_SCHEDULE_MAX_TUPLES
+            )));
+        }
+        if !cycle_updated {
+            reached_fixed_point = true;
             break;
         }
+    }
+    if !reached_fixed_point {
+        return Err(egglog::Error::BackendError(format!(
+            "egglog saturation did not reach a fixed point within {MAIN_SCHEDULE_MAX_CYCLES} cycles"
+        )));
     }
     for phase in egglog_final_phases() {
         run_schedule_phase(&mut egraph, &mut phases, &phase)?;
