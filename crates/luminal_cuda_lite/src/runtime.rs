@@ -1317,7 +1317,52 @@ impl CudaRuntime {
                 let kernel_name = kernel_op.kernel_name();
                 bucket.kernel_names.push(kernel_name);
 
-                if kernel_name != "FusionStart" && !kernel_name.starts_with("Fused") {
+                // Decide if this node needs a real device buffer.
+                //
+                // The default assumption is "yes" for ordinary kernel ops
+                // (Conv outputs, matmul outputs, etc). FusionStart and
+                // Fused* are the exceptions — they're synthetic markers
+                // that the fusion rewrites add inside a region; the
+                // megakernel computes them in registers and never writes
+                // to memory, so allocating a buffer would just be waste.
+                //
+                // BUT — and this was the cause of the YOLO crash: if such
+                // a node has a *consumer in a different region*, that
+                // consumer's CudaGraphOp will look up a device pointer for
+                // the producer in the runtime's buffer_map and find none,
+                // pass NULL into the kernel, and dereference it →
+                // `CUDA_ERROR_ILLEGAL_ADDRESS`. Multi-consumer fan-out is
+                // the typical trigger: rule R fuses op X into one region
+                // (FusionStart-wrapping it as input), but X is also used by
+                // an unrelated downstream op that lives in another region.
+                //
+                // Safe over-approximation: if the node is a FusionStart /
+                // Fused* and *any* of its consumers is a FusionStart
+                // (which can only happen when that consumer is the leaf
+                // of a different region) or a non-marker op (e.g. an
+                // unfused Add/Mul reading the value directly), allocate a
+                // buffer so cross-region reads have somewhere to land.
+                let is_marker = kernel_name == "FusionStart" || kernel_name.starts_with("Fused");
+                let has_external_consumer = is_marker
+                    && llir_graph
+                        .neighbors_directed(node, Direction::Outgoing)
+                        .any(|consumer| {
+                            // A consumer that's a non-kernel op (Output, etc.) always
+                            // needs a real buffer; otherwise check the kernel name.
+                            match llir_graph[consumer].to_dialect::<dyn KernelOp>() {
+                                None => true,
+                                Some(ck) => {
+                                    let cn = ck.kernel_name();
+                                    // FusionEnd is the consumer in the SAME region
+                                    // (so it's absorbed). Anything else — including
+                                    // another FusionStart, which is by definition the
+                                    // leaf of a different region — is external.
+                                    cn != "FusionEnd"
+                                }
+                            }
+                        });
+                let allocated = !is_marker || has_external_consumer;
+                if allocated {
                     bucket.buffer_specs.insert(
                         node,
                         BufferSpec {
