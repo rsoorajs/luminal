@@ -19,4 +19,8 @@ mod performance_tests;
 #[cfg(test)]
 mod qwen3_moe_rewrite;
 #[cfg(test)]
+mod rmsnorm_test;
+#[cfg(test)]
+mod rope_test;
+#[cfg(test)]
 mod transformer;
