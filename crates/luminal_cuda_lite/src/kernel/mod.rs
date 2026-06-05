@@ -304,4 +304,4 @@ luminal::impl_into_ops!(KernelOp);
 
 // Kernel to host op compilation
 mod to_host;
-pub use to_host::{CudaGraphOp, kernel_to_host};
+pub use to_host::{CudaGraphDebugSummary, CudaGraphOp, kernel_to_host};
