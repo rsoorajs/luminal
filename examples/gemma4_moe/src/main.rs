@@ -26,6 +26,24 @@ fn env_bool(name: &str) -> bool {
         .is_some_and(|s| matches!(s.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
+fn promote_persistent_state(
+    runtime: &mut CudaRuntime,
+    seen_out: GraphTensor,
+    seen_mask: GraphTensor,
+    cache_outputs: &[(GraphTensor, GraphTensor)],
+    kv_cache: &KVCache,
+) {
+    let seen_buf = runtime.remove_buffer(seen_out);
+    runtime.set_buffer(seen_mask, seen_buf);
+
+    for (layer, (k_out, v_out)) in cache_outputs.iter().enumerate() {
+        let k_buf = runtime.remove_buffer(*k_out);
+        let v_buf = runtime.remove_buffer(*v_out);
+        runtime.set_buffer(kv_cache.k_caches[layer], k_buf);
+        runtime.set_buffer(kv_cache.v_caches[layer], v_buf);
+    }
+}
+
 fn main() {
     let max_seq_len = 4096;
     let gen_tokens = 500;
@@ -75,18 +93,16 @@ fn main() {
         .next_power_of_two()
         .min(max_seq_len);
     let search_s = 16.min(max_prefill).max(2);
-    let build_options = CompileOptions::default().dim_buckets(
-        's',
-        &[
-            DimBucket::new(1, 1),
-            DimBucket::new(2, max_prefill).representative(search_s),
-        ],
-    );
-
-    println!("Building E-Graph...");
-    let phase = std::time::Instant::now();
-    cx.build_search_space::<CudaRuntime>(build_options);
-    println!("  e-graph build: {:.1}s", phase.elapsed().as_secs_f64());
+    let compile_options = CompileOptions::default()
+        .dim_buckets(
+            's',
+            &[
+                DimBucket::new(1, 1),
+                DimBucket::new(2, max_prefill).representative(search_s),
+            ],
+        )
+        .search_dim('c', search_s)
+        .search_graph_limit(search_graphs);
 
     println!("Loading weights...");
     // ~52 GB of weights leave room for the arena on an 80 GB A100 only after
@@ -106,7 +122,6 @@ fn main() {
 
     println!("Compiling...");
     cx.set_dim('s', search_s);
-    cx.set_dim('c', search_s);
     runtime.set_data(input, vec![1; search_s]);
     runtime.set_data(pos_ids, (0..search_s as i32).collect::<Vec<_>>());
     runtime.set_data(scatter_idx_t, (0..search_s as i32).collect::<Vec<_>>());
@@ -115,8 +130,7 @@ fn main() {
     runtime.set_zeros(seen_mask_t, VOCAB_SIZE * std::mem::size_of::<f32>());
     let mut rng = SmallRng::seed_from_u64(SEARCH_SEED);
     // Profiling timeouts use the CompileOptions defaults (5s candidate / 1s execution).
-    let search_options = CompileOptions::default().search_graph_limit(search_graphs);
-    runtime = cx.search_with_rng(runtime, search_options, &mut rng);
+    runtime = cx.compile_with_rng(runtime, compile_options, &mut rng);
 
     // Search profiling leaves several GB cached in the async allocator pool;
     // reclaim it before the first real execute so the stitched-graph arena
@@ -148,8 +162,9 @@ fn main() {
 
     const EOS_TOKEN: u32 = 1;
 
-    // KV caches update in place; sampling runs on-device — per-step host
-    // I/O is one token id each way.
+    // Sampling runs on-device, and each execute's selected cache/seen outputs
+    // are promoted back into the persistent input slots before the next step.
+    // Per-step host I/O is one token id each way.
     let prefill_start = std::time::Instant::now();
     let plen = prompt_tokens.len();
     cx.set_dim('s', plen);
@@ -163,6 +178,13 @@ fn main() {
     runtime.set_data(gather_idx_t, (0..plen as i32).collect::<Vec<_>>());
     runtime.set_data(new_token_t, vec![-1i32]);
     runtime.execute(&cx.dyn_map);
+    promote_persistent_state(
+        &mut runtime,
+        seen_out,
+        seen_mask_t,
+        &cache_outputs,
+        &kv_cache,
+    );
     prev_seq = prompt_tokens.len();
 
     let ids = runtime.get_i32(token_ids);
@@ -183,6 +205,13 @@ fn main() {
         runtime.set_data(gather_idx_t, (0..=prev_seq as i32).collect::<Vec<_>>());
         runtime.set_data(new_token_t, vec![next_token as i32]);
         runtime.execute(&cx.dyn_map);
+        promote_persistent_state(
+            &mut runtime,
+            seen_out,
+            seen_mask_t,
+            &cache_outputs,
+            &kv_cache,
+        );
 
         prev_seq += 1;
         let ids = runtime.get_i32(token_ids);

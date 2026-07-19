@@ -6,10 +6,13 @@ extern crate self as luminal_cuda_lite;
 pub mod dyn_backend;
 pub mod host;
 pub mod kernel;
+mod resource;
 pub mod runtime;
 use std::{
+    cell::Cell,
     ffi::{CStr, CString},
-    path::Path,
+    os::raw::c_int,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -29,6 +32,50 @@ use cudarc::{
     },
 };
 use luminal::dtype::DType;
+
+thread_local! {
+    /// Compilation is synchronous, so a thread-local budget lets each runtime
+    /// control its own NVRTC safety limit without leaking policy across
+    /// concurrent searches. Direct kernel compilation keeps the safe default.
+    static KERNEL_SOURCE_LIMIT_BYTES: Cell<Option<usize>> =
+        const { Cell::new(Some(resource::DEFAULT_MAX_KERNEL_SOURCE_BYTES)) };
+}
+
+struct KernelSourceLimitGuard {
+    previous: Option<usize>,
+}
+
+impl Drop for KernelSourceLimitGuard {
+    fn drop(&mut self) {
+        KERNEL_SOURCE_LIMIT_BYTES.with(|limit| limit.set(self.previous));
+    }
+}
+
+pub(crate) fn with_kernel_source_limit<T>(limit: Option<usize>, compile: impl FnOnce() -> T) -> T {
+    let previous = KERNEL_SOURCE_LIMIT_BYTES.with(|current| current.replace(limit));
+    let _guard = KernelSourceLimitGuard { previous };
+    compile()
+}
+
+fn kernel_source_limit() -> Option<usize> {
+    KERNEL_SOURCE_LIMIT_BYTES.with(Cell::get)
+}
+
+#[cfg(test)]
+mod kernel_source_limit_tests {
+    use super::*;
+
+    #[test]
+    fn source_limit_is_scoped_and_nestable() {
+        let initial = kernel_source_limit();
+        with_kernel_source_limit(Some(64), || {
+            assert_eq!(kernel_source_limit(), Some(64));
+            with_kernel_source_limit(None, || assert_eq!(kernel_source_limit(), None));
+            assert_eq!(kernel_source_limit(), Some(64));
+        });
+        assert_eq!(kernel_source_limit(), initial);
+    }
+}
 
 fn cuda_dtype(dtype: DType) -> &'static str {
     match dtype {
@@ -115,23 +162,206 @@ fn format_cuda_version(version: i32) -> String {
     format!("{}.{}", version / 1000, (version % 1000) / 10)
 }
 
-fn cuda_nvrtc_include_paths() -> Vec<String> {
-    let mut include_paths = Vec::new();
-    for env_var in ["CUDA_HOME", "CUDA_PATH", "CUDA_ROOT"] {
-        if let Ok(root) = std::env::var(env_var) {
-            let path = format!("{root}/include");
+fn cuda_nvrtc_include_paths() -> &'static [String] {
+    static INCLUDE_PATHS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    INCLUDE_PATHS.get_or_init(|| {
+        let mut include_paths = Vec::new();
+        for env_var in ["CUDA_HOME", "CUDA_PATH", "CUDA_ROOT"] {
+            if let Ok(root) = std::env::var(env_var) {
+                let path = format!("{root}/include");
+                if Path::new(&path).exists() && !include_paths.contains(&path) {
+                    include_paths.push(path);
+                }
+            }
+        }
+        for path in CUDA_NVRTC_INCLUDE_PATHS {
+            let path = path.to_string();
             if Path::new(&path).exists() && !include_paths.contains(&path) {
                 include_paths.push(path);
             }
         }
-    }
-    for path in CUDA_NVRTC_INCLUDE_PATHS {
-        let path = path.to_string();
-        if Path::new(&path).exists() && !include_paths.contains(&path) {
-            include_paths.push(path);
+
+        // NVRTC parses the CUDA headers itself, so using headers from a newer
+        // toolkit than the dynamically loaded compiler can make otherwise-valid
+        // kernels fail before code generation (FP8 headers are particularly
+        // sensitive to this). Prefer the include tree whose CUDA_VERSION matches
+        // the loaded NVRTC, while preserving the configured order as a tie-break.
+        // The loaded compiler and process environment are stable after startup;
+        // cache the filesystem scan instead of rereading cuda.h for every kernel.
+        if let Some(nvrtc_version) = loaded_nvrtc_version() {
+            include_paths.sort_by_key(|path| {
+                cuda_header_version(path)
+                    .map(|header_version| header_version.abs_diff(nvrtc_version))
+                    .unwrap_or(u32::MAX)
+            });
+        }
+        include_paths
+    })
+}
+
+type NvrtcVersionFn = unsafe extern "C" fn(*mut c_int, *mut c_int) -> nvrtc_sys::nvrtcResult;
+
+fn loaded_nvrtc_version() -> Option<u32> {
+    static VERSION: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *VERSION.get_or_init(|| query_nvrtc_version(nvrtc_library_candidates()))
+}
+
+fn query_nvrtc_version(candidates: impl IntoIterator<Item = PathBuf>) -> Option<u32> {
+    for candidate in candidates {
+        // Do not call cudarc's generated nvrtcVersion wrapper here. Under its
+        // fallback dynamic loader, the wrapper panics when the library or
+        // symbol is absent. Opening the library and resolving the symbol
+        // directly keeps version detection optional without manipulating the
+        // process-global panic hook.
+        let Ok(library) = (unsafe { libloading::Library::new(candidate) }) else {
+            continue;
+        };
+        let Ok(version_fn) = (unsafe { library.get::<NvrtcVersionFn>(b"nvrtcVersion\0") }) else {
+            continue;
+        };
+        let (mut major, mut minor) = (0, 0);
+        if unsafe { version_fn(&mut major, &mut minor) }
+            .result()
+            .is_ok()
+            && let Some(version) = encode_nvrtc_version(major, minor)
+        {
+            return Some(version);
         }
     }
-    include_paths
+    None
+}
+
+fn encode_nvrtc_version(major: c_int, minor: c_int) -> Option<u32> {
+    let major = u32::try_from(major).ok()?;
+    let minor = u32::try_from(minor).ok()?;
+    major.checked_mul(1000)?.checked_add(minor.checked_mul(10)?)
+}
+
+fn nvrtc_library_candidates() -> Vec<PathBuf> {
+    use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
+
+    let pointer_width = if cfg!(target_pointer_width = "32") {
+        "32"
+    } else {
+        "64"
+    };
+    let major = driver_sys::CUDA_VERSION / 1000;
+    let minor = (driver_sys::CUDA_VERSION % 1000) / 10;
+
+    // Keep this sequence identical to cudarc 0.19's dynamic NVRTC loader.
+    // Version probing must resolve the same library that compile_ptx will use;
+    // searching extra toolkit versions or CUDA_HOME paths can silently pair a
+    // compiler with the wrong headers and kernel-parameter ABI limit.
+    [
+        format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}"),
+        format!("{DLL_PREFIX}nvrtc{pointer_width}{DLL_SUFFIX}"),
+        format!("{DLL_PREFIX}nvrtc{pointer_width}_{major}{DLL_SUFFIX}"),
+        format!("{DLL_PREFIX}nvrtc{pointer_width}_{major}{minor}{DLL_SUFFIX}"),
+        format!("{DLL_PREFIX}nvrtc{pointer_width}_{major}{minor}_0{DLL_SUFFIX}"),
+        format!("{DLL_PREFIX}nvrtc{pointer_width}_{major}0_{minor}{DLL_SUFFIX}"),
+        format!("{DLL_PREFIX}nvrtc{pointer_width}_10{DLL_SUFFIX}"),
+        format!("{DLL_PREFIX}nvrtc{pointer_width}_11{DLL_SUFFIX}"),
+        format!("{DLL_PREFIX}nvrtc{pointer_width}_12{DLL_SUFFIX}"),
+        format!("{DLL_PREFIX}nvrtc{pointer_width}_{major}0_0{DLL_SUFFIX}"),
+        format!("{DLL_PREFIX}nvrtc{pointer_width}_9{DLL_SUFFIX}"),
+        format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}.{major}"),
+        format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}.12"),
+        format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}.11"),
+        format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}.10"),
+        format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}.9"),
+        format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}.1"),
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
+fn cuda_header_version(include_path: &str) -> Option<u32> {
+    let header = std::fs::read_to_string(Path::new(include_path).join("cuda.h")).ok()?;
+    parse_cuda_header_version(&header)
+}
+
+fn parse_cuda_header_version(header: &str) -> Option<u32> {
+    header.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        match (fields.next(), fields.next(), fields.next()) {
+            (Some("#define"), Some("CUDA_VERSION"), Some(version)) => version.parse().ok(),
+            _ => None,
+        }
+    })
+}
+
+#[cfg(test)]
+mod nvrtc_header_tests {
+    use super::*;
+
+    #[test]
+    fn parses_cuda_version_define() {
+        assert_eq!(
+            parse_cuda_header_version("#pragma once\n#define CUDA_VERSION 12080\n"),
+            Some(12080)
+        );
+        assert_eq!(
+            parse_cuda_header_version("#define SOMETHING_ELSE 1\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn nvrtc_version_encoding_is_checked() {
+        assert_eq!(encode_nvrtc_version(12, 1), Some(12010));
+        assert_eq!(encode_nvrtc_version(13, 3), Some(13030));
+        assert_eq!(encode_nvrtc_version(-1, 3), None);
+        assert_eq!(encode_nvrtc_version(13, -1), None);
+        assert_eq!(encode_nvrtc_version(c_int::MAX, 0), None);
+    }
+
+    #[test]
+    fn missing_nvrtc_library_is_optional() {
+        let missing = std::env::temp_dir().join(format!(
+            "luminal-missing-nvrtc-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        assert_eq!(query_nvrtc_version([missing]), None);
+    }
+
+    #[test]
+    fn nvrtc_probe_matches_cudarc_loader_order() {
+        use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
+
+        let pointer_width = if cfg!(target_pointer_width = "32") {
+            "32"
+        } else {
+            "64"
+        };
+        let major = driver_sys::CUDA_VERSION / 1000;
+        let minor = (driver_sys::CUDA_VERSION % 1000) / 10;
+        let expected = [
+            format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}"),
+            format!("{DLL_PREFIX}nvrtc{pointer_width}{DLL_SUFFIX}"),
+            format!("{DLL_PREFIX}nvrtc{pointer_width}_{major}{DLL_SUFFIX}"),
+            format!("{DLL_PREFIX}nvrtc{pointer_width}_{major}{minor}{DLL_SUFFIX}"),
+            format!("{DLL_PREFIX}nvrtc{pointer_width}_{major}{minor}_0{DLL_SUFFIX}"),
+            format!("{DLL_PREFIX}nvrtc{pointer_width}_{major}0_{minor}{DLL_SUFFIX}"),
+            format!("{DLL_PREFIX}nvrtc{pointer_width}_10{DLL_SUFFIX}"),
+            format!("{DLL_PREFIX}nvrtc{pointer_width}_11{DLL_SUFFIX}"),
+            format!("{DLL_PREFIX}nvrtc{pointer_width}_12{DLL_SUFFIX}"),
+            format!("{DLL_PREFIX}nvrtc{pointer_width}_{major}0_0{DLL_SUFFIX}"),
+            format!("{DLL_PREFIX}nvrtc{pointer_width}_9{DLL_SUFFIX}"),
+            format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}.{major}"),
+            format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}.12"),
+            format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}.11"),
+            format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}.10"),
+            format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}.9"),
+            format!("{DLL_PREFIX}nvrtc{DLL_SUFFIX}.1"),
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+
+        assert_eq!(nvrtc_library_candidates(), expected);
+    }
 }
 
 fn cuda_driver_diagnostics() -> (Option<i32>, Option<i32>) {
@@ -213,7 +443,7 @@ pub(crate) fn try_create_cublaslt(
 
 fn cuda_nvrtc_compile_options(target_arch: &str) -> Vec<String> {
     let mut options = cuda_nvrtc_include_paths()
-        .into_iter()
+        .iter()
         .map(|path| format!("--include-path={path}"))
         .collect::<Vec<_>>();
     options.push(format!("--gpu-architecture={target_arch}"));
@@ -283,14 +513,14 @@ pub(crate) fn compile_module_image_for_current_device<S: AsRef<str>>(
     let target_arch = format!("sm_{major}{minor}");
     let nvrtc_options = cuda_nvrtc_compile_options(&target_arch);
 
-    // nvrtc compile time grows super-linearly with source size; pathological
-    // fusion-region candidates have produced multi-megabyte kernels that sit
-    // in nvrtcCompileProgram for an hour. Reject them as candidates instead
-    // of compiling (the search treats the panic as an invalid genome).
-    const MAX_KERNEL_SOURCE_BYTES: usize = 512 * 1024;
+    // NVRTC compile time grows super-linearly with source size. The active
+    // runtime installs its configured budget around compilation; direct calls
+    // use the default safety budget.
     let src_len = src.as_ref().len();
-    if src_len > MAX_KERNEL_SOURCE_BYTES {
-        panic!("kernel source too large for nvrtc ({src_len} bytes > {MAX_KERNEL_SOURCE_BYTES})");
+    if let Some(limit) = kernel_source_limit()
+        && src_len > limit
+    {
+        panic!("kernel source too large for nvrtc ({src_len} bytes > {limit})");
     }
     if src_len > 128 * 1024 {
         eprintln!("nvrtc: compiling a large kernel ({src_len} bytes)");

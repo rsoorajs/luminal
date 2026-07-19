@@ -76,12 +76,10 @@ pub trait Runtime {
     {
         vec![]
     }
-    /// Backend-provided egglog text spliced in immediately after the op
-    /// constructor definitions and before the rewrite rules. Core keeps this
-    /// empty; runtimes can use it to declare shared egglog relations/functions
-    /// that their rewrite rules read and write across multiple ops — declarations
-    /// that the per-op rewrite hook cannot emit exactly-once — without adding
-    /// those declarations to Luminal core.
+    /// Backend-provided egglog text spliced after the op constructor and
+    /// op-owned declarations, before the rewrite rules. Core keeps this empty;
+    /// runtimes can use it for backend-wide program text that is not naturally
+    /// owned by one registered op, without adding it to Luminal core.
     fn extra_egglog() -> String
     where
         Self: Sized,
@@ -113,7 +111,9 @@ pub trait Runtime {
         self.profile(llir_graph, dyn_map, trials, timeout)
     }
     /// Aggregate multiple profile metrics into one comparable metric.
-    /// Used for regionalized profiling where one candidate maps to multiple LLIR regions.
+    /// Used for regionalized profiling and best-first bucket-set selection.
+    /// Implementations must be coordinate-monotone: replacing any input with
+    /// a metric that compares greater must not make the aggregate compare less.
     fn aggregate_profile_metrics(metrics: &[Self::ProfileMetric]) -> Self::ProfileMetric {
         metrics
             .first()
@@ -147,6 +147,19 @@ pub trait Runtime {
         &mut self,
         _llir_graph: &LLIRGraph,
         _context: CandidateFilterContext<'_>,
+    ) -> CandidateFilterResult {
+        CandidateFilterResult::accept()
+    }
+    /// Runtime-specific filter for a complete retained set of bucket LLIRs.
+    /// Individual buckets may each be viable while their persistent resources
+    /// conflict or exceed a limit when all buckets are retained together.
+    /// Backends with aggregate bucket resources should override this with the
+    /// same dry planning used by [`Runtime::load_llir_buckets`].
+    fn filter_llir_bucket_set(
+        &mut self,
+        _dim_buckets: &FxHashMap<char, Vec<DimBucket>>,
+        _bucket_llirs: &[BucketLLIRRef<'_>],
+        _search_options: &crate::graph::CompileOptions,
     ) -> CandidateFilterResult {
         CandidateFilterResult::accept()
     }
@@ -269,6 +282,15 @@ impl std::fmt::Display for ExecutionStats {
 
 pub trait EgglogOp: Debug {
     fn sort(&self) -> crate::egglog_utils::api::SortDef;
+
+    /// Shared egglog declarations required by this op's rewrites. These are
+    /// emitted once, before any rewrite text, so relations/functions shared by
+    /// multiple ops do not depend on tuple registration order. Identical
+    /// declaration strings are deduplicated while preserving first-seen order.
+    fn egglog_declarations(&self) -> Vec<String> {
+        vec![]
+    }
+
     fn rewrites(&self) -> Vec<crate::egglog_utils::api::Rule> {
         vec![]
     }

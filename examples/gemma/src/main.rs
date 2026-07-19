@@ -26,10 +26,41 @@ fn gemma3_chat_prompt(user_prompt: &str) -> String {
     format!("<bos><start_of_turn>user\n{user_prompt}<end_of_turn>\n<start_of_turn>model\n")
 }
 
+fn rebind_persistent_state(
+    runtime: &mut CudaRuntime,
+    seen_out: GraphTensor,
+    seen_mask: GraphTensor,
+    cache_outputs: &[(GraphTensor, GraphTensor)],
+    kv_cache: &KVCache,
+) {
+    let seen = runtime.remove_buffer(seen_out);
+    runtime.set_buffer(seen_mask, seen);
+
+    debug_assert_eq!(cache_outputs.len(), kv_cache.k_caches.len());
+    debug_assert_eq!(cache_outputs.len(), kv_cache.v_caches.len());
+    for (layer, (k_out, v_out)) in cache_outputs.iter().enumerate() {
+        let k = runtime.remove_buffer(*k_out);
+        let v = runtime.remove_buffer(*v_out);
+        runtime.set_buffer(kv_cache.k_caches[layer], k);
+        runtime.set_buffer(kv_cache.v_caches[layer], v);
+    }
+}
+
 fn main() {
     let max_seq_len = 4096;
     let gen_tokens = 500;
     let search_graphs = 500;
+    let search_memory_mib = match std::env::var("SEARCH_MEMORY_MIB") {
+        Ok(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value > 0)
+            .expect("SEARCH_MEMORY_MIB must be a positive integer"),
+        Err(std::env::VarError::NotPresent) => 5 * 1024,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("SEARCH_MEMORY_MIB must be valid UTF-8")
+        }
+    };
     let prompt = "Explain what a neural network is in simple terms:";
 
     tracing_subscriber::registry()
@@ -81,7 +112,7 @@ fn main() {
 
     let max_prefill = (prompt_len + 16).next_power_of_two().min(max_seq_len);
     let search_s = 16.min(max_prefill).max(2);
-    let build_options = CompileOptions::default()
+    let compile_options = CompileOptions::default()
         .dim_buckets(
             's',
             &[
@@ -92,15 +123,16 @@ fn main() {
         .dim_buckets(
             'c',
             &[DimBucket::new(1, max_seq_len).representative(search_s)],
-        );
-
-    println!("Building E-Graph...");
-    let phase = std::time::Instant::now();
-    cx.build_search_space::<CudaRuntime>(build_options);
-    println!("  e-graph build: {:.1}s", phase.elapsed().as_secs_f64());
+        )
+        .search_graph_limit(search_graphs);
 
     println!("Loading weights...");
-    let mut runtime = CudaRuntime::initialize(stream).with_max_memory_mib(2048);
+    // Widened semantic search produces legal prefill plans with a ~4.7 GiB
+    // proven intermediate lower bound; keep headroom while rejecting the much
+    // larger pathological unfused plans. Allow constrained machines and
+    // resource-regression checks to override the measured default explicitly.
+    println!("Search memory cap: {search_memory_mib} MiB");
+    let mut runtime = CudaRuntime::initialize(stream).with_max_memory_mib(search_memory_mib);
     let weights_path = model_dir.join("model_combined_bf16_v1.safetensors");
     let phase = std::time::Instant::now();
     runtime.load_safetensors(&cx, weights_path.to_str().unwrap());
@@ -122,8 +154,7 @@ fn main() {
     runtime.set_data(gather_idx_t, (0..search_s as i32).collect::<Vec<_>>());
     runtime.set_data(new_token_t, vec![-1i32]);
     let mut rng = SmallRng::seed_from_u64(SEARCH_SEED);
-    let search_options = CompileOptions::default().search_graph_limit(search_graphs);
-    runtime = cx.search_with_rng(runtime, search_options, &mut rng);
+    runtime = cx.compile_with_rng(runtime, compile_options, &mut rng);
 
     // Reclaim memory left in the async allocator pool by search profiling
     // before the first real execute.
@@ -168,6 +199,13 @@ fn main() {
     runtime.set_data(gather_idx_t, (0..prompt_len as i32).collect::<Vec<_>>());
     runtime.set_data(new_token_t, vec![-1i32]);
     runtime.execute(&cx.dyn_map);
+    rebind_persistent_state(
+        &mut runtime,
+        seen_out,
+        seen_mask_t,
+        &cache_outputs,
+        &kv_cache,
+    );
     prev_seq = prompt_len;
 
     let ids = runtime.get_i32(token_ids);
@@ -193,6 +231,13 @@ fn main() {
         runtime.set_data(gather_idx_t, (0..=prev_seq as i32).collect::<Vec<_>>());
         runtime.set_data(new_token_t, vec![next_token as i32]);
         runtime.execute(&cx.dyn_map);
+        rebind_persistent_state(
+            &mut runtime,
+            seen_out,
+            seen_mask_t,
+            &cache_outputs,
+            &kv_cache,
+        );
 
         prev_seq += 1;
         let ids = runtime.get_i32(token_ids);
