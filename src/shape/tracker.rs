@@ -136,7 +136,15 @@ impl ShapeTracker {
                 *dim = size;
                 *stride = 0.into();
             } else {
-                panic!("Cannot expand dim {axis} from {dim} to {size}",);
+                let (dim_simplified, size_simplified) = (dim.simplify(), size.simplify());
+                if dim_simplified == size_simplified {
+                    *dim = size;
+                } else {
+                    panic!(
+                        "Cannot expand dim {axis} from {dim} to {size} \
+                         (simplified: {dim_simplified} vs {size_simplified})",
+                    );
+                }
             }
         }
     }
