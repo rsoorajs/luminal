@@ -74,12 +74,19 @@ impl EgglogOp for CudaUnaryElementwise {
             ("Log2", "Log2"),
             ("Recip", "Recip"),
         ] {
+            // Each FusionStart is stamped with ITS input's dtype — it
+            // describes how the external producer's buffer is loaded, and the
+            // codegen reads every local at its producer's dtype. Stamping the
+            // consumer's dtype instead is illegal by construction whenever
+            // input and output dtypes differ (the post-extraction fusion
+            // region check rejects the mismatch nondeterministically).
             rules.push(Rule::raw(format!(
                 "(rule (
                     (= ?u (Op ({hlir} ?shape ?s ?out_s) (ICons ?x (INil))))
                     (= ?dt (dtype ?u))
+                    (= ?dt_x (dtype ?x))
                  ) (
-                    (let ?fs (Op (FusionStart ?shape ?s ?dt) (ICons ?x (INil))))
+                    (let ?fs (Op (FusionStart ?shape ?s ?dt_x) (ICons ?x (INil))))
                     (let ?elem (Op (CudaUnaryElementwise \"{opcode}\" ?shape ?s ?out_s ?dt)
                                    (ICons ?fs (INil))))
                     (let ?fe (Op (FusionEnd ?shape ?out_s ?dt) (ICons ?elem (INil))))
@@ -89,96 +96,11 @@ impl EgglogOp for CudaUnaryElementwise {
             )));
         }
 
-        rules.push(Rule::raw(
-            "(rule (
-                    (= ?sqrt (Op (Sqrt ?shape ?x_stride ?sqrt_stride) (ICons ?x (INil))))
-                    (= ?recip (Op (Recip ?shape ?sqrt_stride ?out_stride) (ICons ?sqrt (INil))))
-                    (= ?dt (dtype ?recip))
-                 ) (
-                    (let ?fs (Op (FusionStart ?shape ?x_stride ?dt) (ICons ?x (INil))))
-                    (let ?elem (Op (CudaUnaryElementwise \"Rsqrt\" ?shape ?x_stride ?out_stride ?dt)
-                                   (ICons ?fs (INil))))
-                    (let ?fe (Op (FusionEnd ?shape ?out_stride ?dt) (ICons ?elem (INil))))
-                    (union ?recip ?fe)
-                    (set (dtype ?fe) ?dt)
-                 ) :ruleset kernel_lower :name \"cuda-elem-rsqrt-from-sqrt-recip\")",
-        ));
-
-        rules.push(Rule::raw(
-            "(rule
-                (
-                    (= ?mul (Op (Mul ?shape ?x_stride ?const_stride ?inter_stride) (ICons ?x (ICons ?exp_const (INil)))))
-                    (= ?exp2 (Op (Exp2 ?shape ?inter_stride ?out_stride) (ICons ?mul (INil))))
-                    (= ?dt (dtype ?x))
-                    (= ?cv (Op (Constant ?val) (INil)))
-                    (= ?exp_const ?cv)
-                    (> ?val 1.44)
-                    (< ?val 1.45)
-                )
-                (
-                    (let ?fs (Op (FusionStart ?shape ?x_stride ?dt) (ICons ?x (INil))))
-                    (let ?elem (Op (CudaUnaryElementwise \"Exp\" ?shape ?x_stride ?out_stride ?dt)
-                                   (ICons ?fs (INil))))
-                    (let ?fe (Op (FusionEnd ?shape ?out_stride ?dt) (ICons ?elem (INil))))
-                    (union ?exp2 ?fe)
-                    (set (dtype ?fe) ?dt)
-                )
-                :ruleset direct_kernel
-                :name \"direct-exp-region\"
-            )",
-        ));
-
-        rules.push(Rule::raw(
-            "(datatype*
-                (CudaSigmoidScaledState
-                    (MkCudaSigmoidScaledState IR EList EList DType)
-                )
-            )
-            (function cuda_sigmoid_scaled (IR) CudaSigmoidScaledState :merge new)
-
-            (rule
-            (
-                (= ?neg1 (Op (Constant ?nv) (INil)))
-                (< ?nv -0.99)
-                (> ?nv -1.01)
-                (= ?neg_x (Op (Mul ?shape ?x_stride ?neg_stride ?neg_out_stride) (ICons ?x (ICons ?neg1 (INil)))))
-                (= ?log2e (Op (Constant ?lv) (INil)))
-                (> ?lv 1.44)
-                (< ?lv 1.45)
-                (= ?scaled (Op (Mul ?shape ?neg_out_stride ?log2e_stride ?scaled_stride) (ICons ?neg_x (ICons ?log2e (INil)))))
-                (= ?dt (dtype ?x))
-            )
-            (
-                (set (cuda_sigmoid_scaled ?scaled)
-                    (MkCudaSigmoidScaledState ?x ?shape ?x_stride ?dt))
-            )
-            :ruleset direct_kernel
-            :name \"direct-sigmoid-scaled-region-marker\"
-            )
-
-            (rule
-            (
-                (= ?scaled_state (cuda_sigmoid_scaled ?scaled))
-                (= ?scaled_state (MkCudaSigmoidScaledState ?x ?shape ?x_stride ?dt))
-                (= ?exp2 (Op (Exp2 ?shape ?scaled_stride ?exp_stride) (ICons ?scaled (INil))))
-                (= ?one (Op (Constant ?ov) (INil)))
-                (> ?ov 0.99)
-                (< ?ov 1.01)
-                (= ?plus_one (Op (Add ?shape ?exp_stride ?one_stride ?add_stride) (ICons ?exp2 (ICons ?one (INil)))))
-                (= ?sig_out (Op (Recip ?shape ?add_stride ?out_stride) (ICons ?plus_one (INil))))
-            )
-            (
-                (let ?fs (Op (FusionStart ?shape ?x_stride ?dt) (ICons ?x (INil))))
-                (let ?elem (Op (CudaUnaryElementwise \"Sigmoid\" ?shape ?x_stride ?out_stride ?dt)
-                               (ICons ?fs (INil))))
-                (let ?fe (Op (FusionEnd ?shape ?out_stride ?dt) (ICons ?elem (INil))))
-                (union ?sig_out ?fe)
-                (set (dtype ?fe) ?dt)
-            )
-            :ruleset direct_kernel
-            :name \"direct-sigmoid-region\"
-            )",
-        ));
+        // The rsqrt / direct-exp / direct-sigmoid substitutions are removed:
+        // they replaced exact HLIR chains with approximate single
+        // instructions (`rsqrtf`, `expf`, fused sigmoid) matched through
+        // constant tolerance windows — V2 violations under the exact-HLIR
+        // reproduction ruling. See the exact-HLIR reproduction ruling.
 
         rules
     }
@@ -281,12 +203,16 @@ impl EgglogOp for CudaBinaryElementwise {
     fn rewrites(&self) -> Vec<Rule> {
         vec![
             Rule::raw(
+                // FusionStart dtypes follow each input's producer; see the
+                // unary rules for why anything else is construction-illegal.
                 "(rule (
                     (= ?bin (Op (Add ?shape ?a_s ?b_s ?out_s) (ICons ?a (ICons ?b (INil)))))
                     (= ?dt (dtype ?bin))
+                    (= ?dt_a (dtype ?a))
+                    (= ?dt_b (dtype ?b))
                  ) (
-                    (let ?fs_a (Op (FusionStart ?shape ?a_s ?dt) (ICons ?a (INil))))
-                    (let ?fs_b (Op (FusionStart ?shape ?b_s ?dt) (ICons ?b (INil))))
+                    (let ?fs_a (Op (FusionStart ?shape ?a_s ?dt_a) (ICons ?a (INil))))
+                    (let ?fs_b (Op (FusionStart ?shape ?b_s ?dt_b) (ICons ?b (INil))))
                     (let ?elem (Op (CudaBinaryElementwise \"Add\" ?shape ?a_s ?b_s ?out_s ?dt)
                                    (ICons ?fs_a (ICons ?fs_b (INil)))))
                     (let ?fe (Op (FusionEnd ?shape ?out_s ?dt) (ICons ?elem (INil))))
@@ -295,12 +221,17 @@ impl EgglogOp for CudaBinaryElementwise {
                  ) :ruleset kernel_lower :name \"cuda-elem-singleton-Add\")",
             ),
             Rule::raw(
+                // The op and FusionEnd carry the RESULT dtype (?bin, not ?a —
+                // Mul(bf16, f32) stamped bf16 would round the product); the
+                // FusionStarts carry their producers' dtypes as above.
                 "(rule (
                     (= ?bin (Op (Mul ?shape ?a_s ?b_s ?out_s) (ICons ?a (ICons ?b (INil)))))
-                    (= ?dt (dtype ?a))
+                    (= ?dt (dtype ?bin))
+                    (= ?dt_a (dtype ?a))
+                    (= ?dt_b (dtype ?b))
                  ) (
-                    (let ?fs_a (Op (FusionStart ?shape ?a_s ?dt) (ICons ?a (INil))))
-                    (let ?fs_b (Op (FusionStart ?shape ?b_s ?dt) (ICons ?b (INil))))
+                    (let ?fs_a (Op (FusionStart ?shape ?a_s ?dt_a) (ICons ?a (INil))))
+                    (let ?fs_b (Op (FusionStart ?shape ?b_s ?dt_b) (ICons ?b (INil))))
                     (let ?elem (Op (CudaBinaryElementwise \"Mul\" ?shape ?a_s ?b_s ?out_s ?dt)
                                    (ICons ?fs_a (ICons ?fs_b (INil)))))
                     (let ?fe (Op (FusionEnd ?shape ?out_s ?dt) (ICons ?elem (INil))))

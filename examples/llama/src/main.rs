@@ -106,29 +106,6 @@ struct StepProfile {
     sample: Duration,
 }
 
-struct PersistentState<'a> {
-    seen_mask: GraphTensor,
-    seen_out: GraphTensor,
-    kv_cache: &'a KVCache,
-    cache_outputs: &'a [(GraphTensor, GraphTensor)],
-}
-
-impl PersistentState<'_> {
-    fn promote_outputs(&self, runtime: &mut CudaRuntime) {
-        // Search may select either aliasing or copy-producing state updates,
-        // so explicitly carry every persistent output into the next step.
-        let seen_buf = runtime.remove_buffer(self.seen_out);
-        runtime.set_buffer(self.seen_mask, seen_buf);
-
-        for (layer_idx, (k_out, v_out)) in self.cache_outputs.iter().enumerate() {
-            let k_buf = runtime.remove_buffer(*k_out);
-            let v_buf = runtime.remove_buffer(*v_out);
-            runtime.set_buffer(self.kv_cache.k_caches[layer_idx], k_buf);
-            runtime.set_buffer(self.kv_cache.v_caches[layer_idx], v_buf);
-        }
-    }
-}
-
 fn sum_profiles<'a>(profiles: impl Iterator<Item = &'a StepProfile>) -> StepProfile {
     profiles.fold(StepProfile::default(), |mut acc, p| {
         acc.total += p.total;
@@ -250,7 +227,6 @@ fn run_model_step(
     gather_idx_t: GraphTensor,
     new_token_t: GraphTensor,
     token_ids: GraphTensor,
-    persistent_state: &PersistentState<'_>,
     tokens: &[u32],
     q_pos: &[i32],
     scatter_idx: &[i32],
@@ -274,7 +250,6 @@ fn run_model_step(
 
     let execute_start = std::time::Instant::now();
     runtime.execute(&cx.dyn_map);
-    persistent_state.promote_outputs(runtime);
     profile.execute = execute_start.elapsed();
 
     let logits_start = std::time::Instant::now();
@@ -342,17 +317,17 @@ fn main() {
         k_out.output();
         v_out.output();
     }
-    let persistent_state = PersistentState {
-        seen_mask: seen_mask_t,
-        seen_out,
-        kv_cache: &kv_cache,
-        cache_outputs: &cache_outputs,
-    };
 
     cx.set_dim('s', 1);
     cx.set_dim('c', 1);
     let max_prefill = (prompt_len + 16).next_power_of_two().min(MAX_SEQ_LEN);
     let search_s = 16.min(max_prefill).max(2);
+    // Profile the context dim at a representative size, not the bucket
+    // minimum: at c=16 attention cost differences (FlashInfer vs mask+softmax
+    // kernels, fused vs unfused chains) are below profiling noise, so the
+    // search cannot rank them. 512 makes size-dependent costs visible while
+    // keeping per-candidate profiling cheap.
+    let search_c = 512.min(MAX_SEQ_LEN);
     let compile_options = CompileOptions::default()
         .dim_buckets(
             's',
@@ -363,7 +338,7 @@ fn main() {
         )
         .dim_buckets(
             'c',
-            &[DimBucket::new(1, MAX_SEQ_LEN).representative(search_s)],
+            &[DimBucket::new(1, MAX_SEQ_LEN).representative(search_c)],
         )
         .search_graph_limit(SEARCH_GRAPHS)
         .trials(SEARCH_TRIALS)
@@ -371,29 +346,36 @@ fn main() {
 
     println!("Loading weights...");
     let load_start = std::time::Instant::now();
-    let mut runtime = CudaRuntime::initialize(stream).with_max_memory_mib(SEARCH_MEMORY_MIB);
+    let mut runtime =
+        CudaRuntime::initialize(stream.clone()).with_max_memory_mib(SEARCH_MEMORY_MIB);
     for weights_path in &prepared.weight_files {
         println!("  Loading {}", weights_path.display());
         runtime.load_safetensors(&cx, weights_path.to_str().unwrap());
     }
     println!("  Weight load: {:.2} s", load_start.elapsed().as_secs_f64());
 
+    // Persistent state is user-owned, aliased input<->output, registered
+    // before compile so the search prices state updates as deployed.
     let cache_bytes = MAX_SEQ_LEN * KV_DIM * weight_mode.kv_element_bytes();
-    for i in 0..LAYERS {
-        runtime.set_zeros(kv_cache.k_caches[i], cache_bytes);
-        runtime.set_zeros(kv_cache.v_caches[i], cache_bytes);
+    let mut persistent_buffers = vec![runtime.alias_state(
+        seen_mask_t,
+        seen_out,
+        VOCAB_SIZE * std::mem::size_of::<f32>(),
+    )];
+    for (layer, (k_out, v_out)) in cache_outputs.iter().enumerate() {
+        persistent_buffers.push(runtime.alias_state(kv_cache.k_caches[layer], *k_out, cache_bytes));
+        persistent_buffers.push(runtime.alias_state(kv_cache.v_caches[layer], *v_out, cache_bytes));
     }
-    runtime.set_zeros(seen_mask_t, VOCAB_SIZE * std::mem::size_of::<f32>());
 
     println!("Compiling...");
     let compile_start = std::time::Instant::now();
     cx.set_dim('s', search_s);
-    cx.set_dim('c', search_s);
+    cx.set_dim('c', search_c);
     runtime.set_data(input, vec![1; search_s]);
     runtime.set_data(new_token_t, vec![-1i32]);
     runtime.set_data(q_pos_t, (0..search_s as i32).collect::<Vec<_>>());
     runtime.set_data(scatter_idx_t, (0..search_s as i32).collect::<Vec<_>>());
-    runtime.set_data(gather_idx_t, (0..search_s as i32).collect::<Vec<_>>());
+    runtime.set_data(gather_idx_t, (0..search_c as i32).collect::<Vec<_>>());
     let search_seed = std::env::var("LUMINAL_LLAMA_SEARCH_SEED")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -416,11 +398,9 @@ fn main() {
         MAX_SEQ_LEN * std::mem::size_of::<i32>(),
     );
 
-    for i in 0..LAYERS {
-        runtime.set_zeros(kv_cache.k_caches[i], cache_bytes);
-        runtime.set_zeros(kv_cache.v_caches[i], cache_bytes);
+    for buf in &mut persistent_buffers {
+        stream.memset_zeros(buf).unwrap();
     }
-    runtime.set_zeros(seen_mask_t, VOCAB_SIZE * std::mem::size_of::<f32>());
 
     let mut context_len = 0usize;
     let mut fwd_durations = vec![];
@@ -449,7 +429,6 @@ fn main() {
             gather_idx_t,
             new_token_t,
             token_ids,
-            &persistent_state,
             &prompt_tokens,
             &q_pos,
             &scatter_idx,
@@ -501,7 +480,6 @@ fn main() {
             gather_idx_t,
             new_token_t,
             token_ids,
-            &persistent_state,
             &[current_token],
             &[context_len as i32],
             &[context_len as i32],

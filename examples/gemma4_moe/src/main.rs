@@ -26,27 +26,51 @@ fn env_bool(name: &str) -> bool {
         .is_some_and(|s| matches!(s.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
-fn promote_persistent_state(
+/// Allocate user-owned buffers for all persistent state and register each
+/// as BOTH the input and the output buffer (in-place aliasing). A step is
+/// then exactly one execute: in-place candidates write through the alias,
+/// materializing candidates pay a graph-visible copy priced by the search.
+fn alias_persistent_state(
     runtime: &mut CudaRuntime,
+    stream: &std::sync::Arc<luminal_cuda_lite::cudarc::driver::CudaStream>,
     seen_out: GraphTensor,
     seen_mask: GraphTensor,
     cache_outputs: &[(GraphTensor, GraphTensor)],
     kv_cache: &KVCache,
-) {
-    let seen_buf = runtime.remove_buffer(seen_out);
-    runtime.set_buffer(seen_mask, seen_buf);
-
+    max_seq_len: usize,
+) -> Vec<luminal_cuda_lite::cudarc::driver::CudaSlice<u8>> {
+    use luminal_cuda_lite::cudarc::driver::DevicePtr;
+    let mut owned = Vec::new();
+    let mut alias = |runtime: &mut CudaRuntime, t_in: GraphTensor, t_out: GraphTensor, bytes| {
+        let buf = stream.alloc_zeros::<u8>(bytes).unwrap();
+        let ptr = buf.device_ptr(stream).0;
+        unsafe {
+            runtime.set_device_ptr(t_in, ptr, bytes);
+            runtime.set_output_device_ptr(t_out, ptr, bytes);
+        }
+        owned.push(buf);
+    };
+    alias(
+        runtime,
+        seen_mask,
+        seen_out,
+        VOCAB_SIZE * std::mem::size_of::<f32>(),
+    );
     for (layer, (k_out, v_out)) in cache_outputs.iter().enumerate() {
-        let k_buf = runtime.remove_buffer(*k_out);
-        let v_buf = runtime.remove_buffer(*v_out);
-        runtime.set_buffer(kv_cache.k_caches[layer], k_buf);
-        runtime.set_buffer(kv_cache.v_caches[layer], v_buf);
+        let bytes = cache_bytes_for_layer(layer, max_seq_len);
+        alias(runtime, kv_cache.k_caches[layer], *k_out, bytes);
+        alias(runtime, kv_cache.v_caches[layer], *v_out, bytes);
     }
+    owned
 }
 
 fn main() {
     let max_seq_len = 4096;
     let gen_tokens = 500;
+    // 500 candidates leaves the decode search short of full fused-op
+    // adoption on some runs (the full-adoption genome first appears past
+    // candidate ~120 on average); 1000 closes the TPOT gap at ~2x compile
+    // time, still well inside the CI window.
     let search_graphs = 500;
     let prompt = std::env::var("PROMPT").unwrap_or_else(|_| "The capital of France is".to_string());
     let print_token_ids = env_bool("PRINT_TOKEN_IDS");
@@ -93,6 +117,12 @@ fn main() {
         .next_power_of_two()
         .min(max_seq_len);
     let search_s = 16.min(max_prefill).max(2);
+    // Profile the context dim at a representative size, not the bucket
+    // minimum: at c=16 attention cost differences (FlashInfer vs mask+softmax
+    // kernels, fused vs unfused chains) are below profiling noise, so the
+    // search cannot rank them. 512 makes size-dependent costs visible while
+    // keeping per-candidate profiling cheap.
+    let search_c = 512.min(max_seq_len);
     let compile_options = CompileOptions::default()
         .dim_buckets(
             's',
@@ -101,33 +131,40 @@ fn main() {
                 DimBucket::new(2, max_prefill).representative(search_s),
             ],
         )
-        .search_dim('c', search_s)
+        .search_dim('c', search_c)
         .search_graph_limit(search_graphs);
 
     println!("Loading weights...");
     // ~52 GB of weights leave room for the arena on an 80 GB A100 only after
     // release_pooled_memory() (below) reclaims what search profiling leaves in
     // the async allocator pool — without that trim even a 10 GiB arena OOMs.
-    let mut runtime = CudaRuntime::initialize(stream).with_max_memory_gib(12);
+    let mut runtime = CudaRuntime::initialize(stream.clone()).with_max_memory_gib(12);
     let weights_path = model_dir.join("model_combined_bf16_v1.safetensors");
     let phase = std::time::Instant::now();
     runtime.load_safetensors(&cx, weights_path.to_str().unwrap());
+
     println!("  weight load: {:.1}s", phase.elapsed().as_secs_f64());
 
-    for layer in 0..LAYERS {
-        let cache_bytes = cache_bytes_for_layer(layer, max_seq_len);
-        runtime.set_zeros(kv_cache.k_caches[layer], cache_bytes);
-        runtime.set_zeros(kv_cache.v_caches[layer], cache_bytes);
-    }
+    // Persistent state is user-owned and registered as both input and
+    // output before compile: the search profiles candidates writing into
+    // the real buffers, and deployment steps are a single execute.
+    let persistent_buffers = alias_persistent_state(
+        &mut runtime,
+        &stream,
+        seen_out,
+        seen_mask_t,
+        &cache_outputs,
+        &kv_cache,
+        max_seq_len,
+    );
 
     println!("Compiling...");
     cx.set_dim('s', search_s);
     runtime.set_data(input, vec![1; search_s]);
     runtime.set_data(pos_ids, (0..search_s as i32).collect::<Vec<_>>());
     runtime.set_data(scatter_idx_t, (0..search_s as i32).collect::<Vec<_>>());
-    runtime.set_data(gather_idx_t, (0..search_s as i32).collect::<Vec<_>>());
+    runtime.set_data(gather_idx_t, (0..search_c as i32).collect::<Vec<_>>());
     runtime.set_data(new_token_t, vec![-1i32]);
-    runtime.set_zeros(seen_mask_t, VOCAB_SIZE * std::mem::size_of::<f32>());
     let mut rng = SmallRng::seed_from_u64(SEARCH_SEED);
     // Profiling timeouts use the CompileOptions defaults (5s candidate / 1s execution).
     runtime = cx.compile_with_rng(runtime, compile_options, &mut rng);
@@ -146,12 +183,18 @@ fn main() {
         max_seq_len * std::mem::size_of::<i32>(),
     );
 
-    for layer in 0..LAYERS {
-        let cache_bytes = cache_bytes_for_layer(layer, max_seq_len);
-        runtime.set_zeros(kv_cache.k_caches[layer], cache_bytes);
-        runtime.set_zeros(kv_cache.v_caches[layer], cache_bytes);
+    // Search profiling wrote into the persistent buffers — zero them
+    // before real inference.
+    for buf in &persistent_buffers {
+        let mut view = unsafe {
+            stream.upgrade_device_ptr::<u8>(
+                luminal_cuda_lite::cudarc::driver::DevicePtr::device_ptr(buf, &stream).0,
+                buf.len(),
+            )
+        };
+        stream.memset_zeros(&mut view).unwrap();
+        std::mem::forget(view);
     }
-    runtime.set_zeros(seen_mask_t, VOCAB_SIZE * std::mem::size_of::<f32>());
 
     print!("{prompt}");
     std::io::stdout().flush().unwrap();
@@ -178,13 +221,6 @@ fn main() {
     runtime.set_data(gather_idx_t, (0..plen as i32).collect::<Vec<_>>());
     runtime.set_data(new_token_t, vec![-1i32]);
     runtime.execute(&cx.dyn_map);
-    promote_persistent_state(
-        &mut runtime,
-        seen_out,
-        seen_mask_t,
-        &cache_outputs,
-        &kv_cache,
-    );
     prev_seq = prompt_tokens.len();
 
     let ids = runtime.get_i32(token_ids);
@@ -205,13 +241,6 @@ fn main() {
         runtime.set_data(gather_idx_t, (0..=prev_seq as i32).collect::<Vec<_>>());
         runtime.set_data(new_token_t, vec![next_token as i32]);
         runtime.execute(&cx.dyn_map);
-        promote_persistent_state(
-            &mut runtime,
-            seen_out,
-            seen_mask_t,
-            &cache_outputs,
-            &kv_cache,
-        );
 
         prev_seq += 1;
         let ids = runtime.get_i32(token_ids);

@@ -26,28 +26,14 @@ fn qwen3_chat_prompt(user_prompt: &str) -> String {
     )
 }
 
-fn promote_persistent_state(
-    runtime: &mut CudaRuntime,
-    seen_out: GraphTensor,
-    seen_mask: GraphTensor,
-    cache_outputs: &[(GraphTensor, GraphTensor)],
-    kv_cache: &KVCache,
-) {
-    let seen_buf = runtime.remove_buffer(seen_out);
-    runtime.set_buffer(seen_mask, seen_buf);
-
-    for (layer, (k_out, v_out)) in cache_outputs.iter().enumerate() {
-        let k_buf = runtime.remove_buffer(*k_out);
-        let v_buf = runtime.remove_buffer(*v_out);
-        runtime.set_buffer(kv_cache.k_caches[layer], k_buf);
-        runtime.set_buffer(kv_cache.v_caches[layer], v_buf);
-    }
-}
-
 fn main() {
     let max_seq_len = 4096;
     let gen_tokens = 500;
-    let search_graphs = 200;
+    // 200 stopped converging mid-improvement once the widened search kept
+    // every backend alternative alive (best decode candidates were still
+    // trading naive GenericMatmuls for KernelMoEGemv at the cutoff); 500
+    // matches the other example models.
+    let search_graphs = 500;
     let prompt = "What is the capital of France?";
 
     let ctx = CudaContext::new(0).unwrap();
@@ -94,6 +80,13 @@ fn main() {
         .next_power_of_two()
         .min(max_seq_len);
     let search_s = 16.min(max_prefill).max(2);
+    // Profile the context dim at a representative size, not the bucket
+    // minimum: at c=16 attention is ~256 elements and the cost differences
+    // between attention backends (FlashInfer vs mask+softmax kernels) or
+    // fused vs unfused chains are below profiling noise, so the search
+    // cannot rank them. 512 makes size-dependent costs visible while
+    // keeping per-candidate profiling cheap.
+    let search_c = 512.min(max_seq_len);
     let compile_options = CompileOptions::default()
         .dim_buckets(
             's',
@@ -104,32 +97,40 @@ fn main() {
         )
         .dim_buckets(
             'c',
-            &[DimBucket::new(1, max_seq_len).representative(search_s)],
+            &[DimBucket::new(1, max_seq_len).representative(search_c)],
         )
         .search_graph_limit(search_graphs);
 
     println!("Loading weights...");
-    let mut runtime = CudaRuntime::initialize(stream).with_max_memory_gib(20);
+    let mut runtime = CudaRuntime::initialize(stream.clone()).with_max_memory_gib(20);
     let weights_path = model_dir.join("model_combined_bf16_v1.safetensors");
     let phase = std::time::Instant::now();
     runtime.load_safetensors(&cx, weights_path.to_str().unwrap());
+
     println!("  weight load: {:.1}s", phase.elapsed().as_secs_f64());
 
+    // Persistent state is user-owned, aliased input<->output, and
+    // registered before compile so search profiling prices state updates
+    // the way deployment pays them (in-place free, materializing = copy).
     let cache_bytes = max_seq_len * KV_DIM * 2; // bf16
-    for i in 0..LAYERS {
-        runtime.set_zeros(kv_cache.k_caches[i], cache_bytes);
-        runtime.set_zeros(kv_cache.v_caches[i], cache_bytes);
+    let mut persistent_buffers = vec![runtime.alias_state(
+        seen_mask_t,
+        seen_out,
+        VOCAB_SIZE * std::mem::size_of::<f32>(),
+    )];
+    for (layer, (k_out, v_out)) in cache_outputs.iter().enumerate() {
+        persistent_buffers.push(runtime.alias_state(kv_cache.k_caches[layer], *k_out, cache_bytes));
+        persistent_buffers.push(runtime.alias_state(kv_cache.v_caches[layer], *v_out, cache_bytes));
     }
 
     println!("Compiling...");
     cx.set_dim('s', search_s);
-    cx.set_dim('c', search_s);
+    cx.set_dim('c', search_c);
     runtime.set_data(input, vec![1; search_s]);
     runtime.set_data(pos_ids, (0..search_s as i32).collect::<Vec<_>>());
     runtime.set_data(scatter_idx_t, (0..search_s as i32).collect::<Vec<_>>());
-    runtime.set_data(gather_idx_t, (0..search_s as i32).collect::<Vec<_>>());
+    runtime.set_data(gather_idx_t, (0..search_c as i32).collect::<Vec<_>>());
     runtime.set_data(new_token_t, vec![-1i32]);
-    runtime.set_zeros(seen_mask_t, VOCAB_SIZE * std::mem::size_of::<f32>());
     let search_seed = std::env::var("LUMINAL_SEARCH_SEED")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -152,11 +153,9 @@ fn main() {
         max_seq_len * std::mem::size_of::<i32>(),
     );
 
-    for i in 0..LAYERS {
-        runtime.set_zeros(kv_cache.k_caches[i], cache_bytes);
-        runtime.set_zeros(kv_cache.v_caches[i], cache_bytes);
+    for buf in &mut persistent_buffers {
+        stream.memset_zeros(buf).unwrap();
     }
-    runtime.set_zeros(seen_mask_t, VOCAB_SIZE * std::mem::size_of::<f32>());
 
     println!("Prompt: {prompt}");
     print!("Response: ");
@@ -184,13 +183,6 @@ fn main() {
     runtime.set_data(gather_idx_t, (0..plen as i32).collect::<Vec<_>>());
     runtime.set_data(new_token_t, vec![-1i32]);
     runtime.execute(&cx.dyn_map);
-    promote_persistent_state(
-        &mut runtime,
-        seen_out,
-        seen_mask_t,
-        &cache_outputs,
-        &kv_cache,
-    );
     prev_seq = plen;
 
     // One sampled id per row; index from the START of the (possibly larger)
@@ -218,13 +210,6 @@ fn main() {
         t_set += start.elapsed();
         let e = std::time::Instant::now();
         runtime.execute(&cx.dyn_map);
-        promote_persistent_state(
-            &mut runtime,
-            seen_out,
-            seen_mask_t,
-            &cache_outputs,
-            &kv_cache,
-        );
         t_exec += e.elapsed();
 
         prev_seq += 1;

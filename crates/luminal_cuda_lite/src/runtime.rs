@@ -312,6 +312,10 @@ pub struct CudaRuntime {
     /// Pending output pointer registrations: HLIR output id -> (device_ptr, n_bytes)
     /// Set by python before execute(), consumed at start of execute()
     output_ptr_registrations: FxHashMap<NodeIndex, (u64, usize)>,
+    /// (src_ptr, dst_ptr, bytes) device copies enqueued at the end of each
+    /// execute: in-place-elected outputs whose registered buffer differs
+    /// from the aliased input's (user-managed double buffering).
+    pending_output_copies: Vec<(u64, u64, usize)>,
 
     /// Non-owning CudaSlice views of external output pointers, keyed by LLIR data node
     /// ManuallyDrop prevents cuMemFree -- Pytorch owns the memory
@@ -766,6 +770,32 @@ impl CudaRuntime {
             .insert(id.to_id(), (device_ptr, n_bytes));
     }
 
+    /// Allocate a user-owned, statically sized, zeroed device buffer and
+    /// register it as BOTH the input buffer for `input` and the output
+    /// buffer for `output` — the in-place persistent-state idiom (KV
+    /// caches, sampling masks). A step is then just execute(): in-place
+    /// candidates write through the alias, materializing candidates pay a
+    /// graph-visible copy the search prices. Call before compile so search
+    /// profiling sees the same economics; hold the returned buffer as long
+    /// as the runtime uses these tensors.
+    pub fn alias_state(
+        &mut self,
+        input: impl ToId,
+        output: impl ToId,
+        bytes: usize,
+    ) -> CudaSlice<u8> {
+        let buf = self
+            .cuda_stream
+            .alloc_zeros::<u8>(bytes)
+            .expect("failed to allocate aliased state buffer");
+        let ptr = buf.device_ptr(&self.cuda_stream).0;
+        unsafe {
+            self.set_device_ptr(input, ptr, bytes);
+            self.set_output_device_ptr(output, ptr, bytes);
+        }
+        buf
+    }
+
     pub fn output_is_zero_copy(&self, id: impl ToId) -> bool {
         let producer = self.find_producer_node(id);
         let data_node = self.follow_aliases(producer);
@@ -938,25 +968,54 @@ impl CudaRuntime {
             }
         }
 
+        self.pending_output_copies.clear();
         if self.output_ptr_registrations.is_empty() {
             return;
         }
 
-        // Collect registrations to avoid borrow conflict (drain borrows self mutably,
-        // but find_producer_node/follow_aliases need &self).
-
-        let registrations: Vec<_> = self.output_ptr_registrations.drain().collect();
+        // Registrations are durable: outputs are re-resolved against the
+        // active bucket every execute (producers and alias structure differ
+        // per bucket and per loaded candidate).
+        let registrations: Vec<_> = self
+            .output_ptr_registrations
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
 
         for (hlir_id, (device_ptr, n_bytes)) in registrations {
-            // Resolve HLIR output id -> LLIR producer -> follow aliases -> data node
-            let producer = self.find_producer_node(hlir_id);
+            // Resolve HLIR output id -> LLIR producer -> follow aliases -> data node.
+            // Registrations are durable and may reference outputs absent from
+            // the active bucket (stale profiling-scratch ids, other-bucket
+            // outputs) — skip those.
+            let Some(&producer) = self.active().output_producers.get(&hlir_id) else {
+                continue;
+            };
             let data_node = self.follow_aliases(producer);
 
-            // If data_node is an HLIR input (aliased output), skip — can't substitute
-            if self.compiled_buckets[self.active_bucket]
+            // In-place elected output: the data lands in the aliased HLIR
+            // input's buffer. If the user registered that same buffer, the
+            // write is already in place; otherwise honor the registration
+            // with an epilogue copy (manual double-buffering support).
+            if let Some(&hlir_input) = self.compiled_buckets[self.active_bucket]
                 .llir_to_hlir
-                .contains_key(&data_node)
+                .get(&data_node)
             {
+                let input_buf = match self.hlir_buffers.get(&hlir_input) {
+                    Some(CudaInput::Buffer { buf, len }) => {
+                        Some((buf.device_ptr(&self.cuda_stream).0, *len))
+                    }
+                    Some(CudaInput::Ptr(p)) => Some((*p, n_bytes)),
+                    None => None,
+                };
+                if let Some((input_ptr, input_len)) = input_buf
+                    && input_ptr != device_ptr
+                {
+                    self.pending_output_copies.push((
+                        input_ptr,
+                        device_ptr,
+                        n_bytes.min(input_len),
+                    ));
+                }
                 continue;
             }
 
@@ -2977,6 +3036,59 @@ impl CudaRuntime {
         )
     }
 
+    /// Assume a worst-case dynamic-dimension change: drop every cached
+    /// decision derived from live dyn values (per-bucket length tables and
+    /// each captured graph's dyn state) so the next execute pays the same
+    /// staleness costs a real dim transition pays. State keyed on bucket
+    /// capacities or buffer pointers is untouched — real transitions within
+    /// a bucket don't dirty it.
+    fn assume_dyn_dims_stale(&mut self) {
+        for bucket_idx in 0..self.compiled_buckets.len() {
+            // Only dims that vary within this bucket are stale on a real
+            // step. Pinned dims (bucket min == max) never change in
+            // deployment; poisoning them too charges every trial a
+            // full-graph rewalk real steps don't pay, which inflates
+            // trip-difference terms by a constant per body (~3x observed on
+            // gemma4_moe) regardless of the candidate's true dim
+            // sensitivity.
+            let stale_dims: Vec<char> = {
+                let bucket = &self.compiled_buckets[bucket_idx];
+                bucket
+                    .last_dyn_map
+                    .keys()
+                    .copied()
+                    .filter(|dim| {
+                        let idx = bucket.bucket_indices.get(dim).copied().unwrap_or(0);
+                        match self
+                            .dim_buckets
+                            .get(dim)
+                            .and_then(|buckets| buckets.get(idx))
+                        {
+                            Some(dim_bucket) => dim_bucket.min != dim_bucket.max,
+                            // Unbucketed search dims vary in deployment.
+                            None => true,
+                        }
+                    })
+                    .collect()
+            };
+            let bucket = &mut self.compiled_buckets[bucket_idx];
+            for dim in &stale_dims {
+                bucket.last_dyn_map.remove(dim);
+            }
+            for exec_op in bucket.exec_graph.node_weights() {
+                if let Some(cuda_graph) = exec_op.internal.as_any().downcast_ref::<CudaGraphOp>() {
+                    cuda_graph.assume_dyn_dims_stale(&stale_dims);
+                }
+            }
+        }
+    }
+
+    /// Every graph output gets a dedicated, statically-sized buffer before
+    /// profiling: candidate execution then includes its real output writes
+    /// (in-place families write through the alias, materializing families
+    /// write into the buffer via substitution), so the step cost the search
+    /// measures is the step cost deployment pays. User registrations take
+    /// precedence; scratch fills the rest and is reused across candidates.
     fn profile_loaded_llir(
         &mut self,
         llir_graph: &LLIRGraph,
@@ -2986,8 +3098,29 @@ impl CudaRuntime {
     ) -> (Duration, String) {
         self.profiling = true;
         let profile_start = std::time::Instant::now();
+        // Warmup absorbs one-time costs (CUDA graph materialization, lazy
+        // allocations, cache warming) so the timed trials measure steady-state
+        // execution instead of folding setup noise into the candidate ranking.
+        self.execute(dyn_map);
+        // A warmup that already blew the whole profiling budget has proven
+        // the candidate slow; return it as the measurement instead of paying
+        // for a timed trial of the same magnitude. Bad candidates are the
+        // most expensive ones to run, so this halves their cost.
+        if timeout.is_some_and(|timeout| profile_start.elapsed() >= timeout) {
+            self.profiling = false;
+            let duration = profile_start.elapsed();
+            return (duration, format_duration_precise(&duration));
+        }
         let mut durations = Vec::with_capacity(trials.max(1));
         for _ in 0..trials.max(1) {
+            // Deployment never executes the same dyn_map twice (decode's `c`
+            // is fresh every step), so replaying frozen dims would let
+            // dim-baked state carry over between trials and hide the
+            // per-transition costs (param rebuild, island re-prepare and
+            // recapture) that dim-agnostic graphs don't pay. Each trial
+            // measures execute-after-dim-change — the quantity deployment
+            // actually samples.
+            self.assume_dyn_dims_stale();
             let start = std::time::Instant::now();
             self.execute(dyn_map);
             durations.push(start.elapsed());
@@ -3261,6 +3394,7 @@ impl Runtime for CudaRuntime {
         let mut resource_plan = match plan_static_llir_resources(llir_graph, &allocation_dyn_map) {
             Ok(plan) => plan,
             Err(violation) => {
+                luminal::mask_events::RESOURCE_REJECT.record_with(|| violation.to_string());
                 return luminal::op::CandidateFilterResult::reject_with_display(format!(
                     "candidate reject: {violation}"
                 ));
@@ -3268,6 +3402,7 @@ impl Runtime for CudaRuntime {
         };
         if let Err(violation) = validate_resource_plan(&resource_plan, caps, device_resource_limits)
         {
+            luminal::mask_events::RESOURCE_REJECT.record_with(|| violation.to_string());
             return luminal::op::CandidateFilterResult::reject_with_display(format!(
                 "resource reject: {violation}"
             ));
@@ -3344,6 +3479,7 @@ impl Runtime for CudaRuntime {
             active_bucket: 0,
             dim_buckets: FxHashMap::default(),
             output_ptr_registrations: FxHashMap::default(),
+            pending_output_copies: Vec::new(),
             external_output_buffers: FxHashMap::default(),
             external_buffers: FxHashMap::default(),
         }
@@ -3619,6 +3755,23 @@ impl Runtime for CudaRuntime {
                 }
             }
         }
+
+        // User-registered output buffers that differ from an in-place
+        // output's aliased input: honor them with device copies (part of
+        // the step; no allocation).
+        if !self.pending_output_copies.is_empty() {
+            for &(src, dst, bytes) in &self.pending_output_copies {
+                let src_slice = unsafe { self.cuda_stream.upgrade_device_ptr::<u8>(src, bytes) };
+                let mut dst_slice =
+                    unsafe { self.cuda_stream.upgrade_device_ptr::<u8>(dst, bytes) };
+                self.cuda_stream
+                    .memcpy_dtod(&src_slice, &mut dst_slice)
+                    .expect("output epilogue copy failed");
+                std::mem::forget(src_slice);
+                std::mem::forget(dst_slice);
+            }
+        }
+
         // Single sync at end - CUDA stream ordering guarantees sequential execution
         let timer = std::time::Instant::now();
         self.cuda_stream.synchronize().unwrap();
