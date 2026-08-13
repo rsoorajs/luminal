@@ -82,6 +82,9 @@ pub trait DynBackend {
     unsafe fn set_output_device_ptr(&mut self, _node: NodeIndex, _ptr: u64, _n_bytes: usize) {
         panic!("set_output_device_ptr not supported by '{}'", self.name());
     }
+    fn clear_output_device_ptr(&mut self, _node: NodeIndex) {
+        panic!("clear_output_device_ptr not supported by '{}'", self.name());
+    }
     fn output_is_zero_copy(&self, _node: NodeIndex) -> bool {
         false
     }
@@ -92,6 +95,17 @@ pub trait DynBackend {
             "copy_output_to_device_ptr not supported by '{}'",
             self.name()
         );
+    }
+    /// Copy multiple outputs to device pointers. Backends may override this to
+    /// enqueue the full batch and synchronize once.
+    ///
+    /// # Safety
+    /// Every destination pointer must be a valid device allocation with at
+    /// least the corresponding byte count available.
+    unsafe fn copy_outputs_to_device_ptrs(&self, copies: &[(NodeIndex, u64, usize)]) {
+        for &(node, dest_ptr, n_bytes) in copies {
+            unsafe { self.copy_output_to_device_ptr(node, dest_ptr, n_bytes) };
+        }
     }
 }
 
