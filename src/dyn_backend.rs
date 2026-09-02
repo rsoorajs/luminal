@@ -29,6 +29,10 @@ use crate::shape::DynMap;
 pub trait DynBackend {
     fn name(&self) -> &str;
 
+    fn artifact_data(&self) -> Option<String> {
+        None
+    }
+
     /// The device type this backend operates on (e.g. "cpu", "cuda").
     /// Used by the Python frontend to decide input tensor placement.
     fn device_type(&self) -> &str {
@@ -127,6 +131,7 @@ pub struct BackendCompileArgs {
     pub weights: Vec<(String, Vec<u8>, DType)>,
     pub tensor_sizes: HashMap<String, usize>,
     pub device_ptrs: HashMap<String, (u64, usize)>,
+    pub backend_artifact: Option<String>,
 }
 
 /// Canonical PyCapsule name for [`BackendFactory`] function-pointer capsules.
@@ -164,6 +169,7 @@ pub type SetDevicePtrFn<'a, Rt> = &'a dyn Fn(&mut Rt, NodeIndex, u64, usize);
 /// - `init`: create the concrete runtime
 /// - `set_raw`: upload raw bytes + dtype to a node
 /// - `set_device_ptr`: optional zero-copy device pointer setter
+/// - `finalize`: perform backend-specific finalization after schedule selection
 /// - `wrap`: wrap the final runtime in a `Box<dyn DynBackend>`
 pub fn compile_backend<Rt: Runtime + 'static>(
     graph: &mut Graph,
@@ -171,13 +177,17 @@ pub fn compile_backend<Rt: Runtime + 'static>(
     init: impl FnOnce() -> Result<Rt, String>,
     set_raw: impl Fn(&mut Rt, NodeIndex, Vec<u8>, DType),
     set_device_ptr: Option<SetDevicePtrFn<'_, Rt>>,
+    finalize: impl FnOnce(&mut Graph, &mut Rt) -> Result<(), String>,
     wrap: impl FnOnce(Rt) -> Box<dyn DynBackend>,
 ) -> Result<Box<dyn DynBackend>, String> {
     // Build label map from input_meta (plain data — no downcast needed,
     // survives cross-binary type identity mismatches with external plugins).
     let label_map = build_label_map(graph);
 
-    graph.build_search_space::<Rt>(CompileOptions::default());
+    let has_selected_schedule = graph.selected_schedule().is_some();
+    if !has_selected_schedule {
+        graph.build_search_space::<Rt>(CompileOptions::default());
+    }
 
     let mut rt = init()?;
 
@@ -205,11 +215,18 @@ pub fn compile_backend<Rt: Runtime + 'static>(
         }
     }
 
-    // Search
-    let mut rt = graph.search(
-        rt,
-        CompileOptions::default().search_graph_limit(args.search_iters),
-    );
+    let mut rt = rt;
+    if has_selected_schedule {
+        graph.load_selected_schedule(&mut rt)?;
+    } else {
+        // Search
+        rt = graph.search(
+            rt,
+            CompileOptions::default().search_graph_limit(args.search_iters),
+        );
+    }
+
+    finalize(graph, &mut rt)?;
 
     // Rebuild label map after search (graph may have changed)
     let label_map = build_label_map(graph);
@@ -498,6 +515,7 @@ pub fn reference_factory(
             }
         },
         None,
+        |_, _| Ok(()),
         |rt| Box::new(ReferenceDynBackend { runtime: rt }),
     )
 }

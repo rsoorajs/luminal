@@ -45,6 +45,19 @@ pub use lattice::{AggregateFn, BucketLattice, BucketSet};
 pub use packed::{LlirFingerprint, PackedLLIRGraph};
 pub use unroll::{collapse_loops_to_first_iter, unroll_loops_in_llir, unroll_packed_llir};
 
+pub struct SelectedProgram {
+    pub bucket_indices: DynMap,
+    pub representative_dyn_map: DynMap,
+    pub genome: IndexedChoiceSet,
+    pub llir: LLIRGraph,
+}
+
+impl SelectedProgram {
+    pub fn into_bucket_llir(self) -> BucketLLIR {
+        (self.bucket_indices, self.representative_dyn_map, self.llir)
+    }
+}
+
 /// What core hands the runtime: the saturated e-graph of every bucket
 /// combination plus everything needed to extract programs from them.
 #[derive(Debug)]
@@ -220,9 +233,23 @@ pub fn extract_one(
     ctx: &BucketContext<'_>,
     rng: &mut dyn RngCore,
 ) -> LLIRGraph {
+    extract_one_selected(space, ctx, rng).llir
+}
+
+pub fn extract_one_selected(
+    space: &SearchSpace,
+    ctx: &BucketContext<'_>,
+    rng: &mut dyn RngCore,
+) -> SelectedProgram {
     let mut extractor = LlirExtractor::new(ctx.egraph(), &space.ops);
     let genome = extractor.random_indexed_choice(rng);
-    unroll_packed_llir(extractor.extract_indexed_packed(&genome, &space.custom_ops))
+    let llir = unroll_packed_llir(extractor.extract_indexed_packed(&genome, &space.custom_ops));
+    SelectedProgram {
+        bucket_indices: ctx.bucket_indices().clone(),
+        representative_dyn_map: ctx.representative_dyn_map.clone(),
+        genome,
+        llir,
+    }
 }
 
 /// The stock strategy: genetic search in every bucket, lazy finalists under
