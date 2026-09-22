@@ -95,7 +95,7 @@ impl<'a> Translator<'a> {
             };
             let tensor = if tensor.dtype == DType::Bool {
                 tensor.cast(DType::Int).cast(DType::Bool)
-            } else if tensor.dtype == DType::Int || tensor.shape.is_contiguous() {
+            } else if tensor.dtype == DType::Int || tensor.legacy_tracker_ref().is_contiguous() {
                 tensor
             } else {
                 tensor + 0.0
@@ -151,7 +151,7 @@ impl<'a> Translator<'a> {
         &mut self,
         graph_name: &str,
         label: &str,
-        mut logical_shape: Vec<Expression>,
+        mut logical_shape: Vec<IntExpr>,
         dtype_code: u32,
         user_input: bool,
     ) -> Result<()> {
@@ -161,11 +161,10 @@ impl<'a> Translator<'a> {
             // PyTorch complex storage is interleaved real/imaginary values.
             // Preserve that layout in one real-valued input and split it into
             // the two frontend-only components before translating operators.
-            logical_shape.push(Expression::from(2usize));
+            logical_shape.push(IntExpr::from(2usize));
             let backing = self
                 .graph
-                .named_tensor(label, logical_shape)
-                .as_dtype(component_dtype);
+                .named_tensor(label, logical_shape, component_dtype);
             backing.persist();
             let complex =
                 complex::ComplexTensor::from_interleaved(&mut self.graph, backing, torch_dtype)?;
@@ -178,8 +177,7 @@ impl<'a> Translator<'a> {
             let dtype = pt2_util::torch_dtype_int_to_luminal(dtype_code);
             let tensor = self
                 .graph
-                .named_tensor(label, logical_shape)
-                .as_dtype(dtype);
+                .named_tensor(label, logical_shape, dtype);
             if !user_input {
                 tensor.persist();
             }
@@ -311,7 +309,7 @@ impl<'a> Translator<'a> {
             .with_context(|| format!("Input {idx} of {} is not int list: {:?}", node.target, arg))
     }
 
-    pub(crate) fn get_expr_arg(&self, node: &Node, idx: usize) -> Result<Expression> {
+    pub(crate) fn get_expr_arg(&self, node: &Node, idx: usize) -> Result<IntExpr> {
         let arg = &node
             .inputs
             .get(idx)
@@ -319,13 +317,13 @@ impl<'a> Translator<'a> {
             .arg;
         self.resolve_arg_as_expression(arg).with_context(|| {
             format!(
-                "Input {idx} of {} cannot be resolved to Expression: {:?}",
+                "Input {idx} of {} cannot be resolved to IntExpr: {:?}",
                 node.target, arg
             )
         })
     }
 
-    pub(crate) fn get_exprs_arg(&self, node: &Node, idx: usize) -> Result<Vec<Expression>> {
+    pub(crate) fn get_exprs_arg(&self, node: &Node, idx: usize) -> Result<Vec<IntExpr>> {
         use crate::pt2_schema::SymIntEntry;
         let arg = &node
             .inputs
@@ -333,13 +331,13 @@ impl<'a> Translator<'a> {
             .with_context(|| format!("Node {} missing input {idx}", node.target))?
             .arg;
         if let Some(ints) = arg.as_ints() {
-            return Ok(ints.iter().map(|&v| Expression::from(v)).collect());
+            return Ok(ints.iter().map(|&v| IntExpr::from(v)).collect());
         }
         if let Some(entries) = arg.as_sym_ints() {
             return entries
                 .iter()
                 .map(|entry| match entry {
-                    SymIntEntry::Int(i) => Ok(Expression::from(i.as_int)),
+                    SymIntEntry::Int(i) => Ok(IntExpr::from(i.as_int)),
                     SymIntEntry::Name(s) => self
                         .resolve_sym_int(&s.as_name)
                         .with_context(|| format!("Cannot resolve sym_int: {}", s.as_name)),
@@ -419,7 +417,7 @@ impl<'a> Translator<'a> {
         Ok(())
     }
 
-    pub(crate) fn axis_positions(&mut self, full_shape: &[Expression], axis: usize) -> GraphTensor {
+    pub(crate) fn axis_positions(&mut self, full_shape: &[IntExpr], axis: usize) -> GraphTensor {
         let mut positions = self.graph.arange(full_shape[axis]).cast(DType::Int);
         for (dim, size) in full_shape.iter().copied().enumerate() {
             if dim != axis {
@@ -431,7 +429,7 @@ impl<'a> Translator<'a> {
 
     pub(crate) fn full_tensor(
         &mut self,
-        shape: Vec<Expression>,
+        shape: Vec<IntExpr>,
         dtype: DType,
         value: f64,
     ) -> GraphTensor {
@@ -443,7 +441,7 @@ impl<'a> Translator<'a> {
         scalar.cast(dtype).expand_rhs(shape)
     }
 
-    pub(crate) fn tensor_meta_to_shape(&self, meta: &TensorMeta) -> Result<Vec<Expression>> {
+    pub(crate) fn tensor_meta_to_shape(&self, meta: &TensorMeta) -> Result<Vec<IntExpr>> {
         meta.sizes
             .iter()
             .map(|s| self.dim_size_to_expr(s))
@@ -452,7 +450,7 @@ impl<'a> Translator<'a> {
 
     /// Shape of the node's first output, from its tensor metadata (for ops
     /// whose output size isn't reliably readable from the args).
-    pub(crate) fn output_meta_shape(&self, node: &Node) -> Result<Vec<Expression>> {
+    pub(crate) fn output_meta_shape(&self, node: &Node) -> Result<Vec<IntExpr>> {
         let name = node
             .outputs
             .first()
@@ -484,9 +482,9 @@ impl<'a> Translator<'a> {
         Ok(pt2_util::torch_dtype_int_to_luminal(meta.dtype))
     }
 
-    pub(crate) fn dim_size_to_expr(&self, dim: &DimSize) -> Result<Expression> {
+    pub(crate) fn dim_size_to_expr(&self, dim: &DimSize) -> Result<IntExpr> {
         match dim {
-            DimSize::Int(i) => Ok(Expression::from(i.as_int)),
+            DimSize::Int(i) => Ok(IntExpr::from(i.as_int)),
             DimSize::Expr(e) => self.resolve_expr_value(&e.as_expr).with_context(|| {
                 format!(
                     "Cannot resolve symbolic dimension expression: {}",
@@ -496,7 +494,7 @@ impl<'a> Translator<'a> {
         }
     }
 
-    pub(crate) fn resolve_sym_int(&self, name: &str) -> Option<Expression> {
+    pub(crate) fn resolve_sym_int(&self, name: &str) -> Option<IntExpr> {
         let sym_int_values = &self.parsed.program.graph_module.graph.sym_int_values;
         if let Some(val) = sym_int_values.get(name) {
             if let Some(expr_str) = val
@@ -513,15 +511,15 @@ impl<'a> Translator<'a> {
                 .and_then(|h| h.get("as_int"))
                 .and_then(|v| v.as_i64())
             {
-                return Some(Expression::from(hint));
+                return Some(IntExpr::from(hint));
             }
         }
         None
     }
 
-    pub(crate) fn resolve_arg_as_expression(&self, arg: &Argument) -> Option<Expression> {
+    pub(crate) fn resolve_arg_as_expression(&self, arg: &Argument) -> Option<IntExpr> {
         if let Some(v) = arg.as_int() {
-            return Some(Expression::from(v));
+            return Some(IntExpr::from(v));
         }
         if let Some(name) = arg.as_sym_int_name() {
             return self.resolve_sym_int(name);
@@ -532,21 +530,21 @@ impl<'a> Translator<'a> {
         None
     }
 
-    pub(crate) fn resolve_expr_str(&self, expr_str: &str) -> Option<Expression> {
+    pub(crate) fn resolve_expr_str(&self, expr_str: &str) -> Option<IntExpr> {
         parse_sympy_expr_with_ranges(expr_str, &self.sym_map.sym_to_symbol, &self.sym_map.ranges)
             .or_else(|| {
                 crate::pt2_parser::extract_symbol_name_pub(expr_str)
                     .and_then(|sym| self.sym_map.sym_to_symbol.get(&sym).copied())
-                    .map(Expression::from)
+                    .map(IntExpr::from)
             })
     }
 
-    pub(crate) fn resolve_expr_value(&self, expr: &ExprValue) -> Option<Expression> {
+    pub(crate) fn resolve_expr_value(&self, expr: &ExprValue) -> Option<IntExpr> {
         self.resolve_expr_str(&expr.expr_str).or_else(|| {
             expr.hint
                 .as_ref()
                 .and_then(|h| h.as_int())
-                .map(Expression::from)
+                .map(IntExpr::from)
         })
     }
 }

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use luminal::{
     dyn_backend::{BackendCompileArgs, BackendFactory},
     prelude::*,
-    shape::Expression,
+    shape::IntExpr,
 };
 use pyo3::{prelude::*, types::PyCapsule};
 use serde::{Deserialize, Serialize};
@@ -34,9 +34,9 @@ struct CompiledArtifactData {
     output_names: Vec<String>,
     output_ids: Vec<usize>,
     output_shapes: Vec<Vec<usize>>,
-    output_shape_exprs: Vec<Vec<Expression>>,
+    output_shape_exprs: Vec<Vec<IntExpr>>,
     output_dtypes: Vec<u32>,
-    input_shape_exprs: Vec<Vec<Expression>>,
+    input_shape_exprs: Vec<Vec<IntExpr>>,
     dim_param_map: DimParamMap,
     dim_bounds: DimBoundsMap,
     writeback_outputs: Vec<(usize, String)>,

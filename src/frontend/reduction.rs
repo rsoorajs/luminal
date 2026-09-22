@@ -1,49 +1,45 @@
-use crate::hlir::*;
 use crate::prelude::*;
 
 impl GraphTensor {
     /// Reduce a dimension of the tensor by summing all elements along that axis.
     pub fn sum(self, axes: impl ToAxes) -> GraphTensor {
-        let (mut shape, mut id) = (self.shape, self.id);
-        // Sum reduce each dimension
-        let mut axes = axes.to_axes();
-        for dim in 0..axes.len() {
-            id = self.graph().add_op(
-                SumReduce {
-                    dim: axes[dim],
-                    input_shape: shape,
-                    ..Default::default()
-                },
-                &[id],
-            );
-            shape.remove_dim(axes[dim]);
-            shape = shape.contiguous();
-            let axis = axes[dim];
-            for ax in &mut axes {
-                if *ax > axis {
-                    *ax -= 1;
-                }
-            }
-        }
-        GraphTensor::from_id(id, shape.contiguous(), self.graph_ref, self.dtype)
+        self.reduce(false, axes)
     }
 
     /// Reduce a dimension of the tensor by taking the maximum of all elements along that axis.
     pub fn max(self, axes: impl ToAxes) -> GraphTensor {
-        let (mut shape, mut id) = (self.shape, self.id);
-        // Max reduce each dimension
+        self.reduce(true, axes)
+    }
+
+    /// One recorded reduce per axis; the operand for the FIRST reduce is
+    /// self's value, later reduces consume the previous reduce's result.
+    fn reduce(self, is_max: bool, axes: impl ToAxes) -> GraphTensor {
+        let (mut dims, mut id) = (self.dims(), self.id);
         let mut axes = axes.to_axes();
         for dim in 0..axes.len() {
-            id = self.graph().add_op(
-                MaxReduce {
-                    dim: axes[dim],
-                    input_shape: shape,
-                    ..Default::default()
-                },
-                &[id],
-            );
-            shape.remove_dim(axes[dim]);
-            shape = shape.contiguous();
+            let operand_dims = dims.clone();
+            if is_max {
+                // The empty max has no value (extent-0 ruling
+                // 2026-08-13): the reduced axis contracts to >= 1 —
+                // static extents discharge trivially; symbolic ones
+                // refuse unless the binding's range excludes 0.
+                let extent = operand_dims[axes[dim]];
+                self.graph().logical.contract_extent_at_least(&extent, 1);
+            }
+            let rank = operand_dims.len();
+            let axis_from_end = rank - 1 - axes[dim];
+            let mut out_dims = operand_dims.clone();
+            out_dims.remove(axes[dim]);
+            let op = if is_max {
+                LogicalOp::ReduceMax { axis_from_end }
+            } else {
+                LogicalOp::ReduceSum { axis_from_end }
+            };
+            id = self
+                .graph()
+                .logical
+                .op(op, &[(id, operand_dims)], out_dims.clone(), self.dtype);
+            dims = out_dims;
             let axis = axes[dim];
             for ax in &mut axes {
                 if *ax > axis {
@@ -51,7 +47,7 @@ impl GraphTensor {
                 }
             }
         }
-        GraphTensor::from_id(id, shape.contiguous(), self.graph_ref, self.dtype)
+        GraphTensor::from_id(id, dims, self.graph_ref, self.dtype)
     }
 
     /// Reduce a dimension of the tensor by taking the minimum of all elements along that axis.
@@ -65,7 +61,7 @@ impl GraphTensor {
             .to_axes()
             .into_iter()
             .map(|i| self.dims()[i])
-            .product::<Expression>();
+            .product::<IntExpr>();
         self.sum(axes) / reduced_elements
     }
 

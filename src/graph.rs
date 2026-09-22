@@ -1,103 +1,23 @@
-use crate::egglog_utils::{
-    hlir_to_egglog, log_channel_enabled, run_egglog_with_late_passes_interval_analysis_and_log,
+//! The graph a model is authored into: dynamic-dim assumptions plus the
+//! LOGICAL structure the recorder captures. The old layout-bearing HLIR
+//! graph and compile ladder are gone; this module owns the petgraph-backed
+//! logical SSA that feeds the e-graph, while runtimes own
+//! load/bind/with_ops/search.
+
+use petgraph::{
+    Direction,
+    stable_graph::{NodeIndex, StableDiGraph},
+    visit::EdgeRef,
 };
-pub use crate::search::unroll::{collapse_loops_to_first_iter, unroll_loops_in_llir};
-use crate::search::{BucketSearchSpace, SearchSpace, bucket_index_combinations};
-use crate::shape::{DimInterval, DynDimIntervals};
-use crate::{
-    egglog_utils::SerializedEGraph,
-    op::{EgglogOp, IntoEgglogOp, LLIROp},
-};
-use crate::{hlir::CustomOpKind, op::*, prelude::*};
-use colored::Colorize;
-use itertools::Itertools;
-use petgraph::{Direction, stable_graph::StableGraph, visit::EdgeRef};
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::{
-    fmt::Debug,
-    ops::{Deref, DerefMut},
-    sync::Arc,
-};
-use tracing;
+use rustc_hash::FxHashSet;
 
-mod artifact;
-
-pub use artifact::{ScheduleBucket, SelectedSchedule};
-
-pub type LLIRGraph = StableGraph<LLIROp, ()>;
-pub type HLIRGraph = StableGraph<Box<dyn HLIROp>, ()>;
-
-#[derive(Debug, Clone)]
-struct RollingOccurrence {
-    nodes: Vec<NodeIndex>,
-    boundary_inputs: Vec<NodeIndex>,
-    output_nodes: Vec<NodeIndex>,
-}
-
-#[derive(Debug, Clone)]
-struct RollingCandidate {
-    occurrences: Vec<RollingOccurrence>,
-    state_param_indices: Vec<usize>,
-    savings: usize,
-}
-
-#[derive(Debug, Clone)]
-struct RollingRun {
-    occurrences: Vec<RollingOccurrence>,
-    starts: Vec<usize>,
-    window: usize,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RollingSearchDiagnostics {
-    windows_probed: usize,
-    adjacent_hash_matches: usize,
-    repeated_signature_runs: usize,
-    rejected_zero_state_params: usize,
-    best_rejected: Option<RollingRejectedCandidate>,
-    top_runs: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-struct RollingRejectedCandidate {
-    window: usize,
-    repetitions: usize,
-    boundary_inputs: usize,
-    state_params: usize,
-    savings: usize,
-}
-
-#[derive(Debug, Clone)]
-struct RollingSearchReport {
-    candidate: Option<RollingCandidate>,
-    diagnostics: RollingSearchDiagnostics,
-}
-
-/// A compiled bucket: (bucket_indices, representative_dyn_map, stitched_llir).
-pub type BucketLLIR = (DynMap, DynMap, LLIRGraph);
-
-/// Borrowed view of a compiled bucket used for non-committing aggregate
-/// candidate filtering.
-#[derive(Clone, Copy)]
-pub struct BucketLLIRRef<'a> {
-    pub bucket_indices: &'a DynMap,
-    pub representative_dyn_map: &'a DynMap,
-    pub llir: &'a LLIRGraph,
-}
-
-impl<'a> From<&'a BucketLLIR> for BucketLLIRRef<'a> {
-    fn from((bucket_indices, representative_dyn_map, llir): &'a BucketLLIR) -> Self {
-        Self {
-            bucket_indices,
-            representative_dyn_map,
-            llir,
-        }
-    }
-}
+use crate::dtype::DType;
+use crate::frontend::GraphTensor;
+use crate::shape::ToShape;
 
 /// A bucket for a dynamic dimension, defining a range of valid values.
 /// For an exact value, use `min == max` (zero-length range).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DimBucket {
     pub min: usize,
     pub max: usize,
@@ -131,8 +51,6 @@ impl DimBucket {
 
     /// The representative value used during search profiling.
     /// Defaults to midpoint `(min + max) / 2`.
-    /// This is not a runtime shape constraint or implicit padding: executions
-    /// still use the exact dynamic value anywhere in the bucket's range.
     pub fn representative_value(&self) -> usize {
         self.representative_override
             .unwrap_or((self.min + self.max) / 2)
@@ -144,277 +62,14 @@ impl DimBucket {
     }
 }
 
-/// Options for building an e-graph search space and searching it.
-///
-/// Use the builder pattern to configure search parameters:
-/// ```
-/// use luminal::prelude::CompileOptions;
-/// let opts = CompileOptions::default()
-///     .search_graph_limit(5)
-///     .search_time_limit(std::time::Duration::from_secs(30))
-///     .generation_size(50)
-///     .mutations(40)
-///     .trials(15);
-/// ```
-#[derive(Debug, Clone)]
-pub struct CompileOptions {
-    /// Maximum number of graphs to evaluate during search.
-    pub limit: usize,
-    /// Maximum wall-clock time to spend searching.
-    pub search_time_limit: std::time::Duration,
-    /// Number of offspring per generation (default: 10)
-    pub generation_size: usize,
-    /// Number of mutations applied to each offspring (default: 10)
-    pub mutations: usize,
-    /// Number of profiling trials per candidate (default: 3)
-    pub trials: usize,
-    /// Number of best genomes to keep as parents per generation (default: 1)
-    pub keep_best: usize,
-    /// Generations without a new best before exploration escalates:
-    /// mutation counts grow per stagnant generation (escaping local minima
-    /// needs multi-gene jumps) and every other stagnant generation samples
-    /// fresh random genomes. 0 disables (default: 0).
-    pub restart_stagnation: usize,
-    /// Per-candidate viability budget covering compile (`load_llir`) + run.
-    /// Candidates exceeding it are discarded (default: 60 seconds).
-    pub candidate_timeout: Option<std::time::Duration>,
-    /// Caps how long profiling runs a single trial; not a rejection criterion.
-    pub execution_timeout: Option<std::time::Duration>,
-    /// Stop profiling a candidate early once its running mean exceeds
-    /// `factor ×` the best candidate's metric. The partial mean is still
-    /// returned and ranked normally, so this never changes which candidates
-    /// are eligible — it only stops spending trials on candidates that have
-    /// already lost by at least this margin. `None` disables (default).
-    pub early_stop_factor: Option<f64>,
-    /// Dynamic dimension values applied after search-space construction and
-    /// before search. These values persist in [`Graph::dyn_map`] and provide
-    /// the base representative values for unbucketed dimensions. Per-bucket
-    /// representatives override them during bucketed search, and
-    /// [`CompileOptions::profile_dims`] override them only while profiling.
-    pub search_dims: DynMap,
-    /// Optional profiling dimension overrides.
-    pub profile_dims: DynMap,
-    /// Bucket definitions per dynamic dimension. Dimensions without buckets use
-    /// a single implicit bucket.
-    pub dim_buckets: FxHashMap<Symbol, Vec<DimBucket>>,
-    /// Enable egglog progress logging. Quiet by default; overridden by
-    /// `EGGLOG_LOG=1` or `LUMINAL_LOG=1`.
-    pub egglog_log: bool,
-    /// Enable automatic loop rolling and its diagnostics. Disabled by default;
-    /// overridden by `ROLLING_LOG=1` or `LUMINAL_LOG=1`.
-    pub rolling_log: bool,
-    /// Enable search progress logging. Enabled by default; overridden by
-    /// `SEARCH_LOG=0`/`1` or `LUMINAL_LOG=1`.
-    pub search_log: bool,
-}
-
-/// Resolve a caller-supplied dimension name, rejecting the reserved loop index.
-///
-/// Covers the methods that give a dimension a value, not every way in:
-/// `Graph::dyn_map` and `CompileOptions::{search_dims, profile_dims,
-/// dim_buckets}` are public fields, and a serialized `ShapeTracker`
-/// deserializes without passing through here.
-fn checked_dim(dimension: impl Into<Symbol>) -> Symbol {
-    let dimension = dimension.into();
-    assert!(
-        !dimension.is_reserved(),
-        "{}",
-        crate::shape::InvalidSymbolName::Reserved
-    );
-    dimension
-}
-
-impl CompileOptions {
-    /// Set the maximum number of graphs to evaluate during search.
-    pub fn search_graph_limit(mut self, limit: usize) -> Self {
-        self.limit = limit;
-        self
-    }
-
-    /// Set the maximum wall-clock time to spend searching.
-    pub fn search_time_limit(mut self, search_time_limit: std::time::Duration) -> Self {
-        self.search_time_limit = search_time_limit;
-        self
-    }
-
-    /// Set the number of offspring per generation.
-    pub fn generation_size(mut self, generation_size: usize) -> Self {
-        self.generation_size = generation_size;
-        self
-    }
-
-    /// Set the number of mutations per offspring.
-    pub fn mutations(mut self, mutations: usize) -> Self {
-        self.mutations = mutations;
-        self
-    }
-
-    /// Set the number of profiling trials per candidate.
-    pub fn trials(mut self, trials: usize) -> Self {
-        self.trials = trials;
-        self
-    }
-
-    /// Set the number of best genomes to keep as parents per generation.
-    pub fn keep_best(mut self, keep_best: usize) -> Self {
-        self.keep_best = keep_best;
-        self
-    }
-
-    pub fn restart_stagnation(mut self, generations: usize) -> Self {
-        self.restart_stagnation = generations;
-        self
-    }
-
-    /// Set the outer per-candidate timeout (compilation + execution).
-    pub fn candidate_timeout(mut self, candidate_timeout: std::time::Duration) -> Self {
-        self.candidate_timeout = Some(candidate_timeout);
-        self
-    }
-
-    /// Set the inner single-execution timeout (execution only, excludes compile).
-    pub fn execution_timeout(mut self, execution_timeout: std::time::Duration) -> Self {
-        self.execution_timeout = Some(execution_timeout);
-        self
-    }
-
-    /// Stop profiling a candidate once its running mean exceeds `factor ×`
-    /// the current best. See [`CompileOptions::early_stop_factor`].
-    pub fn early_stop_factor(mut self, factor: f64) -> Self {
-        assert!(
-            factor >= 1.0,
-            "early_stop_factor below 1.0 would truncate candidates still in contention"
-        );
-        self.early_stop_factor = Some(factor);
-        self
-    }
-
-    /// Set a dynamic dimension after search-space construction and before
-    /// search. This is equivalent to calling [`Graph::set_dim`] between
-    /// [`Graph::build_search_space`] and [`Graph::search`], while still using
-    /// the unified [`Graph::compile`] API.
-    pub fn search_dim(mut self, dim: impl Into<Symbol>, value: usize) -> Self {
-        let dim = checked_dim(dim);
-        self.search_dims.insert(dim, value);
-        self
-    }
-
-    /// Override a dynamic dimension value used during search profiling.
-    pub fn profile_dim(mut self, dim: impl Into<Symbol>, value: usize) -> Self {
-        let dim = checked_dim(dim);
-        self.profile_dims.insert(dim, value);
-        self
-    }
-
-    /// Define buckets for a dynamic dimension.
-    ///
-    /// Bucketed compilation builds a separate search space and selected LLIR for
-    /// each bucket combination. Buckets must not overlap and must cover all
-    /// values that will be used at runtime.
-    pub fn dim_buckets(mut self, dimension: impl Into<Symbol>, buckets: &[DimBucket]) -> Self {
-        let dimension = checked_dim(dimension);
-        validate_dim_buckets(dimension, buckets);
-        self.dim_buckets.insert(dimension, buckets.to_vec());
-        self
-    }
-
-    /// Enable or disable egglog progress logging.
-    pub fn egglog_log(mut self, enabled: bool) -> Self {
-        self.egglog_log = enabled;
-        self
-    }
-
-    /// Enable or disable automatic loop rolling and its diagnostics.
-    pub fn rolling_log(mut self, enabled: bool) -> Self {
-        self.rolling_log = enabled;
-        self
-    }
-
-    /// Enable or disable search progress logging.
-    pub fn search_log(mut self, enabled: bool) -> Self {
-        self.search_log = enabled;
-        self
-    }
-
-    fn egglog_log_enabled(&self) -> bool {
-        log_channel_enabled(self.egglog_log, "EGGLOG_LOG")
-    }
-
-    fn rolling_log_enabled(&self) -> bool {
-        log_channel_enabled(self.rolling_log, "ROLLING_LOG")
-    }
-
-    /// Whether search progress logging is on, honoring `SEARCH_LOG` /
-    /// `LUMINAL_LOG` overrides.
-    pub fn search_log_enabled(&self) -> bool {
-        log_channel_enabled(self.search_log, "SEARCH_LOG")
-    }
-}
-
-impl Default for CompileOptions {
-    fn default() -> Self {
-        Self {
-            limit: 100,
-            search_time_limit: std::time::Duration::MAX,
-            generation_size: 10,
-            mutations: 10,
-            trials: 3,
-            keep_best: 1,
-            restart_stagnation: 0,
-            candidate_timeout: Some(std::time::Duration::from_secs(60)),
-            execution_timeout: Some(std::time::Duration::from_secs(1)),
-            early_stop_factor: None,
-            search_dims: FxHashMap::default(),
-            profile_dims: FxHashMap::default(),
-            dim_buckets: FxHashMap::default(),
-            egglog_log: false,
-            rolling_log: false,
-            search_log: true,
-        }
-    }
-}
-
-fn validate_dim_buckets(dimension: Symbol, buckets: &[DimBucket]) {
-    assert!(
-        !buckets.is_empty(),
-        "Buckets for dim '{dimension}' must not be empty"
-    );
-    for (i, a) in buckets.iter().enumerate() {
-        for b in buckets.iter().skip(i + 1) {
-            assert!(
-                a.max < b.min || b.max < a.min,
-                "Overlapping buckets for dim '{}': [{}, {}] and [{}, {}]",
-                dimension,
-                a.min,
-                a.max,
-                b.min,
-                b.max,
-            );
-        }
-    }
-}
-
-/// A Luminal compute graph.
-///
-/// All computation is represented as a directed acyclic graph.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Graph {
     /// A map of dynamic dimensions to concrete dimension sizes
-    pub dyn_map: DynMap,
-    /// Edge weights: (Input index, Output index, Input shape)
-    pub graph: HLIRGraph,
-    /// The saturated search space built by [`Graph::build_search_space`]:
-    /// one e-graph per bucket combination, handed to the runtime to search.
-    search_space: Option<SearchSpace>,
-    /// Custom ops
-    pub custom_ops: Vec<Box<dyn CustomOp>>,
-    /// Optional graph-wide interval assumptions for dynamic dimensions.
-    pub dim_intervals: DynDimIntervals,
-    /// Metadata for Input nodes: NodeIndex -> (label, dtype).
-    /// Stored as plain data so it survives cross-binary type identity mismatches
-    /// when external backend plugins are compiled separately.
-    pub input_meta: FxHashMap<NodeIndex, (String, DType)>,
-    selected_schedule: Option<SelectedSchedule>,
+    pub dyn_map: crate::shape::DynMap,
+    /// The logical-model recorder — GraphTensor methods emit their
+    /// logical ops here; it IS the graph (absorbed into this struct at
+    /// M3 Step 4e).
+    pub logical: crate::graph::LogicalGraph,
 }
 
 impl Graph {
@@ -423,2570 +78,1448 @@ impl Graph {
         Graph::default()
     }
 
-    fn run_auto_loop_rolling_prepass(&mut self, options: &CompileOptions) {
-        let log = options.rolling_log_enabled();
-        let before = self.graph.node_count();
-        // Roll to a fixpoint. Each pass rolls the single best repeated
-        // region, and rolling one region can expose the next: a periodic
-        // layer pattern (e.g. 5 local + 1 global attention layer) first
-        // rolls into a multi-layer body, and only then do the identical
-        // layers inside that one surviving body form a rollable run of
-        // their own. Termination: every roll strictly deletes duplicate
-        // body nodes, and marker ops are unique so they never form new
-        // repeats.
-        let mut rolled = 0usize;
-        while self.auto_roll_loops_prepass_with_log(log) > 0 {
-            rolled += 1;
-        }
-        if rolled == 0 {
-            println!(
-                "   {:>6}  no loop regions found (max body={})",
-                "Rolled".cyan().bold(),
-                before / 2,
-            );
-        }
-        if log {
-            self.debug_validate_rolled_regions();
-        }
+    pub fn set_dim(&mut self, dimension: impl Into<crate::shape::Symbol>, val: usize) {
+        self.dyn_map.insert(dimension.into(), val);
     }
 
-    /// ROLLING_LOG diagnostic: walk each rolled region's body in the HLIR and
-    /// report any path that reaches another region's markers without passing
-    /// through this region's own exit markers. Inner regions reaching outer
-    /// markers directly means some cross-region edge was not rewired through
-    /// a marker at insert time.
-    fn debug_validate_rolled_regions(&self) {
-        use crate::hlir::{LoopEnd, LoopInput, LoopOutput, LoopOutputSelect, LoopStart, Output};
-        let mut markers: FxHashMap<NodeIndex, usize> = FxHashMap::default();
-        let mut entries: FxHashMap<usize, Vec<NodeIndex>> = FxHashMap::default();
-        for n in self.graph.node_indices() {
-            if let Some(op) = self.try_get_op::<LoopStart>(n) {
-                markers.insert(n, op.loop_id);
-                entries.entry(op.loop_id).or_default().push(n);
-            } else if let Some(op) = self.try_get_op::<LoopEnd>(n) {
-                markers.insert(n, op.loop_id);
-            } else if let Some(op) = self.try_get_op::<LoopInput>(n) {
-                markers.insert(n, op.loop_id);
-                entries.entry(op.loop_id).or_default().push(n);
-            } else if let Some(op) = self.try_get_op::<LoopOutput>(n) {
-                markers.insert(n, op.loop_id);
-            } else if let Some(op) = self.try_get_op::<LoopOutputSelect>(n) {
-                markers.insert(n, op.loop_id);
-            }
-        }
-        for (&id, seeds) in entries.iter().sorted_by_key(|(id, _)| **id) {
-            let mut seen: FxHashSet<NodeIndex> = FxHashSet::default();
-            let mut bridges = 0usize;
-            let mut worklist: Vec<(NodeIndex, NodeIndex)> = seeds
-                .iter()
-                .flat_map(|m| {
-                    self.graph
-                        .neighbors_directed(*m, Direction::Outgoing)
-                        .map(|s| (s, *m))
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            while let Some((n, pred)) = worklist.pop() {
-                if seen.contains(&n) {
-                    continue;
-                }
-                if let Some(&owner) = markers.get(&n) {
-                    if owner != id {
-                        bridges += 1;
-                        if bridges <= 3 {
-                            println!(
-                                "   {:>6}  region {id} bridge: {} -> {} (owner {owner})",
-                                "Rolled".red().bold(),
-                                self.graph[pred],
-                                self.graph[n],
-                            );
-                        }
-                    }
-                    continue;
-                }
-                if self.try_get_op::<Output>(n).is_some() {
-                    continue;
-                }
-                seen.insert(n);
-                for succ in self
-                    .graph
-                    .neighbors_directed(n, Direction::Outgoing)
-                    .collect::<Vec<_>>()
-                {
-                    worklist.push((succ, n));
-                }
-            }
-            println!(
-                "   {:>6}  region {id}: body={} foreign-marker bridges={}",
-                "Rolled".cyan().bold(),
-                seen.len(),
-                bridges,
-            );
-        }
+    /// Create a new tensor with shape S and this dtype. Dtype is DECLARED
+    /// at creation (purity ruling 2026-07-30: as_dtype is gone — a
+    /// different dtype downstream is a logical cast, never a mutation of
+    /// the declaration).
+    pub fn tensor(&mut self, shape: impl ToShape, dtype: DType) -> GraphTensor {
+        self.named_tensor("", shape, dtype)
     }
 
-    /// Add edges whose relative edge-id order carries meaning (LoopInput
-    /// per-iteration sources) with freshly allocated, ascending edge ids.
-    /// StableGraph recycles freed edge indices LIFO, so after any removals a
-    /// plain `add_edge` sequence lands on arbitrary ids — and `get_sources`
-    /// / serialization order edges by id. Drain the free list with dummy
-    /// edges first, add the real edges in fresh index territory, then drop
-    /// the dummies.
-    fn add_iteration_ordered_edges(&mut self, pending: Vec<(NodeIndex, Vec<NodeIndex>)>) {
-        use petgraph::visit::EdgeIndexable;
-        let Some(&(anchor, _)) = pending.first() else {
-            return;
-        };
-        let bound = EdgeIndexable::edge_bound(&self.graph);
-        let mut dummies = Vec::new();
-        loop {
-            let e = self.graph.add_edge(anchor, anchor, ());
-            let fresh = e.index() >= bound;
-            dummies.push(e);
-            if fresh {
-                break;
-            }
-        }
-        for (marker, sources) in pending {
-            for src in sources {
-                self.graph.add_edge(src, marker, ());
-            }
-        }
-        for e in dummies {
-            self.graph.remove_edge(e);
-        }
-    }
-
-    /// Mutate the HLIR graph in place to fold N repeated body occurrences into
-    /// a single body plus loop-marker ops. See `auto_roll_loops_prepass`.
-    fn insert_loop_region_ops(&mut self, candidate: RollingCandidate, log: bool) -> usize {
-        use crate::hlir::{LoopEnd, LoopInput, LoopOutput, LoopOutputSelect, LoopStart, Output};
-        use petgraph::visit::EdgeRef;
-
-        let nodes_before = self.graph.node_count();
-        let n_iters = candidate.occurrences.len();
-        // Regions roll one at a time; each gets the next free id so nested
-        // and disjoint regions stay distinguishable through egglog and the
-        // LLIR unroll/collapse passes.
-        let loop_id = self
-            .graph
-            .node_indices()
-            .filter_map(|n| {
-                self.try_get_op::<LoopStart>(n)
-                    .map(|start| start.loop_id + 1)
-            })
-            .max()
-            .unwrap_or(0);
-
-        // Build the body-node sets EXCLUDING `Output` HLIR nodes. An Output
-        // inside a rolled occurrence is a graph-external sink for that
-        // iteration's value, not body computation; we treat it as a cross-
-        // region consumer so each iteration's Output survives all the way
-        // through and gets rewired to its `LoopOutputSelect(i)` below.
-        let body_nodes: FxHashSet<NodeIndex> = candidate.occurrences[0]
-            .nodes
-            .iter()
-            .copied()
-            .filter(|&n| self.try_get_op::<Output>(n).is_none())
-            .collect();
-        let mut duplicate_body_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
-        for occ in &candidate.occurrences[1..] {
-            for &n in &occ.nodes {
-                if self.try_get_op::<Output>(n).is_none() {
-                    duplicate_body_nodes.insert(n);
-                }
-            }
-        }
-
-        let n_boundary = candidate.occurrences[0].boundary_inputs.len();
-        let state_set: FxHashSet<usize> = candidate.state_param_indices.iter().copied().collect();
-
-        let mut state_out_pos_per_slot: Vec<usize> =
-            Vec::with_capacity(candidate.state_param_indices.len());
-        let mut state_output_positions: FxHashSet<usize> = FxHashSet::default();
-        for &p in &candidate.state_param_indices {
-            let next_val = candidate.occurrences[1].boundary_inputs[p];
-            let pos = candidate.occurrences[0]
-                .output_nodes
-                .iter()
-                .position(|&n| n == next_val)
-                .expect("state param must have a producer in output_nodes");
-            state_out_pos_per_slot.push(pos);
-            state_output_positions.insert(pos);
-        }
-
-        let mut created = 0usize;
-        // Loop markers cross the HLIR -> egglog -> LLIR boundary and therefore
-        // carry the same concrete dtype as the tensor they represent. Compute
-        // those dtypes from the still-unmodified graph before inserting any
-        // markers; an unknown or inconsistent dtype is a compile error, never
-        // an F32 default.
-        let dtype_map = self.concrete_node_dtypes();
-        // Track all NodeIndex slots we newly assign for loop-marker ops.
-        // StableGraph reuses freed node indices; removals later in this
-        // function might target slots that happen to coincide with a new
-        // loop-marker's NodeIndex, so we explicitly exclude those.
-        let mut added_loop_ops: FxHashSet<NodeIndex> = FxHashSet::default();
-        // LoopInput per-iteration source edges, added together at the end:
-        // edge-id order IS logical input order across HLIR (`get_sources`
-        // sorts by id), and StableGraph recycles freed edge indices LIFO, so
-        // adding these amid the rewiring below — or after a previous pass's
-        // duplicate-body deletions — would hand them arbitrary recycled ids
-        // and silently permute iteration order at serialization.
-        let mut deferred_source_edges: Vec<(NodeIndex, Vec<NodeIndex>)> = Vec::new();
-
-        for (slot_idx, (&p, &out_pos)) in candidate
-            .state_param_indices
-            .iter()
-            .zip(state_out_pos_per_slot.iter())
-            .enumerate()
-        {
-            let initial = candidate.occurrences[0].boundary_inputs[p];
-            let body_state_out = candidate.occurrences[0].output_nodes[out_pos];
-            let last_state_out = candidate.occurrences[n_iters - 1].output_nodes[out_pos];
-            let dtype = dtype_map[&initial];
-            for (role, node) in [
-                ("loop body state output", body_state_out),
-                ("loop final state output", last_state_out),
-            ] {
-                let actual = dtype_map[&node];
-                assert_eq!(
-                    actual,
-                    dtype,
-                    "loop {loop_id} slot {slot_idx} changes dtype: initial node {} is {dtype:?}, {role} node {} is {actual:?}",
-                    initial.index(),
-                    node.index(),
-                );
-            }
-
-            let loop_start = self.graph.add_node(Box::new(LoopStart {
-                loop_id,
-                slot_idx,
-                iters: Expression::from(n_iters as i32),
-                dtype,
-            }));
-            added_loop_ops.insert(loop_start);
-            self.graph.add_edge(initial, loop_start, ());
-
-            let edges_out_of_initial: Vec<_> = self
-                .graph
-                .edges_directed(initial, Direction::Outgoing)
-                .filter(|e| body_nodes.contains(&e.target()))
-                .map(|e| (e.id(), e.target()))
-                .collect();
-            for (eid, dst) in edges_out_of_initial {
-                self.graph.remove_edge(eid);
-                self.graph.add_edge(loop_start, dst, ());
-            }
-
-            let loop_end = self.graph.add_node(Box::new(LoopEnd {
-                loop_id,
-                slot_idx,
-                dtype,
-            }));
-            added_loop_ops.insert(loop_end);
-            self.graph.add_edge(body_state_out, loop_end, ());
-
-            let external_edges: Vec<_> = self
-                .graph
-                .edges_directed(last_state_out, Direction::Outgoing)
-                .filter(|e| {
-                    let t = e.target();
-                    !body_nodes.contains(&t) && !duplicate_body_nodes.contains(&t)
-                })
-                .map(|e| (e.id(), e.target()))
-                .collect();
-            for (eid, dst) in external_edges {
-                self.graph.remove_edge(eid);
-                self.graph.add_edge(loop_end, dst, ());
-            }
-
-            created += 2;
-        }
-
-        for p in 0..n_boundary {
-            if state_set.contains(&p) {
-                continue;
-            }
-            let per_iter_sources: Vec<NodeIndex> = candidate
-                .occurrences
-                .iter()
-                .map(|occ| occ.boundary_inputs[p])
-                .collect();
-            if per_iter_sources.windows(2).all(|w| w[0] == w[1]) {
-                continue;
-            }
-
-            let body_input = candidate.occurrences[0].boundary_inputs[p];
-            let dtype = self.uniform_node_dtype(
-                &per_iter_sources,
-                &dtype_map,
-                &format!("loop {loop_id} input stream {p}"),
-            );
-            assert_eq!(
-                dtype, dtype_map[&body_input],
-                "loop {loop_id} input stream {p} body input has a different concrete dtype"
-            );
-            if log {
-                println!(
-                    "   {:>6}  loop {loop_id} stream {p}: per-iter sources {:?}",
-                    "Rolled".cyan().bold(),
-                    per_iter_sources
-                        .iter()
-                        .map(|n| n.index())
-                        .collect::<Vec<_>>(),
-                );
-            }
-            let loop_input = self.graph.add_node(Box::new(LoopInput {
-                loop_id,
-                stream_id: p,
-                dtype,
-            }));
-            added_loop_ops.insert(loop_input);
-            // Deferred: added at the end with fresh ascending edge ids —
-            // see `add_iteration_ordered_edges`.
-            deferred_source_edges.push((loop_input, per_iter_sources.clone()));
-
-            let body_edges: Vec<_> = self
-                .graph
-                .edges_directed(body_input, Direction::Outgoing)
-                .filter(|e| body_nodes.contains(&e.target()))
-                .map(|e| (e.id(), e.target()))
-                .collect();
-            for (eid, dst) in body_edges {
-                self.graph.remove_edge(eid);
-                self.graph.add_edge(loop_input, dst, ());
-            }
-
-            created += 1;
-        }
-
-        let n_outputs = candidate.occurrences[0].output_nodes.len();
-        for q in 0..n_outputs {
-            if state_output_positions.contains(&q) {
-                continue;
-            }
-
-            // Per iteration, determine (body_producer, edges_to_rewire):
-            //  * If `output_nodes[q]` is an Output HLIR (graph sink): the
-            //    body producer is that Output's predecessor, and the edge to
-            //    rewire is the predecessor → Output edge itself.
-            //  * Otherwise: body producer is `output_nodes[q]`; the edges to
-            //    rewire are all of its outgoing edges whose target is OUTSIDE
-            //    the rolled region (post-loop consumers — Output HLIR or any
-            //    downstream computation, treated identically).
-            let mut per_iter_plan: Vec<(NodeIndex, Vec<(petgraph::graph::EdgeIndex, NodeIndex)>)> =
-                Vec::with_capacity(n_iters);
-            let mut complete = true;
-            for occ in &candidate.occurrences {
-                let node = occ.output_nodes[q];
-                if self.try_get_op::<Output>(node).is_some() {
-                    // Output HLIR sink. Its predecessor is the body producer;
-                    // the single (pred → Output) edge is what we rewire.
-                    let pred_edge = self
-                        .graph
-                        .edges_directed(node, Direction::Incoming)
-                        .next()
-                        .map(|e| (e.id(), e.source(), node));
-                    match pred_edge {
-                        Some((eid, pred, output)) => {
-                            per_iter_plan.push((pred, vec![(eid, output)]));
-                        }
-                        None => {
-                            complete = false;
-                            break;
-                        }
-                    }
-                } else {
-                    // Internal body producer. Cross-region edges = its
-                    // outgoing edges whose target is not in any iter's body.
-                    let edges: Vec<_> = self
-                        .graph
-                        .edges_directed(node, Direction::Outgoing)
-                        .filter(|e| {
-                            let t = e.target();
-                            !body_nodes.contains(&t) && !duplicate_body_nodes.contains(&t)
-                        })
-                        .map(|e| (e.id(), e.target()))
-                        .collect();
-                    if edges.is_empty() {
-                        // Nothing actually crosses the region for this iter.
-                        // Skip the whole stream — without a consumer the
-                        // Select would dangle.
-                        complete = false;
-                        break;
-                    }
-                    per_iter_plan.push((node, edges));
-                }
-            }
-            if !complete {
-                continue;
-            }
-
-            // Iter-0 body producer feeds the LoopOutput marker.
-            let body_output = per_iter_plan[0].0;
-            let per_iter_outputs: Vec<NodeIndex> = per_iter_plan
-                .iter()
-                .map(|(producer, _)| *producer)
-                .collect();
-            let dtype = self.uniform_node_dtype(
-                &per_iter_outputs,
-                &dtype_map,
-                &format!("loop {loop_id} output stream {q}"),
-            );
-
-            let loop_output = self.graph.add_node(Box::new(LoopOutput {
-                loop_id,
-                stream_id: q,
-                dtype,
-            }));
-            self.graph.add_edge(body_output, loop_output, ());
-            added_loop_ops.insert(loop_output);
-
-            // For each iter, create a LoopOutputSelect(i) and rewire the
-            // cross-region edges to flow through it.
-            for (i, (_, edges)) in per_iter_plan.into_iter().enumerate() {
-                let select = self.graph.add_node(Box::new(LoopOutputSelect {
-                    loop_id,
-                    stream_id: q,
-                    iter: i,
-                    dtype,
-                }));
-                self.graph.add_edge(loop_output, select, ());
-                added_loop_ops.insert(select);
-
-                for (edge_id, consumer) in edges {
-                    self.graph.remove_edge(edge_id);
-                    self.graph.add_edge(select, consumer, ());
-                }
-                created += 1;
-            }
-            created += 1; // for the LoopOutput marker itself
-        }
-
-        // Delete duplicate body nodes. Skip any node we just added as a
-        // loop-marker op (StableGraph may reuse NodeIndex slots, so an
-        // added marker could collide with a previously-freed body node id).
-        for &node in &duplicate_body_nodes {
-            if added_loop_ops.contains(&node) {
-                continue;
-            }
-            self.graph.remove_node(node);
-        }
-
-        self.add_iteration_ordered_edges(deferred_source_edges);
-
-        if log && created > 0 {
-            let nodes_after = self.graph.node_count();
-            // Region partition: body_nodes is the surviving one-iteration body,
-            // `created` is the marker scaffold (LoopStart/End/Input/Output),
-            // and the rest is graph outside the loop region (embedding,
-            // weights, post-loop / lm-head).
-            let inside_body = body_nodes.len();
-            let inside_markers = created;
-            let outside = nodes_after - inside_body - inside_markers;
-            println!(
-                "   {:>6}  rolled HLIR: {} -> {} nodes ({} loop ops inserted, {} duplicate body nodes deleted)",
-                "Rolled".cyan().bold(),
-                nodes_before,
-                nodes_after,
-                created,
-                duplicate_body_nodes.len(),
-            );
-            println!(
-                "   {:>6}  region partition: {} inside ({} body + {} markers) / {} outside",
-                "Rolled".cyan().bold(),
-                inside_body + inside_markers,
-                inside_body,
-                inside_markers,
-                outside,
-            );
-        }
-        created
-    }
-
-    /// Resolve every HLIR node's concrete dtype in topological order.
-    ///
-    /// Each operation owns its dtype contract through
-    /// [`HLIROp::output_dtype`]. There is no graph-level opcode table and no
-    /// fallback dtype: malformed graphs fail before a transform can stamp
-    /// incorrect metadata onto a structural marker.
-    fn concrete_node_dtypes(&self) -> FxHashMap<NodeIndex, DType> {
-        let order = petgraph::algo::toposort(&self.graph, None).unwrap_or_else(|cycle| {
-            panic!("HLIR contains a cycle at node {}", cycle.node_id().index())
-        });
-        let mut dtypes = FxHashMap::default();
-        for node in order {
-            let sources = self.get_sources(node);
-            let input_dtypes: Vec<_> = sources
-                .iter()
-                .map(|source| {
-                    dtypes.get(source).copied().unwrap_or_else(|| {
-                        panic!(
-                            "HLIR node {} ({}) depends on node {} before its concrete dtype is known",
-                            node.index(),
-                            self.graph[node],
-                            source.index(),
-                        )
-                    })
-                })
-                .collect();
-            let dtype = self.graph[node].output_dtype(&input_dtypes);
-            if let Some((_, metadata_dtype)) = self.input_meta.get(&node) {
-                assert_eq!(
-                    dtype,
-                    *metadata_dtype,
-                    "HLIR node {} ({}) has conflicting concrete dtypes: op={dtype:?}, metadata={metadata_dtype:?}",
-                    node.index(),
-                    self.graph[node],
-                );
-            }
-            dtypes.insert(node, dtype);
-        }
-        dtypes
-    }
-
-    fn uniform_node_dtype(
-        &self,
-        nodes: &[NodeIndex],
-        dtypes: &FxHashMap<NodeIndex, DType>,
-        context: &str,
-    ) -> DType {
-        let (&first, rest) = nodes
-            .split_first()
-            .unwrap_or_else(|| panic!("{context} has no tensor sources"));
-        let dtype = dtypes[&first];
-        for &node in rest {
-            let actual = dtypes[&node];
-            assert_eq!(
-                actual,
-                dtype,
-                "{context} mixes concrete dtypes: node {} is {dtype:?}, node {} is {actual:?}",
-                first.index(),
-                node.index(),
-            );
-        }
-        dtype
-    }
-
-    /// Set a runtime dimension
-    pub fn set_dim(&mut self, dimension: impl Into<Symbol>, val: usize) {
-        let dimension = checked_dim(dimension);
-        self.dyn_map.insert(dimension, val);
-    }
-
-    pub fn set_dim_interval(&mut self, dimension: impl Into<Symbol>, min: i64, max: i64) {
-        let dimension = checked_dim(dimension);
-        self.dim_intervals
-            .insert(dimension, DimInterval::new(min, max));
-    }
-
-    /// Attempt to discover repeated HLIR regions and build explicit region
-    /// descriptors for loop-carried state edges.
-    /// Returns the number of detected inter-region boundaries.
-    ///
-    /// This is a conservative prepass:
-    /// - only rolls candidates with at least one loop-carried state parameter
-    /// - only inserts when the carried edge shapes can be inferred
-    pub fn auto_roll_loops_prepass(&mut self) -> usize {
-        let log = log_channel_enabled(false, "ROLLING_LOG");
-        self.auto_roll_loops_prepass_with_log(log)
-    }
-
-    fn auto_roll_loops_prepass_with_log(&mut self, log: bool) -> usize {
-        let max_region_size = self.graph.node_count() / 2;
-        if max_region_size < 1 {
-            return 0;
-        }
-        if log {
-            println!(
-                "   {:>6}  scanning {} HLIR nodes for loop regions (max body={})",
-                "Rolled".cyan().bold(),
-                self.graph.node_count(),
-                max_region_size,
-            );
-        }
-        let report = self.best_rolling_candidate(max_region_size);
-        let Some(candidate) = report.candidate else {
-            if log {
-                self.print_rolling_search_diagnostics(&report.diagnostics);
-            }
-            return 0;
-        };
-        if log {
-            println!(
-                "   {:>6}  candidate: body={} trips={} boundary_inputs={} state_params={:?}",
-                "Rolled".yellow().bold(),
-                candidate.occurrences[0].nodes.len(),
-                candidate.occurrences.len(),
-                candidate.occurrences[0].boundary_inputs.len(),
-                candidate.state_param_indices,
-            );
-            if let Some(rejected) = &report.diagnostics.best_rejected {
-                println!(
-                    "   {:>6}  best rejected: body={} trips={} boundary_inputs={} state_params={} savings={}",
-                    "Rolled".yellow().bold(),
-                    rejected.window,
-                    rejected.repetitions,
-                    rejected.boundary_inputs,
-                    rejected.state_params,
-                    rejected.savings,
-                );
-            }
-            for run in report.diagnostics.top_runs.iter().take(5) {
-                println!("   {:>6}  run: {}", "Rolled".yellow().bold(), run);
-            }
-        }
-        if candidate.occurrences.len() < 2 {
-            return 0;
-        }
-        // Reject rolls that grow the graph: a roll that deletes fewer
-        // duplicate nodes than the markers it creates is pure overhead.
-        // (Termination of the rolling fixpoint doesn't depend on this —
-        // every roll irreversibly consumes a repetition run, since markers
-        // are unique and can never form new repeats — so break-even rolls
-        // are kept for their search-space compression.)
-        let net = rolling_net_savings(&candidate);
-        if net < 0 {
-            if log {
-                println!(
-                    "   {:>6}  best candidate rejected: net savings {} <= 0 (body={} trips={})",
-                    "Rolled".yellow().bold(),
-                    net,
-                    candidate.occurrences[0].nodes.len(),
-                    candidate.occurrences.len(),
-                );
-            }
-            return 0;
-        }
-
-        // Mutate the HLIR in place — insert LoopStart/LoopEnd/LoopInput/
-        // LoopOutput markers, delete N-1 duplicate bodies. The loop structure
-        // is encoded in the HLIR graph itself and the downstream single-root
-        // egglog path picks it up unchanged.
-        self.insert_loop_region_ops(candidate, log)
-    }
-
-    fn print_rolling_search_diagnostics(&self, diagnostics: &RollingSearchDiagnostics) {
-        let best_rejected = diagnostics
-            .best_rejected
-            .as_ref()
-            .map(|candidate| {
-                format!(
-                    "best rejected: body={} trips={} boundary_inputs={} state_params={} savings={}",
-                    candidate.window,
-                    candidate.repetitions,
-                    candidate.boundary_inputs,
-                    candidate.state_params,
-                    candidate.savings
-                )
-            })
-            .unwrap_or_else(|| "best rejected: none".to_string());
-        println!(
-            "   {:>6}  diagnostics: windows={} hash_matches={} repeated_runs={} rejected(zero_state={}); {}",
-            "Rolled".yellow().bold(),
-            diagnostics.windows_probed,
-            diagnostics.adjacent_hash_matches,
-            diagnostics.repeated_signature_runs,
-            diagnostics.rejected_zero_state_params,
-            best_rejected,
-        );
-        for run in diagnostics.top_runs.iter().take(5) {
-            println!("   {:>6}  run: {}", "Rolled".yellow().bold(), run);
-        }
-    }
-
-    /// Innermost enclosing rolled region per HLIR node. Walked outer-to-inner
-    /// (ascending loop_id = creation order), so later (inner) regions
-    /// overwrite nothing: an outer walk stops at the inner region's markers
-    /// and never sees the inner body. Nodes outside every region are absent.
-    fn region_scope_map(&self) -> FxHashMap<NodeIndex, usize> {
-        use crate::hlir::{LoopInput, LoopStart, Output};
-        let mut entries: std::collections::BTreeMap<usize, Vec<NodeIndex>> =
-            std::collections::BTreeMap::new();
-        for n in self.graph.node_indices() {
-            if let Some(op) = self.try_get_op::<LoopStart>(n) {
-                entries.entry(op.loop_id).or_default().push(n);
-            } else if let Some(op) = self.try_get_op::<LoopInput>(n) {
-                entries.entry(op.loop_id).or_default().push(n);
-            }
-        }
-        let mut scope: FxHashMap<NodeIndex, usize> = FxHashMap::default();
-        for (&id, seeds) in &entries {
-            let mut worklist: Vec<NodeIndex> = seeds
-                .iter()
-                .flat_map(|m| {
-                    self.graph
-                        .neighbors_directed(*m, Direction::Outgoing)
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            let mut seen: FxHashSet<NodeIndex> = FxHashSet::default();
-            while let Some(n) = worklist.pop() {
-                if seen.contains(&n)
-                    || self.is_rolled_loop_marker(n)
-                    || self.try_get_op::<Output>(n).is_some()
-                {
-                    continue;
-                }
-                seen.insert(n);
-                scope.insert(n, id);
-                for succ in self
-                    .graph
-                    .neighbors_directed(n, Direction::Outgoing)
-                    .collect::<Vec<_>>()
-                {
-                    worklist.push(succ);
-                }
-            }
-        }
-        scope
-    }
-
-    fn is_rolled_loop_marker(&self, n: NodeIndex) -> bool {
-        use crate::hlir::{
-            LoopEnd, LoopInput, LoopInputStatic, LoopOutput, LoopOutputSelect, LoopStart,
-        };
-        self.try_get_op::<LoopStart>(n).is_some()
-            || self.try_get_op::<LoopEnd>(n).is_some()
-            || self.try_get_op::<LoopInput>(n).is_some()
-            || self.try_get_op::<LoopInputStatic>(n).is_some()
-            || self.try_get_op::<LoopOutput>(n).is_some()
-            || self.try_get_op::<LoopOutputSelect>(n).is_some()
-    }
-
-    fn best_rolling_candidate(&self, max_region_size: usize) -> RollingSearchReport {
-        // The signature memo is keyed by NodeIndex; clear it so entries from a
-        // prior (now-mutated) graph state can't leak into this read-only search.
-        clear_rolling_sig_cache();
-        let Some(full_topo) = stable_toposort_by_node_index(&self.graph) else {
-            return RollingSearchReport {
-                candidate: None,
-                diagnostics: RollingSearchDiagnostics::default(),
-            };
-        };
-        // Inputs, Outputs, and loop markers are region boundary, not body:
-        // they feed or drain repeated windows without belonging to them.
-        // Markers especially must be excluded — after one roll, per-iteration
-        // values (e.g. layer weights) arrive through LoopInput markers whose
-        // stream ids differ, and letting them into windows breaks the hash
-        // match for otherwise-identical bodies nested inside the roll.
-        let topo: Vec<NodeIndex> = full_topo
-            .into_iter()
-            .filter(|n| {
-                self.try_get_op::<crate::hlir::Input>(*n).is_none()
-                    && self.try_get_op::<crate::hlir::Output>(*n).is_none()
-                    && !self.is_rolled_loop_marker(*n)
-            })
-            .collect();
-        if topo.len() < 2 {
-            return RollingSearchReport {
-                candidate: None,
-                diagnostics: RollingSearchDiagnostics::default(),
-            };
-        }
-        let uses = build_uses(&self.graph);
-        // A roll must not straddle a rolled-region boundary: occurrences in
-        // different scopes would produce overlapping (not nested) regions.
-        // Markers are invisible to scan windows, so this scope check is the
-        // fence that keeps repetition discovery from crossing into or out of
-        // an existing rolled body.
-        let node_scope = self.region_scope_map();
-        let scope_uniform = |occs: &[RollingOccurrence]| {
-            let mut nodes = occs.iter().flat_map(|occ| occ.nodes.iter());
-            let first = nodes.next().map(|n| node_scope.get(n).copied());
-            match first {
-                None => true,
-                Some(s0) => nodes.all(|n| node_scope.get(n).copied() == s0),
-            }
-        };
-        let topo_index: FxHashMap<NodeIndex, usize> =
-            topo.iter().enumerate().map(|(i, &n)| (n, i)).collect();
-        // Cap the largest probed window. A useful rolling candidate is one
-        // repeating unit — a transformer layer (≈3.4k HLIR nodes for a gpt-oss
-        // MoE layer; ≈6.7k for a 2-minibatch dual-branch layer). With two
-        // structurally-similar branches (default + minibatch prefill share
-        // weights) the cheap rolling hash matches MANY large windows spanning
-        // both branches; each triggers an O(window) `canonicalize_occurrence`
-        // that ultimately fails the signature check. Probing windows all the way
-        // to `topo.len()/2` made those dead-end canonicalizes dominate (still
-        // minutes even after the externals-scan fix below). Capping the window
-        // comfortably above one layer skips them without changing the selected
-        // candidate (the per-layer roll has the best savings = window·(reps−1)
-        // and lives at a small window). A real body larger than the cap just
-        // isn't rolled (correctness preserved). Tunable via LUMINAL_MAX_ROLL_BODY.
-        let roll_body_cap = std::env::var("LUMINAL_MAX_ROLL_BODY")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&v| v >= 1)
-            .unwrap_or(8192);
-        let max_window = max_region_size.min(topo.len() / 2).min(roll_body_cap);
-        let probe_windows = rolling_probe_window_sizes(max_window);
-        let node_hashes: Vec<u64> = topo
-            .iter()
-            .map(|&node| cheap_rolling_node_hash(&self.graph, node, &self.custom_ops))
-            .collect();
-        let rolling_hash = RollingHash64::new(&node_hashes);
-        let mut diagnostics = RollingSearchDiagnostics::default();
-        let mut best_overall: Option<RollingCandidate> = None;
-        let mut discovered_runs: Vec<RollingRun> = Vec::new();
-
-        // Search all window sizes down to 1, using cheap rolling hashes only as a
-        // gate for expensive canonicalization. Candidate selection remains purely
-        // based on valid HLIR-op reduction.
-        for window in probe_windows {
-            let mut start = 0usize;
-            while start + window * 2 <= topo.len() {
-                diagnostics.windows_probed += 1;
-                let first_hash = rolling_hash.window_hash(start, window);
-                let second_hash = rolling_hash.window_hash(start + window, window);
-                if first_hash != second_hash {
-                    start += 1;
-                    continue;
-                }
-                diagnostics.adjacent_hash_matches += 1;
-
-                let mut occs = vec![];
-                let mut starts = vec![];
-                let first_nodes = topo[start..start + window].to_vec();
-                let Some((sig, first_boundary, first_outputs)) = canonicalize_occurrence(
-                    &self.graph,
-                    &first_nodes,
-                    &uses,
-                    &topo_index,
-                    &self.custom_ops,
-                ) else {
-                    start += 1;
-                    continue;
-                };
-                starts.push(start);
-                occs.push(RollingOccurrence {
-                    nodes: first_nodes,
-                    boundary_inputs: first_boundary,
-                    output_nodes: first_outputs,
-                });
-
-                let mut pos = start + window;
-                while pos + window <= topo.len() {
-                    if rolling_hash.window_hash(pos, window) != first_hash {
-                        break;
-                    }
-                    let nodes = topo[pos..pos + window].to_vec();
-                    let Some((next_sig, boundary_inputs, output_nodes)) = canonicalize_occurrence(
-                        &self.graph,
-                        &nodes,
-                        &uses,
-                        &topo_index,
-                        &self.custom_ops,
-                    ) else {
-                        break;
-                    };
-                    if next_sig != sig {
-                        break;
-                    }
-                    starts.push(pos);
-                    occs.push(RollingOccurrence {
-                        nodes,
-                        boundary_inputs,
-                        output_nodes,
-                    });
-                    pos += window;
-                }
-                if occs.len() < 2 {
-                    start += 1;
-                    continue;
-                }
-                diagnostics.repeated_signature_runs += 1;
-                discovered_runs.push(RollingRun {
-                    occurrences: occs.clone(),
-                    starts: starts.clone(),
-                    window,
-                });
-                let stride = starts
-                    .windows(2)
-                    .next()
-                    .map(|w| w[1].saturating_sub(w[0]))
-                    .unwrap_or(0);
-                let summary = format!(
-                    "body={} trips={} stride={} boundary_inputs={} state_params={} starts={:?}",
-                    window,
-                    occs.len(),
-                    stride,
-                    occs[0].boundary_inputs.len(),
-                    collect_state_params(&occs, &uses, &self.graph).len(),
-                    starts.iter().copied().take(4).collect::<Vec<_>>()
-                );
-                if occs.len() >= 20 && diagnostics.top_runs.len() < 16 {
-                    diagnostics.top_runs.push(summary);
-                }
-
-                let state_params = collect_state_params(&occs, &uses, &self.graph);
-                if state_params.is_empty()
-                    || !candidate_is_rollable(&occs, &state_params)
-                    || !scope_uniform(&occs)
-                {
-                    let rejected = RollingRejectedCandidate {
-                        window,
-                        repetitions: occs.len(),
-                        boundary_inputs: occs[0].boundary_inputs.len(),
-                        state_params: state_params.len(),
-                        savings: window * (occs.len() - 1),
-                    };
-                    diagnostics.rejected_zero_state_params += 1;
-                    let replace = diagnostics.best_rejected.as_ref().is_none_or(|best| {
-                        (rejected.savings, rejected.repetitions, rejected.window)
-                            > (best.savings, best.repetitions, best.window)
-                    });
-                    if replace {
-                        diagnostics.best_rejected = Some(rejected);
-                    }
-                    start = pos.saturating_sub(window).max(start + 1);
-                    continue;
-                }
-
-                let savings = window * (occs.len() - 1);
-                let _ = sig;
-                let candidate = RollingCandidate {
-                    occurrences: occs,
-                    state_param_indices: state_params,
-                    savings,
-                };
-                let replace = best_overall.as_ref().is_none_or(|b| {
-                    (rolling_net_savings(&candidate), candidate.occurrences.len())
-                        > (rolling_net_savings(b), b.occurrences.len())
-                });
-                if replace {
-                    best_overall = Some(candidate);
-                }
-                start = pos.saturating_sub(window).max(start + 1);
-            }
-        }
-        if crate::egglog_utils::log_channel_enabled(false, "ROLLING_LOG")
-            && let Some(best) = &best_overall
-        {
-            // Probe the windows adjacent to the accepted run: if another
-            // repetition of the body exists but didn't match, the first
-            // divergent node names what broke the periodicity of the linear
-            // order (phase misalignment shows up as an immediate mismatch,
-            // interleaved shared nodes as a mismatch at their topo slot).
-            let window = best.occurrences[0].nodes.len();
-            let first_start = topo_index[&best.occurrences[0].nodes[0]];
-            let last_start = topo_index[&best.occurrences.last().unwrap().nodes[0]];
-            for (label, probe_start) in [
-                ("before", first_start.checked_sub(window)),
-                ("after", Some(last_start + window)),
-            ] {
-                let Some(probe_start) = probe_start else {
-                    continue;
-                };
-                if probe_start + window > topo.len() {
-                    continue;
-                }
-                let mismatches = (0..window)
-                    .filter(|i| node_hashes[probe_start + i] != node_hashes[first_start + i])
-                    .take(4)
-                    .map(|i| {
-                        format!(
-                            "+{i}: {:?} vs body {:?}",
-                            self.graph[topo[probe_start + i]],
-                            self.graph[topo[first_start + i]]
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let total = (0..window)
-                    .filter(|i| node_hashes[probe_start + i] != node_hashes[first_start + i])
-                    .count();
-                println!(
-                    "   Rolled  probe {label} run (start {probe_start}, window {window}): {total} hash mismatches{}{}",
-                    if mismatches.is_empty() {
-                        ""
-                    } else {
-                        "; first: "
-                    },
-                    mismatches.join(" | ")
-                );
-            }
-        }
-        let mut grown_best = best_overall.take().map(|best| {
-            // `best` is already rollable (gated above). Growing only ever
-            // extends occurrences, which could re-introduce a cross-occurrence
-            // dependency; if it does, keep the validated (smaller) seed.
-            let seed = best.clone();
-            let grown = grow_rolling_candidate(
-                &self.graph,
-                &uses,
-                &topo_index,
-                best,
-                &discovered_runs,
-                &self.custom_ops,
-            );
-            if candidate_is_rollable(&grown.occurrences, &grown.state_param_indices)
-                && scope_uniform(&grown.occurrences)
-            {
-                grown
-            } else {
-                seed
-            }
-        });
-        for run in &discovered_runs {
-            let state_param_indices = collect_state_params(&run.occurrences, &uses, &self.graph);
-            let seed = RollingCandidate {
-                occurrences: run.occurrences.clone(),
-                state_param_indices,
-                savings: 0,
-            };
-            let grown = grow_rolling_candidate(
-                &self.graph,
-                &uses,
-                &topo_index,
-                seed,
-                &discovered_runs,
-                &self.custom_ops,
-            );
-            if grown.state_param_indices.is_empty()
-                || !candidate_is_rollable(&grown.occurrences, &grown.state_param_indices)
-                || !scope_uniform(&grown.occurrences)
-            {
-                continue;
-            }
-            let replace = grown_best.as_ref().is_none_or(|best| {
-                (rolling_net_savings(&grown), grown.occurrences.len())
-                    > (rolling_net_savings(best), best.occurrences.len())
-            });
-            if replace {
-                grown_best = Some(grown);
-            }
-        }
-        RollingSearchReport {
-            candidate: grown_best,
-            diagnostics,
-        }
-    }
-
-    /// Create a new tensor with shape S
-    pub fn tensor(&mut self, shape: impl ToShape) -> GraphTensor {
-        self.named_tensor("", shape)
-    }
-
-    /// Create a new tensor with shape S and a name. This name will show up on the graph when displayed
-    pub fn named_tensor(&mut self, name: impl ToString, shape: impl ToShape) -> GraphTensor {
+    /// Create a new tensor with a name, shape, and dtype. This name will show up on the graph when displayed.
+    pub fn named_tensor(
+        &mut self,
+        name: impl ToString,
+        shape: impl ToShape,
+        dtype: DType,
+    ) -> GraphTensor {
         let name = name.to_string();
-        let id = self.graph.add_node(Box::new(crate::hlir::Input {
-            node: 0,
-            label: name.clone(),
-            dtype: DType::default(),
-        }));
-        self.get_op_mut::<crate::hlir::Input>(id).node = id.index();
-        self.input_meta.insert(id, (name.clone(), DType::default()));
-        GraphTensor {
-            id,
-            graph_ref: self,
-            shape: ShapeTracker::new(shape),
-            dtype: DType::default(),
+        let dims = shape.to_shape();
+        let id = self.logical.input(&name, &dims, dtype);
+        GraphTensor::from_id(id, dims, self, dtype)
+    }
+}
+
+// ---------------------------------------------------------------------
+// THE LOGICAL GRAPH (M3 Step 4e: absorbed into this module — the
+// recorder IS the graph; LogicalGraph keeps its name, Austin's ruling
+// 2026-08-01). Formerly src/logical_graph.rs:
+// ---------------------------------------------------------------------
+// The LOGICAL GRAPH — the model the frontend actually builds (renamed
+// from logical_recorder, ruling 2026-07-31: this IS the durable thing;
+// absorbed into this module at Step 4e; the layout-bearing HLIR graph it
+// once stood beside remains deleted).
+//
+// GraphTensor methods insert typed logical nodes and numbered operand
+// edges here as the graph is built. There is no parallel tensor-id or
+// HLIR-node keyspace. Movement methods emit `IndexMapApply` views DIRECTLY
+// from their own parameters, at the source of truth — replacing
+// tracker-lift reconstruction entirely.
+//
+// Model/binding split (M3 Step 1): the recorder emits MODEL text only —
+// input declarations, ops, output naming, signature lists. Boundary
+// vocabulary (layouts, buffers, access, freed-by, Bool8 casts) is the
+// runtime binding generator's business (`runtime_binding`), never the
+// model's.
+//
+// Coverage is honest: any construct the recorder does not understand
+// POISONS it with a reason — the first reason wins, the native path
+// refuses loudly at load, and their pipeline is untouched. Handle dims
+// are DERIVED from the recorded value after every record call (R-D
+// ruling 2026-08-26), so a tracker/recorder dims divergence is
+// unrepresentable — the old resolve() cross-check tripwire is deleted.
+
+use crate::shape::{IntExpr, Term};
+use anyhow::{Result as AnyResult, bail};
+
+/// One index-map entry, in-memory. Movement composition happens on this
+/// tree — substituting our OWN just-emitted terms, never reconstructing
+/// from strides.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MapEntry {
+    /// The consuming view's coordinate, zero-based FROM THE END (the
+    /// de Bruijn house convention), with its extent.
+    Coord {
+        from_end: usize,
+        extent: IntExpr,
+    },
+    /// A dim-expression literal (a number or a symbolic dim var).
+    Lit(IntExpr),
+    Add(Box<MapEntry>, Box<MapEntry>),
+    Mul(Box<MapEntry>, IntExpr),
+    Div(Box<MapEntry>, IntExpr),
+    Rem(Box<MapEntry>, IntExpr),
+    Min(Box<MapEntry>, Box<MapEntry>),
+    Max(Box<MapEntry>, Box<MapEntry>),
+}
+
+// MapEntry::substitute as a RECORDER fold (composing maps across
+// already-recorded values) is DELETED with fold 1 (Austin's ruling
+// 2026-08-26): composition of recorded index-map applies is egglog's
+// job. What remains below is CONSTRUCTION-TIME composition for ONE
+// macro call — the same ruling's flip side: "macro interiors mint ONE
+// apply per logical construct", with the map built at construction
+// inside the one call. `ViewChain` (frontend/movement.rs) is the only
+// user.
+impl MapEntry {
+    /// Replace each Coord leaf (an axis of the intermediate space,
+    /// whose rank is `rank`) with that axis's entry over the next
+    /// space. Purely construction-time; nothing recorded is rewritten.
+    pub(crate) fn substitute(&self, replacements: &[MapEntry], rank: usize) -> MapEntry {
+        match self {
+            MapEntry::Coord {
+                from_end,
+                extent: _,
+            } => replacements[rank - 1 - from_end].clone(),
+            MapEntry::Lit(value) => MapEntry::Lit(*value),
+            MapEntry::Add(a, b) => MapEntry::Add(
+                Box::new(a.substitute(replacements, rank)),
+                Box::new(b.substitute(replacements, rank)),
+            ),
+            MapEntry::Mul(a, e) => MapEntry::Mul(Box::new(a.substitute(replacements, rank)), *e),
+            MapEntry::Div(a, e) => MapEntry::Div(Box::new(a.substitute(replacements, rank)), *e),
+            MapEntry::Rem(a, e) => MapEntry::Rem(Box::new(a.substitute(replacements, rank)), *e),
+            MapEntry::Min(a, b) => MapEntry::Min(
+                Box::new(a.substitute(replacements, rank)),
+                Box::new(b.substitute(replacements, rank)),
+            ),
+            MapEntry::Max(a, b) => MapEntry::Max(
+                Box::new(a.substitute(replacements, rank)),
+                Box::new(b.substitute(replacements, rank)),
+            ),
+        }
+    }
+}
+
+/// A movement transform, as the frontend method states it — its own
+/// parameters, not a tracker diff.
+#[derive(Debug, Clone)]
+pub enum Movement {
+    /// out dim i = in dim axes[i] (front-based, their convention).
+    Permute(Vec<usize>),
+    /// New broadcast dim inserted at front position `axis`.
+    ExpandDim { axis: usize, size: IntExpr },
+    /// Size-1 front dim at `axis` removed (the squeeze).
+    RemoveDim { axis: usize },
+    /// dims[axis] = old/inner (outer), inner inserted after (their
+    /// split_dims): parent coord = outer·inner_size + inner.
+    SplitDims { axis: usize, inner: IntExpr },
+    /// axis2 moved adjacent then merged into axis1 (their merge_dims):
+    /// axis1 reads merged/inner, axis2 reads merged%inner.
+    MergeDims { axis1: usize, axis2: usize },
+    /// Per-axis tile (their repeat): dim → dim·r, coord reads % old dim.
+    Repeat(Vec<IntExpr>),
+    /// Zero-start slice: same coords, smaller extents (in-bounds shrink).
+    Shrink { new_dims: Vec<IntExpr> },
+}
+
+/// The logical SSA identity. A tensor names the node that produces its
+/// value; there is no parallel frontend-id keyspace.
+pub type ValueId = NodeIndex;
+
+/// An operand as a record call sees it: the handle's value plus its
+/// dims. The dims payload is VESTIGIAL (R-D ruling 2026-08-26,
+/// reasserted 2026-09-01: handle dims are derived from the recorded
+/// value after every record call, so the divergence tripwire it fed is
+/// deleted; the tuple shape is kept only to avoid churn at ~40 call
+/// sites).
+pub type Operand = (ValueId, Vec<IntExpr>);
+
+/// Logical operation carried by an SSA node. Rendering details remain at
+/// the Egglog boundary; the graph itself stores a closed operation
+/// vocabulary rather than free-form constructor strings.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogicalOp {
+    Input {
+        label: String,
+    },
+    Constant(f64),
+    ConstantF64(f64),
+    Iota {
+        value_expr: String,
+    },
+    Cast(DType),
+    TruncCast(DType),
+    Sqrt,
+    Exp,
+    Exp2,
+    Log2,
+    Sin,
+    Floor,
+    Ceil,
+    Trunc,
+    Round,
+    Recip,
+    Add,
+    Mul,
+    Div,
+    Mod,
+    LessThan,
+    TruncDiv,
+    TruncRem,
+    ReduceSum {
+        axis_from_end: usize,
+    },
+    ReduceMax {
+        axis_from_end: usize,
+    },
+    Gather,
+    Scatter,
+    /// Ternary selection: `Select(cond, if_true, if_false)` picks elementwise
+    /// from the two value branches by the boolean condition. The output takes
+    /// the branches' shape and dtype.
+    Select,
+    IndexMapApply {
+        entries: Vec<MapEntry>,
+    },
+}
+
+impl LogicalOp {
+    pub fn constructor(&self) -> &'static str {
+        match self {
+            Self::Input { .. } => "LogicalTensorInputLit",
+            Self::Constant(_) => "LogicalConstant",
+            Self::ConstantF64(_) => "LogicalConstantF64",
+            Self::Iota { .. } => "LogicalIota",
+            Self::Cast(_) => "LogicalCast",
+            Self::TruncCast(_) => "LogicalTruncCast",
+            Self::Sqrt => "LogicalSqrt",
+            Self::Exp => "LogicalExp",
+            Self::Exp2 => "LogicalExp2",
+            Self::Log2 => "LogicalLog2",
+            Self::Sin => "LogicalSin",
+            Self::Floor => "LogicalFloor",
+            Self::Ceil => "LogicalCeil",
+            Self::Trunc => "LogicalTrunc",
+            Self::Round => "LogicalRound",
+            Self::Recip => "LogicalRecip",
+            Self::Add => "LogicalAdd",
+            Self::Mul => "LogicalMul",
+            Self::Div => "LogicalDiv",
+            Self::Mod => "LogicalMod",
+            Self::LessThan => "LogicalLessThan",
+            Self::TruncDiv => "LogicalTruncDiv",
+            Self::TruncRem => "LogicalTruncRem",
+            Self::Select => "LogicalSelect",
+            Self::ReduceSum { .. } => "LogicalReduceSum",
+            Self::ReduceMax { .. } => "LogicalReduceMax",
+            Self::Gather => "LogicalGather",
+            Self::Scatter => "LogicalScatter",
+            Self::IndexMapApply { .. } => "LogicalIndexMapApply",
         }
     }
 
-    /// Get the sources of a node given it's id
-    pub fn get_sources(&self, node_id: NodeIndex) -> Vec<NodeIndex> {
-        self.graph
-            .edges_directed(node_id, Direction::Incoming)
-            .sorted_by_key(|e| e.id())
-            .map(|e| e.source())
-            .collect()
+    fn render_form(&self) -> RenderForm {
+        match self {
+            Self::Gather => RenderForm::GatherList,
+            Self::Scatter => RenderForm::ScatterList,
+            _ => RenderForm::Plain,
+        }
     }
 
-    /// Get the dests of a node given it's id
-    #[allow(clippy::borrowed_box)]
-    pub fn get_dests(&self, node_id: NodeIndex) -> Vec<(NodeIndex, &Box<dyn HLIROp>)> {
-        self.graph
-            .edges_directed(node_id, Direction::Outgoing)
-            .sorted_by_key(|e| e.id())
-            .map(|e| (e.target(), &self.graph[e.target()]))
-            .collect()
+    fn fixed_arity(&self) -> Option<usize> {
+        Some(match self {
+            Self::Input { .. } | Self::Constant(_) | Self::ConstantF64(_) | Self::Iota { .. } => 0,
+            Self::Cast(_)
+            | Self::TruncCast(_)
+            | Self::Sqrt
+            | Self::Exp
+            | Self::Exp2
+            | Self::Log2
+            | Self::Sin
+            | Self::Floor
+            | Self::Ceil
+            | Self::Trunc
+            | Self::Round
+            | Self::Recip
+            | Self::ReduceSum { .. }
+            | Self::ReduceMax { .. }
+            | Self::IndexMapApply { .. } => 1,
+            Self::Add
+            | Self::Mul
+            | Self::Div
+            | Self::Mod
+            | Self::LessThan
+            | Self::TruncDiv
+            | Self::TruncRem => 2,
+            Self::Select => 3,
+            Self::Gather | Self::Scatter => return None,
+        })
+    }
+}
+
+/// Operand position is graph structure, not edge insertion order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InputPort(pub usize);
+
+/// Egglog rendering form. Gather and scatter wrap coordinate operands in
+/// a `LogicalTensorList`; every other typed node uses the plain form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderForm {
+    /// ({constructor} {operands...} {aux})
+    Plain,
+    /// (LogicalGather data (Cons c1 (Cons c2 ...)))
+    GatherList,
+    /// (LogicalScatter init (Cons ...) src) — src is the LAST operand.
+    ScatterList,
+}
+
+/// One SSA value. Operands live exclusively on incoming graph edges;
+/// views keep their map entries structured in the operation payload so
+/// movement composition works on trees, never on rendered text.
+#[derive(Debug, Clone)]
+pub struct LogicalNode {
+    pub op: LogicalOp,
+    pub dims: Vec<IntExpr>,
+    pub dtype: DType,
+}
+
+/// One bound input of the recorded model: the pristine label, the
+/// staging id (what set_data/search key on), and the declared
+/// geometry. `dtype` is the AUTHORED dtype — Bool inputs stage as
+/// Bool8 buffers per the Bool8 boundary contract.
+pub struct InputSpec {
+    pub label: String,
+    pub id: petgraph::graph::NodeIndex,
+    pub dims: Vec<IntExpr>,
+    pub dtype: DType,
+}
+
+#[derive(Debug, Default)]
+pub struct LogicalGraph {
+    graph: StableDiGraph<LogicalNode, InputPort>,
+    /// Name annotations, `(value, name)`: a name is a pure logical
+    /// annotation (`LogicalTensorNamed`, unionable with any value) so a
+    /// runtime can bind a value by name. It designates nothing — what is
+    /// bound is the runtime's statement.
+    names: Vec<(ValueId, String)>,
+    /// Anonymous-input counter — mints "arg.{k}" labels (Stage 3).
+    anon_inputs: usize,
+    /// Conditions on extents the recorder could not decide at build time
+    /// (symbolic dims); rendered as facts the fixpoint invariants judge.
+    contracts: Vec<Contract>,
+}
+
+/// A condition on an extent, decided at saturation under the binding's
+/// bounds: the extent equals `n`, or is at least `n`.
+#[derive(Debug, Clone)]
+pub enum Contract {
+    ExtentEq { extent: IntExpr, n: i64 },
+    ExtentAtLeast { extent: IntExpr, n: i64 },
+}
+
+impl LogicalGraph {
+    /// Refuse a construct the recorder cannot lower: a construction-time
+    /// error, raised where it happens, like every other builder in Rust.
+    pub fn refuse(&self, reason: impl Into<String>) -> ! {
+        panic!("{}", reason.into())
     }
 
-    /// Add an op to the graph with the given input edges. Returns the new node's index.
-    ///
-    /// ```rust
-    /// # use luminal::prelude::*;
-    /// # let mut cx = Graph::new();
-    /// let a = cx.tensor(3);
-    /// let b_id = cx.add_op(
-    ///     luminal::hlir::Mul { input_shapes: vec![a.shape, a.shape], ..Default::default() },
-    ///     &[a.id],
-    /// );
-    /// let b = GraphTensor::from_id(b_id, a.shape, a.graph(), a.dtype);
-    /// ```
-    pub fn add_op<O: HLIROp + 'static>(&mut self, op: O, inputs: &[NodeIndex]) -> NodeIndex {
-        let id = self.graph.add_node(Box::new(op));
-        for &src in inputs {
-            self.graph.add_edge(src, id, ());
+    /// The backing petgraph. Nodes are logical SSA values and incoming
+    /// edges are explicitly numbered operand ports.
+    pub fn petgraph(&self) -> &StableDiGraph<LogicalNode, InputPort> {
+        &self.graph
+    }
+
+    /// The recorded dims of a value — THE dims (R-D ruling 2026-08-26:
+    /// `GraphTensor.dims` is derived from this after every record call
+    /// by `with_logical`).
+    pub fn value_dims(&self, id: ValueId) -> &[IntExpr] {
+        &self.graph[id].dims
+    }
+
+    pub(crate) fn viz_nodes(&self) -> impl Iterator<Item = (ValueId, &LogicalNode)> {
+        self.graph.node_indices().map(|id| (id, &self.graph[id]))
+    }
+
+    pub(crate) fn viz_operands(&self, id: ValueId) -> Vec<(usize, ValueId)> {
+        self.operand_edges(id)
+    }
+
+    /// The recorded name annotations.
+    pub(crate) fn viz_names(&self) -> impl Iterator<Item = (ValueId, &str)> + '_ {
+        self.names.iter().map(|(id, name)| (*id, name.as_str()))
+    }
+
+    /// One extent rendered as the preamble's `IntExpr` term — the same
+    /// renderer shapes go through, so a boundary that states an extent
+    /// elsewhere (a binding's element strides) spells it identically.
+    pub fn dim_term(expr: &IntExpr) -> Result<String, String> {
+        let terms = expr.terms.read();
+        match &terms[..] {
+            [Term::Num(n)] => Ok(format!("(IntLit {n})")),
+            // Symbolic dims stay IntVar unconditionally — pins are
+            // BINDING-side bounds seeds, never model content.
+            [Term::Var(c)] => Ok(format!("(IntVar \"{c}\")")),
+            // Compound dims render as full IntExpr trees (ruling
+            // 2026-08-12: dims are any arbitrary IntExpr — extents are
+            // structure, not identity; spellings that stall a
+            // structural match surface as fail-closed refusals, never
+            // as unsoundness). Coord atoms have no meaning in a shape
+            // position and stay refused inside int_expr_term.
+            _ => int_expr_term(expr, &[], "dim").map_err(|e| format!("dim render: {e:#}")),
+        }
+    }
+
+    fn shape_term(dims: &[IntExpr]) -> Result<String, String> {
+        let mut term = "(IntExprNil)".to_string();
+        for dim in dims.iter().rev() {
+            term = format!("(IntExprCons {} {term})", Self::dim_term(dim)?);
+        }
+        Ok(format!("(ShapeLit {term})"))
+    }
+
+    fn dtype_term(dtype: DType) -> String {
+        format!("({dtype:?})")
+    }
+
+    /// `owner_shape` is the consuming view's OUT shape term — the box the
+    /// map's coordinates are formals of (scoped CoordVar: ownership rides
+    /// in the term; the extent field is gone, extents are the owner's own
+    /// dims).
+    fn entry_term(entry: &MapEntry, owner_shape: &str) -> Result<String, String> {
+        Ok(match entry {
+            MapEntry::Coord {
+                from_end,
+                extent: _,
+            } => {
+                format!("(CoordVar {owner_shape} {from_end})")
+            }
+            MapEntry::Lit(value) => Self::dim_term(value)?,
+            MapEntry::Add(a, b) => format!(
+                "(IntAdd {} {})",
+                Self::entry_term(a, owner_shape)?,
+                Self::entry_term(b, owner_shape)?
+            ),
+            MapEntry::Mul(a, e) => {
+                format!(
+                    "(IntMul {} {})",
+                    Self::entry_term(a, owner_shape)?,
+                    Self::dim_term(e)?
+                )
+            }
+            MapEntry::Div(a, e) => format!(
+                "(IntTruncDiv {} {})",
+                Self::entry_term(a, owner_shape)?,
+                Self::dim_term(e)?
+            ),
+            MapEntry::Rem(a, e) => format!(
+                "(IntTruncRem {} {})",
+                Self::entry_term(a, owner_shape)?,
+                Self::dim_term(e)?
+            ),
+            MapEntry::Min(a, b) => format!(
+                "(IntMin {} {})",
+                Self::entry_term(a, owner_shape)?,
+                Self::entry_term(b, owner_shape)?
+            ),
+            MapEntry::Max(a, b) => format!(
+                "(IntMax {} {})",
+                Self::entry_term(a, owner_shape)?,
+                Self::entry_term(b, owner_shape)?
+            ),
+        })
+    }
+
+    fn push(
+        &mut self,
+        op: LogicalOp,
+        operands: &[ValueId],
+        dims: Vec<IntExpr>,
+        dtype: DType,
+    ) -> ValueId {
+        if let Some(expected) = op.fixed_arity() {
+            debug_assert_eq!(
+                operands.len(),
+                expected,
+                "{} has the wrong operand count",
+                op.constructor()
+            );
+        }
+        let id = self.graph.add_node(LogicalNode { op, dims, dtype });
+        for (port, operand) in operands.iter().copied().enumerate() {
+            debug_assert!(
+                self.graph.node_weight(operand).is_some(),
+                "logical operand {operand:?} is not in the graph"
+            );
+            self.graph.add_edge(operand, id, InputPort(port));
         }
         id
     }
 
-    pub fn try_get_op<T: HLIROp + 'static>(&self, node: NodeIndex) -> Option<&T> {
-        self.node_weight(node).unwrap().as_any().downcast_ref::<T>()
-    }
-    pub fn get_op<T: HLIROp + 'static>(&self, node: NodeIndex) -> &T {
-        self.try_get_op(node).unwrap()
-    }
-    pub fn try_get_op_mut<T: HLIROp + 'static>(&mut self, node: NodeIndex) -> Option<&mut T> {
-        self.node_weight_mut(node)
-            .unwrap()
-            .as_any_mut()
-            .downcast_mut::<T>()
-    }
-    pub fn get_op_mut<T: HLIROp + 'static>(&mut self, node: NodeIndex) -> &mut T {
-        self.try_get_op_mut(node).unwrap()
+    fn operand_edges(&self, id: ValueId) -> Vec<(usize, ValueId)> {
+        let mut operands: Vec<_> = self
+            .graph
+            .edges_directed(id, Direction::Incoming)
+            .map(|edge| (edge.weight().0, edge.source()))
+            .collect();
+        operands.sort_unstable_by_key(|(port, _)| *port);
+        debug_assert!(operands.iter().enumerate().all(|(i, (port, _))| i == *port));
+        operands
     }
 
-    pub fn custom_op(
+    fn operands(&self, id: ValueId) -> Vec<ValueId> {
+        self.operand_edges(id)
+            .into_iter()
+            .map(|(_, operand)| operand)
+            .collect()
+    }
+
+    /// Resolve an operand: it must be a value in the graph. (The
+    /// tracker-vs-recorded dims tripwire is DELETED — R-D ruling
+    /// 2026-08-26, reasserted 2026-09-01 over the petgraph backing:
+    /// handle dims derive from the recorded value after every record
+    /// call, so divergence is unrepresentable. The operand's dims
+    /// payload is vestigial and ignored here.)
+    fn resolve(&mut self, operand: &Operand, at: &str) -> Result<ValueId, String> {
+        let (id, _vestigial_dims) = operand;
+        if self.graph.node_weight(*id).is_none() {
+            return Err(format!("{at}: operand {id:?} is not in the logical graph"));
+        }
+        Ok(*id)
+    }
+
+    /// Record an input declaration. The returned graph node is both its
+    /// SSA identity and its staging key. A bad shape or a duplicate label
+    /// refuses at the construction site.
+    pub fn input(&mut self, label: &str, dims: &[IntExpr], dtype: DType) -> ValueId {
+        let at = self.graph.node_count();
+        if let Err(reason) = Self::shape_term(dims) {
+            self.refuse(format!("input t{at}: {reason}"));
+        }
+        // STAGE 3 (rulings 2026-08-13): every input has a unique
+        // pristine label. Anonymous inputs auto-name "arg.{k}" in
+        // declaration order (the ExportedProgram/ONNX convention for
+        // positional user inputs); duplicate labels POISON at the one
+        // choke point (uniqueness follows from hierarchical module namespaces,
+        // and this tripwire catches hand-authored collisions); and the
+        // label ALONE is the input's identity in the IR text — the
+        // "{label}_{slot}" mangle is dead, its anti-hash-cons job done
+        // by label uniqueness.
+        let label = if label.is_empty() {
+            let minted = format!("arg.{}", self.anon_inputs);
+            self.anon_inputs += 1;
+            minted
+        } else {
+            label.to_string()
+        };
+        if self.graph.node_weights().any(
+            |node| matches!(&node.op, LogicalOp::Input { label: existing } if existing == &label),
+        ) {
+            self.refuse(format!("duplicate input label \"{label}\""));
+        }
+        self.push(LogicalOp::Input { label }, &[], dims.to_vec(), dtype)
+    }
+
+    /// Every bound input, in declaration order — the model's input
+    /// interface, discoverable from the IR alone (checkpoint-name-
+    /// driven staging: match `label` against checkpoint keys, stage by
+    /// `id`). Labels are stored pristine; label uniqueness is an
+    /// authoring obligation until the namespace tripwire lands.
+    pub fn input_specs(&self) -> Vec<InputSpec> {
+        self.graph
+            .node_indices()
+            .filter_map(|id| {
+                let value = &self.graph[id];
+                let LogicalOp::Input { label } = &value.op else {
+                    return None;
+                };
+                Some(InputSpec {
+                    label: label.clone(),
+                    id,
+                    dims: value.dims.clone(),
+                    dtype: value.dtype,
+                })
+            })
+            .collect()
+    }
+
+    /// Record an op over operand values.
+    pub fn op(
         &mut self,
-        op: impl CustomOp + 'static,
-        inputs: impl ToIds,
-        shape: impl ToShape,
-        dtype: DType,
-    ) -> GraphTensor {
-        self.custom_ops.push(Box::new(op));
-        let input_ids = inputs.to_ids();
-        let id = self.add_op(
-            CustomOpKind {
-                id: self.custom_ops.len() - 1,
-                dtype,
-            },
-            &input_ids,
-        );
-        GraphTensor::from_id(
-            id,
-            ShapeTracker::new_with_element_bits(shape, dtype.bits()),
-            self,
-            dtype,
+        op: LogicalOp,
+        operands: &[Operand],
+        out_dims: Vec<IntExpr>,
+        out_dtype: DType,
+    ) -> ValueId {
+        let constructor = op.constructor();
+        let at = self.graph.node_count();
+        if let Some(expected) = op.fixed_arity()
+            && operands.len() != expected
+        {
+            self.refuse(format!(
+                "{constructor} at t{at}: expected {expected} operands, got {}",
+                operands.len()
+            ));
+        }
+        let mut ids = Vec::with_capacity(operands.len());
+        for operand in operands {
+            match self.resolve(operand, &format!("{constructor} at t{at}")) {
+                Ok(id) => ids.push(id),
+                Err(reason) => {
+                    self.refuse(reason);
+                }
+            }
+        }
+        self.push(op, &ids, out_dims, out_dtype)
+    }
+
+    /// Record a seam-node view: an IndexMapApply of the operand through
+    /// entries built from the seam's own parameters.
+    pub fn view_op(
+        &mut self,
+        operand: &Operand,
+        entries: &[MapEntry],
+        out_dims: Vec<IntExpr>,
+        out_dtype: DType,
+    ) -> ValueId {
+        let at = self.graph.node_count();
+        let base = match self.resolve(operand, &format!("view op at t{at}")) {
+            Ok(id) => id,
+            Err(reason) => {
+                self.refuse(reason);
+            }
+        };
+        self.push_view(base, entries.to_vec(), out_dims, out_dtype)
+    }
+
+    fn push_view(
+        &mut self,
+        base: ValueId,
+        entries: Vec<MapEntry>,
+        out_dims: Vec<IntExpr>,
+        out_dtype: DType,
+    ) -> ValueId {
+        let at = self.graph.node_count();
+        let shape = match Self::shape_term(&out_dims) {
+            Ok(shape) => shape,
+            Err(reason) => {
+                self.refuse(format!("view at t{at}: {reason}"));
+            }
+        };
+        // The map's DOMAIN TAG (ruling 2026-08-11): an IndexMapLit
+        // carries the source shape it substitutes into — the parent's
+        // own dims, written here at the single mint site so the
+        // apply/map coherence tripwire can never fire on recorder output.
+        let source_dims = self.graph[base].dims.clone();
+        let source_shape = match Self::shape_term(&source_dims) {
+            Ok(term) => term,
+            Err(reason) => {
+                self.refuse(format!("view at t{at}: {reason}"));
+            }
+        };
+        let mut entries_term = "(IntExprNil)".to_string();
+        for entry in entries.iter().rev() {
+            match Self::entry_term(entry, &shape) {
+                Ok(term) => entries_term = format!("(IntExprCons {term} {entries_term})"),
+                Err(reason) => {
+                    self.refuse(format!("view at t{at}: {reason}"));
+                }
+            }
+        }
+        // Validate all structured render inputs at the insertion boundary.
+        let _ = (shape, source_shape, entries_term);
+        self.push(
+            LogicalOp::IndexMapApply { entries },
+            &[base],
+            out_dims,
+            out_dtype,
         )
     }
 
-    #[tracing::instrument(skip_all)]
-    pub fn build_search_space<Rt: Runtime>(&mut self, options: CompileOptions) {
-        let mut ops = Rt::Ops::into_vec();
-        ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
-        self.build_search_space_with_ops::<Rt>(ops, options);
-    }
-
-    #[tracing::instrument(skip_all)]
-    pub fn build_search_space_exclude_ops<Rt: Runtime, Ex: IntoEgglogOp>(
-        &mut self,
-        options: CompileOptions,
-    ) {
-        let exclude_ops = Ex::into_vec()
-            .into_iter()
-            .map(|e| e.sort().name)
-            .collect::<FxHashSet<_>>();
-        let mut ops = Rt::Ops::into_vec();
-        ops.retain(|o| !exclude_ops.contains(&o.sort().name));
-        ops.extend(<crate::hlir::HLIROps as IntoEgglogOp>::into_vec());
-        self.build_search_space_with_ops::<Rt>(ops, options);
-    }
-
-    /// Roll loops, then saturate one e-graph per bucket combination into a
-    /// [`SearchSpace`] the runtime searches in [`Runtime::compile`].
-    fn build_search_space_with_ops<Rt: Runtime>(
-        &mut self,
-        ops: Vec<Arc<Box<dyn EgglogOp>>>,
-        options: CompileOptions,
-    ) {
-        self.run_auto_loop_rolling_prepass(&options);
-        let dim_buckets = options.dim_buckets.clone();
-        let late_pass_dyn_map = self.late_pass_dyn_map(&dim_buckets);
-        let late_passes = Rt::late_egglog_passes(&ops, &options, &late_pass_dyn_map);
-        let extra_egglog = Rt::extra_egglog();
-
-        let (program, root) = hlir_to_egglog(self);
-        let buckets = bucket_index_combinations(&dim_buckets)
-            .into_iter()
-            .map(|bucket_indices| {
-                let intervals = self.bucket_intervals(&dim_buckets, &bucket_indices);
-                let (contextual_program, use_interval_analysis) =
-                    self.egglog_program_with_interval_facts(&program, &intervals);
-                let egraph = run_egglog_with_late_passes_interval_analysis_and_log(
-                    &contextual_program,
-                    &root,
-                    &ops,
-                    Rt::CLEANUP_HLIR,
-                    &late_passes,
-                    &extra_egglog,
-                    use_interval_analysis,
-                    options.egglog_log_enabled(),
-                )
-                .unwrap();
-                BucketSearchSpace {
-                    egraph,
-                    bucket_indices,
-                    intervals,
+    /// Record a pad-mask indicator iota (see the pad seam): per padded
+    /// axis, (before <= p) · (p < before + dim) as bool-bridge casts.
+    /// Record a LogicalIota: the value expression is authored over the
+    /// FLAT index (the frontend's `'z'`) and rewritten here into a true
+    /// COORDINATE FUNCTION over the declared shape —
+    /// `z := Σ CoordVar(shape, axis) · row-major-stride` — so the
+    /// recorded model is per-coordinate at ANY rank (Design A, ruling
+    /// 2026-08-06: the rank-1-plus-recorded-splits detour and its silent
+    /// symbolic-total collapse are gone; symbolic dims render as IntVar
+    /// through `shape_term`). Extent-1 axes contribute no summand (their
+    /// coordinate is identically 0); a fully degenerate shape records
+    /// `(IntLit 0)`. The authoring-contract bounds check pair rides
+    /// every iota.
+    /// Record a LogicalIota from a COORDINATE-FUNCTION expression (P1
+    /// ruling 2026-08-07): the value expression is authored over
+    /// `Term::Coord(k)` atoms — one per output axis, minted by
+    /// `Graph::iota`'s closure — and lowers per-axis: coords become
+    /// `(CoordVar shape axis)`, named symbols become `(IntVar "c")`.
+    /// There is no flat-'z' form anymore ('z' in an iota expression is an
+    /// ordinary named symbol; flat-index authoring is a rank-1 iota plus
+    /// recorded reshapes). Extent-1 axes substitute `(IntLit 0)` (their
+    /// coordinate is identically zero); a `Coord(k)` with `k >= rank` is
+    /// a leaked atom and poisons loudly. The authoring-contract bounds
+    /// pair rides every iota.
+    pub fn record_iota(&mut self, expr: &IntExpr, dims: &[IntExpr]) -> ValueId {
+        let at = self.graph.node_count();
+        let shape = match Self::shape_term(dims) {
+            Ok(term) => term,
+            Err(reason) => {
+                self.refuse(format!("iota at t{at}: {reason}"));
+            }
+        };
+        let rank = dims.len();
+        let coord_terms: Vec<String> = (0..rank)
+            .map(|k| {
+                if dims[k] == IntExpr::from(1) {
+                    "(IntLit 0)".to_string()
+                } else {
+                    format!("(CoordVar {shape} {})", rank - 1 - k)
                 }
             })
             .collect();
-        let custom_ops = self.custom_ops.iter().map(|op| op.to_llir_op()).collect();
-        self.search_space = Some(SearchSpace {
-            buckets,
-            ops,
-            custom_ops,
-            dim_buckets,
-        });
-    }
-
-    /// Graph-wide interval assumptions narrowed to one bucket combination.
-    fn bucket_intervals(
-        &self,
-        dim_buckets: &FxHashMap<Symbol, Vec<DimBucket>>,
-        bucket_indices: &DynMap,
-    ) -> DynDimIntervals {
-        let mut intervals = self.dim_intervals.clone();
-        for (&dim, &idx) in bucket_indices {
-            let bucket = &dim_buckets[&dim][idx];
-            let min = i64::try_from(bucket.min)
-                .expect("DimBucket min must fit into i64 for interval analysis");
-            let max = i64::try_from(bucket.max)
-                .expect("DimBucket max must fit into i64 for interval analysis");
-            let bucket_interval = DimInterval::new(min, max);
-            intervals
-                .entry(dim)
-                .and_modify(|existing| {
-                    existing.min = existing.min.max(bucket_interval.min);
-                    existing.max = existing.max.min(bucket_interval.max);
-                    assert!(
-                        existing.min <= existing.max,
-                        "Bucket interval for dim '{dim}' does not overlap graph interval"
-                    );
-                })
-                .or_insert(bucket_interval);
-        }
-        intervals
-    }
-
-    fn egglog_program_with_interval_facts(
-        &self,
-        program: &str,
-        intervals: &DynDimIntervals,
-    ) -> (String, bool) {
-        let facts = crate::egglog_utils::base::interval_facts_egglog(intervals, []);
-        if facts.is_empty() {
-            (program.to_string(), false)
-        } else {
-            (format!("{facts}\n{program}"), true)
-        }
-    }
-
-    /// Dyn map handed to backend late passes: bucket maxima override the
-    /// graph's values so passes plan for the largest shape.
-    fn late_pass_dyn_map(&self, dim_buckets: &FxHashMap<Symbol, Vec<DimBucket>>) -> DynMap {
-        let mut dyn_map = self.dyn_map.clone();
-        for (&dim, buckets) in dim_buckets {
-            if let Some(max) = buckets.iter().map(|bucket| bucket.max).max() {
-                dyn_map.insert(dim, max);
+        let value_expr = match int_expr_term(expr, &coord_terms, &format!("recorder iota t{at}")) {
+            Ok(text) => text,
+            Err(err) => {
+                self.refuse(format!("iota at t{at}: {err}"));
             }
-        }
-        dyn_map
-    }
-    /// The built search space, if [`Graph::build_search_space`] has run.
-    pub fn search_space(&self) -> Option<&SearchSpace> {
-        self.search_space.as_ref()
-    }
-
-    /// Get a reference to the first e-graph search space (if built)
-    pub fn egraph(&self) -> Option<&SerializedEGraph> {
-        self.search_space
-            .as_ref()
-            .and_then(|space| space.buckets.first())
-            .map(|bucket| &bucket.egraph)
+        };
+        self.push(
+            LogicalOp::Iota {
+                value_expr: value_expr.clone(),
+            },
+            &[],
+            dims.to_vec(),
+            DType::Int,
+        )
     }
 
-    /// Get a reference to the available ops (if search space is built)
-    pub fn egglog_ops(&self) -> Option<&Vec<Arc<Box<dyn EgglogOp>>>> {
-        self.search_space.as_ref().map(|space| &space.ops)
-    }
-
-    /// Build the search space and search it with one shared set of options.
-    ///
-    /// This is the usual compile entry point when runtime inputs such as
-    /// weights have already been loaded. Use `build_search_space` and `search`
-    /// directly when the two phases need to be separated.
-    #[tracing::instrument(skip_all)]
-    pub fn compile<R: Runtime>(&mut self, runtime: R, options: CompileOptions) -> R {
-        let mut rng = rand::rng();
-        self.compile_with_rng(runtime, options, &mut rng)
-    }
-
-    #[tracing::instrument(skip_all)]
-    pub fn compile_with_rng<R: Runtime, G: rand::Rng>(
+    pub fn record_mask_iota(
         &mut self,
-        runtime: R,
-        options: CompileOptions,
-        rng: &mut G,
-    ) -> R {
-        self.build_search_space::<R>(options.clone());
-        let runtime = self.search_with_rng(runtime, options, rng);
-        // Legality-by-construction burn-down: any post-extraction mask that
-        // fired during this compile is a contract violation to fix, not a
-        // normal event — always report it.
-        if let Some(report) = crate::mask_events::report() {
-            println!("{report}");
-        }
-        runtime
-    }
-
-    #[tracing::instrument(skip_all)]
-    pub fn search<R: Runtime>(&mut self, runtime: R, options: CompileOptions) -> R {
-        let mut rng = rand::rng();
-        self.search_with_rng(runtime, options, &mut rng)
-    }
-
-    /// Hand the built search space to the runtime, which searches it by
-    /// whatever strategy it implements and loads the programs it selects.
-    #[tracing::instrument(skip_all)]
-    pub fn search_with_rng<R: Runtime, G: rand::Rng>(
-        &mut self,
-        mut runtime: R,
-        options: CompileOptions,
-        rng: &mut G,
-    ) -> R {
-        for (&dim, &value) in &options.search_dims {
-            self.set_dim(dim, value);
-        }
-        let space = self
-            .search_space
-            .as_ref()
-            .expect("build_search_space must run before search");
-        assert!(
-            options.dim_buckets.is_empty() || options.dim_buckets == space.dim_buckets,
-            "dim buckets must be configured in CompileOptions before build_search_space; search cannot change buckets after build",
-        );
-        runtime.compile(space, &self.dyn_map, &options, rng);
-        self.selected_schedule = runtime.selected_schedule();
-        runtime
-    }
-}
-impl Deref for Graph {
-    type Target = HLIRGraph;
-    fn deref(&self) -> &Self::Target {
-        &self.graph
-    }
-}
-
-impl DerefMut for Graph {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.graph
-    }
-}
-
-fn build_uses(graph: &HLIRGraph) -> FxHashMap<NodeIndex, Vec<(NodeIndex, usize)>> {
-    let mut uses: FxHashMap<NodeIndex, Vec<(NodeIndex, usize)>> = FxHashMap::default();
-    for n in graph.node_indices() {
-        uses.entry(n).or_default();
-    }
-    for dst in graph.node_indices() {
-        let sources: Vec<_> = graph
-            .edges_directed(dst, Direction::Incoming)
-            .sorted_by_key(|e| e.id())
-            .map(|e| e.source())
-            .collect();
-        for (port, src) in sources.into_iter().enumerate() {
-            if let Some(v) = uses.get_mut(&src) {
-                v.push((dst, port));
+        befores: &[IntExpr],
+        afters: &[IntExpr],
+        in_dims: &[IntExpr],
+    ) -> ValueId {
+        let at = self.graph.node_count();
+        let rank = in_dims.len();
+        let mut out_dims = Vec::with_capacity(rank);
+        let mut out_terms = Vec::with_capacity(rank);
+        for k in 0..rank {
+            // Frontend simplification restored (Austin's revert ruling
+            // 2026-08-27): recorder-authored expressions are
+            // construction-simplified, as pre-R-C.
+            let out_dim = (befores[k] + in_dims[k] + afters[k]).simplify();
+            match Self::dim_term(&out_dim) {
+                Ok(term) => out_terms.push(term),
+                Err(reason) => {
+                    self.refuse(format!("mask iota at t{at}: {reason}"));
+                }
             }
+            out_dims.push(out_dim);
         }
-    }
-    uses
-}
-
-fn stable_toposort_by_node_index(graph: &HLIRGraph) -> Option<Vec<NodeIndex>> {
-    let mut indegree: FxHashMap<NodeIndex, usize> = FxHashMap::default();
-    for n in graph.node_indices() {
-        indegree.insert(n, graph.edges_directed(n, Direction::Incoming).count());
-    }
-
-    let mut ready = std::collections::BTreeSet::new();
-    for (&node, &degree) in &indegree {
-        if degree == 0 {
-            ready.insert(node);
-        }
-    }
-
-    let mut ordered = Vec::with_capacity(graph.node_count());
-    while let Some(node) = ready.pop_first() {
-        ordered.push(node);
-        for edge in graph.edges_directed(node, Direction::Outgoing) {
-            let target = edge.target();
-            let degree = indegree
-                .get_mut(&target)
-                .expect("toposort target must exist in indegree map");
-            *degree -= 1;
-            if *degree == 0 {
-                ready.insert(target);
+        let out_shape_term = match Self::shape_term(&out_dims) {
+            Ok(term) => term,
+            Err(reason) => {
+                self.refuse(format!("mask iota at t{at}: {reason}"));
             }
-        }
-    }
-
-    (ordered.len() == graph.node_count()).then_some(ordered)
-}
-
-struct RollingHash64 {
-    prefix: Vec<u64>,
-    powers: Vec<u64>,
-}
-
-impl RollingHash64 {
-    const BASE: u64 = 1_000_000_007;
-
-    fn new(tokens: &[u64]) -> Self {
-        let mut prefix = Vec::with_capacity(tokens.len() + 1);
-        let mut powers = Vec::with_capacity(tokens.len() + 1);
-        prefix.push(0u64);
-        powers.push(1u64);
-        for &token in tokens {
-            let next_prefix = prefix
-                .last()
-                .copied()
-                .unwrap()
-                .wrapping_mul(Self::BASE)
-                .wrapping_add(token.wrapping_add(1));
-            prefix.push(next_prefix);
-            let next_power = powers.last().copied().unwrap().wrapping_mul(Self::BASE);
-            powers.push(next_power);
-        }
-        Self { prefix, powers }
-    }
-
-    fn window_hash(&self, start: usize, len: usize) -> u64 {
-        self.prefix[start + len].wrapping_sub(self.prefix[start].wrapping_mul(self.powers[len]))
-    }
-}
-
-fn cheap_rolling_node_hash(
-    graph: &HLIRGraph,
-    node: NodeIndex,
-    custom_ops: &[Box<dyn CustomOp>],
-) -> u64 {
-    let op = rolling_op_signature(graph, node, custom_ops);
-    let mut hash: u64 = 1469598103934665603;
-    for byte in op.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(1099511628211);
-    }
-    // Only in-degree (op arity) may enter the hash. Out-degree counts external
-    // consumers, and boundary nodes legitimately differ in fan-out between
-    // occurrences (an interior repetition feeds the next one, the last feeds
-    // the epilogue) — the canonical signature models those consumers as loop
-    // outputs, so a gate stricter than the matcher would reject valid trips.
-    let in_degree = graph.neighbors_directed(node, Direction::Incoming).count() as u64;
-    hash ^= in_degree.wrapping_mul(0x9e3779b185ebca87);
-    hash
-}
-
-thread_local! {
-    // Memoized per-node rolling signatures. `rolling_op_signature_uncached`
-    // Debug-formats the op (allocating + recursing over its shape/stride
-    // metadata), and the rolling search calls it for the SAME node across many
-    // overlapping windows — O(window) per `canonicalize_occurrence`, summed over
-    // every (window, start) hash-match. On a 36-layer dual-branch graph that
-    // re-formatting dominated the prepass (16+ min). The signature is a pure
-    // function of (node, custom_ops) while the graph + custom_ops are read-only
-    // (the search phase never mutates them), so memoize it keyed by node. Cleared
-    // at the start of each `best_rolling_candidate` so stale NodeIndex→signature
-    // entries can never leak across a graph mutation.
-    static ROLLING_SIG_CACHE: std::cell::RefCell<FxHashMap<NodeIndex, String>> =
-        std::cell::RefCell::new(FxHashMap::default());
-}
-
-fn clear_rolling_sig_cache() {
-    ROLLING_SIG_CACHE.with(|c| c.borrow_mut().clear());
-}
-
-fn rolling_op_signature(
-    graph: &HLIRGraph,
-    node: NodeIndex,
-    custom_ops: &[Box<dyn CustomOp>],
-) -> String {
-    ROLLING_SIG_CACHE.with(|c| {
-        if let Some(sig) = c.borrow().get(&node) {
-            return sig.clone();
-        }
-        let sig = rolling_op_signature_uncached(graph, node, custom_ops);
-        c.borrow_mut().insert(node, sig.clone());
-        sig
-    })
-}
-
-fn rolling_op_signature_uncached(
-    graph: &HLIRGraph,
-    node: NodeIndex,
-    custom_ops: &[Box<dyn CustomOp>],
-) -> String {
-    if graph[node].as_any().is::<crate::hlir::Output>() {
-        return "Output".to_string();
-    }
-    if let Some(kind) = graph[node].as_any().downcast_ref::<CustomOpKind>() {
-        // The `id` is a global custom_ops index and differs for every call
-        // (e.g. one rope per layer), which would make structurally identical
-        // layer bodies hash differently and defeat loop rolling. Hash the
-        // referenced op's content instead: identical custom ops (same kernel
-        // parameters) compare equal across layers, distinct ones stay
-        // distinct.
-        return format!("CustomOp({:?}, {:?})", custom_ops[kind.id], kind.dtype);
-    }
-
-    // Use Debug, NOT Display — Display for many HLIR ops drops their
-    // shape/stride metadata (e.g. `Display for Mul` emits just "Mul"), so
-    // two structurally-different ops with the same kind would hash equal
-    // and get falsely grouped as a repeating pattern. Debug captures those
-    // fields. Output is the exception: its `node` field is only the source
-    // slot for runtime storage, so it must not participate in rolling
-    // identity.
-    format!("{:?}", graph[node])
-}
-
-fn rolling_probe_window_sizes(max_window: usize) -> Vec<usize> {
-    if max_window == 0 {
-        return vec![];
-    }
-    (1..=max_window).rev().collect()
-}
-
-fn canonicalize_occurrence(
-    graph: &HLIRGraph,
-    ordered_nodes: &[NodeIndex],
-    uses: &FxHashMap<NodeIndex, Vec<(NodeIndex, usize)>>,
-    topo_index: &FxHashMap<NodeIndex, usize>,
-    custom_ops: &[Box<dyn CustomOp>],
-) -> Option<(String, Vec<NodeIndex>, Vec<NodeIndex>)> {
-    let region: FxHashSet<NodeIndex> = ordered_nodes.iter().copied().collect();
-    if region.is_empty() {
-        return None;
-    }
-    let internal_index: FxHashMap<NodeIndex, usize> = ordered_nodes
-        .iter()
-        .enumerate()
-        .map(|(i, &n)| (n, i))
-        .collect();
-    let mut param_index: FxHashMap<NodeIndex, usize> = FxHashMap::default();
-    let mut boundary_inputs = vec![];
-    let mut node_parts = vec![];
-
-    for &node in ordered_nodes {
-        let op = rolling_op_signature(graph, node, custom_ops);
-        let inputs: Vec<NodeIndex> = graph
-            .edges_directed(node, Direction::Incoming)
-            .sorted_by_key(|e| e.id())
-            .map(|e| e.source())
-            .collect();
-        let mut inp_parts = vec![];
-        for src in inputs {
-            if let Some(&idx) = internal_index.get(&src) {
-                inp_parts.push(format!("n{idx}"));
-            } else {
-                let p = *param_index.entry(src).or_insert_with(|| {
-                    boundary_inputs.push(src);
-                    boundary_inputs.len() - 1
-                });
-                inp_parts.push(format!("p{p}"));
-            }
-        }
-        node_parts.push(format!("{op}({})", inp_parts.join(",")));
-    }
-
-    let mut output_nodes: Vec<NodeIndex> = ordered_nodes
-        .iter()
-        .copied()
-        .filter(|n| {
-            uses.get(n)
-                .is_some_and(|out_uses| out_uses.iter().any(|(user, _)| !region.contains(user)))
-                // A node is an Outgoing-external (graph sink) iff it has no
-                // outgoing edges. The previous `graph.externals(Outgoing).any(..)`
-                // re-scanned EVERY node in the graph for each node in the window,
-                // making this O(window × graph) per canonicalize — the dominant
-                // cost that stalled the dual-branch rolling prepass. Check the
-                // node's own out-edges instead (O(out-degree)).
-                || graph
-                    .edges_directed(*n, Direction::Outgoing)
-                    .next()
-                    .is_none()
-        })
-        .collect();
-    output_nodes.sort_by_key(|n| topo_index[n]);
-    let outputs: Vec<String> = output_nodes
-        .iter()
-        .filter_map(|n| internal_index.get(n).copied())
-        .map(|idx| format!("o{idx}"))
-        .collect();
-
-    let sig = format!("{}|{}", node_parts.join(";"), outputs.join(","));
-    Some((sig, boundary_inputs, output_nodes))
-}
-
-fn collect_state_params(
-    occurrences: &[RollingOccurrence],
-    uses: &FxHashMap<NodeIndex, Vec<(NodeIndex, usize)>>,
-    graph: &HLIRGraph,
-) -> Vec<usize> {
-    if occurrences.len() < 2 {
-        return vec![];
-    }
-    let param_count = occurrences[0].boundary_inputs.len();
-    let mut state_params = vec![];
-
-    for p in 0..param_count {
-        let mut is_state = true;
-        for i in 1..occurrences.len() {
-            let earlier = &occurrences[i - 1];
-            let later = &occurrences[i];
-            let val = later.boundary_inputs.get(p).copied();
-            let Some(val) = val else {
-                is_state = false;
-                break;
+        };
+        let mut factors: Vec<String> = Vec::new();
+        for k in 0..rank {
+            let coord = format!("(CoordVar {out_shape_term} {})", rank - 1 - k);
+            let before = befores[k];
+            let after = afters[k];
+            let (Ok(before_term), Ok(bound_term)) = (
+                Self::dim_term(&before),
+                Self::dim_term(&(before + in_dims[k]).simplify()),
+            ) else {
+                self.refuse(format!("mask iota at t{at}: symbolic pad bound"));
             };
-            if !earlier.output_nodes.contains(&val) {
-                is_state = false;
-                break;
+            if before != IntExpr::from(0) {
+                factors.push(format!(
+                    "(IntCastFromBool (BoolLessThanInt {before_term} (IntAdd {coord} (IntLit 1))))"
+                ));
             }
-            let external_uses: Vec<_> = uses
-                .get(&val)
-                .map(|u| {
-                    u.iter()
-                        .copied()
-                        .filter(|(user, _)| !earlier.nodes.contains(user))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if external_uses.is_empty() {
-                is_state = false;
-                break;
-            }
-            if graph.externals(Direction::Outgoing).any(|root| root == val) {
-                is_state = false;
-                break;
-            }
-            if external_uses
-                .iter()
-                .any(|(user, _)| !later.nodes.contains(user))
-            {
-                is_state = false;
-                break;
+            if after != IntExpr::from(0) {
+                factors.push(format!(
+                    "(IntCastFromBool (BoolLessThanInt {coord} {bound_term}))"
+                ));
             }
         }
-        if is_state {
-            state_params.push(p);
+        let mut expr = factors.pop().unwrap_or_else(|| "(IntLit 1)".to_string());
+        for factor in factors {
+            expr = format!("(IntMul {factor} {expr})");
         }
+        self.push(
+            LogicalOp::Iota {
+                value_expr: expr.clone(),
+            },
+            &[],
+            out_dims,
+            DType::Int,
+        )
     }
-    state_params
+
+    /// Record a coordinate-form gather.
+    pub fn record_gather(
+        &mut self,
+        data: &Operand,
+        coords: &[Operand],
+        out_dims: Vec<IntExpr>,
+        out_dtype: DType,
+    ) -> ValueId {
+        let at = self.graph.node_count();
+        let mut ids = Vec::with_capacity(coords.len() + 1);
+        match self.resolve(data, &format!("gather at t{at}")) {
+            Ok(id) => ids.push(id),
+            Err(reason) => {
+                self.refuse(reason);
+            }
+        }
+        for coord in coords {
+            match self.resolve(coord, &format!("gather at t{at}")) {
+                Ok(id) => ids.push(id),
+                Err(reason) => {
+                    self.refuse(reason);
+                }
+            }
+        }
+        self.push(LogicalOp::Gather, &ids, out_dims, out_dtype)
+    }
+
+    /// Record a coordinate-form scatter (operands: init, coords..., src).
+    pub fn record_scatter(
+        &mut self,
+        init: &Operand,
+        coords: &[Operand],
+        src: &Operand,
+        out_dims: Vec<IntExpr>,
+        out_dtype: DType,
+    ) -> ValueId {
+        let at = self.graph.node_count();
+        let mut ids = Vec::with_capacity(coords.len() + 2);
+        match self.resolve(init, &format!("scatter at t{at}")) {
+            Ok(id) => ids.push(id),
+            Err(reason) => {
+                self.refuse(reason);
+            }
+        }
+        for coord in coords {
+            match self.resolve(coord, &format!("scatter at t{at}")) {
+                Ok(id) => ids.push(id),
+                Err(reason) => {
+                    self.refuse(reason);
+                }
+            }
+        }
+        match self.resolve(src, &format!("scatter at t{at}")) {
+            Ok(id) => ids.push(id),
+            Err(reason) => {
+                self.refuse(reason);
+            }
+        }
+        self.push(LogicalOp::Scatter, &ids, out_dims, out_dtype)
+    }
+
+    /// Apply a movement: mints ONE view value per movement on the
+    /// CURRENT value, carrying that single movement's map (fold-1
+    /// removal, Austin's ruling 2026-08-26, REASSERTED 2026-09-01 over
+    /// the petgraph backing: no base short-circuit, no entry
+    /// composition — movement chains are recorded as chains and egglog
+    /// composes the index-map applies).
+    pub fn apply_movement(&mut self, current: &Operand, movement: Movement) -> ValueId {
+        let at = self.graph.node_count();
+        let current_id = match self.resolve(current, &format!("movement at t{at}")) {
+            Ok(id) => id,
+            Err(reason) => {
+                self.refuse(reason);
+            }
+        };
+        let value = &self.graph[current_id];
+        let prev_dims = value.dims.clone();
+        let out_dtype = value.dtype;
+
+        let (replacement, new_dims) = match movement_entries(movement, &prev_dims) {
+            Ok(pair) => pair,
+            Err(reason) => {
+                self.refuse(reason);
+            }
+        };
+
+        // Fold-1 removed: `replacement` IS this movement's map (the
+        // per-parent-axis entries over the new out space) — push it
+        // directly on the current value.
+        self.push_view(current_id, replacement, new_dims, out_dtype)
+    }
 }
 
-/// A rolling candidate is only valid to collapse into a single loop body if
-/// every boundary-input parameter is either:
-///   - a loop-carried state param (its value is produced by the IMMEDIATELY
-///     preceding occurrence — already enforced by `collect_state_params`), or
-///   - fed from OUTSIDE the candidate's occurrences (an external producer, e.g.
-///     a per-iteration weight tensor — these may legitimately differ across
-///     occurrences; the loop indexes them by iteration).
-///
-/// If a NON-state boundary input is produced by ANOTHER occurrence in the
-/// candidate, that's a cross-occurrence dependency that is not the adjacent
-/// loop-carry (e.g. occurrence `i` consuming occurrence `i-2`'s output, as
-/// happens when minibatch-pipelined prefill is rolled at the per-minibatch
-/// granularity: stream-0 of layer L+1 depends on stream-0 of layer L, skipping
-/// stream-1). Collapsing the duplicate bodies folds that `i ← i-2` edge back
-/// onto the single rolled body, creating a directed cycle that makes the egglog
-/// Kahn toposort drop nodes and panic. Rejecting such candidates lets the search
-/// fall back to a coarser, valid window (e.g. rolling whole layers — both
-/// minibatch streams together — where the only cross-occurrence edges are the
-/// adjacent layer-to-layer state).
-fn candidate_is_rollable(occurrences: &[RollingOccurrence], state_params: &[usize]) -> bool {
-    if occurrences.len() < 2 {
-        return false;
-    }
-    let state_set: FxHashSet<usize> = state_params.iter().copied().collect();
-    let all_occ_nodes: FxHashSet<NodeIndex> = occurrences
-        .iter()
-        .flat_map(|o| o.nodes.iter().copied())
-        .collect();
-    let param_count = occurrences[0].boundary_inputs.len();
-    for p in 0..param_count {
-        if state_set.contains(&p) {
-            continue;
-        }
-        for occ in occurrences {
-            if let Some(&src) = occ.boundary_inputs.get(p) {
-                if all_occ_nodes.contains(&src) {
-                    return false;
-                }
+/// One movement's index map, stated from the movement's own parameters:
+/// per PARENT axis, an entry over the movement's OUT space, plus the out
+/// dims. Shared by `apply_movement` (one view per movement) and
+/// `ViewChain` (construction-time composition for one macro call).
+pub(crate) fn movement_entries(
+    movement: Movement,
+    prev_dims: &[IntExpr],
+) -> Result<(Vec<MapEntry>, Vec<IntExpr>), String> {
+    let prev_rank = prev_dims.len();
+    let pair: (Vec<MapEntry>, Vec<IntExpr>) = match movement {
+        Movement::Permute(axes) => {
+            if axes.len() != prev_rank {
+                return Err(format!("permute arity {} vs rank {prev_rank}", axes.len()));
             }
-        }
-    }
-    true
-}
-
-/// Net node-count change of rolling a candidate: duplicate body nodes
-/// deleted minus marker ops created (mirroring `insert_loop_region_ops`:
-/// LoopStart + LoopEnd per state slot, one LoopInput per iteration-varying
-/// non-state boundary stream, and one LoopOutput plus a per-iteration Select
-/// for each non-state output stream). Rolling is only worth doing — and the
-/// rolling fixpoint only terminates — when this is positive.
-fn rolling_net_savings(candidate: &RollingCandidate) -> i64 {
-    let occs = &candidate.occurrences;
-    let n_iters = occs.len();
-    let states: FxHashSet<usize> = candidate.state_param_indices.iter().copied().collect();
-    let deleted = occs[0].nodes.len() * (n_iters - 1);
-    let varying_inputs = (0..occs[0].boundary_inputs.len())
-        .filter(|p| !states.contains(p))
-        .filter(|&p| {
-            !occs
-                .windows(2)
-                .all(|w| w[0].boundary_inputs[p] == w[1].boundary_inputs[p])
-        })
-        .count();
-    let output_streams = occs[0].output_nodes.len().saturating_sub(states.len());
-    let markers = 2 * states.len() + varying_inputs + output_streams * (n_iters + 1);
-    deleted as i64 - markers as i64
-}
-
-fn grow_rolling_candidate(
-    graph: &HLIRGraph,
-    uses: &FxHashMap<NodeIndex, Vec<(NodeIndex, usize)>>,
-    topo_index: &FxHashMap<NodeIndex, usize>,
-    mut candidate: RollingCandidate,
-    discovered_runs: &[RollingRun],
-    custom_ops: &[Box<dyn CustomOp>],
-) -> RollingCandidate {
-    loop {
-        let candidate_starts: Vec<usize> = candidate
-            .occurrences
-            .iter()
-            .map(|occ| {
-                occ.nodes
-                    .first()
-                    .map(|n| topo_index[n])
-                    .unwrap_or(usize::MAX)
-            })
-            .collect();
-        let candidate_ends: Vec<usize> = candidate
-            .occurrences
-            .iter()
-            .map(|occ| occ.nodes.last().map(|n| topo_index[n] + 1).unwrap_or(0))
-            .collect();
-
-        let mut best_growth: Option<RollingCandidate> = None;
-        for run in discovered_runs {
-            for shift in 0..=1usize {
-                if run.occurrences.len() < candidate.occurrences.len() + shift {
-                    continue;
-                }
-                let aligned = (0..candidate.occurrences.len()).all(|i| {
-                    run.starts[i + shift] == candidate_ends[i]
-                        || run.starts[i + shift] + run.window == candidate_starts[i]
-                });
-                if !aligned {
-                    continue;
-                }
-
-                let mut merged_occs = Vec::with_capacity(candidate.occurrences.len());
-                // `i` indexes the candidate side while `i + shift` indexes the
-                // run side — explicit range is clearer than zip-with-skip.
-                #[allow(clippy::needless_range_loop)]
-                for i in 0..candidate.occurrences.len() {
-                    let run_occ = &run.occurrences[i + shift];
-                    let mut nodes = if run.starts[i + shift] + run.window == candidate_starts[i] {
-                        let mut n = run_occ.nodes.clone();
-                        n.extend(candidate.occurrences[i].nodes.iter().copied());
-                        n
-                    } else {
-                        let mut n = candidate.occurrences[i].nodes.clone();
-                        n.extend(run_occ.nodes.iter().copied());
-                        n
-                    };
-                    nodes.sort_by_key(|n| topo_index[n]);
-                    let Some((sig, boundary_inputs, output_nodes)) =
-                        canonicalize_occurrence(graph, &nodes, uses, topo_index, custom_ops)
-                    else {
-                        merged_occs.clear();
-                        break;
-                    };
-                    if i == 0 && sig.is_empty() {
-                        merged_occs.clear();
-                        break;
-                    }
-                    merged_occs.push(RollingOccurrence {
-                        nodes,
-                        boundary_inputs,
-                        output_nodes,
-                    });
-                }
-                if merged_occs.len() != candidate.occurrences.len() {
-                    continue;
-                }
-                let first_sig = canonicalize_occurrence(
-                    graph,
-                    &merged_occs[0].nodes,
-                    uses,
-                    topo_index,
-                    custom_ops,
-                )
-                .map(|(sig, _, _)| sig);
-                let Some(first_sig) = first_sig else { continue };
-                if merged_occs.iter().skip(1).any(|occ| {
-                    canonicalize_occurrence(graph, &occ.nodes, uses, topo_index, custom_ops)
-                        .map(|(sig, _, _)| sig != first_sig)
-                        .unwrap_or(true)
-                }) {
-                    continue;
-                }
-                let state_param_indices = collect_state_params(&merged_occs, uses, graph);
-                if state_param_indices.is_empty() {
-                    continue;
-                }
-                let savings = merged_occs[0].nodes.len() * (merged_occs.len() - 1);
-                let _ = first_sig;
-                let grown = RollingCandidate {
-                    occurrences: merged_occs,
-                    state_param_indices,
-                    savings,
+            let mut replacement = vec![MapEntry::Lit(0.into()); prev_rank];
+            for (q, &p) in axes.iter().enumerate() {
+                replacement[p] = MapEntry::Coord {
+                    from_end: prev_rank - 1 - q,
+                    extent: prev_dims[p],
                 };
-                let replace = best_growth.as_ref().is_none_or(|best| {
-                    (
-                        grown.savings,
-                        grown.occurrences[0].nodes.len(),
-                        grown.occurrences.len(),
-                    ) > (
-                        best.savings,
-                        best.occurrences[0].nodes.len(),
-                        best.occurrences.len(),
-                    )
-                });
-                if replace {
-                    best_growth = Some(grown);
-                }
             }
+            let new_dims = axes.iter().map(|&p| prev_dims[p]).collect();
+            (replacement, new_dims)
+        }
+        Movement::ExpandDim { axis, size } => {
+            if axis > prev_rank {
+                return Err(format!("expand_dim axis {axis} vs rank {prev_rank}"));
+            }
+            let new_rank = prev_rank + 1;
+            let replacement = (0..prev_rank)
+                .map(|p| {
+                    let q = if p < axis { p } else { p + 1 };
+                    MapEntry::Coord {
+                        from_end: new_rank - 1 - q,
+                        extent: prev_dims[p],
+                    }
+                })
+                .collect();
+            let mut new_dims = prev_dims.to_vec();
+            new_dims.insert(axis, size);
+            (replacement, new_dims)
+        }
+        Movement::RemoveDim { axis } => {
+            if axis >= prev_rank || prev_dims[axis].to_usize().is_some_and(|d| d != 1) {
+                return Err(format!(
+                    "remove_dim axis {axis} of dims {prev_dims:?} (must be a size-1 axis)"
+                ));
+            }
+            let new_rank = prev_rank - 1;
+            let replacement = (0..prev_rank)
+                .map(|p| {
+                    if p == axis {
+                        MapEntry::Lit(0.into())
+                    } else {
+                        let q = if p < axis { p } else { p - 1 };
+                        MapEntry::Coord {
+                            from_end: new_rank - 1 - q,
+                            extent: prev_dims[p],
+                        }
+                    }
+                })
+                .collect();
+            let mut new_dims = prev_dims.to_vec();
+            new_dims.remove(axis);
+            (replacement, new_dims)
+        }
+        Movement::SplitDims { axis, inner } => {
+            if axis >= prev_rank {
+                return Err(format!("split_dims axis {axis} vs rank {prev_rank}"));
+            }
+            // Frontend simplification restored (revert ruling 2026-08-27).
+            let outer = (prev_dims[axis] / inner).simplify();
+            let new_rank = prev_rank + 1;
+            let replacement = (0..prev_rank)
+                .map(|p| {
+                    if p == axis {
+                        MapEntry::Add(
+                            Box::new(MapEntry::Mul(
+                                Box::new(MapEntry::Coord {
+                                    from_end: new_rank - 1 - axis,
+                                    extent: outer,
+                                }),
+                                inner,
+                            )),
+                            Box::new(MapEntry::Coord {
+                                from_end: new_rank - 1 - (axis + 1),
+                                extent: inner,
+                            }),
+                        )
+                    } else {
+                        let q = if p < axis { p } else { p + 1 };
+                        MapEntry::Coord {
+                            from_end: new_rank - 1 - q,
+                            extent: prev_dims[p],
+                        }
+                    }
+                })
+                .collect();
+            let mut new_dims = prev_dims.to_vec();
+            new_dims[axis] = outer;
+            new_dims.insert(axis + 1, inner);
+            (replacement, new_dims)
+        }
+        Movement::MergeDims { axis1, axis2 } => {
+            if axis1 >= axis2 || axis2 >= prev_rank {
+                return Err(format!("merge_dims ({axis1},{axis2}) vs rank {prev_rank}"));
+            }
+            let inner = prev_dims[axis2];
+            // Frontend simplification restored (revert ruling 2026-08-27).
+            let merged = (prev_dims[axis1] * prev_dims[axis2]).simplify();
+            let new_rank = prev_rank - 1;
+            let merged_coord = MapEntry::Coord {
+                from_end: new_rank - 1 - axis1,
+                extent: merged,
+            };
+            let replacement = (0..prev_rank)
+                .map(|p| {
+                    if p == axis1 {
+                        MapEntry::Div(Box::new(merged_coord.clone()), inner)
+                    } else if p == axis2 {
+                        MapEntry::Rem(Box::new(merged_coord.clone()), inner)
+                    } else {
+                        let q = if p < axis2 { p } else { p - 1 };
+                        MapEntry::Coord {
+                            from_end: new_rank - 1 - q,
+                            extent: prev_dims[p],
+                        }
+                    }
+                })
+                .collect();
+            let mut new_dims = prev_dims.to_vec();
+            new_dims[axis1] = merged;
+            new_dims.remove(axis2);
+            (replacement, new_dims)
+        }
+        Movement::Repeat(repeats) => {
+            if repeats.len() != prev_rank {
+                return Err(format!(
+                    "repeat arity {} vs rank {prev_rank}",
+                    repeats.len()
+                ));
+            }
+            let replacement = (0..prev_rank)
+                .map(|p| {
+                    if repeats[p].to_usize() == Some(1) {
+                        MapEntry::Coord {
+                            from_end: prev_rank - 1 - p,
+                            extent: prev_dims[p],
+                        }
+                    } else {
+                        // Frontend simplification restored (revert
+                        // ruling 2026-08-27).
+                        let tiled = (prev_dims[p] * repeats[p]).simplify();
+                        MapEntry::Rem(
+                            Box::new(MapEntry::Coord {
+                                from_end: prev_rank - 1 - p,
+                                extent: tiled,
+                            }),
+                            prev_dims[p],
+                        )
+                    }
+                })
+                .collect();
+            let new_dims = prev_dims
+                .iter()
+                .zip(&repeats)
+                .map(|(d, r)| (*d * *r).simplify())
+                .collect();
+            (replacement, new_dims)
+        }
+        Movement::Shrink { new_dims } => {
+            if new_dims.len() != prev_rank {
+                return Err(format!(
+                    "shrink arity {} vs rank {prev_rank}",
+                    new_dims.len()
+                ));
+            }
+            let replacement = (0..prev_rank)
+                .map(|p| MapEntry::Coord {
+                    from_end: prev_rank - 1 - p,
+                    extent: new_dims[p],
+                })
+                .collect();
+            (replacement, new_dims)
+        }
+    };
+    Ok(pair)
+}
+
+impl LogicalGraph {
+    /// State that `extent` is exactly `n` — a squeeze of a symbolic axis.
+    /// Static extents are decided by the caller; this is for the ones
+    /// only the binding's bounds can decide.
+    pub(crate) fn contract_extent_eq(&mut self, extent: &IntExpr, n: i64) {
+        self.contracts
+            .push(Contract::ExtentEq { extent: *extent, n });
+    }
+
+    /// State that `extent` is at least `n` (a non-empty reduce_max axis,
+    /// a positive unfold window count).
+    pub(crate) fn contract_extent_at_least(&mut self, extent: &IntExpr, n: i64) {
+        self.contracts
+            .push(Contract::ExtentAtLeast { extent: *extent, n });
+    }
+
+    /// The recorded extent conditions.
+    pub fn contracts(&self) -> &[Contract] {
+        &self.contracts
+    }
+
+    /// Annotate a value with a name (`LogicalTensorNamed`) so a runtime
+    /// can bind it by name. A duplicated name would silently union two
+    /// distinct values, so duplicates refuse the graph.
+    pub fn name(&mut self, operand: &Operand, name: &str) {
+        if self.names.iter().any(|(_, existing)| existing == name) {
+            self.refuse(format!("duplicate name \"{name}\""));
+        }
+        let id = match self.resolve(operand, "name") {
+            Ok(id) => id,
+            Err(reason) => self.refuse(reason),
+        };
+        self.names.push((id, name.to_string()));
+    }
+
+    /// The value carrying `name`, if any.
+    pub fn named(&self, name: &str) -> Option<ValueId> {
+        self.names
+            .iter()
+            .find(|(_, existing)| existing == name)
+            .map(|(id, _)| *id)
+    }
+
+    /// Every value transitively feeding one of `roots` (roots included).
+    pub fn cone(&self, roots: &[ValueId]) -> FxHashSet<ValueId> {
+        let mut live = FxHashSet::default();
+        let mut stack: Vec<ValueId> = roots.to_vec();
+        while let Some(id) = stack.pop() {
+            if !live.insert(id) {
+                continue;
+            }
+            stack.extend(self.operands(id));
+        }
+        live
+    }
+
+    fn render_value(&self, id: ValueId) -> Result<String, String> {
+        let value = &self.graph[id];
+        let operands = self.operands(id);
+        let name = |id: &ValueId| format!("v{}", id.index());
+        let shape = Self::shape_term(&value.dims)?;
+
+        if let LogicalOp::Input { label } = &value.op {
+            let wire_dtype = if value.dtype == DType::Bool {
+                "(Bool8)".to_string()
+            } else {
+                Self::dtype_term(value.dtype)
+            };
+            let literal =
+                format!("(LogicalTensorInputLit (LogicalIdLit \"{label}\") {shape} {wire_dtype})");
+            return if value.dtype == DType::Bool {
+                Ok(format!(
+                    "(let input_wire_v{} {literal})\n(let v{} (LogicalCast input_wire_v{} (Bool)))\n",
+                    id.index(),
+                    id.index(),
+                    id.index()
+                ))
+            } else {
+                Ok(format!("(let v{} {literal})\n", id.index()))
+            };
         }
 
-        match best_growth {
-            Some(grown) if grown.savings > candidate.savings => candidate = grown,
-            _ => return candidate,
+        match value.op.render_form() {
+            RenderForm::Plain => {
+                let mut parts: Vec<String> = operands.iter().map(name).collect();
+                match &value.op {
+                    LogicalOp::Constant(constant) | LogicalOp::ConstantF64(constant) => {
+                        parts.push(format!("{constant:?}"))
+                    }
+                    LogicalOp::Iota { value_expr } => {
+                        parts.push(value_expr.clone());
+                        parts.push(shape);
+                    }
+                    LogicalOp::Cast(dtype) | LogicalOp::TruncCast(dtype) => {
+                        parts.push(Self::dtype_term(*dtype))
+                    }
+                    LogicalOp::ReduceSum { axis_from_end }
+                    | LogicalOp::ReduceMax { axis_from_end } => {
+                        parts.push(axis_from_end.to_string());
+                    }
+                    LogicalOp::IndexMapApply { entries } => {
+                        let source_shape = Self::shape_term(&self.graph[operands[0]].dims)?;
+                        let mut entries_term = "(IntExprNil)".to_string();
+                        for entry in entries.iter().rev() {
+                            entries_term = format!(
+                                "(IntExprCons {} {entries_term})",
+                                Self::entry_term(entry, &shape)?
+                            );
+                        }
+                        parts.push(format!("(IndexMapLit {entries_term} {source_shape})"));
+                        parts.push(shape);
+                    }
+                    _ => {}
+                }
+                Ok(format!(
+                    "(let v{} ({} {}))\n",
+                    id.index(),
+                    value.op.constructor(),
+                    parts.join(" ")
+                ))
+            }
+            RenderForm::GatherList => {
+                let data = name(&operands[0]);
+                let mut list = "(LogicalTensorNil)".to_string();
+                for coord in operands[1..].iter().rev() {
+                    list = format!("(LogicalTensorCons {} {list})", name(coord));
+                }
+                Ok(format!(
+                    "(let v{} ({} {data} {list}))\n",
+                    id.index(),
+                    value.op.constructor()
+                ))
+            }
+            RenderForm::ScatterList => {
+                let init = name(&operands[0]);
+                let src = name(operands.last().unwrap());
+                let mut list = "(LogicalTensorNil)".to_string();
+                for coord in operands[1..operands.len() - 1].iter().rev() {
+                    list = format!("(LogicalTensorCons {} {list})", name(coord));
+                }
+                Ok(format!(
+                    "(let v{} ({} {init} {list} {src}))\n",
+                    id.index(),
+                    value.op.constructor()
+                ))
+            }
         }
+    }
+
+    /// The model as egglog text: one `let` per value in the cone of
+    /// `roots`, in SSA (node-index) order, then a `LogicalTensorNamed`
+    /// union for every named value in the cone. No buffers, layouts or
+    /// schedule — those are the runtime's binding statements.
+    pub fn render(&self, roots: &[ValueId]) -> Result<String, String> {
+        let live = self.cone(roots);
+        let mut text = String::new();
+        for id in self.graph.node_indices() {
+            if live.contains(&id) {
+                text.push_str(&self.render_value(id)?);
+            }
+        }
+        for (id, name) in &self.names {
+            if live.contains(id) {
+                text.push_str(&format!(
+                    "(union v{} (LogicalTensorNamed (LogicalIdLit \"{name}\")))\n",
+                    id.index()
+                ));
+            }
+        }
+        for contract in &self.contracts {
+            let (relation, extent, n) = match contract {
+                Contract::ExtentEq { extent, n } => ("extent-eq", extent, n),
+                Contract::ExtentAtLeast { extent, n } => ("extent-at-least", extent, n),
+            };
+            text.push_str(&format!("({relation} {} {n})\n", Self::dim_term(extent)?));
+        }
+        Ok(text)
+    }
+
+    /// [`Self::render`] over every recorded value.
+    pub fn render_all(&self) -> Result<String, String> {
+        let all: Vec<ValueId> = self.graph.node_indices().collect();
+        self.render(&all)
+    }
+
+    /// Values with no consumers that are not inputs — what a runtime
+    /// binds as outputs when the caller does not say otherwise.
+    pub fn leaves(&self) -> Vec<ValueId> {
+        self.graph
+            .node_indices()
+            .filter(|&id| {
+                !self.is_input(id)
+                    && self
+                        .graph
+                        .edges_directed(id, Direction::Outgoing)
+                        .next()
+                        .is_none()
+            })
+            .collect()
+    }
+
+    /// Every input value, in declaration order.
+    pub fn inputs(&self) -> Vec<ValueId> {
+        self.graph
+            .node_indices()
+            .filter(|&id| self.is_input(id))
+            .collect()
+    }
+
+    pub fn is_input(&self, id: ValueId) -> bool {
+        matches!(self.graph[id].op, LogicalOp::Input { .. })
+    }
+
+    pub fn value_dtype(&self, id: ValueId) -> DType {
+        self.graph[id].dtype
+    }
+
+    /// The egglog `let` a boundary attaches to. A Bool input enters as a
+    /// Bool8 wire (`input_wire_v{n}`) that the model casts to Bool — the
+    /// one storage representation the renderer states.
+    pub fn let_name(&self, id: ValueId) -> String {
+        match (&self.graph[id].op, self.graph[id].dtype) {
+            (LogicalOp::Input { .. }, DType::Bool) => format!("input_wire_v{}", id.index()),
+            _ => format!("v{}", id.index()),
+        }
+    }
+
+    /// The value's dims as a `ShapeLit` term.
+    pub fn value_shape_term(&self, id: ValueId) -> Result<String, String> {
+        Self::shape_term(&self.graph[id].dims)
+    }
+}
+
+/// Their RPN index expression rendered as OUR IntExpr term, with `z`
+/// replaced by the given coordinate term and dyn vars resolved via the
+/// pins. Add/Mul only for now (their slice path is affine); anything else
+/// bails loudly.
+pub(crate) fn int_expr_term(expr: &IntExpr, coord_terms: &[String], at: &str) -> AnyResult<String> {
+    let mut stack: Vec<String> = Vec::new();
+    for term in expr.terms.read().iter() {
+        match term {
+            Term::Num(n) => stack.push(format!("(IntLit {n})")),
+            // Symbolic vars stay IntVar in the model — pins are
+            // BINDING-side bounds seeds, never model content (same rule
+            // as dim_term; the R3 fix, 2026-08-06). No character is
+            // special: 'z' is an ordinary named symbol (P1, 2026-08-07).
+            Term::Var(c) => stack.push(format!("(IntVar \"{c}\")")),
+            // Coordinate atoms substitute their axis's CoordVar term; an
+            // out-of-range axis is a coord IntExpr that leaked out of
+            // its own iota — refuse loudly.
+            Term::Coord(k) => match coord_terms.get(*k as usize) {
+                Some(term) => stack.push(term.clone()),
+                None => bail!(
+                    "coordinate atom c{k} at {at}: out of range for rank {} — a \
+                     coordinate IntExpr escaped its iota's value function",
+                    coord_terms.len()
+                ),
+            },
+            Term::Add
+            | Term::Mul
+            | Term::Sub
+            | Term::Div
+            | Term::Mod
+            | Term::Min
+            | Term::Max
+            | Term::Gte
+            | Term::Lt => {
+                // Their builders emit RHS terms first, so the stack TOP is
+                // the LEFT operand (verified against as_op + the Sub impl).
+                let (Some(left), Some(right)) = (stack.pop(), stack.pop()) else {
+                    bail!("hlir_to_logical: malformed index expression at {at}");
+                };
+                let rendered = match term {
+                    Term::Add => format!("(IntAdd {left} {right})"),
+                    Term::Mul => format!("(IntMul {left} {right})"),
+                    Term::Sub => format!("(IntAdd {left} (IntMul (IntLit -1) {right}))"),
+                    Term::Div => format!("(IntTruncDiv {left} {right})"),
+                    Term::Mod => format!("(IntTruncRem {left} {right})"),
+                    Term::CeilDiv => format!("(IntCeilDiv {left} {right})"),
+                    Term::Min => format!("(IntMin {left} {right})"),
+                    Term::Max => format!("(IntMax {left} {right})"),
+                    // Comparisons arrive as 0/1 VALUES in their expressions;
+                    // ours are the bool bridge's indicators. Over the discrete
+                    // integers, a >= b is spelled b < a+1 — one constructor.
+                    Term::Lt => {
+                        format!("(IntCastFromBool (BoolLessThanInt {left} {right}))")
+                    }
+                    Term::Gte => format!(
+                        "(IntCastFromBool (BoolLessThanInt {right} (IntAdd {left} (IntLit 1))))"
+                    ),
+                    _ => unreachable!(),
+                };
+                stack.push(rendered);
+            }
+            other => {
+                bail!("hlir_to_logical: index-expression term {other:?} at {at} — later slice")
+            }
+        }
+    }
+    match (stack.pop(), stack.is_empty()) {
+        (Some(result), true) => Ok(result),
+        _ => bail!("hlir_to_logical: malformed index expression at {at}"),
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod logical_petgraph_tests {
     use super::*;
-    use crate::egglog_utils::hash_egglog_normalized;
-    use crate::hlir::{Input, LoopEnd, LoopInput, LoopStart, Output, ReferenceOp, Sin};
-    use crate::search::unroll::materialize_unrolled_llir;
-
-    // A rolling candidate is only collapsible if every non-state boundary input
-    // is fed from OUTSIDE the candidate's occurrences. A non-state input produced
-    // by another occurrence (e.g. occ `i` consuming occ `i-2`'s output) is a
-    // non-adjacent cross-occurrence dependency that, once the bodies are folded
-    // into one, becomes a directed cycle — which makes the egglog Kahn toposort
-    // drop nodes and panic. `candidate_is_rollable` must reject those.
-    #[test]
-    fn candidate_is_rollable_rejects_cross_occurrence_dep() {
-        let n = NodeIndex::new;
-        let occ = |body: usize, input: usize| RollingOccurrence {
-            nodes: vec![n(body)],
-            boundary_inputs: vec![n(input)],
-            output_nodes: vec![n(body)],
-        };
-
-        // Both occurrences' inputs come from outside the candidate (100, 101) →
-        // rollable.
-        let rollable = vec![occ(0, 100), occ(1, 101)];
-        assert!(candidate_is_rollable(&rollable, &[]));
-
-        // Occurrence 1's input is node 0, which lives INSIDE occurrence 0, and
-        // param 0 is not a state param → reject.
-        let cyclic = vec![occ(0, 100), occ(1, 0)];
-        assert!(!candidate_is_rollable(&cyclic, &[]));
-
-        // Same shape, but param 0 is declared a loop-carried state param → the
-        // adjacent loop-carry is allowed.
-        assert!(candidate_is_rollable(&cyclic, &[0]));
-
-        // Fewer than two occurrences is never rollable.
-        assert!(!candidate_is_rollable(&[occ(0, 100)], &[]));
-    }
-    use crate::tests::{assert_close, random_vec};
 
     #[test]
-    fn materialize_many_disjoint_loops_without_a_global_cartesian_product() {
-        const N_LOOPS: usize = 64;
-        let mut rolled = LLIRGraph::default();
-        for loop_id in 0..N_LOOPS {
-            let input = rolled.add_node(LLIROp::new::<Input>(Box::new(Input {
-                node: loop_id,
-                label: String::new(),
-                dtype: DType::F32,
-            })));
-            let start = rolled.add_node(LLIROp::new::<LoopStart>(Box::new(LoopStart {
-                loop_id,
-                slot_idx: 0,
-                iters: Expression::from(2),
-                dtype: DType::F32,
-            })));
-            let body = rolled.add_node(LLIROp::new::<dyn ReferenceOp>(
-                Box::new(Sin::default()) as Box<dyn ReferenceOp>
-            ));
-            let end = rolled.add_node(LLIROp::new::<LoopEnd>(Box::new(LoopEnd {
-                loop_id,
-                slot_idx: 0,
-                dtype: DType::F32,
-            })));
-            let output = rolled.add_node(LLIROp::new::<Output>(Box::new(Output {
-                node: loop_id,
-                persist_only: false,
-            })));
-            rolled.add_edge(input, start, ());
-            rolled.add_edge(start, body, ());
-            rolled.add_edge(body, end, ());
-            rolled.add_edge(end, output, ());
-        }
-
-        let materialized = materialize_unrolled_llir(&rolled)
-            .expect("independent loop regions must not multiply one another's contexts");
-
-        // Per region: one input + two body instances + one output, connected
-        // as a three-edge chain. A global product would overflow at 2^64.
-        assert_eq!(materialized.node_count(), N_LOOPS * 4);
-        assert_eq!(materialized.edge_count(), N_LOOPS * 3);
-        assert!(
-            materialized
-                .node_weights()
-                .all(|op| { op.to_op::<LoopStart>().is_none() && op.to_op::<LoopEnd>().is_none() })
-        );
-    }
-
-    #[test]
-    fn test_hash_egglog_normalized_same_structure() {
-        // Two egglog texts differing only in Input node indices and labels
-        let text_a = r#"(let t0 (Input 42 "boundary" (F32)))
-(let t1 (Input 100 "layers.0.wq.weight" (F32)))
-(let t2 (Add (ECons 128 (ECons 4096 (ENil))) t1 (ECons 1 (ECons 128 (ENil))) t0 (ECons 1 (ECons 1 (ENil))) (ECons 1 (ECons 128 (ENil)))))
-(let t3 (Output t2 42 false))
-"#;
-        let text_b = r#"(let t0 (Input 84 "boundary" (F32)))
-(let t1 (Input 200 "layers.1.wq.weight" (F32)))
-(let t2 (Add (ECons 128 (ECons 4096 (ENil))) t1 (ECons 1 (ECons 128 (ENil))) t0 (ECons 1 (ECons 1 (ENil))) (ECons 1 (ECons 128 (ENil)))))
-(let t3 (Output t2 84 false))
-"#;
-        assert_eq!(
-            hash_egglog_normalized(text_a),
-            hash_egglog_normalized(text_b),
-            "Structurally identical chunks should hash the same"
-        );
-    }
-
-    #[test]
-    fn test_hash_egglog_normalized_different_structure() {
-        let text_a = r#"(let t0 (Input 42 "boundary" (F32)))
-(let t1 (Add (ECons 128 (ENil)) t0 (ECons 1 (ENil)) t0 (ECons 1 (ENil)) (ECons 1 (ENil))))
-"#;
-        let text_b = r#"(let t0 (Input 42 "boundary" (F32)))
-(let t1 (Mul (ECons 128 (ENil)) t0 (ECons 1 (ENil)) t0 (ECons 1 (ENil)) (ECons 1 (ENil))))
-"#;
-        assert_ne!(
-            hash_egglog_normalized(text_a),
-            hash_egglog_normalized(text_b),
-            "Different op types should produce different hashes"
-        );
-    }
-
-    #[test]
-    fn test_hash_egglog_normalized_different_dtypes() {
-        let text_a = "(let t0 (Input 42 \"boundary\" (F32)))\n";
-        let text_b = "(let t0 (Input 42 \"boundary\" (F16)))\n";
-        assert_ne!(
-            hash_egglog_normalized(text_a),
-            hash_egglog_normalized(text_b),
-            "Different dtypes should produce different hashes"
-        );
-    }
-
-    #[test]
-    fn test_hash_egglog_normalized_output_join_not_normalized() {
-        // OutputJoin lines should be hashed verbatim, not treated as Output
-        let text_a = "(let t0 (OutputJoin t1 t2))\n";
-        let text_b = "(let t0 (OutputJoin t3 t4))\n";
-        assert_ne!(
-            hash_egglog_normalized(text_a),
-            hash_egglog_normalized(text_b),
-            "OutputJoin lines should be hashed verbatim"
-        );
-    }
-
-    #[test]
-    fn test_hash_egglog_normalized_distinguishes_persist_only_output() {
-        let observed = "(let t1 (Output t0 42 false))\n";
-        let persist_only = "(let t1 (Output t0 42 true))\n";
-        assert_ne!(
-            hash_egglog_normalized(observed),
-            hash_egglog_normalized(persist_only),
-            "persistence and observed-output semantics must not share a cached egraph"
-        );
-    }
-
-    #[test]
-    fn test_hash_egglog_normalized_custom_op_id() {
-        // CustomOpKind lines differ only in the integer ID (layer index)
-        let text_a = r#"(let t0 (Input 441 "boundary" (F32)))
-(let t1 (Op (CustomOpKind 1 (F32)) (ICons t74 (ICons t120 (ICons t28 (INil))))))
-(let t2 (Output t1 585 false))
-"#;
-        let text_b = r#"(let t0 (Input 585 "boundary" (F32)))
-(let t1 (Op (CustomOpKind 2 (F32)) (ICons t74 (ICons t120 (ICons t28 (INil))))))
-(let t2 (Output t1 729 false))
-"#;
-        assert_eq!(
-            hash_egglog_normalized(text_a),
-            hash_egglog_normalized(text_b),
-            "CustomOpKind with different IDs should hash the same"
-        );
-    }
-
-    #[test]
-    fn test_hash_egglog_normalized_custom_op_different_structure() {
-        // CustomOpKind lines with different input lists should hash differently
-        let text_a = "(let t1 (Op (CustomOpKind 1 (F32)) (ICons t74 (ICons t120 (INil)))))\n";
-        let text_b = "(let t1 (Op (CustomOpKind 1 (F32)) (ICons t74 (ICons t99 (INil)))))\n";
-        assert_ne!(
-            hash_egglog_normalized(text_a),
-            hash_egglog_normalized(text_b),
-            "CustomOpKind with different input lists should hash differently"
-        );
-    }
-
-    #[test]
-    fn test_rolling_op_signature_custom_op_content() {
-        #[derive(Debug)]
-        struct TestCustomOp {
-            #[allow(dead_code)]
-            name: &'static str,
-        }
-        impl CustomOp for TestCustomOp {
-            fn to_llir_op(&self) -> LLIROp {
-                unimplemented!()
-            }
-        }
-
-        // The signature cache is keyed by NodeIndex and only cleared by
-        // best_rolling_candidate; drop entries another test on this thread
-        // may have left behind for the same indices.
-        clear_rolling_sig_cache();
-
+    fn tensor_ids_are_petgraph_values_with_ported_operand_edges() {
         let mut cx = Graph::new();
-        cx.custom_ops.push(Box::new(TestCustomOp { name: "rope" }));
-        cx.custom_ops.push(Box::new(TestCustomOp { name: "rope" }));
-        cx.custom_ops.push(Box::new(TestCustomOp { name: "topk" }));
-        let ids: Vec<_> = (0..3)
-            .map(|id| {
-                cx.add_op(
-                    CustomOpKind {
-                        id,
-                        dtype: DType::F32,
-                    },
-                    &[],
-                )
-            })
+        let lhs = cx.named_tensor("lhs", (2usize, 3usize), DType::F32);
+        let rhs = cx.named_tensor("rhs", (2usize, 3usize), DType::F32);
+        let sum = lhs + rhs;
+        let viewed = sum.expand_dim(0, 4usize);
+
+        let graph = cx.logical.petgraph();
+        assert_eq!(graph.node_count(), 4);
+        assert!(matches!(graph[lhs.id].op, LogicalOp::Input { .. }));
+        assert!(matches!(graph[rhs.id].op, LogicalOp::Input { .. }));
+        assert!(matches!(graph[sum.id].op, LogicalOp::Add));
+        assert!(matches!(
+            graph[viewed.id].op,
+            LogicalOp::IndexMapApply { .. }
+        ));
+
+        let mut add_inputs: Vec<_> = graph
+            .edges_directed(sum.id, Direction::Incoming)
+            .map(|edge| (edge.weight().0, edge.source()))
             .collect();
+        add_inputs.sort_unstable_by_key(|(port, _)| *port);
+        assert_eq!(add_inputs, vec![(0, lhs.id), (1, rhs.id)]);
 
-        assert_eq!(
-            rolling_op_signature(&cx.graph, ids[0], &cx.custom_ops),
-            rolling_op_signature(&cx.graph, ids[1], &cx.custom_ops),
-            "separate instances of the same custom op should sign the same"
-        );
-        assert_ne!(
-            rolling_op_signature(&cx.graph, ids[0], &cx.custom_ops),
-            rolling_op_signature(&cx.graph, ids[2], &cx.custom_ops),
-            "different custom ops should sign differently"
-        );
-    }
-
-    #[test]
-    fn test_auto_roll_loops_prepass_creates_regions_for_chain_recurrence() {
-        let mut cx = Graph::new();
-        let x = cx.tensor(8);
-        let out = x.exp2().sin().exp2().sin().exp2().sin().output();
-
-        let inserted = cx.auto_roll_loops_prepass_with_log(true);
-        assert!(
-            inserted >= 2,
-            "expected at least two loop boundaries for 3 repeated bodies, got {inserted}"
-        );
-
-        let vals = random_vec(8);
-        let mut rt = ReferenceRuntime::default();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        rt = cx.search(rt, CompileOptions::default().search_graph_limit(1));
-        rt.set_data(x.id, vals.clone());
-        rt.execute(&cx.dyn_map);
-
-        let expected = vals
-            .into_iter()
-            .map(|v| v.exp2().sin().exp2().sin().exp2().sin())
-            .collect::<Vec<f32>>();
-        assert_close(rt.get_f32(out.id), &expected);
-    }
-
-    #[test]
-    fn test_auto_roll_loops_prepass_rolls_recurrence_with_interleaved_outputs() {
-        let mut cx = Graph::new();
-        let x = cx.tensor(8);
-        let mut y = x;
-        for _ in 0..10 {
-            y.exp2().output();
-            y = y.sin();
-        }
-        let y = y.output();
-
-        let before = cx.graph.node_count();
-        let inserted = cx.auto_roll_loops_prepass_with_log(true);
-        let after = cx.graph.node_count();
-        assert!(
-            inserted >= 2,
-            "expected loop markers for recurrence split by Output nodes, got {inserted}"
-        );
-        assert!(
-            after < before,
-            "expected rolling to reduce nodes for recurrence split by Output nodes ({before} -> {after})"
-        );
-
-        let vals = random_vec(8);
-        let mut rt = ReferenceRuntime::default();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        rt = cx.search(rt, CompileOptions::default().search_graph_limit(1));
-        rt.set_data(x.id, vals.clone());
-        rt.execute(&cx.dyn_map);
-
-        let expected = vals
-            .into_iter()
-            .map(|mut v| {
-                for _ in 0..10 {
-                    v = v.sin();
-                }
-                v
-            })
-            .collect::<Vec<f32>>();
-        assert_close(rt.get_f32(y.id), &expected);
-    }
-
-    #[test]
-    fn test_auto_roll_loops_prepass_skips_non_recurrent_branches() {
-        let mut cx = Graph::new();
-        let x = cx.tensor(8);
-        let y = cx.tensor(8);
-        let _out = (x.exp().sin() + y.exp().sin()).output();
-
-        let inserted = cx.auto_roll_loops_prepass_with_log(true);
-        assert_eq!(inserted, 0, "branch-only reuse should not roll into loops");
-    }
-
-    #[test]
-    fn test_auto_roll_loops_prepass_runs_when_logging_is_disabled() {
-        let mut cx = Graph::new();
-        let x = cx.tensor(8);
-        let out = x.exp2().sin().exp2().sin().exp2().sin().output();
-
-        let before = cx.graph.node_count();
-        let inserted = cx.auto_roll_loops_prepass();
-        let after = cx.graph.node_count();
-
-        assert!(
-            inserted >= 2,
-            "expected loop rolling to run without ROLLING_LOG, got {inserted}"
-        );
-        assert!(
-            after < before,
-            "expected loop rolling to reduce nodes ({before} -> {after})"
-        );
-        assert!(
-            cx.graph
-                .neighbors_directed(out.id, Direction::Outgoing)
-                .next()
-                .is_none(),
-            "output should remain a graph root"
-        );
-    }
-
-    #[test]
-    fn test_nested_loop_rolling_rolls_periodic_layer_pattern() {
-        // Periodic pattern like alternating-attention transformers: blocks
-        // of 3 identical "layers" (sin) closed by a distinct one (exp2),
-        // repeated 4 times. The first pass rolls the 4 blocks; the second
-        // rolls the 3 identical layers inside the surviving body.
-        let mut cx = Graph::new();
-        let x = cx.tensor(8);
-        let mut y = x;
-        for _ in 0..4 {
-            for _ in 0..3 {
-                y = y.sin();
-            }
-            y = y.exp2();
-        }
-        let out = y.output();
-
-        let first = cx.auto_roll_loops_prepass_with_log(true);
-        assert!(first > 0, "expected the block pattern to roll");
-        let second = cx.auto_roll_loops_prepass_with_log(true);
-        assert!(
-            second > 0,
-            "expected the repeated layers inside the rolled body to roll"
-        );
-
-        let loop_ids: FxHashSet<usize> = cx
-            .graph
-            .node_indices()
-            .filter_map(|n| {
-                cx.try_get_op::<crate::hlir::LoopStart>(n)
-                    .map(|ls| ls.loop_id)
-            })
+        let view_input: Vec<_> = graph
+            .edges_directed(viewed.id, Direction::Incoming)
+            .map(|edge| (edge.weight().0, edge.source()))
             .collect();
-        assert_eq!(loop_ids.len(), 2, "expected two distinct loop regions");
+        assert_eq!(view_input, vec![(0, sum.id)]);
 
-        let vals = random_vec(8);
-        let mut rt = ReferenceRuntime::default();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        rt = cx.search(rt, CompileOptions::default().search_graph_limit(1));
-        rt.set_data(x.id, vals.clone());
-        rt.execute(&cx.dyn_map);
-
-        let expected = vals
-            .into_iter()
-            .map(|mut v| {
-                for _ in 0..4 {
-                    for _ in 0..3 {
-                        v = v.sin();
-                    }
-                    v = v.exp2();
-                }
-                v
-            })
-            .collect::<Vec<f32>>();
-        assert_close(rt.get_f32(out.id), &expected);
+        assert_eq!(cx.logical.input_specs()[0].id, lhs.id);
+        assert_eq!(cx.logical.leaves(), vec![viewed.id]);
     }
 
+    /// `render(roots)` emits exactly the cone of its roots plus the
+    /// named unions inside it; `leaves()` is every consumer-less
+    /// non-input value.
     #[test]
-    fn test_nested_loop_rolling_chained_sibling_inner_regions() {
-        // Mirror of gemma's rolled topology: an outer periodic block whose
-        // body contains multiple distinct repeated runs, chained through
-        // non-repeating ops. The runs roll into sibling regions nested
-        // inside the outer region; unroll must find each sibling innermost.
+    fn render_emits_the_cone_and_its_names() {
         let mut cx = Graph::new();
-        let x = cx.tensor(8);
-        let mut y = x;
-        for _ in 0..4 {
-            for _ in 0..3 {
-                y = y.sin();
-            }
-            y = y.exp2();
-            for _ in 0..4 {
-                y = y.sin();
-            }
-            y = y.reciprocal();
-        }
-        let out = y.output();
+        let x = cx.named_tensor("x", (2usize,), DType::F32);
+        let y = cx.named_tensor("y", (2usize,), DType::F32);
+        let sum = (x + y).named("sum");
+        let other = x * 2.0f32;
+        assert_eq!(cx.logical.leaves(), vec![sum.id, other.id]);
+        assert_eq!(cx.logical.inputs(), vec![x.id, y.id]);
+        assert_eq!(cx.logical.named("sum"), Some(sum.id));
 
-        let mut passes = 0;
-        while cx.auto_roll_loops_prepass_with_log(true) > 0 {
-            passes += 1;
-        }
+        let text = cx.logical.render(&[sum.id]).expect("renders");
         assert!(
-            passes >= 3,
-            "expected outer + two sibling inner rolls, got {passes}"
+            text.contains("LogicalAdd"),
+            "the root's cone renders:\n{text}"
         );
-
-        let vals = random_vec(8);
-        let mut rt = ReferenceRuntime::default();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        rt = cx.search(rt, CompileOptions::default().search_graph_limit(1));
-        rt.set_data(x.id, vals.clone());
-        rt.execute(&cx.dyn_map);
-
-        let expected = vals
-            .into_iter()
-            .map(|mut v| {
-                for _ in 0..4 {
-                    for _ in 0..3 {
-                        v = v.sin();
-                    }
-                    v = v.exp2();
-                    for _ in 0..4 {
-                        v = v.sin();
-                    }
-                    v = v.recip();
-                }
-                v
-            })
-            .collect::<Vec<f32>>();
-        assert_close(rt.get_f32(out.id), &expected);
+        assert!(
+            !text.contains("LogicalMul"),
+            "an unbound leaf is not rendered:\n{text}"
+        );
+        assert!(
+            text.contains("(union v2 (LogicalTensorNamed (LogicalIdLit \"sum\")))"),
+            "a name in the cone renders as a union:\n{text}"
+        );
+        let all = cx.logical.render_all().expect("renders");
+        assert!(all.contains("LogicalMul"));
+        assert_eq!(cx.logical.let_name(x.id), "v0");
     }
 
+    /// A duplicated name would silently union two distinct values, so it
+    /// refuses at the construction site.
     #[test]
-    fn test_nested_loop_rolling_with_varying_weights() {
-        // Gemma-shaped: an outer periodic block of 3 identical weighted
-        // layers plus a distinct closer, repeated 4 times, with a DISTINCT
-        // weight tensor per layer. The inner region's per-iteration inputs
-        // are then varying streams fed by the outer region's own LoopInput
-        // markers — the exact structure of per-layer weights in a rolled
-        // transformer.
+    #[should_panic(expected = "duplicate name")]
+    fn duplicate_names_refuse_at_construction() {
         let mut cx = Graph::new();
-        let x = cx.tensor(8);
-        let weights: Vec<GraphTensor> = (0..12).map(|_| cx.tensor(8)).collect();
-        let mut y = x;
-        for block in 0..4 {
-            for layer in 0..3 {
-                y = (y * weights[block * 3 + layer]).sin();
-            }
-            y = y.exp2();
-        }
-        let out = y.output();
-
-        let mut passes = 0;
-        while cx.auto_roll_loops_prepass_with_log(true) > 0 {
-            passes += 1;
-        }
-        assert!(passes >= 2, "expected nested rolls, got {passes}");
-
-        let xv = random_vec(8);
-        let wvs: Vec<Vec<f32>> = (0..12).map(|_| random_vec(8)).collect();
-        let mut rt = ReferenceRuntime::default();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        rt = cx.search(rt, CompileOptions::default().search_graph_limit(1));
-        rt.set_data(x.id, xv.clone());
-        for (w, wv) in weights.iter().zip(&wvs) {
-            rt.set_data(w.id, wv.clone());
-        }
-        rt.execute(&cx.dyn_map);
-
-        let expected: Vec<f32> = (0..8)
-            .map(|j| {
-                let mut v = xv[j];
-                for block in 0..4 {
-                    for layer in 0..3 {
-                        v = (v * wvs[block * 3 + layer][j]).sin();
-                    }
-                    v = v.exp2();
-                }
-                v
-            })
-            .collect();
-        assert_close(rt.get_f32(out.id), &expected);
-    }
-
-    #[test]
-    fn loop_rolling_stamps_concrete_varying_stream_dtypes() {
-        // A transformer-style recurrence carries F32 activations while every
-        // repeated layer receives a distinct BF16 weight. The weight casts are
-        // part of the repeated body, so the rolled boundary itself must retain
-        // BF16 rather than a placeholder chosen independently of its sources.
-        let mut cx = Graph::new();
-        let x = cx.tensor(8);
-        let weights: Vec<GraphTensor> =
-            (0..4).map(|_| cx.tensor(8).as_dtype(DType::Bf16)).collect();
-        let mut y = x;
-        for weight in weights {
-            y = (y * weight.cast(DType::F32)).sin();
-        }
-        let _ = y.output();
-
-        assert!(
-            cx.auto_roll_loops_prepass_with_log(true) > 0,
-            "expected the repeated weighted recurrence to roll"
-        );
-
-        let loop_inputs: Vec<_> = cx
-            .graph
-            .node_indices()
-            .filter_map(|node| cx.try_get_op::<LoopInput>(node))
-            .collect();
-        assert!(!loop_inputs.is_empty(), "expected a varying weight stream");
-        assert!(
-            loop_inputs.iter().any(|input| input.dtype == DType::Bf16),
-            "expected a concrete BF16 LoopInput, got {loop_inputs:?}"
-        );
-        assert!(
-            cx.graph.node_indices().all(|node| {
-                cx.try_get_op::<LoopStart>(node)
-                    .is_none_or(|start| start.dtype == DType::F32)
-            }),
-            "the carried F32 activation must remain concretely F32"
-        );
-
-        // The concrete field remains the source of truth through egglog
-        // construction; this used to turn every marker field into F32.
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-    }
-
-    #[test]
-    fn loop_rolling_preserves_integer_gather_stream_dtypes() {
-        // Regression for mixed-type repeated regions: Gather consumes Int
-        // indexes but produces the dtype of its F32 data input. Both facts
-        // must survive rolling without one eclass overwriting the other.
-        let mut cx = Graph::new();
-        let x = cx.tensor(8);
-        let indexes: Vec<GraphTensor> = (0..4)
-            .map(|layer| {
-                cx.named_tensor(format!("indexes.{layer}"), 8)
-                    .as_dtype(DType::Int)
-            })
-            .collect();
-        let mut y = x;
-        for index in indexes {
-            y = y.gather(index).sin();
-        }
-        let _ = y.output();
-
-        assert!(
-            cx.auto_roll_loops_prepass_with_log(true) > 0,
-            "expected the repeated gather recurrence to roll"
-        );
-
-        let loop_inputs: Vec<_> = cx
-            .graph
-            .node_indices()
-            .filter_map(|node| cx.try_get_op::<LoopInput>(node))
-            .collect();
-        assert!(
-            loop_inputs.iter().any(|input| input.dtype == DType::Int),
-            "expected a concrete Int LoopInput, got {loop_inputs:?}"
-        );
-        assert!(
-            cx.graph.node_indices().all(|node| {
-                cx.try_get_op::<LoopStart>(node)
-                    .is_none_or(|start| start.dtype == DType::F32)
-            }),
-            "Gather must preserve the carried F32 activation dtype"
-        );
-
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-    }
-
-    #[test]
-    fn test_nested_loop_rolling_per_layer_outputs_not_permuted() {
-        // Cache-analog regression test: every layer persists a side output
-        // (like per-layer KV caches). Nested rolling + unroll must route each
-        // side output to ITS OWN layer's value — a permutation across layers
-        // corrupts state promotion even when the final output is correct.
-        let mut cx = Graph::new();
-        let x = cx.tensor(8);
-        let weights: Vec<GraphTensor> = (0..24).map(|_| cx.tensor(8)).collect();
-        let mut y = x;
-        let mut side = Vec::new();
-        for block in 0..4 {
-            for layer in 0..5 {
-                y = (y * weights[block * 6 + layer]).sin();
-                side.push((y * 2.0_f32).output());
-            }
-            y = (y * weights[block * 6 + 5]).exp2();
-            side.push((y * 2.0_f32).output());
-        }
-        let out = y.output();
-
-        let mut passes = 0;
-        while cx.auto_roll_loops_prepass_with_log(true) > 0 {
-            passes += 1;
-        }
-        assert!(passes >= 2, "expected nested rolls, got {passes}");
-
-        let xv = random_vec(8);
-        let wvs: Vec<Vec<f32>> = (0..24).map(|_| random_vec(8)).collect();
-        let mut rt = ReferenceRuntime::default();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        rt = cx.search(rt, CompileOptions::default().search_graph_limit(1));
-        rt.set_data(x.id, xv.clone());
-        for (w, wv) in weights.iter().zip(&wvs) {
-            rt.set_data(w.id, wv.clone());
-        }
-        rt.execute(&cx.dyn_map);
-
-        let mut refs: Vec<Vec<f32>> = Vec::new();
-        let mut v: Vec<f32> = xv.clone();
-        for block in 0..4 {
-            for layer in 0..5 {
-                v = v
-                    .iter()
-                    .zip(&wvs[block * 6 + layer])
-                    .map(|(a, b)| (a * b).sin())
-                    .collect();
-                refs.push(v.iter().map(|a| a * 2.0).collect());
-            }
-            v = v
-                .iter()
-                .zip(&wvs[block * 6 + 5])
-                .map(|(a, b)| (a * b).exp2())
-                .collect();
-            refs.push(v.iter().map(|a| a * 2.0).collect());
-        }
-        let mut permutation = Vec::new();
-        for (idx, t) in side.iter().enumerate() {
-            let got = rt.get_f32(t.id);
-            let matches: Vec<usize> = refs
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| got.iter().zip(*r).all(|(a, b)| (a - b).abs() < 1e-5))
-                .map(|(j, _)| j)
-                .collect();
-            permutation.push((idx, matches));
-        }
-        let bad: Vec<_> = permutation.iter().filter(|(i, m)| !m.contains(i)).collect();
-        assert!(
-            bad.is_empty(),
-            "side outputs carry other layers' values: {permutation:?}"
-        );
-        let final_expected: Vec<f32> = refs.last().unwrap().iter().map(|a| a / 2.0).collect();
-        assert!(
-            rt.get_f32(out.id)
-                .iter()
-                .zip(&final_expected)
-                .all(|(a, b)| (a - b).abs() < 1e-5),
-            "final output mismatch"
-        );
-    }
-
-    #[test]
-    fn test_nested_loop_rolling_handles_disjoint_regions() {
-        // Two independent recurrence chains roll into two disjoint regions
-        // across successive passes; unroll must handle both.
-        let mut cx = Graph::new();
-        let x = cx.tensor(8);
-        let y = cx.tensor(8);
-        let a = x.sin().sin().sin().sin();
-        let b = y.exp2().exp2().exp2().exp2();
-        let out = (a + b).output();
-
-        let mut passes = 0;
-        while cx.auto_roll_loops_prepass_with_log(true) > 0 {
-            passes += 1;
-        }
-        assert!(
-            passes >= 2,
-            "expected both chains to roll, got {passes} passes"
-        );
-
-        let xv = random_vec(8);
-        let yv = random_vec(8);
-        let mut rt = ReferenceRuntime::default();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        rt = cx.search(rt, CompileOptions::default().search_graph_limit(1));
-        rt.set_data(x.id, xv.clone());
-        rt.set_data(y.id, yv.clone());
-        rt.execute(&cx.dyn_map);
-
-        let expected = xv
-            .into_iter()
-            .zip(yv)
-            .map(|(mut a, mut b)| {
-                for _ in 0..4 {
-                    a = a.sin();
-                    b = b.exp2();
-                }
-                a + b
-            })
-            .collect::<Vec<f32>>();
-        assert_close(rt.get_f32(out.id), &expected);
+        let x = cx.named_tensor("x", (2usize,), DType::F32);
+        let _ = (x + x).named("y");
+        let _ = (x * x).named("y");
     }
 }

@@ -101,7 +101,7 @@ impl<'a> Translator<'a> {
     fn histogram_weight(
         &mut self,
         node: &Node,
-        sample_count: Expression,
+        sample_count: IntExpr,
         dtype: DType,
     ) -> Result<GraphTensor> {
         if let Some(weight) = self.named_tensor_arg(node, "weight")? {
@@ -176,19 +176,19 @@ impl<'a> Translator<'a> {
             .expand_rhs(full_shape.clone());
         for (dimension, (column, edge)) in columns.iter().zip(edges).enumerate() {
             let bins = bin_shape[dimension];
-            let left = edge.slice_along(Expression::from(0)..bins, 0);
-            let right = edge.slice_along(Expression::from(1)..(bins + 1), 0);
+            let left = edge.slice_along(IntExpr::from(0)..bins, 0);
+            let right = edge.slice_along(IntExpr::from(1)..(bins + 1), 0);
 
-            let mut column_shape = vec![Expression::from(1); columns.len() + 1];
+            let mut column_shape = vec![IntExpr::from(1); columns.len() + 1];
             column_shape[0] = sample_count;
             let mut column = reshape_tensor(*column, column_shape);
-            column.shape.expand(full_shape.clone());
-            let mut edge_shape = vec![Expression::from(1); columns.len() + 1];
+            column.legacy_tracker_mut().expand(full_shape.clone());
+            let mut edge_shape = vec![IntExpr::from(1); columns.len() + 1];
             edge_shape[dimension + 1] = bins;
             let mut left = reshape_tensor(left, edge_shape.clone());
-            left.shape.expand(full_shape.clone());
+            left.legacy_tracker_mut().expand(full_shape.clone());
             let mut right = reshape_tensor(right, edge_shape.clone());
-            right.shape.expand(full_shape.clone());
+            right.legacy_tracker_mut().expand(full_shape.clone());
 
             let below_right = column.lt(right);
             let equal_right = self.is_zero(column - right);
@@ -200,7 +200,7 @@ impl<'a> Translator<'a> {
                 .expand_rhs(last_position.dims());
             last_position = last_position.eq(last_index);
             let mut last_position = reshape_tensor(last_position, edge_shape);
-            last_position.shape.expand(full_shape.clone());
+            last_position.legacy_tracker_mut().expand(full_shape.clone());
             let inclusive_last = self.bool_and(equal_right, last_position);
             let upper = self.bool_or(below_right, inclusive_last);
             let in_bin = self.bool_and(column.ge(left), upper);
@@ -209,10 +209,10 @@ impl<'a> Translator<'a> {
             membership = self.bool_and(membership, in_bin);
         }
 
-        let mut weight_shape = vec![Expression::from(1); columns.len() + 1];
+        let mut weight_shape = vec![IntExpr::from(1); columns.len() + 1];
         weight_shape[0] = sample_count;
         let mut weight = reshape_tensor(weight, weight_shape);
-        weight.shape.expand(full_shape);
+        weight.legacy_tracker_mut().expand(full_shape);
         let mut histogram = (membership.cast(weight.dtype) * weight).sum(0);
         if density {
             let axes = (0..bin_shape.len()).collect::<Vec<_>>();
@@ -222,12 +222,12 @@ impl<'a> Translator<'a> {
                 .expand_rhs(bin_shape.clone());
             for (dimension, edge) in edges.iter().enumerate() {
                 let bins = bin_shape[dimension];
-                let widths = edge.slice_along(Expression::from(1)..(bins + 1), 0)
-                    - edge.slice_along(Expression::from(0)..bins, 0);
-                let mut width_shape = vec![Expression::from(1); edges.len()];
+                let widths = edge.slice_along(IntExpr::from(1)..(bins + 1), 0)
+                    - edge.slice_along(IntExpr::from(0)..bins, 0);
+                let mut width_shape = vec![IntExpr::from(1); edges.len()];
                 width_shape[dimension] = bins;
                 let mut widths = reshape_tensor(widths, width_shape);
-                widths.shape.expand(bin_shape.clone());
+                widths.legacy_tracker_mut().expand(bin_shape.clone());
                 volume *= widths;
             }
             histogram = histogram / total / volume;
@@ -239,10 +239,10 @@ impl<'a> Translator<'a> {
         &mut self,
         input: GraphTensor,
         dimensions: usize,
-    ) -> Result<(Vec<GraphTensor>, Expression)> {
+    ) -> Result<(Vec<GraphTensor>, IntExpr)> {
         anyhow::ensure!(dimensions > 0, "histogram dimension count must be positive");
         anyhow::ensure!(
-            !input.shape.is_empty(),
+            !input.legacy_tracker_ref().is_empty(),
             "histogramdd input must have a coordinate dimension"
         );
         let input_dims = input.dims();
@@ -251,7 +251,7 @@ impl<'a> Translator<'a> {
             "histogramdd coordinate dimension does not match bins"
         );
         let sample_count = product_of_dims(input_dims[..input_dims.len() - 1].iter().copied());
-        let matrix = reshape_tensor(input, vec![sample_count, Expression::from(dimensions)]);
+        let matrix = reshape_tensor(input, vec![sample_count, IntExpr::from(dimensions)]);
         let columns = (0..dimensions)
             .map(|dimension| {
                 let column = matrix.slice_along(dimension..dimension + 1, 1).squeeze(1);
@@ -398,7 +398,7 @@ impl<'a> Translator<'a> {
             .first_along_axis(nan.cast(DType::F32).stable_argsort(axis, true), axis)
             .cast(DType::I64);
         let count = nan.cast(DType::Int).sum(axis);
-        let zero = self.graph.constant(0).expand_rhs(count.shape);
+        let zero = self.graph.constant(0).expand_rhs(count.dims());
         (first, count.gt(zero))
     }
 
@@ -443,7 +443,7 @@ impl<'a> Translator<'a> {
         let zero = self
             .graph
             .constant(0)
-            .expand_rhs(positive_infinite_count.shape);
+            .expand_rhs(positive_infinite_count.dims());
         let has_positive_infinity = positive_infinite_count.gt(zero);
         let replace = self.bool_and(
             selected_nan,
@@ -462,7 +462,7 @@ impl<'a> Translator<'a> {
             "max/min dim must produce values and indices"
         );
 
-        if value.shape.is_empty() {
+        if value.legacy_tracker_ref().is_empty() {
             anyhow::ensure!(
                 matches!(raw_axis, -1 | 0),
                 "dimension out of range for scalar"
@@ -472,7 +472,7 @@ impl<'a> Translator<'a> {
                 .insert(names[1].clone(), self.graph.constant(0i64).cast(DType::I64));
             return Ok(());
         }
-        let axis = normalize_dim(raw_axis, value.shape.len());
+        let axis = normalize_dim(raw_axis, value.legacy_tracker_ref().len());
         let sort_key = if value.dtype == DType::Bool {
             value.cast(DType::F32)
         } else {
@@ -512,7 +512,7 @@ impl<'a> Translator<'a> {
         let names = Self::tensor_output_names(node);
         let dim_variant = node.target.ends_with(".dim");
         let (base, axis, keepdim) = if dim_variant {
-            if value.shape.is_empty() {
+            if value.legacy_tracker_ref().is_empty() {
                 let raw_axis = self.get_int_arg(node, 1)?;
                 anyhow::ensure!(
                     matches!(raw_axis, -1 | 0),
@@ -525,11 +525,11 @@ impl<'a> Translator<'a> {
             }
             (
                 value,
-                normalize_dim(self.get_int_arg(node, 1)?, value.shape.len()),
+                normalize_dim(self.get_int_arg(node, 1)?, value.legacy_tracker_ref().len()),
                 self.get_bool_arg(node, 2).unwrap_or(false),
             )
         } else {
-            if value.shape.is_empty() {
+            if value.legacy_tracker_ref().is_empty() {
                 self.tensors.insert(names[0].clone(), value);
                 return Ok(());
             }
@@ -547,13 +547,13 @@ impl<'a> Translator<'a> {
                 .graph
                 .constant(base.dims()[axis])
                 .cast(DType::I64)
-                .expand_rhs(nan_count.shape);
+                .expand_rhs(nan_count.dims());
             let valid_count = axis_length - nan_count;
             let zero = self
                 .graph
                 .constant(0)
                 .cast(valid_count.dtype)
-                .expand_rhs(valid_count.shape);
+                .expand_rhs(valid_count.dims());
             let has_valid = valid_count.gt(zero);
             let kth = (((valid_count - 1).maximum(zero)).cast(DType::F64) * 0.5).cast(DType::I64);
             let sorted = self.nan_last_argsort(base, axis);
@@ -611,7 +611,7 @@ impl<'a> Translator<'a> {
             })
             .context("segment_reduce is missing its reduction name")?;
         let axis = self.named_int_arg(node, "axis").unwrap_or(0);
-        let axis = normalize_dim(axis, data.shape.len());
+        let axis = normalize_dim(axis, data.legacy_tracker_ref().len());
         let output_shape = self.output_meta_shape(node)?;
         let segment_count = output_shape[axis];
         let input_count = data.dims()[axis];
@@ -625,8 +625,8 @@ impl<'a> Translator<'a> {
         } else if let Some(offsets) = offsets {
             let offsets = offsets.cast(DType::Int);
             (
-                offsets.slice_along(Expression::from(0)..segment_count, axis),
-                offsets.slice_along(Expression::from(1)..(segment_count + 1), axis),
+                offsets.slice_along(IntExpr::from(0)..segment_count, axis),
+                offsets.slice_along(IntExpr::from(1)..(segment_count + 1), axis),
             )
         } else {
             anyhow::bail!("segment_reduce requires lengths or offsets");
@@ -637,8 +637,8 @@ impl<'a> Translator<'a> {
         let mut starts = starts.expand_dim(axis + 1, input_count);
         let mut ends = ends.expand_dim(axis + 1, input_count);
         for suffix in data.dims()[axis + 1..].iter().copied() {
-            starts = starts.expand_dim(starts.shape.len(), suffix);
-            ends = ends.expand_dim(ends.shape.len(), suffix);
+            starts = starts.expand_dim(starts.legacy_tracker_ref().len(), suffix);
+            ends = ends.expand_dim(ends.legacy_tracker_ref().len(), suffix);
         }
         let mut positions = self.graph.arange(input_count).cast(DType::Int);
         for (dimension, size) in pair_shape.iter().copied().enumerate() {
@@ -668,9 +668,9 @@ impl<'a> Translator<'a> {
                 if reduction == "sum" {
                     Ok(sum)
                 } else {
-                    let zero_count = self.graph.constant(0).expand_rhs(count.shape);
+                    let zero_count = self.graph.constant(0).expand_rhs(count.dims());
                     let nonempty = count.gt(zero_count);
-                    let one_count = self.graph.constant(1).expand_rhs(count.shape);
+                    let one_count = self.graph.constant(1).expand_rhs(count.dims());
                     let safe_count = self.select(nonempty, count, one_count);
                     let mean = sum / safe_count.cast(data.dtype);
                     if has_initial {
@@ -678,7 +678,7 @@ impl<'a> Translator<'a> {
                     } else {
                         let nan = self
                             .floating_scalar(f64::NAN, data.dtype)
-                            .expand_rhs(mean.shape);
+                            .expand_rhs(mean.dims());
                         Ok(self.select(nonempty, mean, nan))
                     }
                 }
@@ -687,8 +687,8 @@ impl<'a> Translator<'a> {
                 let selected = self.select(membership, expanded, one);
                 let magnitude = self.real_abs(selected).prod(candidate_axis);
                 let negative_count = self.signbit(selected).cast(DType::Int).sum(candidate_axis);
-                let two = self.graph.constant(2).expand_rhs(negative_count.shape);
-                let zero = self.graph.constant(0).expand_rhs(negative_count.shape);
+                let two = self.graph.constant(2).expand_rhs(negative_count.dims());
+                let zero = self.graph.constant(0).expand_rhs(negative_count.dims());
                 let odd = (negative_count % two).ne(zero);
                 let mut product = self.select(odd, magnitude * -1.0, magnitude);
                 if let Some(initial) = initial {
@@ -706,14 +706,14 @@ impl<'a> Translator<'a> {
                         },
                         data.dtype,
                     )
-                    .expand_rhs(expanded.shape);
+                    .expand_rhs(expanded.dims());
                 let values = self.select(membership, expanded, fill);
                 let mut result = if reduction == "max" {
                     values.max(candidate_axis)
                 } else {
                     values.min(candidate_axis)
                 };
-                let zero_count = self.graph.constant(0).expand_rhs(count.shape);
+                let zero_count = self.graph.constant(0).expand_rhs(count.dims());
                 let nonempty = count.gt(zero_count);
                 if let Some(initial) = initial {
                     let combined = if reduction == "max" {
@@ -732,7 +732,7 @@ impl<'a> Translator<'a> {
                             },
                             data.dtype,
                         )
-                        .expand_rhs(result.shape);
+                        .expand_rhs(result.dims());
                     result = self.select(nonempty, result, empty);
                 }
                 Ok(result)
@@ -803,7 +803,7 @@ impl<'a> Translator<'a> {
     ) -> Result<GraphTensor> {
         let output_dtype = self.output_meta_dtype(node)?;
         let magnitude = magnitude.cast(output_dtype);
-        let axes = self.composed_reduction_axes_at(node, magnitude.shape.len(), 2)?;
+        let axes = self.composed_reduction_axes_at(node, magnitude.legacy_tracker_ref().len(), 2)?;
         let keepdim = self.get_bool_arg(node, 3).unwrap_or(false);
         let ord = self.get_float_arg(node, 1).unwrap_or(2.0);
 
@@ -822,7 +822,7 @@ impl<'a> Translator<'a> {
                 .graph
                 .constant_float(0.0)
                 .cast(magnitude.dtype)
-                .expand_rhs(magnitude.shape);
+                .expand_rhs(magnitude.dims());
             let ordered_nonzero = self.bool_or(magnitude.lt(zero), magnitude.gt(zero));
             let nonzero = if dtype_can_contain_nan(magnitude.dtype) {
                 let nan = self.is_nan(magnitude);
@@ -861,37 +861,37 @@ impl<'a> Translator<'a> {
         let (lhs, rhs) = broadcast_binary(lhs, rhs);
         let magnitude = self.real_abs(lhs - rhs).cast(self.output_meta_dtype(node)?);
         let p = self.get_float_arg(node, 2).unwrap_or(2.0);
-        Ok(self.p_norm(magnitude, p, (0..magnitude.shape.len()).collect()))
+        Ok(self.p_norm(magnitude, p, (0..magnitude.legacy_tracker_ref().len()).collect()))
     }
 
     pub(crate) fn translate_cdist(&mut self, node: &Node) -> Result<GraphTensor> {
         let lhs = self.get_input_tensor(node, 0)?;
         let rhs = self.get_input_tensor(node, 1)?;
         anyhow::ensure!(
-            lhs.shape.len() >= 2 && rhs.shape.len() >= 2,
+            lhs.legacy_tracker_ref().len() >= 2 && rhs.legacy_tracker_ref().len() >= 2,
             "cdist inputs must be matrices"
         );
         let (mut lhs, mut rhs) = ensure_same_dtype(lhs, rhs);
         let output_shape = self.output_meta_shape(node)?;
-        let feature = lhs.dims()[lhs.shape.len() - 1];
+        let feature = lhs.dims()[lhs.legacy_tracker_ref().len() - 1];
         anyhow::ensure!(
-            feature == rhs.dims()[rhs.shape.len() - 1],
+            feature == rhs.dims()[rhs.legacy_tracker_ref().len() - 1],
             "cdist feature dimensions must match"
         );
         let mut pair_shape = output_shape;
         pair_shape.push(feature);
-        lhs = lhs.expand_dim(lhs.shape.len() - 1, rhs.dims()[rhs.shape.len() - 2]);
-        rhs = rhs.expand_dim(rhs.shape.len() - 2, lhs.dims()[lhs.shape.len() - 3]);
-        lhs.shape.expand(pair_shape.clone());
-        rhs.shape.expand(pair_shape);
+        lhs = lhs.expand_dim(lhs.legacy_tracker_ref().len() - 1, rhs.dims()[rhs.legacy_tracker_ref().len() - 2]);
+        rhs = rhs.expand_dim(rhs.legacy_tracker_ref().len() - 2, lhs.dims()[lhs.legacy_tracker_ref().len() - 3]);
+        lhs.legacy_tracker_mut().expand(pair_shape.clone());
+        rhs.legacy_tracker_mut().expand(pair_shape);
         let magnitude = self.real_abs(lhs - rhs).cast(self.output_meta_dtype(node)?);
         let p = self.get_float_arg(node, 2)?;
-        Ok(self.p_norm(magnitude, p, vec![magnitude.shape.len() - 1]))
+        Ok(self.p_norm(magnitude, p, vec![magnitude.legacy_tracker_ref().len() - 1]))
     }
 
     pub(crate) fn translate_pdist(&mut self, node: &Node) -> Result<GraphTensor> {
         let input = self.get_input_tensor(node, 0)?;
-        anyhow::ensure!(input.shape.len() == 2, "pdist input must be a matrix");
+        anyhow::ensure!(input.legacy_tracker_ref().len() == 2, "pdist input must be a matrix");
         let rows = input.dims()[0];
         let columns = input.dims()[1];
         let output_shape = self.output_meta_shape(node)?;
@@ -901,7 +901,7 @@ impl<'a> Translator<'a> {
             .graph
             .constant(rows)
             .cast(DType::F64)
-            .expand_rhs(k.shape);
+            .expand_rhs(k.dims());
         let discriminant = k * -8.0 + rows_f * (rows_f - 1.0) * 4.0 - 7.0;
         let i = (rows_f
             - 2.0
@@ -938,7 +938,7 @@ impl<'a> Translator<'a> {
         let value = self
             .get_input_tensor(node, 0)?
             .cast(self.output_meta_dtype(node)?);
-        let rank = value.shape.len();
+        let rank = value.legacy_tracker_ref().len();
         let raw_dim = self.get_int_arg(node, 1)?;
         if rank == 0 {
             anyhow::ensure!(
@@ -989,7 +989,7 @@ impl<'a> Translator<'a> {
         node: &Node,
         value: GraphTensor,
     ) -> Result<(GraphTensor, GraphTensor)> {
-        let axes = self.composed_reduction_axes(node, value.shape.len())?;
+        let axes = self.composed_reduction_axes(node, value.legacy_tracker_ref().len())?;
         let keepdim = node
             .inputs
             .iter()
@@ -1005,13 +1005,13 @@ impl<'a> Translator<'a> {
         } else {
             value.sum(axes.clone()) / n
         };
-        let expanded_mean = mean.expand_to_shape_on_axes(value.shape, axes.clone());
+        let expanded_mean = mean.expand_to_shape_on_axes(value.dims(), axes.clone());
         let centered = value - expanded_mean;
         let numerator = (centered * centered).sum(axes.clone());
         let degrees = self.graph.constant(n).cast(output_dtype)
             - self.floating_scalar(correction, output_dtype);
         let zero = self.floating_scalar(0.0, output_dtype);
-        let divisor = degrees.maximum(zero).expand_rhs(numerator.shape);
+        let divisor = degrees.maximum(zero).expand_rhs(numerator.dims());
         let variance = numerator / divisor;
         Ok((
             self.restore_reduced_dims(variance, &axes, keepdim),
@@ -1077,7 +1077,7 @@ impl<'a> Translator<'a> {
         node: &Node,
         truth: GraphTensor,
     ) -> Result<GraphTensor> {
-        let rank = truth.shape.len();
+        let rank = truth.legacy_tracker_ref().len();
         let (axes, keepdim) = match node.target.as_str() {
             "torch.ops.aten.any.default" => ((0..rank).collect::<Vec<_>>(), false),
             "torch.ops.aten.any.dim" => {
@@ -1126,7 +1126,7 @@ impl<'a> Translator<'a> {
         }
 
         let counts = truth.cast(DType::Int).sum(axes.clone());
-        let zero = self.graph.constant(0).expand_rhs(counts.shape);
+        let zero = self.graph.constant(0).expand_rhs(counts.dims());
         let mut result = counts.ne(zero);
         if keepdim {
             let mut sorted_axes = axes;
@@ -1144,7 +1144,7 @@ impl<'a> Translator<'a> {
             .graph
             .constant(0)
             .cast(input.dtype)
-            .expand_rhs(input.shape);
+            .expand_rhs(input.dims());
         self.translate_any_from_truth(node, input.ne(zero))
     }
 
@@ -1155,7 +1155,7 @@ impl<'a> Translator<'a> {
     /// otherwise inactive `0 * NaN` lanes into NaNs.
     pub(crate) fn scan_shift_indices(
         &mut self,
-        shape: &[Expression],
+        shape: &[IntExpr],
         axis: usize,
         offset: usize,
     ) -> (GraphTensor, GraphTensor) {
@@ -1169,9 +1169,9 @@ impl<'a> Translator<'a> {
         let offset = self
             .graph
             .constant(offset as i64)
-            .expand_rhs(positions.shape);
+            .expand_rhs(positions.dims());
         let valid = positions.ge(offset);
-        let zero = self.graph.constant(0).expand_rhs(positions.shape);
+        let zero = self.graph.constant(0).expand_rhs(positions.dims());
         let shifted = self.select(valid, positions - offset, zero);
         (shifted, valid)
     }
@@ -1184,7 +1184,7 @@ impl<'a> Translator<'a> {
         let mut values = self
             .get_input_tensor(node, 0)?
             .cast(self.output_meta_dtype(node)?);
-        let Some(axis) = cumulative_axis(self.get_int_arg(node, 1)?, values.shape.len())? else {
+        let Some(axis) = cumulative_axis(self.get_int_arg(node, 1)?, values.legacy_tracker_ref().len())? else {
             return Ok(values);
         };
         let length = values.dims()[axis].to_usize().ok_or_else(|| {
@@ -1208,7 +1208,7 @@ impl<'a> Translator<'a> {
     /// a prior NaN beats a later ordered value, so NaN propagation is explicit.
     pub(crate) fn translate_cumextremum(&mut self, node: &Node, which: CumExtremum) -> Result<()> {
         let mut values = self.get_input_tensor(node, 0)?;
-        let axis = cumulative_axis(self.get_int_arg(node, 1)?, values.shape.len())?;
+        let axis = cumulative_axis(self.get_int_arg(node, 1)?, values.legacy_tracker_ref().len())?;
 
         let mut indices = match axis {
             None => self.graph.constant(0i64).cast(DType::I64),
@@ -1294,7 +1294,7 @@ impl<'a> Translator<'a> {
         let dims_result = self.get_ints_arg(node, 1);
         let (axes, keepdim) = match dims_result {
             Ok(ref dims) if !dims.is_empty() => {
-                let ndim = a.shape.len();
+                let ndim = a.legacy_tracker_ref().len();
                 let axes: Vec<usize> = dims.iter().map(|&d| normalize_dim(d, ndim)).collect();
                 let keepdim = if node.inputs.len() > 2 {
                     self.get_bool_arg(node, 2).unwrap_or(false)
@@ -1307,7 +1307,7 @@ impl<'a> Translator<'a> {
                 // Full reduce: reduce over every axis, leaving a rank-0 (scalar) tensor.
                 // PyTorch eager returns shape () for `x.sum()` etc., and downstream ops
                 // (e.g. unsqueeze(0).expand(N)) rely on this rank.
-                let ndim = a.shape.len();
+                let ndim = a.legacy_tracker_ref().len();
                 if ndim == 0 {
                     // Already rank-0 — reducing over no axes is a no-op for sum/max/min/prod,
                     // and mean of a scalar is just the scalar.
@@ -1391,7 +1391,7 @@ impl<'a> Translator<'a> {
             false
         };
 
-        if a.shape.is_empty() {
+        if a.legacy_tracker_ref().is_empty() {
             match dim_opt {
                 None | Some(0) | Some(-1) => {
                     // PyTorch returns scalar index 0 for rank-0 argmax/argmin.
@@ -1412,11 +1412,11 @@ impl<'a> Translator<'a> {
             None => {
                 // Full-reduce: flatten to 1-D, argsort along axis 0.
                 let total = concrete_numel(&a)?;
-                let flat = reshape_tensor(a, vec![Expression::from(total)]);
+                let flat = reshape_tensor(a, vec![IntExpr::from(total)]);
                 (0usize, flat)
             }
             Some(dim_raw) => {
-                let dim = normalize_dim(dim_raw, a.shape.len());
+                let dim = normalize_dim(dim_raw, a.legacy_tracker_ref().len());
                 (dim, a)
             }
         };

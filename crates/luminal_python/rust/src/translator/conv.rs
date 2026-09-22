@@ -116,7 +116,7 @@ impl<'a> Translator<'a> {
             } else {
                 // General grouped: pre-pad full input then slice per group
                 let padded_input = {
-                    let mut pad_spec: Vec<(Expression, Expression)> =
+                    let mut pad_spec: Vec<(IntExpr, IntExpr)> =
                         vec![(0.into(), 0.into()); 2 + spatial];
                     for i in 0..spatial {
                         pad_spec[2 + i] = (padding_u[i].into(), padding_u[i].into());
@@ -152,7 +152,7 @@ impl<'a> Translator<'a> {
             }
         } else {
             let mut w_flat = weight;
-            w_flat.shape = ShapeTracker::new_with_element_bits(
+            *w_flat.legacy_tracker_mut() = ShapeTracker::new_with_element_bits(
                 vec![ch_out, ch_in * kernel_product],
                 weight.dtype.bits(),
             );
@@ -196,7 +196,7 @@ fn slice_channel_group(
     let end = start + ch_per_group;
     let dims = x.dims();
     let rank = 2 + spatial;
-    let mut slices: Vec<(Expression, Expression)> = Vec::with_capacity(rank);
+    let mut slices: Vec<(IntExpr, IntExpr)> = Vec::with_capacity(rank);
     slices.push((0.into(), dims[0]));
     slices.push((start.into(), end.into()));
     for dim in dims.iter().take(rank).skip(2) {
@@ -215,7 +215,7 @@ fn slice_weight_group(
     let start = g * group_out;
     let end = start + group_out;
     let w_dims = w.dims();
-    let mut slices: Vec<(Expression, Expression)> = Vec::with_capacity(w_dims.len());
+    let mut slices: Vec<(IntExpr, IntExpr)> = Vec::with_capacity(w_dims.len());
     slices.push((start.into(), end.into()));
     for dim in w_dims.iter().skip(1) {
         slices.push((0.into(), *dim));
@@ -224,8 +224,7 @@ fn slice_weight_group(
     // following flatten safe for the sliced weight buffer.
     let w_sliced = w.slice(slices) + 0.0;
     let mut w_flat = w_sliced;
-    w_flat.shape =
-        ShapeTracker::new_with_element_bits(vec![group_out, flat_inner], w_sliced.dtype.bits());
+    *w_flat.legacy_tracker_mut() = ShapeTracker::new_with_element_bits(vec![group_out, flat_inner], w_sliced.dtype.bits());
     w_flat
 }
 
@@ -252,7 +251,7 @@ fn conv_unfold(
     // Pad spatial dimensions (skip if all padding is zero)
     let needs_pad = pads_begin.iter().any(|&p| p > 0) || pads_end.iter().any(|&p| p > 0);
     let padded = if needs_pad {
-        let mut padding: Vec<(Expression, Expression)> = vec![(0.into(), 0.into()); rank];
+        let mut padding: Vec<(IntExpr, IntExpr)> = vec![(0.into(), 0.into()); rank];
         for i in 0..spatial {
             padding[2 + i] = (pads_begin[i].into(), pads_end[i].into());
         }
@@ -280,7 +279,7 @@ fn conv_unfold(
     perm.extend(rank..2 * rank);
     let permuted = unfolded.permute(perm);
 
-    let output_spatial_dims: Vec<Expression> = permuted.dims()[1..1 + spatial].to_vec();
+    let output_spatial_dims: Vec<IntExpr> = permuted.dims()[1..1 + spatial].to_vec();
 
     // Merge all channel+kernel dims into [N, spatial..., ch_in * kernel_product]
     let mut patches = permuted;
@@ -336,7 +335,7 @@ fn depthwise_conv(
 
     let needs_pad = pads_begin.iter().any(|&p| p > 0) || pads_end.iter().any(|&p| p > 0);
     let padded = if needs_pad {
-        let mut padding: Vec<(Expression, Expression)> = vec![(0.into(), 0.into()); rank];
+        let mut padding: Vec<(IntExpr, IntExpr)> = vec![(0.into(), 0.into()); rank];
         for i in 0..spatial {
             padding[2 + i] = (pads_begin[i].into(), pads_end[i].into());
         }
@@ -364,7 +363,7 @@ fn depthwise_conv(
     perm.extend(rank..2 * rank); // all kernel dims
     let permuted = unfolded.permute(perm);
 
-    let out_spatial_dims: Vec<Expression> = permuted.dims()[2..2 + spatial].to_vec();
+    let out_spatial_dims: Vec<IntExpr> = permuted.dims()[2..2 + spatial].to_vec();
 
     // Merge all kernel dims (including 1-size k_N, k_C) into kernel_product
     let target = 3 + spatial; // [N, C, spatial..., K]
@@ -382,8 +381,7 @@ fn depthwise_conv(
 
     // Weight [C * group_out, 1, *kernel] -> [C, group_out, kernel_product]
     let mut w_flat = w;
-    w_flat.shape =
-        ShapeTracker::new_with_element_bits(vec![ch, group_out, kernel_product], w.dtype.bits());
+    *w_flat.legacy_tracker_mut() = ShapeTracker::new_with_element_bits(vec![ch, group_out, kernel_product], w.dtype.bits());
 
     // patches: [N, C, out_spatial_product, kernel_product]
     // Expand to [N, C, group_out, out_spatial_product, kernel_product]

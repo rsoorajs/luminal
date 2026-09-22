@@ -7,4 +7,5 @@ pub mod reduction;
 pub mod tensor;
 pub mod unary;
 
+pub use movement::ViewChain;
 pub use tensor::*;

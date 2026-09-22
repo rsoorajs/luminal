@@ -1,64 +1,94 @@
-## luminal_cuda_lite
+# CUDA Lite execution
 
-This crate contains the CUDA backend for Luminal.
+CUDA Lite has one execution path: a CUDA graph launch. Serving, candidate warmup,
+and profiling use `CudaDevice::execute`. Graph compilation and instantiation are
+outside timed trials. An execution stages inputs, launches the graph, waits for
+completion, and returns owned host output bytes.
 
-The backend can be broken down into several main types of ops. Starting from the highest level and going lower:
+## Compilation and memory
 
-#### Host Ops
+Egglog selects all operations. Bucket searches extract from range-seeded e-graphs,
+so implementation guards must hold throughout the interval. Representative
+shapes are used for timing, without freezing the installed plan's geometry.
 
-Host ops are opaque operations executed from the host (can execute on device, simply launched in an opaque manner). cuBLAS is a good example of this type of op. Luminal can't assume much about these operations since they are so opaque. These ops implement the `HostOp` trait.
+The storage planner evaluates conservative interval capacities for each buffer.
+It respects the bufferizer's allocation/free events and data/anti-dependencies.
+One schedule places input uploads immediately before their first device use,
+then bufferized operations and output readbacks at their output boundaries.
+Graph construction consumes this schedule directly.
 
-#### Kernel Ops
+One interval allocator packs every physical resource:
 
-Kernel ops are operations encoded as a kernel and launch parameters. Luminal can put these into CUDA graphs. Cutlass kernels are good examples of these. These ops implement the `KernelOp` trait.
+- The dynamic-dimension parameter block remains live throughout execution.
+- Interior tensors follow their bufferizer alloc/free markers.
+- Donated device copies end at their explicit free; other boundary copies end
+  at their final device use, including any required readback.
+- Escaping device outputs start at their allocation and end after their final
+  use/readback. Returned host bytes keep the caller's output alive separately.
+- Each HostOp's scratch is live only during that operation's child graph, and
+  can reuse storage occupied by tensors or other HostOps at different times.
 
-#### Block Ops
+Pinned staging uses the same allocator with byte alignment. All input payloads
+remain live from host preparation through their upload; each output remains live
+from readback through host result collection. Completed uploads can therefore
+provide space for outputs, while late inputs remain protected. Multiple output
+slots sharing a buffer at one boundary share a single readback and staging range.
 
-Block ops are operations encoded on the threadblock level, which implement an operation that runs for a duration within a single threadblock. These are required to use a fixed number of threads per threadblock (or gate unused threads out), and are given a fixed-size shared memory scratchpad. Luminal can fuse these operations into megakernels. These ops impelement the `BlockOp` trait.
+Each bucket keeps its capacity-sized offsets fixed as live dimensions change.
+The arena allocation is the **maximum** requirement across installed buckets.
+Pinned host staging is shared across buckets too. Execution is serialized on one
+nonblocking stream; buckets cannot run concurrently against these shared ranges.
+Returned output data owns its host memory and survives later launches.
 
-#### Warp Ops
+Installing a new plan set synchronizes and destroys old executables before any
+allocation can move. Search releases candidate graphs, staging, and arena memory
+between candidates, while retaining the CUDA context and compiled module cache.
 
-Warp ops are not yet merged. Stay tuned!
+## Dynamic updates
 
-#### Thread Ops
+| Change | Work before graph launch |
+| --- | --- |
+| Input contents | Fill the existing pinned staging ranges. |
+| Dimension used only inside kernels | Write the parameter block; no graph node updates. |
+| Copy length | Patch dependent copy nodes; disable zero-length copies. |
+| Explicit kernel launch geometry | Patch dependent kernel nodes. |
+| HostOp capture dimensions | Reuse a cached capture, or prepare and capture that HostOp. |
+| Compatible child graph topology | Update the existing executable's child node. |
+| Incompatible child graph topology | Rebind a cached parent executable, or instantiate a new one. |
+| Bucket switch | Select that bucket's graph using the same arena and staging allocations. |
 
-Thread ops are not yet merged. Stay tuned!
+Dimension-to-node dependencies are built once. Host captures and parent topology
+variants have bounded caches (eight each). Parents retain the preparations
+referenced by their source and executable nodes, even after capture-cache
+eviction. A failed partial update invalidates
+the affected compiled plan before another launch can use it.
 
-### Architecture
+## Operation interfaces
 
-`luminal_cuda_lite` can model a joint search space that smoothly searches through various mixed configurations of these ops. At compile time, a waterfall process takes place to iteratively raise each op to the level above, resulting in all host-level ops in the final runtime graph. For instance, block ops get combined into megakernels, implemented as kernel ops. Kernel ops get combined into cuda graphs, implemented as host ops.
+`KernelOp::codegen` returns CUDA source plus symbolic launch metadata. The kernel
+ABI is input pointers, output pointer, then `const long long* params`. Dimension
+identifiers returned by `symbolic::variable` are defined as entries in `params`.
+Default launches cover the bucket capacity and kernels guard against the live
+extent. `KernelSource::launch` can instead specify symbolic grid, block, and
+shared-memory geometry through `KernelLaunch`.
 
-### Semantic search contract
+`HostOp::prepare` resolves host descriptors and algorithms outside capture.
+`PreparedHostOp::record` submits GPU work during capture; its Rust body is not
+called on replay. The executor treats the resulting child graph as opaque.
+`workspace_bytes` reserves operation-local device scratch in the shared arena;
+preparation must not access scratch contents or preserve them beyond that
+operation's captured work. `capture_dims`
+may narrow invalidation to the dimensions that affect captured work; its default
+conservatively depends on all dimensions.
 
-Backend rewrites add legal implementations with `union`; they do not remove a
-legal implementation merely because another implementation is usually faster.
-The profiling search, rather than cleanup, chooses between alternatives such as
-generic kernels, specialized kernels, and host-library calls.
+cuBLASLt uses this interface for all DPS forms. Geometry changes rebuild its
+public library descriptors and capture a new child graph. The executor never
+inspects or edits cuBLASLt's private kernel arguments.
 
-That includes GenericMatmul/cuBLASLt/GEMV, direct/decomposed Conv2D,
-materialized/absorbed fusion and casts, copying/no-copy scatter, and
-materialized/fused RoPE-scatter paths. These alternatives are matched in
-egglog; selected LLIR is not rewritten into a different operator pattern after
-extraction.
+During bucket profiling, dynamic payloads supplied at another size are truncated
+or zero-extended to the representative size for timing. Serving requires exact
+live payload sizes. Profiling includes staging and readback, matching serving.
 
-Cleanup may remove only representations that are not executable plans: cycles,
-malformed shape/stride metadata, unsupported type/layout combinations, and
-proven alias or ownership violations. Candidate resource checks may reject a
-plan that cannot fit or launch on the target device. The intermediate-memory
-cap applies to the peak planned bucket arena. Bucket dispatch drops the active
-arena before allocating another, so bucket arenas peak rather than coexist. The
-device-memory check separately includes that peak arena, persistent host-op state
-retained by all compiled buckets, the peak transient host-op allocation, and
-deduplicated shared workspaces. That check is a necessary planned-capacity bound,
-not an available-memory guarantee: external allocations, CUDA context and
-allocator overhead, and pool reservations are not observable in the plan. Arena
-growth likewise drops the synchronized old arena before allocating its
-replacement, so replacement itself does not introduce an old-plus-new peak. The
-intermediate-memory and synchronous-NVRTC source budgets are reported as resource
-rejections and can be adjusted independently of rewrite semantics. Otherwise, a
-plan that is legal but merely expensive remains available for measured search.
-
-Choice-set validation detects correlated e-class cycles before LLIR loading.
-Random initial genomes repair only those reachable cycles; later mutations may
-still produce them, in which case candidate filtering discards them without
-profiling and continues searching the remaining legal alternatives.
+`CudaRuntime::graph_stats` exposes counters and arena/staging footprint for
+checking reuse. GPU regressions live in `tests/dynamic_graphs.rs` and
+`tests/execution_traits.rs`.

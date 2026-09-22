@@ -6,16 +6,16 @@
 //! input dim and panic at translate-time when `torch.compile` hands us a
 //! batch dim, sequence-length dim, or any other dynamic dim. PT2's whole
 //! point is dynamic shapes, so we re-implement the same three ops here
-//! using `Expression`-typed shape arithmetic and only call luminal-core
-//! primitives that already accept `Expression`s (`Graph::constant`,
-//! `Graph::iota`, `flatten_strides`, `ShapeTracker::new(Vec<Expression>)`,
+//! using `IntExpr`-typed shape arithmetic and only call luminal-core
+//! primitives that already accept `IntExpr`s (`Graph::constant`,
+//! `Graph::iota`, `flatten_strides`, `ShapeTracker::new(Vec<IntExpr>)`,
 //! `expand_dim`, `expand_rhs`, `flatten`, `slice_along`, `squeeze`,
 //! `cast`, `scatter`, `gather`).
 //!
 //! Every shape product flows through `crate::dim_arith::product_of_dims`
-//! so the `Expression`s we build are canonical: two callers that produce
+//! so the `IntExpr`s we build are canonical: two callers that produce
 //! the same logical dim via differently-ordered multiplications end up
-//! with byte-identical `Expression`s. Without this, downstream dim-equality
+//! with byte-identical `IntExpr`s. Without this, downstream dim-equality
 //! asserts in luminal-core's `Add` / `Sub` (see `src/frontend/binary.rs`)
 //! panic on `a*8` ≠ `8*a` after these helpers feed into broadcast paths.
 
@@ -29,8 +29,8 @@ pub(super) enum ScatterReduction {
     Multiply,
 }
 
-/// Row-major strides as `Expression`s. `stride[i] = prod(dims[i+1..])`.
-pub(super) fn row_major_strides(dims: &[Expression]) -> Vec<Expression> {
+/// Row-major strides as `IntExpr`s. `stride[i] = prod(dims[i+1..])`.
+pub(super) fn row_major_strides(dims: &[IntExpr]) -> Vec<IntExpr> {
     let rank = dims.len();
     (0..rank)
         .map(|i| product_of_dims(dims[i + 1..].iter().copied()))
@@ -43,9 +43,9 @@ pub(super) fn row_major_strides(dims: &[Expression]) -> Vec<Expression> {
 /// than the data tensor's physical strides.
 pub(super) fn logical_flat_indices(
     graph: &mut Graph,
-    output_shape: &[Expression],
-    axis_contributions: &[Expression],
-    base: Expression,
+    output_shape: &[IntExpr],
+    axis_contributions: &[IntExpr],
+    base: IntExpr,
 ) -> GraphTensor {
     let index = base + flatten_strides(output_shape, axis_contributions);
     graph.iota(index, output_shape.to_vec())
@@ -55,20 +55,20 @@ pub(super) fn logical_flat_indices(
 /// rank-`rank` output of shape `out_shape`. The axis dim contributes
 /// 0; every other dim `d` contributes `iota_d * strides[d]`. Materialised
 /// via one `Graph::iota` call with `flatten_strides(out_shape, axis_exprs)`
-/// — same pattern luminal core uses, just with `Expression` throughout.
+/// — same pattern luminal core uses, just with `IntExpr` throughout.
 fn non_axis_flat(
     graph: &mut Graph,
-    out_shape: &[Expression],
-    strides: &[Expression],
+    out_shape: &[IntExpr],
+    strides: &[IntExpr],
     axis: usize,
 ) -> GraphTensor {
     let rank = out_shape.len();
-    let axis_exprs: Vec<Expression> = (0..rank)
+    let axis_exprs: Vec<IntExpr> = (0..rank)
         .map(|d| {
             if d == axis {
-                Expression::from(0)
+                IntExpr::from(0)
             } else {
-                Expression::from('z') * strides[d]
+                IntExpr::from('z') * strides[d]
             }
         })
         .collect();
@@ -77,30 +77,30 @@ fn non_axis_flat(
 
 /// Wrap negative axis indices into `[0, axis_dim)`. Equivalent to
 /// `if idx < 0 { idx + axis_dim } else { idx }` in tensor form.
-fn normalize_negative_index(indices: GraphTensor, axis_dim: Expression) -> GraphTensor {
+fn normalize_negative_index(indices: GraphTensor, axis_dim: IntExpr) -> GraphTensor {
     let idx_f32 = indices.cast(DType::F32);
     let zero = idx_f32
         .graph()
         .constant_float(0.0)
-        .expand_rhs(idx_f32.shape);
+        .expand_rhs(idx_f32.dims());
     let adj = idx_f32
         .graph()
         .constant(axis_dim)
         .cast(DType::F32)
-        .expand_rhs(idx_f32.shape);
+        .expand_rhs(idx_f32.dims());
     let is_neg = idx_f32.lt(zero).cast(DType::F32);
     (idx_f32 + (is_neg * adj)).cast(DType::Int)
 }
 
 /// Translator-local `gather_elements` that accepts symbolic shape dims.
 /// Mirrors `GraphTensor::gather_elements` semantics but uses
-/// `Expression`-typed shape arithmetic and only calls symbol-safe
+/// `IntExpr`-typed shape arithmetic and only calls symbol-safe
 /// luminal-core primitives.
 ///
 /// `output[i0,..,ik] = self[i0,..,i_{axis-1}, indices[i0,..,ik], i_{axis+1},..,ik]`
 pub fn pt2_gather_elements(data: GraphTensor, indexes: GraphTensor, axis: usize) -> GraphTensor {
     let dims = data.dims();
-    let out_shape: Vec<Expression> = indexes.dims();
+    let out_shape: Vec<IntExpr> = indexes.dims();
     let strides = row_major_strides(&dims);
 
     let idx_normalized = normalize_negative_index(indexes, dims[axis]);
@@ -109,10 +109,10 @@ pub fn pt2_gather_elements(data: GraphTensor, indexes: GraphTensor, axis: usize)
     let stride_tensor = data
         .graph()
         .constant(strides[axis])
-        .expand_rhs(idx_normalized.shape);
+        .expand_rhs(idx_normalized.dims());
     let flat_idx = non_axis_flat + idx_normalized * stride_tensor;
 
-    data.gather(flat_idx)
+    data.gather1d(flat_idx)
 }
 
 /// `index_select` with a rank-0 or rank-1 index tensor. Unlike
@@ -122,16 +122,16 @@ pub fn pt2_index_select(
     data: GraphTensor,
     indices: GraphTensor,
     axis: usize,
-    output_shape: &[Expression],
+    output_shape: &[IntExpr],
 ) -> GraphTensor {
-    let rank = data.shape.len();
-    let indices = if indices.shape.is_empty() {
+    let rank = data.legacy_tracker_ref().len();
+    let indices = if indices.legacy_tracker_ref().is_empty() {
         indices.unsqueeze(0)
     } else {
         indices
     };
     assert_eq!(
-        indices.shape.len(),
+        indices.legacy_tracker_ref().len(),
         1,
         "index_select index must be rank 0 or 1"
     );
@@ -146,7 +146,7 @@ pub fn pt2_index_select(
     let axis_stride = data
         .graph()
         .constant(strides[axis])
-        .expand_rhs(indices.shape);
+        .expand_rhs(indices.dims());
     data.gather(non_axis_flat + indices * axis_stride)
 }
 
@@ -158,7 +158,7 @@ pub(super) fn pt2_scatter_element_indices(
     axis: usize,
 ) -> GraphTensor {
     let data_dims = data.dims();
-    let idx_shape: Vec<Expression> = indices.dims();
+    let idx_shape: Vec<IntExpr> = indices.dims();
     let strides = row_major_strides(&data_dims);
 
     let idx_normalized = normalize_negative_index(indices, data_dims[axis]);
@@ -167,7 +167,7 @@ pub(super) fn pt2_scatter_element_indices(
     let stride_tensor = data
         .graph()
         .constant(strides[axis])
-        .expand_rhs(idx_normalized.shape);
+        .expand_rhs(idx_normalized.dims());
     let flat_dest = non_axis_flat + idx_normalized * stride_tensor;
 
     flat_dest.flatten()
@@ -184,12 +184,12 @@ pub fn pt2_scatter_elements(
     let flat_updates = updates.flatten();
     let flat_data = data.flatten();
 
-    let output_flat = flat_updates.scatter(flat_dest_1d, flat_data);
+    let output_flat = flat_updates.scatter1d(flat_dest_1d, flat_data);
 
     // View-only reshape back to data shape; the buffer is already laid
     // out row-major from the scatter, so swapping the tracker is safe.
     let mut result = output_flat;
-    result.shape = ShapeTracker::new(data_dims);
+    *result.legacy_tracker_mut() = ShapeTracker::new(data_dims);
     result
 }
 
@@ -209,10 +209,10 @@ pub(super) fn pt2_scatter_elements_reduce(
     reduction: ScatterReduction,
 ) -> anyhow::Result<GraphTensor> {
     anyhow::ensure!(
-        indices.shape.len() == updates.shape.len(),
+        indices.legacy_tracker_ref().len() == updates.legacy_tracker_ref().len(),
         "scatter reduction requires index/update ranks to match, got {} and {}",
-        indices.shape.len(),
-        updates.shape.len()
+        indices.legacy_tracker_ref().len(),
+        updates.legacy_tracker_ref().len()
     );
     let index_shape = indices.dims();
     let update_shape = updates.dims();
@@ -245,7 +245,7 @@ pub(super) fn pt2_scatter_elements_reduce(
         output = combined.scatter(destination, output);
     }
 
-    output.shape = ShapeTracker::new(output_shape);
+    *output.legacy_tracker_mut() = ShapeTracker::new(output_shape);
     Ok(output)
 }
 
@@ -274,11 +274,11 @@ pub fn pt2_scatter_nd(
     assert!(k <= data_rank, "scatter_nd: K must be <= data rank");
 
     // Batch shape = indices shape without last dim.
-    let batch_shape: Vec<Expression> = idx_dims[..idx_rank - 1].to_vec();
+    let batch_shape: Vec<IntExpr> = idx_dims[..idx_rank - 1].to_vec();
     let batch_numel = product_of_dims(batch_shape.iter().copied());
 
     // Trailing shape = data_shape[K..]
-    let trailing_shape: Vec<Expression> = data_dims[k..].to_vec();
+    let trailing_shape: Vec<IntExpr> = data_dims[k..].to_vec();
     let trailing_numel = product_of_dims(trailing_shape.iter().copied());
 
     let data_strides = row_major_strides(&data_dims);
@@ -286,7 +286,7 @@ pub fn pt2_scatter_nd(
     // Flatten batch dims of indices to [batch_numel, K] via view reshape.
     let mut indices_flat = indices;
     if idx_rank > 2 {
-        indices_flat.shape = ShapeTracker::new(vec![batch_numel, Expression::from(k)]);
+        *indices_flat.legacy_tracker_mut() = ShapeTracker::new(vec![batch_numel, IntExpr::from(k)]);
     }
 
     let mut flat_base: Option<GraphTensor> = None;
@@ -294,7 +294,7 @@ pub fn pt2_scatter_nd(
         let idx_k = indices_flat.slice_along(k_dim..k_dim + 1, indices_flat.dims().len() - 1);
         let idx_k = idx_k.squeeze(idx_k.dims().len() - 1);
 
-        let stride_tensor = data.graph().constant(stride).expand_rhs(idx_k.shape);
+        let stride_tensor = data.graph().constant(stride).expand_rhs(idx_k.dims());
         let contribution = idx_k * stride_tensor;
 
         flat_base = Some(match flat_base {
@@ -311,28 +311,31 @@ pub fn pt2_scatter_nd(
     let mut full_flat_dest = if trailing_is_unit {
         flat_base
     } else {
-        // The trailing offset of flat position `t` is just `t`.
-        //
-        // `data_strides` is row-major over `data_dims`, so `data_strides[k..]`
-        // are exactly the row-major strides of `trailing_shape` — walking the
-        // trailing block in flat order walks memory in step. There is nothing
-        // to weight.
-        //
-        // This replaced a per-dim loop that built an `arange` for each trailing
-        // dim, gave it EXPANDED (0-stride) dims to broadcast, and then
-        // overwrote its ShapeTracker with a contiguous `[trailing_numel]` view.
-        // Overwriting a tracker is a view-only reshape, which is valid only if
-        // the buffer really is laid out that way — an expanded dim is virtual,
-        // so it is not. It went unnoticed because a rank-2 target has
-        // trailing_rank 1 and never introduces an expanded dim; from rank 3 up
-        // it does, and the scatter then wrote one element per row instead of
-        // the whole block.
-        let base_expanded = flat_base.expand_dim(1, trailing_numel);
-        let offsets = data
-            .graph()
-            .arange(trailing_numel)
-            .expand_dim(0, batch_numel);
-        base_expanded + offsets
+        let mut base_expanded = flat_base.expand_dim(1, trailing_numel);
+
+        let trailing_rank = trailing_shape.len();
+        for (ti, d) in (k..data_rank).enumerate() {
+            let ar = data.graph().arange(data_dims[d]);
+            let mut ar_shaped = ar;
+            for _ in ti + 1..trailing_rank {
+                let n = ar_shaped.dims().len();
+                ar_shaped = ar_shaped.expand_dim(n, 1);
+            }
+            for _ in 0..ti {
+                ar_shaped = ar_shaped.expand_dim(0, 1);
+            }
+            crate::pt2_util::tracker_expand(ar_shaped.legacy_tracker_mut(), trailing_shape.clone());
+            let mut ar_flat = ar_shaped;
+            *ar_flat.legacy_tracker_mut() = ShapeTracker::new(vec![trailing_numel]);
+            ar_flat = ar_flat.expand_dim(0, batch_numel);
+
+            let stride_tensor = data
+                .graph()
+                .constant(data_strides[d])
+                .expand_rhs(ar_flat.dims());
+            base_expanded += ar_flat * stride_tensor;
+        }
+        base_expanded
     };
 
     full_flat_dest = full_flat_dest.flatten();
@@ -340,9 +343,9 @@ pub fn pt2_scatter_nd(
     let flat_updates = updates.flatten();
     let flat_data = data.flatten();
 
-    let output_flat = flat_updates.scatter(full_flat_dest, flat_data);
+    let output_flat = flat_updates.scatter1d(full_flat_dest, flat_data);
 
     let mut result = output_flat;
-    result.shape = ShapeTracker::new(data_dims);
+    *result.legacy_tracker_mut() = ShapeTracker::new(data_dims);
     result
 }

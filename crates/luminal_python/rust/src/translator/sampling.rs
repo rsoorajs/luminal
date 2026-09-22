@@ -20,7 +20,7 @@ impl<'a> Translator<'a> {
     fn reflect_coordinate(
         &mut self,
         value: GraphTensor,
-        size: Expression,
+        size: IntExpr,
         align_corners: bool,
     ) -> GraphTensor {
         let twice_low = if align_corners { 0.0 } else { -1.0 };
@@ -29,7 +29,7 @@ impl<'a> Translator<'a> {
             .graph
             .constant(size * 2 - if align_corners { 2 } else { 1 })
             .cast(value.dtype)
-            .expand_rhs(value.shape);
+            .expand_rhs(value.dims());
         let maximum = twice_high * self.constant_like(value, 0.5);
         let span = maximum - minimum;
         let span_is_zero = self.is_zero(span);
@@ -43,12 +43,12 @@ impl<'a> Translator<'a> {
                 .graph
                 .constant(2)
                 .cast(DType::I64)
-                .expand_rhs(quotient.shape))
+                .expand_rhs(quotient.dims()))
         .ne(self
             .graph
             .constant(0)
             .cast(DType::I64)
-            .expand_rhs(quotient.shape));
+            .expand_rhs(quotient.dims()));
         let reflected = self.select(odd, safe_span - remainder, remainder) + minimum;
         let zero = self.constant_like(reflected, 0.0);
         self.select(span_is_zero, zero, reflected)
@@ -57,7 +57,7 @@ impl<'a> Translator<'a> {
     fn grid_source_coordinate(
         &mut self,
         normalized: GraphTensor,
-        size: Expression,
+        size: IntExpr,
         padding_mode: i64,
         align_corners: bool,
         nan_replacement: Option<f64>,
@@ -77,7 +77,7 @@ impl<'a> Translator<'a> {
             .graph
             .constant(size)
             .cast(normalized.dtype)
-            .expand_rhs(normalized.shape);
+            .expand_rhs(normalized.dims());
         let one = self.constant_like(normalized, 1.0);
         let two = self.constant_like(normalized, 2.0);
         let coordinate = if align_corners {
@@ -101,7 +101,7 @@ impl<'a> Translator<'a> {
     fn bound_grid_index(
         &mut self,
         index: GraphTensor,
-        size: Expression,
+        size: IntExpr,
         padding_mode: i64,
         align_corners: bool,
     ) -> (GraphTensor, GraphTensor) {
@@ -110,7 +110,7 @@ impl<'a> Translator<'a> {
             .graph
             .constant(size)
             .cast(index.dtype)
-            .expand_rhs(index.shape);
+            .expand_rhs(index.dims());
         let upper = size_tensor - self.constant_like(index, 1.0);
         let (coordinate, valid) = match padding_mode {
             0 => (index, self.bool_and(index.ge(zero), index.lt(size_tensor))),
@@ -132,12 +132,12 @@ impl<'a> Translator<'a> {
         &mut self,
         input: GraphTensor,
         indices: &[GraphTensor],
-        output_shape: &[Expression],
+        output_shape: &[IntExpr],
         padding_mode: i64,
         align_corners: bool,
     ) -> GraphTensor {
         let spatial_rank = indices.len();
-        let rank = input.shape.len();
+        let rank = input.legacy_tracker_ref().len();
         let strides = super::movement_dynamic::row_major_strides(&input.dims());
         let mut flat = self.axis_positions(output_shape, 0) * strides[0]
             + self.axis_positions(output_shape, 1) * strides[1];
@@ -193,7 +193,7 @@ impl<'a> Translator<'a> {
         let input = self.get_input_tensor(node, 0)?;
         let grid = self.get_input_tensor(node, 1)?;
         anyhow::ensure!(
-            input.shape.len() == spatial_rank + 2 && grid.shape.len() == spatial_rank + 2,
+            input.legacy_tracker_ref().len() == spatial_rank + 2 && grid.legacy_tracker_ref().len() == spatial_rank + 2,
             "grid_sampler_{spatial_rank}d received invalid ranks"
         );
         anyhow::ensure!(

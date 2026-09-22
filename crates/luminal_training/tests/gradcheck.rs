@@ -4,6 +4,7 @@
 
 use luminal::prelude::*;
 use luminal_training::Backward;
+use model_zoo::model_support;
 
 const EPS: f32 = 1e-2;
 const TOL: f32 = 2e-2;
@@ -24,7 +25,10 @@ fn gradcheck(
     build: impl Fn(&mut Graph, &[GraphTensor]) -> GraphTensor,
 ) {
     let mut cx = Graph::new();
-    let params: Vec<GraphTensor> = param_shapes.iter().map(|s| cx.tensor(*s)).collect();
+    let params: Vec<GraphTensor> = param_shapes
+        .iter()
+        .map(|s| cx.tensor(*s, DType::F32))
+        .collect();
     let loss = build(&mut cx, &params);
     let grads = cx.backward(loss, &params);
     let loss_out = loss.output();
@@ -360,10 +364,10 @@ fn grad_sigmoid_mse() {
 #[test]
 fn mlp_training_decreases_loss() {
     let mut cx = Graph::new();
-    let x = cx.tensor((4, 3));
-    let y = cx.tensor((4, 2));
-    let w1 = cx.tensor((3, 8));
-    let w2 = cx.tensor((8, 2));
+    let x = cx.tensor((4, 3), DType::F32);
+    let y = cx.tensor((4, 2), DType::F32);
+    let w1 = cx.tensor((3, 8), DType::F32);
+    let w2 = cx.tensor((8, 2), DType::F32);
 
     let pred = x.matmul(w1).sigmoid().matmul(w2);
     let d = pred - y;
@@ -430,8 +434,8 @@ fn grad_unfold_windows() {
 #[test]
 fn grad_convnd_weight() {
     let mut cx = Graph::new();
-    let x = cx.tensor((1, 1, 3, 3));
-    let conv = luminal_nn::ConvND::new(
+    let x = cx.tensor((1, 1, 3, 3), DType::F32);
+    let conv = model_support::ConvND::new(
         1,
         2,
         vec![2, 2],
@@ -439,6 +443,8 @@ fn grad_convnd_weight() {
         vec![1, 1],
         vec![0, 0],
         false,
+        DType::F32,
+        &model_support::Namespace::root().child("conv"),
         &mut cx,
     );
     let out = conv.forward(x); // (1,2,2,2)

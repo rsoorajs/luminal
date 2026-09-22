@@ -1,0 +1,86 @@
+; NON-INT dtypes: ungated (float arithmetic carries its own
+; semantics).
+; Layout Tensor Op Reduce Sum Generic
+(rule
+  (
+    (= ?in_layout_tensor (LayoutTensorLit ?in_logical ?in_layout))
+    (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?out_layout))
+    ; WRITE CAPABILITY (ruling 2026-09-01): this backend's kernels write
+    ; `out[i]`, so the rewrite fires only when the out class carries the
+    ; right-major contiguous spelling. The e-graph joins equivalent
+    ; spellings; the matcher matches the hardware's literal one.
+    (= ?out_layout (RightMajorContiguousElementLayoutLit ?out_rm_shape ?out_rm_bits))
+    (= ?out_logical (LogicalReduceSum ?in_logical ?reduction_dim))
+    (= ?value_dtype (dtype-of ?out_logical))
+    (!= ?value_dtype (Int))
+    (!= ?value_dtype (Int64))
+    (= (injectivity-of ?out_layout_tensor) (Injective))
+  )
+  (
+    (let ?layout_tensor_op
+      (LayoutTensorOpLit
+        (LayoutTensorCons ?in_layout_tensor (LayoutTensorNil))
+        (LayoutTensorCons ?out_layout_tensor (LayoutTensorNil))))
+    (union ?layout_tensor_op
+      (LayoutTensorOpReduceSumGeneric ?in_layout_tensor ?reduction_dim ?out_layout))
+  )
+  :ruleset backend
+)
+
+; Int: WRAPS, and mints unproven (LUM-833, temporary). torch
+; wraps integer arithmetic at every width, so the in-width proof
+; refused programs eager runs. The gate returns for index-born
+; integers once overflow follows provenance (LUM-802).
+; Layout Tensor Op Reduce Sum Generic
+(rule
+  (
+    (= ?in_layout_tensor (LayoutTensorLit ?in_logical ?in_layout))
+    (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?out_layout))
+    ; WRITE CAPABILITY (ruling 2026-09-01): this backend's kernels write
+    ; `out[i]`, so the rewrite fires only when the out class carries the
+    ; right-major contiguous spelling. The e-graph joins equivalent
+    ; spellings; the matcher matches the hardware's literal one.
+    (= ?out_layout (RightMajorContiguousElementLayoutLit ?out_rm_shape ?out_rm_bits))
+    (= ?out_logical (LogicalReduceSum ?in_logical ?reduction_dim))
+    (= (dtype-of ?out_logical) (Int))
+    (= (injectivity-of ?out_layout_tensor) (Injective))
+  )
+  (
+    (let ?layout_tensor_op
+      (LayoutTensorOpLit
+        (LayoutTensorCons ?in_layout_tensor (LayoutTensorNil))
+        (LayoutTensorCons ?out_layout_tensor (LayoutTensorNil))))
+    (union ?layout_tensor_op
+      (LayoutTensorOpReduceSumGeneric ?in_layout_tensor ?reduction_dim ?out_layout))
+  )
+  :ruleset backend
+)
+
+; Int64: WRAPS, and mints unproven (LUM-833, temporary). torch
+; wraps integer arithmetic at every width, so the in-width proof
+; refused programs eager runs. The gate returns for index-born
+; integers once overflow follows provenance (LUM-802).
+; Layout Tensor Op Reduce Sum Generic
+(rule
+  (
+    (= ?in_layout_tensor (LayoutTensorLit ?in_logical ?in_layout))
+    (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?out_layout))
+    ; WRITE CAPABILITY (ruling 2026-09-01): this backend's kernels write
+    ; `out[i]`, so the rewrite fires only when the out class carries the
+    ; right-major contiguous spelling. The e-graph joins equivalent
+    ; spellings; the matcher matches the hardware's literal one.
+    (= ?out_layout (RightMajorContiguousElementLayoutLit ?out_rm_shape ?out_rm_bits))
+    (= ?out_logical (LogicalReduceSum ?in_logical ?reduction_dim))
+    (= (dtype-of ?out_logical) (Int64))
+    (= (injectivity-of ?out_layout_tensor) (Injective))
+  )
+  (
+    (let ?layout_tensor_op
+      (LayoutTensorOpLit
+        (LayoutTensorCons ?in_layout_tensor (LayoutTensorNil))
+        (LayoutTensorCons ?out_layout_tensor (LayoutTensorNil))))
+    (union ?layout_tensor_op
+      (LayoutTensorOpReduceSumGeneric ?in_layout_tensor ?reduction_dim ?out_layout))
+  )
+  :ruleset backend
+)

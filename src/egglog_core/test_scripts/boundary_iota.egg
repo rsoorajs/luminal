@@ -1,0 +1,60 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Boundary condition: a ZERO-INPUT program — an iota written straight into a
+; caller-provided output buffer. This is the proof fixture for the source-op
+; path end to end: extraction of an op with an EMPTY operand list, the DPS
+; rewrite where the appended destination is the op's ONLY operand, and
+; bufferization with nothing upstream to alias. The input boundary is the
+; empty list — also deliberately exercised.
+
+(let window_shape (ShapeLit (IntExprCons (IntLit 3) (IntExprCons (IntLit 5) (IntExprNil)))))
+; The row-major linear index: axis 1 outer (extent 3), axis 0 inner (extent 5).
+(let window_expr
+  (IntAdd
+    (IntMul (CoordVar window_shape 1) (IntLit 5))
+    (CoordVar window_shape 0)))
+(let iota_logical (LogicalIota window_expr window_shape))
+
+(let iota_layout (RightMajorContiguousElementLayoutLit window_shape (bits-of (Int))))
+(let iota_layout_tensor (LayoutTensorLit iota_logical iota_layout))
+
+; NAMING (models have no signature — ruling 2026-07-30): the iota result
+; is NAMED by unioning it with a name-only LogicalTensorNamed; the name
+; carries no shape or dtype, so it can never disagree with the value's
+; own derivation. Everything below this section is BINDING: buffer
+; conditions in the reference backend's vocabulary, attached by name.
+(union iota_logical (LogicalTensorNamed (LogicalIdLit "iota_result")))
+
+(let iota_output_buffer_id (BufferLit 300))
+(set (buffer-access-of iota_output_buffer_id) (ReadWrite))
+(set (buffer-freed-by iota_output_buffer_id) (CallerFrees))
+
+(let iota_output_buffer_tensor
+  (BufferTensorLit iota_layout_tensor iota_output_buffer_id))
+
+(let input_boundary (BufferInputLit (BufferTensorNil)))
+
+(let output
+  (BufferOutputLit
+    (BufferTensorCons iota_output_buffer_tensor
+      (BufferTensorNil))))
+
+(run-schedule (saturate (run prop)) (saturate (saturate (run) (run prop)) (run subst-walk)) (saturate (saturate (run) (run backend) (run prop)) (run subst-walk)) (run materializing-copy-mint) (run layout-tensor-op-metadata) (saturate (run fixpoint-invariants)))
+
+; Iota authoring contract: every constructed iota demands its expression's
+; bounds — an absent entry fails the check loudly at the fixpoint.
+(check (= ?demanded_lower (lower-bound-of window_expr)))
+(check (= ?demanded_upper (upper-bound-of window_expr)))
+
+; The zero-input op match fired: the iota is implementable.
+(check
+  (= (LayoutTensorOpIotaGeneric window_expr window_shape iota_layout)
+     (LayoutTensorOpLit
+       (LayoutTensorNil)
+       (LayoutTensorCons iota_layout_tensor (LayoutTensorNil)))))
+
+; The naming union held: the output value IS the named signature lit.
+(check (= iota_logical (LogicalTensorNamed (LogicalIdLit "iota_result"))))
+
+; The output slot carries the iota value in the caller's buffer.
+(check (= (layout-tensor-of iota_output_buffer_tensor) iota_layout_tensor))
+(check (= (buffer-id-of iota_output_buffer_tensor) iota_output_buffer_id))

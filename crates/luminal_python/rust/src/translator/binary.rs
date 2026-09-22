@@ -13,19 +13,19 @@ fn normalize_equal_dims(
     b: &mut GraphTensor,
     sym_ranges: &FxHashMap<Symbol, ExprBounds>,
 ) {
-    for i in 0..a.shape.len() {
-        let lhs = a.shape.dims[i];
-        let rhs = b.shape.dims[i];
+    for i in 0..a.legacy_tracker_ref().len() {
+        let lhs = a.legacy_tracker_ref().dims[i];
+        let rhs = b.legacy_tracker_ref().dims[i];
         if let Some(canonical) = canonical_equal_expr(lhs, rhs, sym_ranges) {
-            a.shape.dims[i] = canonical;
-            b.shape.dims[i] = canonical;
+            a.legacy_tracker_mut().dims[i] = canonical;
+            b.legacy_tracker_mut().dims[i] = canonical;
         }
     }
 }
 
 fn same_dims(
-    lhs: &[Expression],
-    rhs: &[Expression],
+    lhs: &[IntExpr],
+    rhs: &[IntExpr],
     sym_ranges: &FxHashMap<Symbol, ExprBounds>,
 ) -> bool {
     lhs.len() == rhs.len()
@@ -438,7 +438,7 @@ impl<'a> Translator<'a> {
         val: f64,
         op: BinaryOp,
     ) -> GraphTensor {
-        let scalar = self.scalar_constant(val, a.dtype).expand_rhs(a.shape);
+        let scalar = self.scalar_constant(val, a.dtype).expand_rhs(a.dims());
         match op {
             BinaryOp::Add => a + scalar,
             BinaryOp::Mul => a * scalar,
@@ -455,7 +455,7 @@ impl<'a> Translator<'a> {
         op: BinaryOp,
     ) -> GraphTensor {
         if let Some(alpha) = alpha {
-            let scalar = self.scalar_constant(val, a.dtype).expand_rhs(a.shape);
+            let scalar = self.scalar_constant(val, a.dtype).expand_rhs(a.dims());
             let scaled = self.apply_scalar_op(scalar, alpha, BinaryOp::Mul);
             match op {
                 BinaryOp::Add => a + scaled,
@@ -471,7 +471,7 @@ impl<'a> Translator<'a> {
     pub(crate) fn apply_symbolic_scalar_op(
         &mut self,
         a: GraphTensor,
-        val: Expression,
+        val: IntExpr,
         op: BinaryOp,
     ) -> GraphTensor {
         match op {
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn simplifies_mark_dynamic_slice_shapes_using_lower_bound() {
-        let a = Expression::from('a');
+        let a = IntExpr::from('a');
         let lhs = (a.min(1) + a).min(a + 1) - 1;
         let rhs = (a.min(1) + a).min(a);
         let sym_ranges = [(
@@ -506,8 +506,8 @@ mod tests {
         let lhs_simplified = simplify_expr_with_ranges(lhs, &sym_ranges);
         let rhs_simplified = simplify_expr_with_ranges(rhs, &sym_ranges);
 
-        assert_eq!(lhs_simplified, Expression::from('a'));
-        assert_eq!(rhs_simplified, Expression::from('a'));
+        assert_eq!(lhs_simplified, IntExpr::from('a'));
+        assert_eq!(rhs_simplified, IntExpr::from('a'));
         assert!(same_expr_with_ranges(lhs, rhs, &sym_ranges));
     }
 }

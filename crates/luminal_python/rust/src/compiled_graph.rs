@@ -1,7 +1,7 @@
 use luminal::{
     dyn_backend::{BackendCompileArgs, BackendFactory, DynBackend},
     prelude::*,
-    shape::Expression,
+    shape::IntExpr,
     visualization::ToDot,
 };
 use pyo3::prelude::*;
@@ -69,7 +69,7 @@ fn check_dim_bounds(
 /// — multi-variable expressions, non-affine forms, slope==0, and inversions
 /// that don't divide cleanly are all rejected so we never write a wrong
 /// guess into `dyn_map`.
-fn solve_single_var_dim(expr: &Expression, dim_val: usize) -> Option<(Symbol, usize)> {
+fn solve_single_var_dim(expr: &IntExpr, dim_val: usize) -> Option<(Symbol, usize)> {
     use luminal::shape::Term;
     let terms = expr.terms.read();
 
@@ -135,14 +135,14 @@ pub struct GraphTranslation {
     /// Output node identities in exactly the same order as `output_names`.
     /// Names are not unique when a functionalized mutation is also returned.
     pub output_ids: Vec<NodeIndex>,
-    pub output_shape_exprs: Vec<Vec<Expression>>,
+    pub output_shape_exprs: Vec<Vec<IntExpr>>,
     /// Output dtypes as PT2 dtype codes (e.g. 5 = int64, 7 = float32).
     /// Stored as PT2 codes (rather than luminal `DType`) so we can preserve
     /// distinctions luminal collapses internally — notably int64 vs int32,
     /// both of which map to `DType::Int` in luminal but must be reported
     /// back to PyTorch with their original precision.
     pub output_dtypes: Vec<u32>,
-    pub input_shape_exprs: Vec<Vec<Expression>>,
+    pub input_shape_exprs: Vec<Vec<IntExpr>>,
     pub dim_param_map: DimParamMap,
     pub dim_bounds: DimBoundsMap,
     /// (output position, user-input name) for outputs that write back into a
@@ -172,11 +172,11 @@ pub struct CompiledGraph {
     pub output_names: Vec<String>,
     pub output_ids: Vec<NodeIndex>,
     pub output_shapes: Vec<Vec<usize>>,
-    pub output_shape_exprs: Vec<Vec<Expression>>,
+    pub output_shape_exprs: Vec<Vec<IntExpr>>,
     /// Output dtypes as PT2 dtype codes (preserves int64 / int32 distinction
     /// that luminal collapses to `DType::Int` internally).
     pub output_dtypes: Vec<u32>,
-    pub input_shape_exprs: Vec<Vec<Expression>>,
+    pub input_shape_exprs: Vec<Vec<IntExpr>>,
     pub dim_param_map: DimParamMap,
     pub dim_bounds: DimBoundsMap,
     /// See [`GraphTranslation::writeback_outputs`].

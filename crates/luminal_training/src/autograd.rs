@@ -43,14 +43,14 @@ pub fn backward(cx: &mut Graph, loss: GraphTensor, params: &[GraphTensor]) -> Ve
     // contiguous shape. Views live on the consumer side (in each op's stored
     // input ShapeTrackers), so gradients are always accumulated in canonical
     // space and mapped through views by `unview`.
-    let mut dims: FxHashMap<NodeIndex, Vec<Expression>> = FxHashMap::default();
+    let mut dims: FxHashMap<NodeIndex, Vec<IntExpr>> = FxHashMap::default();
     let mut dtypes: FxHashMap<NodeIndex, DType> = FxHashMap::default();
     for p in params {
         assert!(
-            p.shape.is_contiguous(),
+            p.legacy_tracker_ref().is_contiguous(),
             "parameters passed to backward must be contiguous tensors (param {:?} has view {})",
             p.id,
-            p.shape
+            p.legacy_tracker_ref()
         );
         dims.insert(p.id, p.dims());
         dtypes.insert(p.id, p.dtype);
@@ -87,7 +87,7 @@ pub fn backward(cx: &mut Graph, loss: GraphTensor, params: &[GraphTensor]) -> Ve
         .get(&loss.id)
         .cloned()
         .expect("loss node has no derivable shape");
-    let loss_elements = loss_dims.iter().copied().product::<Expression>().simplify();
+    let loss_elements = loss_dims.iter().copied().product::<IntExpr>().simplify();
     assert_eq!(
         loss_elements.as_num(),
         Some(1),
@@ -166,9 +166,9 @@ fn derive_node_meta(
     cx: &Graph,
     n: NodeIndex,
     srcs: &[NodeIndex],
-    dims: &FxHashMap<NodeIndex, Vec<Expression>>,
+    dims: &FxHashMap<NodeIndex, Vec<IntExpr>>,
     dtypes: &FxHashMap<NodeIndex, DType>,
-) -> (Option<Vec<Expression>>, Option<DType>) {
+) -> (Option<Vec<IntExpr>>, Option<DType>) {
     if let Some(op) = cx.try_get_op::<hl::Input>(n) {
         // Dims of an Input aren't recorded on the node; params supply theirs.
         return (None, Some(op.dtype));
@@ -296,7 +296,7 @@ fn vjp(
     n: NodeIndex,
     g: GraphTensor,
     srcs: &[NodeIndex],
-    dims: &FxHashMap<NodeIndex, Vec<Expression>>,
+    dims: &FxHashMap<NodeIndex, Vec<IntExpr>>,
     dtypes: &FxHashMap<NodeIndex, DType>,
     rg: &FxHashSet<NodeIndex>,
 ) -> Vec<(usize, GraphTensor, ShapeTracker)> {
@@ -305,7 +305,7 @@ fn vjp(
         |slot: usize| -> DType { dtypes.get(&srcs[slot]).copied().unwrap_or(DType::F32) };
     // The forward node's own (contiguous) output, reusable in vjps to avoid
     // recomputing e.g. exp2(x).
-    let out_tensor = |out_dims: &[Expression]| -> GraphTensor {
+    let out_tensor = |out_dims: &[IntExpr]| -> GraphTensor {
         GraphTensor::from_id(
             n,
             ShapeTracker::new(out_dims).with_element_bits(g.dtype.bits()),
@@ -514,7 +514,7 @@ fn vjp(
             // grad_src[i] = g[idx[i]] for the write that won each location,
             // 0 for overwritten writes. Write i wins iff no later write i' > i
             // hits the same location, so mask by the count of later duplicates.
-            let gathered = g_flat.gather(idx_flat); // (M,)
+            let gathered = g_flat.gather1d(idx_flat); // (M,)
             let ri = cx.iota('z', m_flat).expand_dim(1, m_flat); // [i, i'] = i
             let ci = cx.iota('z', m_flat).expand_dim(0, m_flat); // [i, i'] = i'
             let later = ri.lt(ci).cast(g.dtype); // (M, M): i' after i
@@ -545,8 +545,8 @@ mod tests {
     #[test]
     fn grad_shapes_match_params() {
         let mut cx = Graph::new();
-        let a = cx.tensor((2, 3));
-        let b = cx.tensor((2, 3));
+        let a = cx.tensor((2, 3), DType::F32);
+        let b = cx.tensor((2, 3), DType::F32);
         let loss = (a * b).sum((0, 1));
         let grads = cx.backward(loss, &[a, b]);
         assert_eq!(grads.len(), 2);
@@ -557,8 +557,8 @@ mod tests {
     #[test]
     fn unused_param_gets_zero_grad() {
         let mut cx = Graph::new();
-        let a = cx.tensor(3);
-        let unused = cx.tensor((4, 2));
+        let a = cx.tensor(3, DType::F32);
+        let unused = cx.tensor((4, 2), DType::F32);
         let loss = a.sum(0);
         let grads = cx.backward(loss, &[a, unused]);
         assert_eq!(grads[1].dims(), unused.dims());
@@ -568,7 +568,7 @@ mod tests {
     #[should_panic(expected = "loss must be a scalar")]
     fn non_scalar_loss_panics() {
         let mut cx = Graph::new();
-        let a = cx.tensor((2, 3));
+        let a = cx.tensor((2, 3), DType::F32);
         let loss = a.sum(1); // shape (2,) — not scalar
         cx.backward(loss, &[a]);
     }
@@ -576,8 +576,8 @@ mod tests {
     #[test]
     fn matmul_grad_shapes() {
         let mut cx = Graph::new();
-        let x = cx.tensor((2, 3));
-        let w = cx.tensor((3, 4));
+        let x = cx.tensor((2, 3), DType::F32);
+        let w = cx.tensor((3, 4), DType::F32);
         let loss = x.matmul(w).sum((0, 1));
         let grads = cx.backward(loss, &[x, w]);
         assert_eq!(grads[0].dims(), x.dims());

@@ -1,0 +1,133 @@
+//! Loading, saturation and code generation work on any host. Candidate
+//! search requires a CUDA device and profiles each distinct plan.
+
+use luminal::bufferize::BufferNode;
+use luminal::dtype::DType;
+use luminal::prelude::FxHashMap;
+use luminal_cuda_lite::{CudaRuntime, kernels};
+
+#[test]
+#[cfg_attr(
+    not(feature = "device"),
+    ignore = "candidate search requires a CUDA device"
+)]
+fn search_produces_a_codegen_complete_plan() {
+    let mut cx = luminal::graph::Graph::new();
+    let a = cx.tensor((2usize, 3usize), DType::F32);
+    let b = cx.tensor((2usize, 3usize), DType::F32);
+    let _out = (a + b) * a;
+
+    let mut rt = CudaRuntime::load(&cx).expect("load");
+    let data: FxHashMap<_, _> = [
+        (a.id, vec![1.0f32, 2., 3., 4., 5., 6.].into()),
+        (b.id, vec![10.0f32, 20., 30., 40., 50., 60.].into()),
+    ]
+    .into_iter()
+    .collect();
+    let outcome = rt
+        .search(&data, &luminal_cuda_lite::harness_search_options())
+        .expect("search under the CUDA allow list");
+    assert!(outcome.plans_profiled > 0, "no plans profiled");
+
+    // Every elected compute node must have a kernel interface — the allow
+    // list promised executable trait implementations.
+    let plan = rt.plan().expect("plan loaded");
+    let mut computes = 0usize;
+    for node in plan.dag.node_weights() {
+        if let BufferNode::Compute { op, .. } = node {
+            computes += 1;
+            let label = op.label();
+            if label == "BufferAlloc" || label == "BufferFree" {
+                continue;
+            }
+            assert!(
+                luminal_cuda_lite::as_kernel_op(op.as_ref()).is_some(),
+                "elected op {label} has no kernel interface"
+            );
+        }
+    }
+    assert!(computes > 0, "plan has no compute nodes");
+
+    rt.set_data(a.id, vec![1.0f32, 2., 3., 4., 5., 6.]).unwrap();
+    rt.set_data(b.id, vec![10.0f32, 20., 30., 40., 50., 60.])
+        .unwrap();
+    #[cfg(not(feature = "device"))]
+    {
+        // Without the device feature, execute refuses loudly.
+        let err = rt
+            .execute()
+            .expect_err("execute must refuse without a device");
+        assert!(
+            err.to_string().contains("device"),
+            "refusal must name the missing feature: {err}"
+        );
+    }
+    #[cfg(feature = "device")]
+    {
+        // With a device: NVRTC-compile, launch on the GPU, and match
+        // the hand-computed numerics: (a+b)*a.
+        rt.execute().expect("device execute");
+        let got = rt.get_f32(_out.id).expect("output payload");
+        assert_eq!(got, vec![11.0f32, 44., 99., 176., 275., 396.]);
+    }
+}
+
+#[test]
+fn codegen_emits_wellformed_sources() {
+    // String-level check on a representative binary kernel: generate
+    // Add over (2,3) f32 and eyeball the load-bearing pieces.
+    use luminal::dtype::PlanDtype;
+    use luminal::layouts::{
+        BitWidthTerm, IntExprTerm, RightMajorContiguousElementLayout, ShapeTerm,
+    };
+    fn rm_layout(dims: &[i64]) -> luminal_cuda_lite::layouts::DecodedLayout {
+        luminal_cuda_lite::layouts::DecodedLayout::of(
+            RightMajorContiguousElementLayout {
+                shape: ShapeTerm(dims.iter().map(|&d| IntExprTerm::Lit(d)).collect()),
+                width: BitWidthTerm(32),
+            },
+            Some(PlanDtype::F32),
+        )
+    }
+    let ctx = kernels::CodegenCtx {
+        operand_dims: vec![
+            vec![2usize.into(), 3usize.into()],
+            vec![2usize.into(), 3usize.into()],
+            vec![2usize.into(), 3usize.into()],
+        ],
+        operand_dtypes: vec![PlanDtype::F32, PlanDtype::F32, PlanDtype::F32],
+        dest_dims: vec![vec![2usize.into(), 3usize.into()]],
+        dest_dtypes: vec![PlanDtype::F32],
+        // The slot layouts ARE the read paths (the hop chain is retired):
+        // all three are dense row-major, so every read simplifies to the
+        // identity and the body collapses to the pre-Option-B text.
+        operand_layouts: vec![rm_layout(&[2, 3]), rm_layout(&[2, 3]), rm_layout(&[2, 3])],
+    };
+    let add = luminal_cuda_lite::ops::add::AddFunctionalDps;
+    let kernel = luminal_cuda_lite::as_kernel_op(&add).expect("add implements KernelOp");
+    let launches = kernel.codegen(&ctx).expect("codegen");
+    assert_eq!(launches.len(), 1);
+    assert_eq!(launches[0].n.literal(), Some(6));
+    assert!(launches[0].source.contains("__global__ void k("));
+    assert!(launches[0].source.contains("a[i] + b[i]"));
+}
+
+#[cfg(not(feature = "device"))]
+#[test]
+fn search_refuses_without_a_device() {
+    let mut graph = luminal::graph::Graph::new();
+    let input = graph.tensor(3, DType::F32);
+    let _out = input + 1.;
+    let mut runtime = CudaRuntime::load(&graph).unwrap();
+    runtime
+        .saturated_egraph()
+        .expect("graph inspection needs no GPU");
+    let error = runtime
+        .search(&Default::default(), &Default::default())
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("candidate search requires"),
+        "{error:#}"
+    );
+    assert!(runtime.plan().is_none());
+}

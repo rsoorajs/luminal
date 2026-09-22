@@ -1,45 +1,200 @@
 use itertools::Itertools;
 
-use crate::{
-    hlir::{Gather, Scatter},
-    prelude::*,
-};
+use crate::graph::{MapEntry, Movement, movement_entries};
+use crate::prelude::*;
 
-/// Select elementwise without arithmetic masking. Multiplying an inactive
-/// branch by zero would let NaNs and infinities leak through (`0 * NaN` is
-/// NaN), which is especially visible when padding tensors containing them.
-fn select_by_index(
-    graph: &mut Graph,
-    index: GraphTensor,
-    if_true: GraphTensor,
-    if_false: GraphTensor,
-) -> GraphTensor {
-    assert_eq!(if_true.dims(), if_false.dims());
-    assert_eq!(if_true.dtype, if_false.dtype);
-    assert_eq!(index.dims(), if_true.dims());
-    assert_eq!(index.dtype, DType::Int);
+/// ONE-APPLY view composer for macro interiors (Austin's ratified rule
+/// 2026-08-26: "one user call = one view node; macro interiors also mint
+/// ONE apply per logical construct, never per-axis loops"). A chain of
+/// movement steps is composed at CONSTRUCTION TIME on the MapEntry tree
+/// — nothing is recorded until `finish()`, which mints exactly one
+/// `LogicalIndexMapApply` (or returns the tensor untouched when the
+/// composed map is the identity). Composition of maps that are ALREADY
+/// recorded stays egglog's job (fold-1); this builder only ever builds
+/// the single map for the single call.
+#[must_use]
+pub struct ViewChain {
+    tensor: GraphTensor,
+    /// Per PARENT axis, an entry over the current (virtual) out space.
+    entries: Vec<MapEntry>,
+    /// The current virtual out dims.
+    dims: Vec<IntExpr>,
+}
 
-    let shape = if_true.dims();
-    let mut packed_shape = shape.clone();
-    packed_shape.push(2usize.into());
-    let even = graph.iota(Expression::from('z') * 2, shape.clone());
-    let odd = graph.iota(Expression::from('z') * 2 + 1, shape.clone());
-    let zero = graph.iota(0, packed_shape).cast(if_true.dtype);
-    let packed = if_true.scatter(odd, if_false.scatter(even, zero));
-    let base = graph.iota(Expression::from('z') * 2, shape);
-    packed.gather(base + index)
+impl ViewChain {
+    pub fn rank(&self) -> usize {
+        self.dims.len()
+    }
+
+    pub fn dims(&self) -> Vec<IntExpr> {
+        self.dims.clone()
+    }
+
+    /// Compose one movement step (its map stated from its own
+    /// parameters, exactly as `apply_movement` would record it).
+    fn step(mut self, movement: Movement) -> Self {
+        match movement_entries(movement, &self.dims) {
+            Ok((step_entries, new_dims)) => {
+                let cur_rank = self.dims.len();
+                for entry in &mut self.entries {
+                    *entry = entry.substitute(&step_entries, cur_rank);
+                }
+                self.dims = new_dims;
+            }
+            Err(reason) => {
+                self.tensor.graph().logical.refuse(reason);
+            }
+        }
+        self
+    }
+
+    pub fn permute(self, axes: impl ToAxes) -> Self {
+        self.step(Movement::Permute(axes.to_axes()))
+    }
+
+    pub fn expand_dim(self, axis: usize, size: impl Into<IntExpr>) -> Self {
+        self.step(Movement::ExpandDim {
+            axis,
+            size: size.into(),
+        })
+    }
+
+    pub fn unsqueeze(self, axis: usize) -> Self {
+        self.expand_dim(axis, 1)
+    }
+
+    /// Same contract rails as `GraphTensor::squeeze`: static non-1
+    /// extents panic loudly; symbolic extents record the extent==1
+    /// post-saturation contract.
+    pub fn squeeze(self, axis: usize) -> Self {
+        let extent = self.dims[axis];
+        match extent.to_usize() {
+            Some(1) => {}
+            Some(n) => panic!("Only dimensions of size 1 can be squeezed! (got {n})"),
+            None => self.tensor.graph().logical.contract_extent_eq(&extent, 1),
+        }
+        self.step(Movement::RemoveDim { axis })
+    }
+
+    /// Same divisibility contract as `GraphTensor::split_dims`
+    /// (decision-only simplify — never a recorded spelling).
+    pub fn split_dims(self, axis: usize, new_dim_size: impl Into<IntExpr>) -> Self {
+        let new_dim_size = new_dim_size.into();
+        assert!(
+            new_dim_size.as_num().is_none_or(|n| n > 0),
+            "split_dims inner dimension must be positive, got {new_dim_size}"
+        );
+        let old_dim = self.dims[axis];
+        let outer_dim = (old_dim / new_dim_size).simplify();
+        assert!(
+            (outer_dim * new_dim_size)
+                .simplify()
+                .egglog_equal(old_dim.simplify()),
+            "split_dims requires the old dimension ({old_dim}) to be exactly divisible by the inner dimension ({new_dim_size})"
+        );
+        self.step(Movement::SplitDims {
+            axis,
+            inner: new_dim_size,
+        })
+    }
+
+    pub fn merge_dims(self, axis1: usize, axis2: usize) -> Self {
+        assert!(axis1 < axis2, "axis1 must be less than axis2");
+        self.step(Movement::MergeDims { axis1, axis2 })
+    }
+
+    /// PyTorch-style broadcast (size-1 axes grow to the target) as a
+    /// chain step.
+    pub fn expand(mut self, new_shape: impl ToShape) -> Self {
+        let target = new_shape.to_shape();
+        assert_eq!(target.len(), self.rank(), "expand rank mismatch");
+        if self.dims == target {
+            return self;
+        }
+        let rank = target.len();
+        let step_entries: Vec<MapEntry> = (0..rank)
+            .map(|p| {
+                if self.dims[p] == target[p] {
+                    MapEntry::Coord {
+                        from_end: rank - 1 - p,
+                        extent: target[p],
+                    }
+                } else {
+                    assert_eq!(
+                        self.dims[p],
+                        IntExpr::from(1),
+                        "expand: axis {p} is {}, only size-1 axes broadcast",
+                        self.dims[p]
+                    );
+                    MapEntry::Lit(0.into())
+                }
+            })
+            .collect();
+        let cur_rank = self.dims.len();
+        for entry in &mut self.entries {
+            *entry = entry.substitute(&step_entries, cur_rank);
+        }
+        self.dims = target;
+        self
+    }
+
+    /// Mint the ONE apply — or nothing at all if the composed map is
+    /// the identity.
+    pub fn finish(self) -> GraphTensor {
+        let source_dims = self.tensor.dims();
+        let rank = source_dims.len();
+        let identity = self.dims == source_dims
+            && self.entries.len() == rank
+            && self.entries.iter().enumerate().all(|(p, entry)| {
+                matches!(entry, MapEntry::Coord { from_end, .. } if *from_end == rank - 1 - p)
+            });
+        if identity {
+            return self.tensor;
+        }
+        self.tensor.record_view_map(self.entries, self.dims)
+    }
+}
+
+impl GraphTensor {
+    /// Open a ONE-APPLY view chain (see [`ViewChain`]).
+    pub fn view(self) -> ViewChain {
+        let dims = self.dims();
+        let rank = dims.len();
+        ViewChain {
+            tensor: self,
+            entries: (0..rank)
+                .map(|p| MapEntry::Coord {
+                    from_end: rank - 1 - p,
+                    extent: dims[p],
+                })
+                .collect(),
+            dims,
+        }
+    }
 }
 
 impl GraphTensor {
     /// Swap dimensions of the tensor
-    pub fn permute(mut self, axes: impl ToAxes) -> GraphTensor {
-        self.shape.permute(axes.to_axes());
-        self
+    pub fn permute(self, axes: impl ToAxes) -> GraphTensor {
+        let axes = axes.to_axes();
+        assert!(
+            axes.len() == self.rank(),
+            "Permute axes ({}) doesn't match shape axes ({})",
+            axes.len(),
+            self.rank()
+        );
+        let current_dims = self.dims();
+        let value = self.graph().logical.apply_movement(
+            &(self.id, current_dims),
+            crate::graph::Movement::Permute(axes),
+        );
+        // R-D: dims derive from the recorded value (with_logical).
+        self.with_logical(value)
     }
 
     /// Swap 2 dimensions. This is a view-only operation and does not materialize a new tensor
     pub fn transpose(self, dim0: usize, dim1: usize) -> GraphTensor {
-        let num_dims = self.shape.len();
+        let num_dims = self.rank();
         assert!(
             dim0 < num_dims && dim1 < num_dims,
             "transpose dimensions ({dim0}, {dim1}) out of bounds for tensor with {num_dims} dimensions"
@@ -51,87 +206,213 @@ impl GraphTensor {
 
     /// Transpose a 2D tensor
     pub fn t(self) -> GraphTensor {
-        assert_eq!(self.shape.len(), 2, ".t() supports only 2D tensors");
+        assert_eq!(self.rank(), 2, ".t() supports only 2D tensors");
         self.transpose(0, 1)
     }
 
     /// Broadcast tensor along a new dimension
-    pub fn expand_dim(mut self, axis: usize, size: impl Into<Expression>) -> GraphTensor {
-        self.shape.expand_dim(axis, size);
-        self
+    pub fn expand_dim(self, axis: usize, size: impl Into<IntExpr>) -> GraphTensor {
+        let size = size.into();
+        let current_dims = self.dims();
+        let value = self.graph().logical.apply_movement(
+            &(self.id, current_dims),
+            crate::graph::Movement::ExpandDim { axis, size },
+        );
+        // R-D: dims derive from the recorded value (with_logical).
+        self.with_logical(value)
     }
 
     /// Broadcast tensor along new dimensions on the right-hand-side. For instance, if the original tensor is [5, 2] and you call .expand([4, 2, 3]), the final  tensor will be [5, 2, 4, 2, 3]
-    pub fn expand_rhs(mut self, shape: impl ToShape) -> GraphTensor {
-        let orig_dims = self.shape.len();
+    ///
+    /// ONE apply (ruling 2026-08-26): a rank-0 constant into shape S
+    /// records an empty entry list tagged with the scalar source shape.
+    pub fn expand_rhs(self, shape: impl ToShape) -> GraphTensor {
+        let orig_dims = self.rank();
+        let mut chain = self.view();
         for (i, s) in shape.to_shape().into_iter().enumerate() {
-            self.shape.expand_dim(orig_dims + i, s);
+            chain = chain.expand_dim(orig_dims + i, s);
         }
-        self
+        chain.finish()
     }
 
     /// Tile a tensor along its existing dimensions without materializing a new buffer.
-    pub fn repeat(mut self, repeats: impl ToShape) -> GraphTensor {
-        self.shape.repeat(repeats);
-        self
+    pub fn repeat(self, repeats: impl ToShape) -> GraphTensor {
+        let repeats = repeats.to_shape();
+        assert_eq!(
+            repeats.len(),
+            self.rank(),
+            "Repeat shape ({}) doesn't match tensor dimensions ({})",
+            repeats.len(),
+            self.rank()
+        );
+        let current_dims = self.dims();
+        let value = self.graph().logical.apply_movement(
+            &(self.id, current_dims),
+            crate::graph::Movement::Repeat(repeats),
+        );
+        // R-D: dims derive from the recorded value (with_logical).
+        self.with_logical(value)
+    }
+
+    /// Record ONE view apply from an explicit entry list (fold-2
+    /// removal, Austin's ruling 2026-08-26): the map is stated directly
+    /// at the source of truth — no intermediate movement scaffolding.
+    /// Entries are listed per PARENT axis (outermost inward), each an
+    /// expression in the OUT space's coordinates (from-end convention).
+    pub(crate) fn record_view_map(
+        mut self,
+        entries: Vec<crate::graph::MapEntry>,
+        out_dims: Vec<IntExpr>,
+    ) -> GraphTensor {
+        let operand = (self.id, self.dims());
+        let value = self
+            .graph()
+            .logical
+            .view_op(&operand, &entries, out_dims.clone(), self.dtype);
+        // Poisoned fallback: keep the stated out shape so downstream
+        // reads stay panic-free; when recorded, with_logical re-derives
+        // the dims from the recorder (R-D).
+        self.dims = out_dims.into_iter().collect();
+        self.with_logical(value)
     }
 
     /// Broadcast tensor along new dimensions on the left-hand-side. For instance, if the original tensor is [5, 2] and you call .expand([4, 2, 3]), the final  tensor will be [5, 2, 4, 2, 3]
-    pub fn expand_lhs(mut self, shape: impl ToShape) -> GraphTensor {
-        for (i, s) in shape.to_shape().into_iter().enumerate() {
-            self.shape.expand_dim(i, s);
+    /// PyTorch-style expand: every size-1 axis whose target size differs
+    /// broadcasts to it. Non-1 axes must already match. Records ONE
+    /// direct apply (fold-2 removal): broadcast axes read Lit 0, kept
+    /// axes read their like-positioned out coordinate.
+    pub fn expand(self, new_shape: impl ToShape) -> GraphTensor {
+        let target = new_shape.to_shape();
+        assert_eq!(target.len(), self.rank(), "expand rank mismatch");
+        let current = self.dims();
+        let rank = target.len();
+        if current == target {
+            return self;
         }
-        self
+        let entries: Vec<crate::graph::MapEntry> = (0..rank)
+            .map(|p| {
+                if current[p] == target[p] {
+                    crate::graph::MapEntry::Coord {
+                        from_end: rank - 1 - p,
+                        extent: target[p],
+                    }
+                } else {
+                    assert_eq!(
+                        current[p],
+                        IntExpr::from(1),
+                        "expand: axis {p} is {}, only size-1 axes broadcast",
+                        current[p]
+                    );
+                    crate::graph::MapEntry::Lit(0.into())
+                }
+            })
+            .collect();
+        self.record_view_map(entries, target)
     }
 
-    pub fn expand_to_shape_on_axes(
-        mut self,
-        shape: impl ToShape,
-        axes: impl ToAxes,
-    ) -> GraphTensor {
+    /// ONE apply (ruling 2026-08-26) — see `expand_rhs`.
+    pub fn expand_lhs(self, shape: impl ToShape) -> GraphTensor {
+        let mut chain = self.view();
+        for (i, s) in shape.to_shape().into_iter().enumerate() {
+            chain = chain.expand_dim(i, s);
+        }
+        chain.finish()
+    }
+
+    /// ONE apply (ruling 2026-08-26) — see `expand_rhs`.
+    pub fn expand_to_shape_on_axes(self, shape: impl ToShape, axes: impl ToAxes) -> GraphTensor {
         let shape = shape.to_shape();
         let axes = axes.to_axes();
-        assert_eq!(shape.len(), self.shape.len() + axes.len());
+        assert_eq!(shape.len(), self.rank() + axes.len());
+        let mut chain = self.view();
         for axis in axes.into_iter().sorted() {
-            self = self.expand_dim(axis, shape[axis]);
+            chain = chain.expand_dim(axis, shape[axis]);
         }
-        self
+        chain.finish()
     }
 
     /// Merge two dimensions together
-    pub fn merge_dims(mut self, axis1: usize, axis2: usize) -> GraphTensor {
-        self.shape.merge_dims(axis1, axis2);
-        self
+    pub fn merge_dims(self, axis1: usize, axis2: usize) -> GraphTensor {
+        assert!(axis1 < axis2, "axis1 must be less than axis2");
+        let current_dims = self.dims();
+        let value = self.graph().logical.apply_movement(
+            &(self.id, current_dims),
+            crate::graph::Movement::MergeDims { axis1, axis2 },
+        );
+        // R-D: dims derive from the recorded value (with_logical).
+        self.with_logical(value)
     }
 
-    /// Flatten all dimensions into a single 1D tensor.
-    pub fn flatten(mut self) -> GraphTensor {
-        self.shape.flatten();
-        self
+    /// Flatten all dimensions into a single 1D tensor — ONE apply
+    /// (ruling 2026-08-26): the full merge arithmetic is composed at
+    /// map construction inside this one call.
+    pub fn flatten(self) -> GraphTensor {
+        let mut chain = self.view();
+        while chain.rank() > 1 {
+            chain = chain.merge_dims(0, 1);
+        }
+        chain.finish()
     }
 
     //// Split a dim into 2 dims, new dim is placed directly after original dim
-    pub fn split_dims(mut self, axis: usize, new_dim_size: impl Into<Expression>) -> GraphTensor {
-        self.shape.split_dims(axis, new_dim_size);
-        self
+    pub fn split_dims(self, axis: usize, new_dim_size: impl Into<IntExpr>) -> GraphTensor {
+        let new_dim_size = new_dim_size.into();
+        assert!(
+            new_dim_size.as_num().is_none_or(|n| n > 0),
+            "split_dims inner dimension must be positive, got {new_dim_size}"
+        );
+        let old_dim = self.dims[axis];
+        // Divisibility DECISION: simplify here is decision-only (never
+        // stored, never rendered into the model).
+        let outer_dim = (old_dim / new_dim_size).simplify();
+        assert!(
+            (outer_dim * new_dim_size)
+                .simplify()
+                .egglog_equal(old_dim.simplify()),
+            "split_dims requires the old dimension ({old_dim}) to be exactly divisible by the inner dimension ({new_dim_size})"
+        );
+        let current_dims = self.dims();
+        let value = self.graph().logical.apply_movement(
+            &(self.id, current_dims),
+            crate::graph::Movement::SplitDims {
+                axis,
+                inner: new_dim_size,
+            },
+        );
+        // R-D: dims derive from the recorded value (with_logical).
+        self.with_logical(value)
     }
 
     /// add a new dimension of size 1 at the specified place
-    pub fn unsqueeze(mut self, dim: usize) -> GraphTensor {
-        assert!(self.shape.len() < 10, "Shape is maxed out at 10 dimensions");
-        self.shape.expand_dim(dim, 1);
-        self
+    pub fn unsqueeze(self, dim: usize) -> GraphTensor {
+        assert!(self.rank() < 10, "Shape is maxed out at 10 dimensions");
+        self.expand_dim(dim, 1)
     }
 
     /// remove a dimension of size 1
-    pub fn squeeze(mut self, axis: usize) -> GraphTensor {
-        assert_eq!(
-            self.dims()[axis],
-            Expression::from(1),
-            "Only dimensions of size 1 can be squeezed!"
+    pub fn squeeze(self, axis: usize) -> GraphTensor {
+        let extent = self.dims()[axis];
+        // DECISION site: `to_usize` EVALUATES the RPN (exec with no
+        // vars), so any STATIC spelling — simplified or raw — lands in
+        // the Some arms; only genuinely symbolic extents take the
+        // recorded post-saturation contract below.
+        match extent.to_usize() {
+            Some(1) => {}
+            Some(n) => panic!("Only dimensions of size 1 can be squeezed! (got {n})"),
+            // A SYMBOLIC extent: squeeze is a CONTRACT that this axis
+            // is 1 (a data-dependent rank is unrepresentable). Recorded
+            // unconditionally; a post-saturation invariant refuses any
+            // binding/bucket that admits values other than 1 (ruling
+            // 2026-08-13, option 3 — bucket the dim to [1,1] to pass).
+            None => self.graph().logical.contract_extent_eq(&extent, 1),
+        }
+        let current_dims = self.dims();
+        let value = self.graph().logical.apply_movement(
+            &(self.id, current_dims),
+            crate::graph::Movement::RemoveDim { axis },
         );
-        self.shape.remove_dim(axis);
-        self
+        // R-D: dims derive from the recorded value (with_logical).
+        self.with_logical(value)
     }
 
     /// Gather elements along an axis using per-element indices (ONNX GatherElements semantics).
@@ -142,63 +423,57 @@ impl GraphTensor {
     pub fn gather_elements(self, indexes: GraphTensor, axis: usize) -> GraphTensor {
         let dims = self.dims();
         let rank = dims.len();
-        let out_shape: Vec<usize> = indexes
-            .dims()
-            .iter()
-            .map(|d| {
-                d.to_usize()
-                    .expect("gather_elements: index dim must be concrete")
-            })
-            .collect();
+        let out_shape: Vec<IntExpr> = indexes.dims();
 
-        // Row-major strides: stride[i] = prod(dims[i+1..])
-        let strides: Vec<usize> = (0..rank)
+        // Row-major strides: stride[i] = prod(dims[i+1..]) — SYMBOLIC
+        // IntExpr products (ruling 2026-08-13: the frontend computes
+        // nothing eagerly that the expression language can carry; static
+        // dims still fold to literals via to_usize so the recorded text
+        // is unchanged for concrete shapes).
+        let strides: Vec<IntExpr> = (0..rank)
             .map(|i| {
-                dims[i + 1..]
+                let product = dims[i + 1..]
                     .iter()
-                    .map(|d| d.to_usize().unwrap())
-                    .product()
+                    .fold(IntExpr::from(1), |acc, d| acc * *d);
+                product.to_usize().map(IntExpr::from).unwrap_or(product)
             })
             .collect();
 
-        // Normalize negative indices for axis dim
-        let axis_dim = dims[axis].to_usize().unwrap();
-        let idx_f32 = indexes.cast(DType::F32);
-        let zero = idx_f32
+        // Normalize negative indices for axis dim (symbolic-capable).
+        let axis_dim = dims[axis];
+        // Int-native normalization (2026-08-11): the comparison and the
+        // adjustment stay in i32 end to end — the old f32 detour ended
+        // in a cast back to Int, which the cast policy now refuses.
+        assert_eq!(indexes.dtype, DType::Int, "index tensor must be Int");
+        let zero = indexes.graph().constant_i32(0).expand_rhs(indexes.dims());
+        let adj = indexes
             .graph()
-            .constant_float(0.0)
-            .expand_rhs(idx_f32.shape);
-        let adj = idx_f32
-            .graph()
-            .constant_float(axis_dim as f32)
-            .expand_rhs(idx_f32.shape);
-        let is_neg = idx_f32.lt(zero).cast(DType::F32);
-        let idx_normalized = (idx_f32 + (is_neg * adj)).cast(DType::Int);
+            .constant_i32(axis_dim)
+            .expand_rhs(indexes.dims());
+        let is_neg = indexes.lt(zero).cast(DType::Int);
+        // Plain Int arithmetic is proof-gated (non-wrapping ruling): this
+        // graph implements only when the caller DECLARES the index
+        // tensor's value range at binding time (`bind_value_range` —
+        // gather semantics already require indices in [-d, d), so the
+        // declaration states what the data must satisfy anyway).
+        let idx_normalized = indexes + is_neg * adj;
 
-        // Non-axis flat index via iota + flatten_strides
-        let axis_exprs: Vec<Expression> = (0..rank)
-            .map(|d| {
-                if d == axis {
-                    Expression::from(0)
-                } else {
-                    Expression::from('z') * strides[d]
-                }
-            })
-            .collect();
-        let out_shape_expr: Vec<Expression> =
-            out_shape.iter().map(|&s| Expression::from(s)).collect();
-        let non_axis_flat = self
-            .graph()
-            .iota(flatten_strides(&out_shape_expr, &axis_exprs), out_shape);
+        // Non-axis flat contribution as a coordinate function — no
+        // flat-index div/mod chain ever enters the model (P1, 2026-08-07).
+        let non_axis_flat = self.graph().iota(out_shape, |c| {
+            (0..rank)
+                .filter(|d| *d != axis)
+                .fold(IntExpr::from(0), |acc, d| acc + c[d] * strides[d])
+        });
 
         // Axis contribution from the runtime index values
         let stride_tensor = self
             .graph()
-            .constant(strides[axis])
-            .expand_rhs(idx_normalized.shape);
+            .constant_i32(strides[axis])
+            .expand_rhs(idx_normalized.dims());
         let flat_idx = non_axis_flat + idx_normalized * stride_tensor;
 
-        self.gather(flat_idx)
+        self.gather1d(flat_idx)
     }
 
     /// Scatter updates into a copy of self at positions specified by per-element indices along an axis.
@@ -216,61 +491,45 @@ impl GraphTensor {
     ) -> GraphTensor {
         let data_dims = self.dims();
         let rank = data_dims.len();
-        let idx_shape: Vec<usize> = indices
-            .dims()
-            .iter()
-            .map(|d| {
-                d.to_usize()
-                    .expect("scatter_elements: index dim must be concrete")
-            })
-            .collect();
+        let idx_shape: Vec<IntExpr> = indices.dims();
 
-        // Row-major strides for data
-        let strides: Vec<usize> = (0..rank)
+        // Row-major strides for data — symbolic IntExpr products
+        // (see gather_elements; static dims fold to literals).
+        let strides: Vec<IntExpr> = (0..rank)
             .map(|i| {
-                data_dims[i + 1..]
+                let product = data_dims[i + 1..]
                     .iter()
-                    .map(|d| d.to_usize().unwrap())
-                    .product()
+                    .fold(IntExpr::from(1), |acc, d| acc * *d);
+                product.to_usize().map(IntExpr::from).unwrap_or(product)
             })
             .collect();
 
-        // Normalize negative indices for axis dim
-        let axis_dim = data_dims[axis].to_usize().unwrap();
-        let idx_f32 = indices.cast(DType::F32);
-        let zero = idx_f32
+        // Normalize negative indices for axis dim (symbolic-capable).
+        let axis_dim = data_dims[axis];
+        // Int-native normalization (2026-08-11) — see gather_elements.
+        assert_eq!(indices.dtype, DType::Int, "index tensor must be Int");
+        let zero = indices.graph().constant_i32(0).expand_rhs(indices.dims());
+        let adj = indices
             .graph()
-            .constant_float(0.0)
-            .expand_rhs(idx_f32.shape);
-        let adj = idx_f32
-            .graph()
-            .constant_float(axis_dim as f32)
-            .expand_rhs(idx_f32.shape);
-        let is_neg = idx_f32.lt(zero).cast(DType::F32);
-        let idx_normalized = (idx_f32 + (is_neg * adj)).cast(DType::Int);
+            .constant_i32(axis_dim)
+            .expand_rhs(indices.dims());
+        let is_neg = indices.lt(zero).cast(DType::Int);
+        // Proof-gated plain arithmetic — see gather_elements: the caller
+        // declares the index range at binding time.
+        let idx_normalized = indices + is_neg * adj;
 
-        // Non-axis flat index via iota + flatten_strides
-        let axis_exprs: Vec<Expression> = (0..rank)
-            .map(|d| {
-                if d == axis {
-                    Expression::from(0)
-                } else {
-                    Expression::from('z') * strides[d]
-                }
-            })
-            .collect();
-        let idx_shape_expr: Vec<Expression> =
-            idx_shape.iter().map(|&s| Expression::from(s)).collect();
-        let non_axis_flat = self.graph().iota(
-            flatten_strides(&idx_shape_expr, &axis_exprs),
-            idx_shape.clone(),
-        );
+        // Non-axis flat contribution as a coordinate function (P1).
+        let non_axis_flat = self.graph().iota(idx_shape.clone(), |c| {
+            (0..rank)
+                .filter(|d| *d != axis)
+                .fold(IntExpr::from(0), |acc, d| acc + c[d] * strides[d])
+        });
 
         // Axis contribution from the runtime index values
         let stride_tensor = self
             .graph()
-            .constant(strides[axis])
-            .expand_rhs(idx_normalized.shape);
+            .constant_i32(strides[axis])
+            .expand_rhs(idx_normalized.dims());
         let flat_dest = non_axis_flat + idx_normalized * stride_tensor;
 
         // Flatten to 1D using materialize + reshape
@@ -278,16 +537,9 @@ impl GraphTensor {
         let flat_updates = updates.flatten();
         let flat_data = self.flatten();
 
-        // Use HLIR Scatter: dest[indexes[i]] = src[i]
-        let output_flat = flat_updates.scatter(flat_dest_1d, flat_data);
-
-        // Reshape back to data_shape
-        let data_shape_usize: Vec<usize> =
-            data_dims.iter().map(|d| d.to_usize().unwrap()).collect();
-        let mut result = output_flat;
-        result.shape = ShapeTracker::new(data_shape_usize);
-
-        result
+        // dest.flat[indexes[i]] = src[i], then rebuild data's shape
+        let output_flat = flat_updates.scatter1d(flat_dest_1d, flat_data);
+        output_flat.unflatten_to(&data_dims)
     }
 
     /// Scatter updates into a copy of self using multi-dimensional index vectors (ONNX ScatterND semantics).
@@ -298,54 +550,59 @@ impl GraphTensor {
     ///   multi_idx = indices[s0, ..., sq-2, :]
     ///   output[multi_idx[0], ..., multi_idx[K-1], :, ..] = updates[s0, ..., sq-2, :, ..]
     pub fn scatter_nd(self, indices: GraphTensor, updates: GraphTensor) -> GraphTensor {
-        let indices = indices.cast(DType::Int);
+        // Was a convenience cast; a float index tensor would now record
+        // the refused f32 -> Int cast, so demand Int at the door.
+        assert_eq!(indices.dtype, DType::Int, "scatter_nd indices must be Int");
         let data_dims = self.dims();
         let data_rank = data_dims.len();
         let idx_dims = indices.dims();
         let idx_rank = idx_dims.len();
 
-        let data_shape: Vec<usize> = data_dims
-            .iter()
-            .map(|d| d.to_usize().expect("scatter_nd: data dim must be concrete"))
-            .collect();
-        let idx_shape: Vec<usize> = idx_dims
-            .iter()
-            .map(|d| {
-                d.to_usize()
-                    .expect("scatter_nd: indices dim must be concrete")
-            })
-            .collect();
-
-        let k = idx_shape[idx_rank - 1]; // last dim of indices = number of index dimensions
+        // K is STRUCTURAL — it fixes how many slice extractions the
+        // recorder emits (a rank, not an extent) — so it alone must be
+        // concrete. Every other quantity stays a symbolic IntExpr
+        // (ruling 2026-08-13: nothing eager in the frontend that the
+        // expression language can carry; static dims fold to literals).
+        let k = idx_dims[idx_rank - 1]
+            .to_usize()
+            .expect("scatter_nd: K (last indices dim) is structural and must be concrete");
         assert!(k <= data_rank, "scatter_nd: K must be <= data rank");
 
-        // Batch shape = indices shape without last dim: [S0, ..., Sq-2]
-        let batch_shape: Vec<usize> = idx_shape[..idx_rank - 1].to_vec();
-        let batch_numel: usize = batch_shape.iter().product::<usize>().max(1);
+        let fold_product = |dims: &[IntExpr]| {
+            let product = dims.iter().fold(IntExpr::from(1), |acc, d| acc * *d);
+            product.to_usize().map(IntExpr::from).unwrap_or(product)
+        };
+        // Batch numel = product of indices shape without the last dim.
+        let batch_numel = fold_product(&idx_dims[..idx_rank - 1]);
+        // Trailing shape = data dims [K..].
+        let trailing_shape: Vec<IntExpr> = data_dims[k..].to_vec();
+        let trailing_numel = fold_product(&trailing_shape);
 
-        // Trailing shape = data_shape[K..]
-        let trailing_shape: Vec<usize> = data_shape[k..].to_vec();
-        let trailing_numel: usize = trailing_shape.iter().product::<usize>().max(1);
-
-        // Row-major strides for data
-        let data_strides: Vec<usize> = (0..data_rank)
-            .map(|i| data_shape[i + 1..].iter().product::<usize>().max(1))
+        // Row-major strides for data — symbolic products.
+        let data_strides: Vec<IntExpr> = (0..data_rank)
+            .map(|i| fold_product(&data_dims[i + 1..]))
             .collect();
 
-        // Flatten batch dims of indices to [batch_numel, K] using materialize + reshape
-        let mut indices_flat = indices;
-        if idx_rank > 2 {
-            indices_flat.shape = ShapeTracker::new(vec![batch_numel, k]);
-        }
+        // Flatten batch dims of indices to [batch_numel, K] — ONE apply
+        // (ruling 2026-08-26).
+        let indices_flat = {
+            let mut chain = indices.view();
+            while chain.rank() > 2 {
+                chain = chain.merge_dims(0, 1);
+            }
+            chain.finish()
+        };
         // indices_flat: [batch_numel, K] or [K] if idx_rank == 1
 
         // For each k_dim, extract the slice and multiply by stride
         let mut flat_base: Option<GraphTensor> = None;
-        for (k_dim, &stride) in data_strides.iter().enumerate().take(k) {
+        for (k_dim, stride) in data_strides.iter().copied().enumerate().take(k) {
             let idx_k = indices_flat.slice_along(k_dim..k_dim + 1, indices_flat.dims().len() - 1);
             let idx_k = idx_k.squeeze(idx_k.dims().len() - 1);
 
-            let stride_tensor = self.graph().constant(stride).expand_rhs(idx_k.shape);
+            let stride_tensor = self.graph().constant_i32(stride).expand_rhs(idx_k.dims());
+            // Proof-gated plain arithmetic — see gather_elements: the
+            // caller declares the index range at binding time.
             let contribution = idx_k * stride_tensor;
 
             flat_base = Some(match flat_base {
@@ -355,38 +612,23 @@ impl GraphTensor {
         }
         let flat_base = flat_base.unwrap();
 
-        let mut full_flat_dest = if trailing_shape.is_empty() || trailing_numel == 1 {
-            flat_base
-        } else {
-            // Expand flat_base to [batch_numel, trailing_numel]
-            let mut base_expanded = flat_base.expand_dim(1, trailing_numel);
-
-            let trailing_rank = trailing_shape.len();
-            for (ti, d) in (k..data_rank).enumerate() {
-                let ar = self.graph().arange(data_shape[d]);
-                let mut ar_shaped = ar;
-                for _ in ti + 1..trailing_rank {
-                    let n = ar_shaped.dims().len();
-                    ar_shaped = ar_shaped.expand_dim(n, 1);
-                }
-                for _ in 0..ti {
-                    ar_shaped = ar_shaped.expand_dim(0, 1);
-                }
-                ar_shaped.shape.expand(trailing_shape.clone());
-                // Flatten trailing dims using materialize + reshape
-                let mut ar_flat = ar_shaped;
-                ar_flat.shape = ShapeTracker::new(vec![trailing_numel]);
-                // Expand to [batch_numel, trailing_numel]
-                ar_flat = ar_flat.expand_dim(0, batch_numel);
-
-                let stride_tensor = self
-                    .graph()
-                    .constant(data_strides[d])
-                    .expand_rhs(ar_flat.shape);
-                base_expanded += ar_flat * stride_tensor;
-            }
-            base_expanded
-        };
+        let mut full_flat_dest =
+            if trailing_shape.is_empty() || trailing_numel.to_usize() == Some(1) {
+                flat_base
+            } else {
+                // The trailing offset is a pure COORDINATE FUNCTION over the
+                // trailing space (P1, 2026-08-07: no flat div/mod chain) —
+                // ONE iota + two broadcast applies replace the per-dim
+                // arange/expand scaffolding (ruling 2026-08-26).
+                let trailing_strides: Vec<IntExpr> = data_strides[k..].to_vec();
+                let trailing_offset = self.graph().iota(trailing_shape.clone(), move |c| {
+                    (0..c.len()).fold(IntExpr::from(0), |acc, ti| {
+                        acc + c[ti] * trailing_strides[ti]
+                    })
+                });
+                flat_base.expand_rhs(trailing_shape.clone())
+                    + trailing_offset.expand_lhs(vec![batch_numel])
+            };
 
         full_flat_dest = full_flat_dest.flatten();
 
@@ -394,62 +636,136 @@ impl GraphTensor {
         let flat_updates = updates.flatten();
         let flat_data = self.flatten();
 
-        // Use HLIR Scatter: dest[indexes[i]] = src[i]
-        let output_flat = flat_updates.scatter(full_flat_dest, flat_data);
-
-        // Reshape back to data_shape
-        let mut result = output_flat;
-        result.shape = ShapeTracker::new(data_shape);
-
-        result
+        // dest.flat[indexes[i]] = src[i], then rebuild data's shape
+        let output_flat = flat_updates.scatter1d(full_flat_dest, flat_data);
+        output_flat.unflatten_to(&data_dims)
     }
 
-    pub fn gather(self, indexes: GraphTensor) -> GraphTensor {
+    /// COORDINATE-FORM gather — THE primary (ruling 2026-07-31): one Int
+    /// coordinate tensor per data axis, each over the OUTPUT shape:
+    /// `out[c] = data[coords[0][c], ..., coords[r-1][c]]` — numpy fancy
+    /// indexing / unpacked GatherND, mapping 1:1 onto LogicalGather. The
+    /// HLIR side lowers transitionally to flat-index arithmetic + the flat
+    /// Gather (dies with the HLIR pipeline at M3 Step 4); the recorder
+    /// emits the coordinate form DIRECTLY.
+    pub fn gather(self, coords: &[GraphTensor]) -> GraphTensor {
+        assert_eq!(
+            coords.len(),
+            self.rank(),
+            "gather: one coordinate tensor per data axis"
+        );
+        assert!(!coords.is_empty(), "gather: rank-0 data has no axes");
+        let out_dims = coords[0].dims();
+        for coord in coords {
+            assert_eq!(coord.dtype, DType::Int, "gather coordinates must be Int");
+            assert_eq!(
+                coord.dims(),
+                out_dims,
+                "gather coordinates share the out shape"
+            );
+        }
+        let dims = self.dims();
+        let data_operand = (self.id, dims);
+        let coord_operands: Vec<_> = coords
+            .iter()
+            .map(|coord| (coord.id, coord.dims()))
+            .collect();
+        let id = self.graph().logical.record_gather(
+            &data_operand,
+            &coord_operands,
+            out_dims.clone(),
+            self.dtype,
+        );
+        GraphTensor::from_id(id, out_dims, self.graph_ref, self.dtype)
+    }
+
+    /// COORDINATE-FORM scatter — THE primary (ruling 2026-07-31): self is
+    /// the init/dest; `src` lands at the positions the coordinate tensors
+    /// name (one per dest axis, each over src's shape). Copy-then-write
+    /// value semantics; in-place is a binding + search decision.
+    pub fn scatter(self, coords: &[GraphTensor], src: GraphTensor) -> GraphTensor {
+        assert_eq!(
+            coords.len(),
+            self.rank(),
+            "scatter: one coordinate tensor per dest axis"
+        );
+        assert!(!coords.is_empty(), "scatter: rank-0 dest has no axes");
+        let index_dims = src.dims();
+        for coord in coords {
+            assert_eq!(coord.dtype, DType::Int, "scatter coordinates must be Int");
+            assert_eq!(
+                coord.dims(),
+                index_dims,
+                "scatter coordinates share src's shape"
+            );
+        }
+        let dims = self.dims();
+        let init_operand = (self.id, dims.clone());
+        let src_operand = (src.id, index_dims);
+        let coord_operands: Vec<_> = coords
+            .iter()
+            .map(|coord| (coord.id, coord.dims()))
+            .collect();
+        let id = self.graph().logical.record_scatter(
+            &init_operand,
+            &coord_operands,
+            &src_operand,
+            dims.clone(),
+            self.dtype,
+        );
+        GraphTensor::from_id(id, dims, self.graph_ref, self.dtype)
+    }
+
+    /// Rebuild a multi-dim shape from a flat tensor with recorded splits
+    /// (the inverse of `flatten`; there is no wholesale reshape in the
+    /// recorded vocabulary).
+    pub(crate) fn unflatten_to(self, dims: &[IntExpr]) -> GraphTensor {
+        assert_eq!(self.rank(), 1, "unflatten_to starts from a flat tensor");
+        // ONE apply (ruling 2026-08-26): the split arithmetic composes
+        // at map construction inside this one call.
+        let mut chain = self.view();
+        for axis in 0..dims.len().saturating_sub(1) {
+            // Frontend simplification restored (revert ruling 2026-08-27).
+            let inner: IntExpr = dims[axis + 1..]
+                .iter()
+                .copied()
+                .fold(IntExpr::from(1), |acc, d| acc * d)
+                .simplify();
+            chain = chain.split_dims(axis, inner);
+        }
+        chain.finish()
+    }
+
+    /// FLAT gather over flat data: out[c] = data.flat[indexes[c]], out
+    /// shape = indexes' shape. Sugar over the coordinate form: flatten the
+    /// data, then the index tensor IS the single coordinate tensor.
+    pub fn gather1d(self, indexes: GraphTensor) -> GraphTensor {
         assert_eq!(
             indexes.dtype,
             DType::Int,
             "Gather indexes must have an integer dtype!"
         );
-        let id = self.graph().add_op(
-            Gather {
-                input_shapes: vec![indexes.shape, self.shape],
-                ..Default::default()
-            },
-            &[indexes.id, self.id],
-        );
-        GraphTensor::from_id(id, indexes.shape.contiguous(), self.graph_ref, self.dtype)
+        self.flatten().gather(&[indexes])
     }
 
     /// Scatter self (src) into dest at flat 1D positions given by indexes.
-    /// output = copy(dest); output[indexes[i]] = src[i]
-    pub fn scatter(self, indexes: GraphTensor, dest: GraphTensor) -> GraphTensor {
+    /// output = copy(dest); output.flat[indexes[i]] = src[i]
+    /// Sugar over the coordinate form: flatten dest/src/indexes, scatter,
+    /// then rebuild dest's shape with recorded splits.
+    pub fn scatter1d(self, indexes: GraphTensor, dest: GraphTensor) -> GraphTensor {
         assert_eq!(
             indexes.dtype,
             DType::Int,
             "Scatter indexes must have an integer dtype!"
         );
-        // Pad src_strides with leading zero-strides when src has lower rank
-        // than indexes. A zero stride reads the same src element at every
-        // index position — matches PyTorch's broadcast semantics for
-        // `x[idx] = scalar`. Without this, KernelScatter::compile calls
-        // flatten_strides(index_shape, src_strides) with mismatched lengths
-        // and panics with `assertion `left == right` failed, left: 1 right: 0`.
-        let mut src_strides = self.shape.strides.to_vec();
-        let target_rank = indexes.shape.dims.len();
-        while src_strides.len() < target_rank {
-            src_strides.insert(0, Expression::from(0));
-        }
-        let id = self.graph().add_op(
-            Scatter {
-                dest_shape: dest.shape.dims.to_vec(),
-                dest_strides: dest.shape.strides.to_vec(),
-                index_shape: indexes.shape.dims.to_vec(),
-                index_strides: indexes.shape.strides.to_vec(),
-                src_strides,
-            },
-            &[dest.id, indexes.id, self.id],
+        assert_eq!(
+            indexes.dims(),
+            self.dims(),
+            "scatter1d: indexes and src (self) share a shape"
         );
-        GraphTensor::from_id(id, dest.shape.contiguous(), self.graph_ref, self.dtype)
+        let out_dims = dest.dims();
+        let flat = dest.flatten().scatter(&[indexes.flatten()], self.flatten());
+        flat.unflatten_to(&out_dims)
     }
 
     /// Extracts sliding local windows from an input tensor.
@@ -461,60 +777,122 @@ impl GraphTensor {
     ) -> GraphTensor {
         let (kernel, strides, dilation) =
             (kernel.to_shape(), strides.to_shape(), dilation.to_shape());
+        let (entries, final_shape) = self.unfold_map(&kernel, &strides, &dilation);
+        let operand = (self.id, self.dims());
+        let logical =
+            self.graph()
+                .logical
+                .view_op(&operand, &entries, final_shape.clone(), self.dtype);
+        // The id is minted by the recorder itself now (PR #423: the SSA
+        // node IS the identity); poisoned recording keeps the source id.
+        GraphTensor::from_id(self.id, final_shape, self.graph_ref, self.dtype).with_logical(logical)
+    }
 
+    /// [`unfold`](Self::unfold) opened as a [`ViewChain`], so a macro
+    /// that immediately reshapes the windows (convolution's im2col)
+    /// can compose the whole construct into ONE apply (ruling
+    /// 2026-08-26).
+    pub fn unfold_view(
+        self,
+        kernel: impl ToShape,
+        strides: impl ToShape,
+        dilation: impl ToShape,
+    ) -> ViewChain {
+        let (kernel, strides, dilation) =
+            (kernel.to_shape(), strides.to_shape(), dilation.to_shape());
+        let (entries, dims) = self.unfold_map(&kernel, &strides, &dilation);
+        ViewChain {
+            tensor: self,
+            entries,
+            dims,
+        }
+    }
+
+    /// The unfold index map + out shape, from the unfold's own
+    /// parameters; records the window contracts.
+    fn unfold_map(
+        self,
+        kernel: &[IntExpr],
+        strides: &[IntExpr],
+        dilation: &[IntExpr],
+    ) -> (Vec<crate::graph::MapEntry>, Vec<IntExpr>) {
         assert_eq!(
-            self.shape.len(),
+            self.rank(),
             kernel.len(),
             "Kernel must be same number of dimensions as tensor!"
         );
         assert_eq!(
-            self.shape.len(),
+            self.rank(),
             strides.len(),
             "Strides must be same number of dimensions as tensor!"
         );
         assert_eq!(
-            self.shape.len(),
+            self.rank(),
             dilation.len(),
             "Dilation must be same number of dimensions as tensor!"
         );
 
-        // Compute input strides (row-major contiguous)
         let dims = self.dims();
         let n = dims.len();
-        let mut in_strides = vec![Expression::from(1); n];
-        let mut acc = Expression::from(1);
-        for (dim, in_stride) in dims.iter().zip(&mut in_strides).rev() {
-            *in_stride = acc;
-            acc *= dim;
-        }
 
         // Per-dim window counts
         let mut win = Vec::with_capacity(n);
-        for (((dim, k), s), d) in dims.iter().zip(&kernel).zip(&strides).zip(&dilation) {
+        for (((dim, k), s), d) in dims.iter().zip(kernel).zip(strides).zip(dilation) {
             let effective_window = *d * (*k - 1) + 1;
             win.push((*dim - effective_window).floor_div(s) + 1);
         }
 
-        // [win..., kernel...]
-        let mut final_shape: Vec<Expression> = win.into_iter().map(|e| e.simplify()).collect();
+        // [win..., kernel...] — construction-simplified like every
+        // other recorder-authored expression (Austin's revert ruling
+        // 2026-08-27: the frontend simplifying ruleset is restored as
+        // the shield on recorded spellings; the deeper ring
+        // boundary/fence question is deferred to the pending boundary
+        // analysis). Historical note: during the brief R-C raw-spelling
+        // window this site was the one measured exception — the raw
+        // symbolic window count ((d - (dil*(k-1)+1)) / s) + 1 as a
+        // recorded EXTENT made the reference schedule non-terminating
+        // (>52 min vs 0.23 s; the nested-IntAdd assoc/subst family
+        // detonation, see the rejoin-divergence dossier).
+        let mut final_shape: Vec<IntExpr> = win.into_iter().map(|e| e.simplify()).collect();
         final_shape.extend(kernel.iter().copied());
 
-        // Axis exprs must match final_shape axis order: first w axes, then k axes.
-        // idx = Σ_d (w_d * stride_d + k_d * dilation_d) * in_strides[d]
-        let mut axis_exprs = Vec::with_capacity(2 * n);
-
-        // w axes
-        for i in 0..n {
-            axis_exprs.push(Expression::from('z') * strides[i] * in_strides[i]);
+        let window_counts = final_shape[..n].to_vec();
+        // WINDOW CONTRACTS (ruling 2026-08-13, same rail as squeeze):
+        // a symbolic window count must reach 1 — the kernel fits within
+        // dim + padding, or the binding's bucket refuses with the named
+        // door. Static counts are checked right here, loudly.
+        for (axis, count) in window_counts.iter().enumerate() {
+            match count.to_usize() {
+                Some(0) => panic!("unfold axis {axis}: kernel does not fit (window count 0)"),
+                Some(_) => {}
+                None => self.graph().logical.contract_extent_at_least(count, 1),
+            }
         }
-        // k axes
-        for i in 0..n {
-            axis_exprs.push(Expression::from('z') * dilation[i] * in_strides[i]);
-        }
-
-        let index_expression = flatten_strides(&final_shape, &axis_exprs).simplify();
-        let iota = self.graph().iota(index_expression, final_shape);
-        self.gather(iota)
+        // Out shape [win..., k...] (rank 2n): parent axis p reads
+        // win_p·stride_p + k_p·dilation_p — window arithmetic straight
+        // from the unfold's own parameters.
+        let out_rank = 2 * n;
+        let entries: Vec<crate::graph::MapEntry> = (0..n)
+            .map(|p| {
+                crate::graph::MapEntry::Add(
+                    Box::new(crate::graph::MapEntry::Mul(
+                        Box::new(crate::graph::MapEntry::Coord {
+                            from_end: out_rank - 1 - p,
+                            extent: window_counts[p],
+                        }),
+                        strides[p],
+                    )),
+                    Box::new(crate::graph::MapEntry::Mul(
+                        Box::new(crate::graph::MapEntry::Coord {
+                            from_end: out_rank - 1 - (n + p),
+                            extent: kernel[p],
+                        }),
+                        dilation[p],
+                    )),
+                )
+            })
+            .collect();
+        (entries, final_shape)
     }
 
     /// Take a slice of a tensor along multiple dimensions.
@@ -522,11 +900,11 @@ impl GraphTensor {
     /// ```
     /// # use luminal::prelude::*;
     /// # let mut cx = Graph::new();
-    /// let a = cx.tensor((5, 10));
+    /// let a = cx.tensor((5, 10), DType::F32);
     /// let b = a.slice((2..4, 1..)); // 2x9 tensor
-    /// assert_eq!(b.dims(), vec![Expression::from(2), Expression::from(9)]);
+    /// assert_eq!(b.dims(), vec![IntExpr::from(2), IntExpr::from(9)]);
     /// ```
-    pub fn slice(mut self, slice: impl ToSlice) -> GraphTensor {
+    pub fn slice(self, slice: impl ToSlice) -> GraphTensor {
         let mut ranges = slice.to_range_vec();
         ranges.extend(
             self.dims()
@@ -535,33 +913,54 @@ impl GraphTensor {
                 .map(|d| (0.into(), *d)),
         ); // Make sure we have a range per dim
         if ranges.iter().any(|(st, _)| *st != 0) {
-            // We have a start slice, need to use an iota because tensors don't have offsets
+            // Start slices are VIEWS. The structure-preserving SliceView node
+            // keeps the per-axis starts first-class (the logical-SSA seam);
+            // its to_egglog lowers to the same iota+gather the frontend used
+            // to build eagerly here, so the existing pipeline is unchanged.
             let mut new_dims = vec![];
-            let mut index_expressions = vec![];
-            let mut phys_size = Expression::from(1);
-            for (dim, (start, end)) in self.dims().into_iter().zip(ranges).rev() {
-                index_expressions.push((Expression::from('z') + start) * phys_size);
-                phys_size *= dim;
+            let mut starts = vec![];
+            for (dim, (start, end)) in self.dims().into_iter().zip(ranges) {
+                starts.push(start);
                 new_dims.push(dim.min(end) - start);
             }
-            new_dims.reverse();
-            // A zero-sized output has no elements to gather. Building gather indices for
-            // it would create an Iota expression containing modulo by zero, so represent
-            // the empty slice by updating its shape only.
-            if new_dims.iter().any(|dim| dim.to_usize() == Some(0)) {
-                self.shape.dims = new_dims.into_iter().collect();
-                return self;
-            }
-            index_expressions.reverse();
-            let index_expression = flatten_strides(&new_dims, &index_expressions);
-            let iota = self.graph().iota(index_expression, new_dims);
-            self.gather(iota)
+            // The seam node's own parameters ARE the view: parent axis p
+            // reads out coordinate p plus its start.
+            let rank = new_dims.len();
+            let entries: Vec<crate::graph::MapEntry> = (0..rank)
+                .map(|p| {
+                    let coord = crate::graph::MapEntry::Coord {
+                        from_end: rank - 1 - p,
+                        extent: new_dims[p],
+                    };
+                    if starts[p] == IntExpr::from(0) {
+                        coord
+                    } else {
+                        crate::graph::MapEntry::Add(
+                            Box::new(coord),
+                            Box::new(crate::graph::MapEntry::Lit(starts[p])),
+                        )
+                    }
+                })
+                .collect();
+            let operand = (self.id, self.dims());
+            let id = self
+                .graph()
+                .logical
+                .view_op(&operand, &entries, new_dims.clone(), self.dtype);
+            GraphTensor::from_id(id, new_dims, self.graph_ref, self.dtype)
         } else {
             // No start slices so no iota needed, just reduce the shape down
-            for (sh, (_, end)) in self.shape.dims.iter_mut().zip(ranges) {
-                *sh = sh.min(end);
+            let mut new_dims = self.dims();
+            for (sh, (_, end)) in new_dims.iter_mut().zip(&ranges) {
+                *sh = sh.min(*end);
             }
-            self
+            let current_dims = self.dims();
+            let value = self.graph().logical.apply_movement(
+                &(self.id, current_dims),
+                crate::graph::Movement::Shrink { new_dims },
+            );
+            // R-D: dims derive from the recorded value (with_logical).
+            self.with_logical(value)
         }
     }
 
@@ -570,116 +969,158 @@ impl GraphTensor {
     /// ```
     /// # use luminal::prelude::*;
     /// # let mut cx = Graph::new();
-    /// let a = cx.tensor((5, 10));
+    /// let a = cx.tensor((5, 10), DType::F32);
     /// let b = a.slice_along(4.., 1); // 5x6 tensor
-    /// assert_eq!(b.dims(), vec![Expression::from(5), Expression::from(6)]);
+    /// assert_eq!(b.dims(), vec![IntExpr::from(5), IntExpr::from(6)]);
     /// ```
     pub fn slice_along(self, slice: impl SliceRange, axis: usize) -> GraphTensor {
-        let mut s = vec![(Expression::from(0), Expression::from(i64::MAX)); axis + 1];
+        let mut s = vec![(IntExpr::from(0), IntExpr::from(i64::MAX)); axis + 1];
         s[axis] = slice.bounds();
         self.slice(s)
     }
 
-    // /// Cut out 'size' elements every 'spacing' elements on a dimension. 'size' must be smaller than the dimension
-    // pub fn excise(mut self, spacing: usize, size: usize) -> GraphTensor {
-    //     let n_dims = self.shape.len();
-    //     // Pad out to a multiple of spacing + size
-    //     let total_size = (self.shape.dims[n_dims - 1] + ((spacing + size) - 1))
-    //         / (spacing + size)
-    //         * (spacing + size);
-    //     let padding = total_size - self.shape.dims[self.shape.indexes[n_dims - 1]];
-    //     self.shape.padding[self.shape.indexes[n_dims - 1]].1 = padding;
-
-    //     self = self.contiguous();
-    //     // Expand a new dimension to do the slicing on
-    //     let n_rows = total_size / (spacing + size);
-    //     self.shape.expand_dim(n_dims, spacing + size);
-    //     // self = self.contiguous();
-    //     self.shape.dims[self.shape.indexes[n_dims - 1]] = n_rows;
-    //     self.shape.fake[self.shape.indexes[n_dims]] = false;
-
-    //     // Slice
-    //     self.shape.mask[self.shape.indexes[n_dims]].1 = spacing.into();
-
-    //     self = self.contiguous();
-
-    //     self.shape.remove_dim(n_dims);
-    //     self
-    // }
-
-    /// Pad out dimensions of a tensor with a typed scalar tensor.
+    /// Pad out dimensions of a tensor with a typed scalar fill tensor.
     ///
-    /// Keeping the fill as a tensor preserves F64 and integer constants that
-    /// cannot be represented exactly by the historical `f32` convenience API.
+    /// Keeping the fill as a TENSOR preserves I64, F64 and Bool fills that
+    /// the historical `f32` convenience API cannot represent exactly; it
+    /// also keeps the fill's dtype the caller's declaration rather than an
+    /// implied one.
     pub fn pad_with(self, padding: impl ToPad, elem: GraphTensor) -> GraphTensor {
-        assert_eq!(elem.shape.len(), 0, "padding value must be a scalar tensor");
+        assert_eq!(elem.rank(), 0, "padding value must be a scalar tensor");
         assert_eq!(
             elem.dtype, self.dtype,
-            "padding value dtype must match input"
+            "padding value dtype must match the input's ({:?} vs {:?})",
+            elem.dtype, self.dtype
         );
+        self.pad_impl(padding, Some(elem))
+    }
+
+    /// The shared pad body. `elem == None` is the zero fill: the masked
+    /// read alone, with no fill term recorded (zero padding of an F32
+    /// tensor is by far the common case and must not grow the graph).
+    fn pad_impl(self, padding: impl ToPad, elem: Option<GraphTensor>) -> GraphTensor {
         let mut padding = padding.to_pad_vec();
-        padding.extend(vec![(0.into(), 0.into()); self.shape.len() - padding.len()]); // Make sure we have a padding per dim
-        let mut index_expressions = vec![];
-        let mut phys_size = Expression::from(1);
-        let mut new_dims = vec![];
-        for (dim, (start, end)) in self.dims().into_iter().zip(&padding).rev() {
-            let mut ind = Expression::from('z');
-            if *start != 0 {
-                ind = (ind - *start).max(0);
-            }
-            if *end != 0 {
-                ind = ind.min(dim - 1);
-            }
-            index_expressions.push(ind * phys_size);
-            phys_size *= dim;
-            new_dims.push((dim + *start + *end).simplify());
+        padding.extend(vec![(0.into(), 0.into()); self.rank() - padding.len()]); // Make sure we have a padding per dim
+        if padding.iter().all(|(s, e)| *s == 0 && *e == 0) {
+            return self;
         }
-        new_dims.reverse();
-        index_expressions.reverse();
-        let index_expression = flatten_strides(&new_dims, &index_expressions);
-        // get indexed tensor
-        let new_tensor = self.gather(self.graph().iota(index_expression, new_dims.clone()));
-        // mask out padded elements
-        let mut mask_expressions = vec![];
-        for ((start, end), dim) in padding.into_iter().zip(self.dims()) {
-            let mut mask = Expression::from(1);
-            if start != 0 {
-                mask *= Expression::from('z').gte(start);
-            }
-            if end != 0 {
-                mask *= Expression::from('z').lt(start + dim);
-            }
-            mask_expressions.push(mask);
+        // Structure-preserving seam (see SliceView): the read half is a
+        // total clamped VIEW, the mask half a per-axis-structured indicator
+        // iota; both nodes lower to the legacy flat forms for the existing
+        // pipeline via their to_egglog.
+        let dims = self.dims();
+        let befores: Vec<IntExpr> = padding.iter().map(|(s, _)| *s).collect();
+        let afters: Vec<IntExpr> = padding.iter().map(|(_, e)| *e).collect();
+        // Frontend simplification restored (revert ruling 2026-08-27).
+        let out_dims: Vec<IntExpr> = dims
+            .iter()
+            .zip(&padding)
+            .map(|(d, (s, e))| (*d + *s + *e).simplify())
+            .collect();
+
+        // Pad's read half recorded as the TOTAL clamped view — per parent
+        // axis min(max(c - before, 0), dim - 1), clamp sides only where
+        // padding exists.
+        let clamped_id;
+        {
+            let rank = dims.len();
+            let entries: Vec<crate::graph::MapEntry> = (0..rank)
+                .map(|k| {
+                    let coord = crate::graph::MapEntry::Coord {
+                        from_end: rank - 1 - k,
+                        extent: out_dims[k],
+                    };
+                    let mut entry = coord;
+                    if befores[k] != IntExpr::from(0) {
+                        entry = crate::graph::MapEntry::Max(
+                            Box::new(crate::graph::MapEntry::Add(
+                                Box::new(entry),
+                                Box::new(crate::graph::MapEntry::Lit(
+                                    (IntExpr::from(0) - befores[k]).simplify(),
+                                )),
+                            )),
+                            Box::new(crate::graph::MapEntry::Lit(0.into())),
+                        );
+                    }
+                    if afters[k] != IntExpr::from(0) {
+                        entry = crate::graph::MapEntry::Min(
+                            Box::new(entry),
+                            Box::new(crate::graph::MapEntry::Lit((dims[k] - 1).simplify())),
+                        );
+                    }
+                    entry
+                })
+                .collect();
+            let operand = (self.id, dims.clone());
+            clamped_id =
+                self.graph()
+                    .logical
+                    .view_op(&operand, &entries, out_dims.clone(), self.dtype);
         }
-        let mut current_elem_size = Expression::from(1);
-        let mut flat_stride = Expression::from(1);
-        for (dim, (range, stride)) in new_dims.iter().zip(mask_expressions).enumerate().rev() {
-            let div = expr('z') / current_elem_size;
-            let m = if dim > 0 { div % range } else { div };
-            flat_stride *= stride.substitute('z', m);
-            current_elem_size *= range;
+        let clamped =
+            GraphTensor::from_id(clamped_id, out_dims.clone(), self.graph_ref, self.dtype);
+
+        let mask_id = self
+            .graph()
+            .logical
+            .record_mask_iota(&befores, &afters, &dims);
+        // ARITHMETIC MASKING, restored 2026-09-03. Main #406's select_by_index
+        // (packed 2N iota + two scatter1d + gather1d, PR #471) was NaN-safe
+        // but made egglog saturation stop converging for rank >= 2 pads
+        // (core lib tests 15 s -> >76 min; LUM-805). KNOWN LEAK, tracked as
+        // LUM-804: the clamped view repeats edge values into the pad region
+        // and `0 * NaN` / `0 * Inf` is NaN, so padding a tensor that holds
+        // non-finite values poisons its padding. The fix owed is a native
+        // Bool8 select op, not a gather construction.
+        let mask = GraphTensor::from_id(mask_id, out_dims.clone(), self.graph_ref, DType::Int)
+            .cast(self.dtype);
+        let masked = clamped * mask;
+        match elem {
+            None => masked,
+            Some(elem) => {
+                let one = self
+                    .graph()
+                    .constant_i32(1)
+                    .cast(self.dtype)
+                    .expand_rhs(out_dims.clone());
+                masked + (one - mask) * elem.expand_rhs(out_dims)
+            }
         }
-        let mask_expression = flat_stride.simplify();
-        let mask = self.graph().iota(mask_expression, new_dims);
-        let fill = elem.expand_rhs(mask.shape);
-        select_by_index(self.graph(), mask, new_tensor, fill)
     }
 
     /// Pad out dimensions of a tensor with an `f32` convenience value.
     pub fn pad(self, padding: impl ToPad, elem: f32) -> GraphTensor {
-        let fill = self.graph().constant_float(elem).cast(self.dtype);
-        self.pad_with(padding, fill)
+        let padding = padding.to_pad_vec();
+        // Early-return BEFORE minting any fill constant: zero padding is the
+        // identity, and a dead constant would still be a node in the
+        // recorded graph.
+        if padding.iter().all(|(s, e)| *s == 0 && *e == 0) {
+            return self;
+        }
+        if elem == 0.0 {
+            return self.pad_impl(padding, None);
+        }
+        // The fill must be built in the tensor's own dtype: a float literal
+        // cast to an integer tensor is a refused lossy read.
+        let fill = match self.dtype {
+            DType::F64 => self.graph().constant_f64(elem as f64),
+            DType::Int | DType::I64 | DType::I8 | DType::U8 | DType::I16 => {
+                self.graph().constant_i32(elem as i64).cast(self.dtype)
+            }
+            _ => self.graph().constant_f32(elem).cast(self.dtype),
+        };
+        self.pad_impl(padding, Some(fill))
     }
 
     /// Pad along an existing dimension
     pub fn pad_along(
         self,
-        left: impl Into<Expression>,
-        right: impl Into<Expression>,
+        left: impl Into<IntExpr>,
+        right: impl Into<IntExpr>,
         axis: usize,
         elem: f32,
     ) -> GraphTensor {
-        let mut p = vec![(Expression::from(0), Expression::from(0)); axis + 1];
+        let mut p = vec![(IntExpr::from(0), IntExpr::from(0)); axis + 1];
         p[axis] = (left.into(), right.into());
         self.pad(p, elem)
     }
@@ -694,18 +1135,21 @@ impl GraphTensor {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        frontend::{binary::tests::test_binary, unary::tests::test_unary},
-        prelude::*,
-        tests::assert_exact,
-    };
+    use crate::frontend::binary::tests::test_binary;
+    use crate::frontend::unary::tests::test_unary;
+    use crate::tests::assert_exact;
     use candle_core::{IndexOp, Tensor};
+    use luminal::prelude::*;
     use proptest::prelude::*;
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
         fn test_pad_1d(len in 1usize..64, left in 0usize..6, right in 0usize..6) {
+            // Zero padding early-returns self => a PURE-IDENTITY graph,
+            // natively unsupported (pinned by stage4b_probes::
+            // pinned_pure_identity_output; binding-level fix at 4d/M4).
+            prop_assume!(left + right > 0);
             test_unary(
                 len,
                 |a| a.pad((left, right), 0.),
@@ -761,6 +1205,22 @@ mod tests {
                 },
             );
         }
+    }
+
+    /// Zero-extent slices are NOT special-cased (ruling 2026-09-03, against
+    /// main's `38640588`, which short-circuits an empty slice into a
+    /// metadata-only view): recording one must simply work. This pins the
+    /// recording half only -- no search, no execution.
+    #[test]
+    fn zero_extent_slice_records_without_special_casing() {
+        let mut cx = Graph::new();
+        let input = cx.tensor((1, 4, 64), DType::F32);
+        let empty = input.slice_along(64.., 2);
+
+        assert_eq!(
+            empty.dims(),
+            vec![IntExpr::from(1), IntExpr::from(4), IntExpr::from(0)]
+        );
     }
 
     proptest! {
@@ -947,7 +1407,7 @@ mod tests {
     #[test]
     fn test_unfold_floor_div_shape_for_odd_window_numerator() {
         let mut cx = Graph::new();
-        let inp = cx.tensor((80, 3000));
+        let inp = cx.tensor((80, 3000), DType::F32);
         let out = inp.pad(((0, 0), (1, 1)), 0.).unfold((1, 3), (1, 2), (1, 1));
         assert_eq!(out.dims(), &[80, 1500, 1, 3]);
     }
@@ -955,7 +1415,7 @@ mod tests {
     #[test]
     fn test_unsqueeze() {
         let mut cx = Graph::new();
-        let inp = cx.tensor((2, 2, 3));
+        let inp = cx.tensor((2, 2, 3), DType::F32);
         let out1 = inp.unsqueeze(1);
         let out2 = inp.unsqueeze(3);
         assert_eq!(out1.dims(), &[2, 1, 2, 3]);
@@ -965,6 +1425,16 @@ mod tests {
             |a| a.squeeze(0).expand_dim(0, 2) * 1.,
             |a| a.broadcast_as((2, 3)).unwrap(),
         );
+        // `* 1.0` materializes: a bare squeeze is a pure-VIEW output, and
+        // view-only outputs share the input's buffer id — the 4d binding
+        // gap (see stage4b_probes::pinned_pure_identity_output).
+        test_unary(
+            (2, 1, 3),
+            |a| a.squeeze(1) * 1.0,
+            |a| a.reshape((2, 3)).unwrap(),
+        );
+        // Bare squeeze — a pure-VIEW output, no materializing op. The
+        // delivery-copy fix (2026-08-05) materializes it at the boundary.
         test_unary((2, 1, 3), |a| a.squeeze(1), |a| a.reshape((2, 3)).unwrap());
     }
 
@@ -995,126 +1465,71 @@ mod tests {
         );
     }
 
-    #[test]
-    fn empty_offset_slice_is_a_metadata_only_view() {
-        let mut cx = Graph::new();
-        let input = cx.tensor((1, 4, 64));
-        let empty = input.slice_along(64.., 2);
-
-        assert_eq!(empty.dims(), &[1, 4, 0]);
-        assert_eq!(empty.id, input.id, "an empty slice must not create an Iota");
-    }
-
-    #[test]
-    fn test_gather_and_scatter_inverse() {
-        let mut cx = Graph::new();
-        let data = cx.tensor((2, 3));
-        let indexes = cx.tensor(4).as_dtype(DType::Int);
-        let gathered = data.gather(indexes).output();
-        // Inverse permutation via scatter: scatter arange at perm positions into zeros
-        let perm = cx.tensor(6).as_dtype(DType::Int);
-        let values = cx.arange(6);
-        let zeros = cx.iota(Expression::from(0usize), 6);
-        let inv = values.scatter(perm, zeros).cast(DType::F32).output();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut rt = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        rt.set_data(data.id, vec![0., 1., 2., 3., 4., 5.]);
-        rt.set_data(indexes.id, vec![5, 0, 3, 2]);
-        rt.set_data(perm.id, vec![3, 2, 4, 1, 5, 0]);
-        rt.execute(&cx.dyn_map);
-        assert_eq!(*rt.get_f32(gathered.id), vec![5., 0., 3., 2.]);
-        assert_eq!(*rt.get_f32(inv.id), vec![5., 3., 1., 0., 2., 4.]);
-    }
-
-    #[test]
-    fn test_scatter_basic() {
-        let mut cx = Graph::new();
-        let src = cx.tensor(3);
-        let indexes = cx.tensor(3).as_dtype(DType::Int);
-        let dest = cx.tensor(5);
-        let result = src.scatter(indexes, dest).output();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut rt = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        rt.set_data(src.id, vec![10., 20., 30.]);
-        rt.set_data(indexes.id, vec![1, 3, 4]);
-        rt.set_data(dest.id, vec![0., 0., 0., 0., 0.]);
-        rt.execute(&cx.dyn_map);
-        assert_eq!(*rt.get_f32(result.id), vec![0., 10., 0., 20., 30.]);
-    }
-
-    #[test]
-    fn test_scatter_into_nonzero_dest() {
-        let mut cx = Graph::new();
-        let src = cx.tensor(1);
-        let indexes = cx.tensor(1).as_dtype(DType::Int);
-        let dest = cx.tensor(5);
-        let result = src.scatter(indexes, dest).output();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut rt = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        rt.set_data(src.id, vec![99.]);
-        rt.set_data(indexes.id, vec![2]);
-        rt.set_data(dest.id, vec![1., 2., 3., 4., 5.]);
-        rt.execute(&cx.dyn_map);
-        assert_eq!(*rt.get_f32(result.id), vec![1., 2., 99., 4., 5.]);
-    }
-
-    #[test]
-    fn test_scatter_all_positions() {
-        let mut cx = Graph::new();
-        let src = cx.tensor(4);
-        let indexes = cx.tensor(4).as_dtype(DType::Int);
-        let dest = cx.tensor(4);
-        let result = src.scatter(indexes, dest).output();
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut rt = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        rt.set_data(src.id, vec![40., 30., 20., 10.]);
-        rt.set_data(indexes.id, vec![3, 2, 1, 0]);
-        rt.set_data(dest.id, vec![1., 2., 3., 4.]);
-        rt.execute(&cx.dyn_map);
-        assert_eq!(*rt.get_f32(result.id), vec![10., 20., 30., 40.]);
-    }
+    // test_gather_and_scatter_inverse / test_scatter_basic /
+    // test_scatter_into_nonzero_dest / test_scatter_all_positions:
+    // B-TAIL-GATED (Step 4b). They exercised gather1d/scatter1d — the
+    // flat pair the recorder still poisons — through the deleted their-
+    // pipeline. Coordinate-form gather/scatter carry the native
+    // differential coverage (reference); the flat sugar's tests
+    // return with the B-tail recordings.
 
     #[test]
     fn test_repeat_is_view_only() {
         let mut cx = Graph::new();
-        let a = cx.tensor((2, 3));
+        let a = cx.tensor((2, 3), DType::F32);
         let repeated = a.repeat((2, 2));
 
-        assert_eq!(repeated.id, a.id);
+        assert_ne!(
+            repeated.id, a.id,
+            "a logical view is its own SSA value even when it requires no materialization"
+        );
+        let graph = cx.logical.petgraph();
+        assert!(matches!(
+            graph[repeated.id].op,
+            LogicalOp::IndexMapApply { .. }
+        ));
+        assert!(graph.find_edge(a.id, repeated.id).is_some());
         assert_eq!(
             repeated.dims(),
-            vec![Expression::from(4usize), Expression::from(6usize)]
+            vec![IntExpr::from(4usize), IntExpr::from(6usize)]
+        );
+    }
+
+    /// `pad_with` takes the fill as a TYPED scalar tensor, so the fill's
+    /// dtype is the caller's declaration rather than an implied one. F32
+    /// here: an Int tensor pads through the same arithmetic, but Int add and
+    /// mul are proof-gated (non-wrapping ruling 2026-08-11) and refuse
+    /// without a `bind_value_range` attestation on the input.
+    #[test]
+    fn pad_with_uses_a_typed_scalar_fill() {
+        let mut cx = Graph::new();
+        let a = cx.tensor(3, DType::F32);
+        let fill = cx.constant_f32(-7.0);
+        let b = a.pad_with((1, 2), fill);
+
+        let rt = luminal_reference::harness::run_reference(
+            &cx,
+            &[(a.id, vec![1.0f32, 2.0, 3.0].into())],
+        );
+        assert_exact(
+            rt.get_f32(b.id).unwrap(),
+            &[-7.0, 1.0, 2.0, 3.0, -7.0, -7.0],
         );
     }
 
     #[test]
     fn test_repeat_runtime_values() {
         let mut cx = Graph::new();
-        let a = cx.tensor((2, 3));
-        let repeated = (a.repeat((2, 2)) * 1.0).output();
+        let a = cx.tensor((2, 3), DType::F32);
+        let repeated = a.repeat((2, 2)) * 1.0;
 
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut rt = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
+        let rt = luminal_reference::harness::run_reference(
+            &cx,
+            &[(a.id, vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0].into())],
         );
-        rt.set_data(a.id, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        rt.execute(&cx.dyn_map);
 
         assert_exact(
-            rt.get_f32(repeated.id),
+            rt.get_f32(repeated.id).unwrap(),
             &[
                 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, //
                 4.0, 5.0, 6.0, 4.0, 5.0, 6.0, //
@@ -1127,7 +1542,7 @@ mod tests {
     //     // #[test]
     //     // fn test_cumsum() {
     //     //     let mut cx = Graph::new();
-    //     //     let a = cx.constant(1.).expand_dim(0, 3);
+    //     //     let a = cx.constant_i32(1.).expand_dim(0, 3);
     //     //     let b = a.cumsum_last_dim().retrieve();
     //     //     let c = a
     //     //         .expand_dim(1, 3)

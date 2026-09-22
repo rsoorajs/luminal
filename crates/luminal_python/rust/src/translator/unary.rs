@@ -42,7 +42,7 @@ impl<'a> Translator<'a> {
         } else {
             false
         };
-        let dim = crate::pt2_util::normalize_dim(dim, a.shape.len());
+        let dim = crate::pt2_util::normalize_dim(dim, a.legacy_tracker_ref().len());
         // PyTorch's `torch.argsort` returns int64 unconditionally;
         // luminal's frontend `stable_argsort` returns i32 (storage-
         // efficient default for native Rust callers). Cast at the
@@ -1189,21 +1189,21 @@ impl<'a> Translator<'a> {
 
     pub(crate) fn translate_logcumsumexp(&mut self, node: &Node) -> Result<GraphTensor> {
         let value = self.unary_input(node)?;
-        if value.shape.is_empty() {
+        if value.legacy_tracker_ref().is_empty() {
             anyhow::ensure!(
                 matches!(self.get_int_arg(node, 1)?, -1 | 0),
                 "logcumsumexp dimension is out of range for a scalar"
             );
             return Ok(value);
         }
-        let axis = crate::pt2_util::normalize_dim(self.get_int_arg(node, 1)?, value.shape.len());
-        let rank = value.shape.len();
+        let axis = crate::pt2_util::normalize_dim(self.get_int_arg(node, 1)?, value.legacy_tracker_ref().len());
+        let rank = value.legacy_tracker_ref().len();
         let length = value.dims()[axis];
-        let mut padding = vec![(Expression::from(0), Expression::from(0)); rank];
-        padding[axis] = (length - 1, Expression::from(0));
+        let mut padding = vec![(IntExpr::from(0), IntExpr::from(0)); rank];
+        padding[axis] = (length - 1, IntExpr::from(0));
         let negative_infinity = self.floating_scalar(f64::NEG_INFINITY, value.dtype);
         let padded = value.pad_with(padding, negative_infinity);
-        let mut kernel = vec![Expression::from(1); rank];
+        let mut kernel = vec![IntExpr::from(1); rank];
         kernel[axis] = length;
         let mut windows = padded.unfold(kernel, vec![1usize; rank], vec![1usize; rank]);
         for kernel_axis in (0..rank).rev() {
@@ -1220,13 +1220,13 @@ impl<'a> Translator<'a> {
         let negative = self.signbit(windows);
         let positive_infinite = self.bool_and(infinite, self.bool_not(negative));
         let positive_count = positive_infinite.cast(DType::Int).sum(reduction_axis);
-        let zero = self.graph.constant(0).expand_rhs(positive_count.shape);
+        let zero = self.graph.constant(0).expand_rhs(positive_count.dims());
         let has_positive_infinity = positive_count.gt(zero);
         let infinity = self.constant_like(ordinary, f64::INFINITY);
         let result = self.select(has_positive_infinity, infinity, ordinary);
 
         let nan_count = self.is_nan(windows).cast(DType::Int).sum(reduction_axis);
-        let zero = self.graph.constant(0).expand_rhs(nan_count.shape);
+        let zero = self.graph.constant(0).expand_rhs(nan_count.dims());
         let has_nan = nan_count.gt(zero);
         let nan = self.constant_like(result, f64::NAN);
         Ok(self.select(has_nan, nan, result))
@@ -1379,7 +1379,7 @@ impl<'a> Translator<'a> {
                 .graph
                 .constant(0)
                 .cast(DType::Bool)
-                .expand_rhs(input.shape))
+                .expand_rhs(input.dims()))
         }
     }
 
@@ -1637,7 +1637,7 @@ impl<'a> Translator<'a> {
         let normalized_shape = self.get_ints_arg(node, 1)?;
 
         // Axes to normalize over = last N dims where N = len(normalized_shape)
-        let ndim = input.shape.len();
+        let ndim = input.legacy_tracker_ref().len();
         let num_norm_dims = normalized_shape.len();
         let axes: Vec<usize> = ((ndim - num_norm_dims)..ndim).collect();
 
@@ -1678,7 +1678,7 @@ impl<'a> Translator<'a> {
         let input = self.get_input_tensor(node, 0)?;
         let normalized_shape = self.get_ints_arg(node, 1)?;
 
-        let ndim = input.shape.len();
+        let ndim = input.legacy_tracker_ref().len();
         let num_norm_dims = normalized_shape.len();
         anyhow::ensure!(
             num_norm_dims <= ndim,
@@ -1721,9 +1721,9 @@ impl<'a> Translator<'a> {
     ///
     /// The per-group volume is flattened into ONE axis before normalizing rather than
     /// reducing over multiple axes: the multi-axis reduction form is dropped by the
-    /// e-graph during cleanup when composed into deep conv chains (see the note in
-    /// `examples/flux2/src/vae.rs`). Reshapes use `Expression` extents throughout, so
-    /// dynamic batch and dynamic spatial dims are preserved.
+    /// e-graph during cleanup when composed into deep convolution chains. Reshapes
+    /// use `IntExpr` extents throughout, so dynamic batch and dynamic spatial dims
+    /// are preserved.
     pub(crate) fn translate_group_norm(&mut self, node: &Node) -> Result<GraphTensor> {
         let input = self.get_input_tensor(node, 0)?;
         let num_groups = self.get_int_arg(node, 6)? as usize;
@@ -1749,8 +1749,8 @@ impl<'a> Translator<'a> {
 
         // Per-group volume V = group_size * (product of spatial dims). Spatial extents
         // stay symbolic so dynamic spatial dims flow through.
-        let spatial: Expression = orig_dims[2..].iter().cloned().product();
-        let group_volume = spatial * Expression::from(group_size);
+        let spatial: IntExpr = orig_dims[2..].iter().cloned().product();
+        let group_volume = spatial * IntExpr::from(group_size);
 
         // torch computes group-norm statistics in fp32 (opmath); fp16 stats
         // overflow on outlier activations. Normalize + affine in F32 and
@@ -1759,7 +1759,7 @@ impl<'a> Translator<'a> {
         // Flatten everything after the batch dim into one axis: (N, C, ...) -> (N, M),
         // where M = C * spatial. Group volumes are contiguous in this layout.
         let mut t = input.cast(DType::F32);
-        while t.shape.len() > 2 {
+        while t.legacy_tracker_ref().len() > 2 {
             t = t.merge_dims(1, 2);
         }
         // (N, M) -> (N, num_groups, group_volume): M / group_volume == num_groups.
@@ -1774,7 +1774,7 @@ impl<'a> Translator<'a> {
         // Peel the trailing (non-batch) dims back off one at a time, left to right.
         let trailing = &orig_dims[1..];
         for i in 0..trailing.len().saturating_sub(1) {
-            let suffix: Expression = trailing[i + 1..].iter().cloned().product();
+            let suffix: IntExpr = trailing[i + 1..].iter().cloned().product();
             t = t.split_dims(1 + i, suffix);
         }
 
@@ -1783,13 +1783,13 @@ impl<'a> Translator<'a> {
         let non_channel_axes: Vec<usize> = (0..ndim).filter(|&a| a != 1).collect();
         if let Some(weight_name) = node.inputs.get(1).and_then(|i| i.arg.as_tensor_name()) {
             let w = self.get_tensor(weight_name)?.cast(DType::F32);
-            let w = w.expand_to_shape_on_axes(t.shape, non_channel_axes.clone());
+            let w = w.expand_to_shape_on_axes(t.dims(), non_channel_axes.clone());
             let (r, w) = broadcast_binary(t, w);
             t = r * w;
         }
         if let Some(bias_name) = node.inputs.get(2).and_then(|i| i.arg.as_tensor_name()) {
             let b = self.get_tensor(bias_name)?.cast(DType::F32);
-            let b = b.expand_to_shape_on_axes(t.shape, non_channel_axes);
+            let b = b.expand_to_shape_on_axes(t.dims(), non_channel_axes);
             let (r, b) = broadcast_binary(t, b);
             t = r + b;
         }
@@ -1803,7 +1803,7 @@ impl<'a> Translator<'a> {
             .graph
             .constant_float(0.0)
             .cast(a.dtype)
-            .expand_rhs(a.shape);
+            .expand_rhs(a.dims());
         let pos = a.gt(zero).cast(DType::Int);
         let neg = a.lt(zero).cast(DType::Int);
         let signed = pos - neg;
@@ -1822,7 +1822,7 @@ impl<'a> Translator<'a> {
                     .graph
                     .constant_float(1.0)
                     .cast(DType::Int)
-                    .expand_rhs(a.shape);
+                    .expand_rhs(a.dims());
                 (one - a.cast(DType::Int)).cast(DType::Bool)
             }
             DType::Int => (a + 1) * -1.0,
@@ -1854,12 +1854,12 @@ impl<'a> Translator<'a> {
         let fill = self.get_float_arg(node, MASKED_FILL_VALUE_ARG)? as f32;
         let out_dtype = input.dtype;
         // Build fill_t exactly like translate_full_like does:
-        //   constant_float(val).cast(dtype).expand_rhs(reference.shape)
+        //   constant_float(val).cast(dtype).expand_rhs(reference.legacy_tracker_ref())
         let fill_t = self
             .graph
             .constant_float(fill)
             .cast(out_dtype)
-            .expand_rhs(input.shape);
+            .expand_rhs(input.dims());
         Ok(self.where_formula(mask, fill_t, input, out_dtype))
     }
 
@@ -1876,7 +1876,7 @@ impl<'a> Translator<'a> {
             self.graph
                 .constant_float(scalar)
                 .cast(a.dtype)
-                .expand_rhs(a.shape)
+                .expand_rhs(a.dims())
         };
         let (a, b) = crate::pt2_util::ensure_same_dtype(a, b);
         let (a, b) = broadcast_binary(a, b);
@@ -1904,7 +1904,7 @@ impl<'a> Translator<'a> {
             self.graph
                 .constant_float(scalar)
                 .cast(a.dtype)
-                .expand_rhs(a.shape)
+                .expand_rhs(a.dims())
         };
         let (a, b) = crate::pt2_util::ensure_same_dtype(a, b);
         let (a, b) = broadcast_binary(a, b);

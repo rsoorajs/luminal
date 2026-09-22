@@ -5,12 +5,33 @@ Luminal is a core-and-plugin design, where the core crate `.` contains everythin
 
 All other functionality is split into crates in the `crates/` directory. For instance, the Cuda compiler is in `luminal_cuda_lite` and the autograd engine is in `luminal_training`. `luminal_nn` has common nn modules.
 
-Core's compile pipeline ends at egglog saturation: `Graph::build_search_space` produces a `SearchSpace` (one saturated e-graph per dynamic-dim bucket) and `Runtime::compile` owns everything after it — search strategy, profiling, and loading. The genetic search is provided as utilities in `luminal::search` (`GeneticSearch`, `Finalists`, `BucketLattice`, `genetic_search`, `extract_one`) that a runtime may use, compose, or ignore; core never runs a search itself. The reference runtime extracts one program, Metal calls the stock utility, CUDA drives the state machine explicitly in `crates/luminal_cuda_lite/src/search.rs`.
-
 ## Testing Instructions
 - Find the CI plan in the .github/workflows folder.
 - Currently running `cargo test` in luminal_metal and luminal_cuda_lite require access to an Apple and Nvidia GPU respectively.
 - PRs must have no clippy errors and `cargo fmt` must be ran before a PR is submitted.
+
+### Run only the tests you need (tiers)
+`cargo test --workspace` is a LANDING gate, not an iteration gate. Reaching for it
+mid-change is the single biggest waste in this repo — measured: one zoo decode
+loop is 185s, `luminal_nn`'s `decoder_block_matches_scalar_reference` is 98s and
+`llama_block_forward_rope...` is 47s, while genuine unit tests are 1-2s each.
+
+- **Spin** (working in core / the bufferizer / rewrites): `cargo test -p luminal --lib`.
+  Nothing else. This is the loop you should be in almost all the time.
+- **Spin + proof of life** (the core change must still drive a runtime): add ONE
+  targeted runtime test, e.g. `cargo test -p luminal_reference --lib <filter>` or a
+  single named `-p luminal_cuda_lite --test <file>`. Enough to prove the seam,
+  not the corpus.
+- **Landing** (about to commit, or the change is done): the full sweep —
+  `cargo test -p luminal`, `-p luminal_reference`, `-p luminal_cuda_lite`,
+  `-p test_runtime`, `-p luminal_nn`, plus device suites where a GPU is available.
+
+The mini model families provide execution-only smoke coverage in the runtime
+crates; for example, `cargo test --release -p luminal_reference --test
+mini_model_smoke`. Numerical and cross-runtime correctness belongs in the
+operation/runtime suites rather than model examples. A smoke test is ignored
+only for a documented blocker; `mini_flux_runs` records the current adaLN
+rejoin-divergence search issue in its reason string.
 
 ## Debugging and Correctness
 - Treat model examples as specifications of the intended architecture. Do not change model code, prompt templates, weights, or example logic to hide compiler/runtime/search bugs unless the model code is demonstrably semantically wrong.

@@ -37,7 +37,7 @@ impl<'a> Translator<'a> {
         let mut key = self.get_input_tensor(node, 1)?;
         let mut value = self.get_input_tensor(node, 2)?;
 
-        let q_ndim = query.shape.len();
+        let q_ndim = query.legacy_tracker_ref().len();
         anyhow::ensure!(
             q_ndim >= 2,
             "SDPA: query must have at least 2 dims (got {q_ndim})"
@@ -46,9 +46,9 @@ impl<'a> Translator<'a> {
         // Q/K share head_dim and K/V share seq by op contract, but dynamo
         // gives each placeholder its own SymInt — unify so matmul
         // dim-equality checks hold.
-        if key.shape.len() == q_ndim && value.shape.len() == q_ndim {
-            key.shape.dims[q_ndim - 1] = query.shape.dims[q_ndim - 1];
-            value.shape.dims[q_ndim - 2] = key.shape.dims[q_ndim - 2];
+        if key.legacy_tracker_ref().len() == q_ndim && value.legacy_tracker_ref().len() == q_ndim {
+            key.legacy_tracker_mut().dims[q_ndim - 1] = query.legacy_tracker_ref().dims[q_ndim - 1];
+            value.legacy_tracker_mut().dims[q_ndim - 2] = key.legacy_tracker_ref().dims[q_ndim - 2];
         }
 
         let arg_by_name =
@@ -78,10 +78,15 @@ impl<'a> Translator<'a> {
         let scale = match float_arg("scale") {
             Some(v) => v,
             None => {
-                let head_dim = query.shape.dims.last().and_then(|d| d.to_usize()).context(
-                    "SDPA: query head_dim must be concrete to derive the default \
+                let head_dim = query
+                    .legacy_tracker_ref()
+                    .dims
+                    .last()
+                    .and_then(|d| d.to_usize())
+                    .context(
+                        "SDPA: query head_dim must be concrete to derive the default \
                          scale (pass `scale` explicitly for symbolic head dims)",
-                )?;
+                    )?;
                 1.0_f64 / (head_dim as f64).sqrt()
             }
         };
@@ -91,19 +96,23 @@ impl<'a> Translator<'a> {
         // pipeline emits only the unified op (sdpa decomps are stripped).
         // Flagless graphs with mismatched heads fail the ensure below.
         let enable_gqa = bool_arg("enable_gqa").unwrap_or(false);
-        if enable_gqa && q_ndim >= 3 && query.shape.dims[q_ndim - 3] != key.shape.dims[q_ndim - 3] {
+        if enable_gqa
+            && q_ndim >= 3
+            && query.legacy_tracker_ref().dims[q_ndim - 3]
+                != key.legacy_tracker_ref().dims[q_ndim - 3]
+        {
             let h_axis = q_ndim - 3;
-            let h_q = query.shape.dims[h_axis]
+            let h_q = query.legacy_tracker_ref().dims[h_axis]
                 .to_usize()
                 .context("SDPA GQA: query head count must be concrete")?;
-            let h_kv = key.shape.dims[h_axis]
+            let h_kv = key.legacy_tracker_ref().dims[h_axis]
                 .to_usize()
                 .context("SDPA GQA: kv head count must be concrete")?;
             anyhow::ensure!(
                 h_kv > 0 && h_q % h_kv == 0,
                 "SDPA GQA: query heads ({h_q}) must be a positive multiple of kv heads ({h_kv})"
             );
-            let group = Expression::from(h_q / h_kv);
+            let group = IntExpr::from(h_q / h_kv);
             key = key
                 .expand_dim(h_axis + 1, group)
                 .merge_dims(h_axis, h_axis + 1);
@@ -112,10 +121,11 @@ impl<'a> Translator<'a> {
                 .merge_dims(h_axis, h_axis + 1);
         } else if q_ndim >= 3 {
             anyhow::ensure!(
-                query.shape.dims[q_ndim - 3] == key.shape.dims[q_ndim - 3],
+                query.legacy_tracker_ref().dims[q_ndim - 3]
+                    == key.legacy_tracker_ref().dims[q_ndim - 3],
                 "SDPA: query/key head counts differ ({:?} vs {:?}) without enable_gqa",
-                query.shape.dims[q_ndim - 3],
-                key.shape.dims[q_ndim - 3]
+                query.legacy_tracker_ref().dims[q_ndim - 3],
+                key.legacy_tracker_ref().dims[q_ndim - 3]
             );
         }
 
@@ -137,8 +147,8 @@ impl<'a> Translator<'a> {
         let mut scores = self.apply_scalar_op(q_for_mm.matmul(k_for_mm), scale, BinaryOp::Mul);
 
         if is_causal {
-            let s_q = scores.shape.dims[q_ndim - 2];
-            let s_k = scores.shape.dims[q_ndim - 1];
+            let s_q = scores.legacy_tracker_ref().dims[q_ndim - 2];
+            let s_k = scores.legacy_tracker_ref().dims[q_ndim - 1];
             let row = self.graph.arange(s_q).cast(DType::F32).expand_dim(1, s_k);
             let col = self.graph.arange(s_k).cast(DType::F32).expand_dim(0, s_q);
             // 1.0 strictly above the diagonal (j > i = masked); -1e9 ≈ -inf.
@@ -152,12 +162,12 @@ impl<'a> Translator<'a> {
         if let Some(mask) = additive {
             let offset = if mask.dtype == DType::Bool {
                 let keep = mask.cast(DType::F32);
-                let key_axis = keep.shape.len() - 1;
+                let key_axis = keep.legacy_tracker_ref().len() - 1;
                 row_any_keep = Some(
                     keep.max(key_axis)
-                        .expand_to_shape_on_axes(keep.shape, key_axis),
+                        .expand_to_shape_on_axes(keep.dims(), key_axis),
                 );
-                let one = keep.graph().constant_float(1.0).expand_rhs(keep.shape);
+                let one = keep.graph().constant_float(1.0).expand_rhs(keep.dims());
                 (one - keep) * -1e9_f32
             } else {
                 mask

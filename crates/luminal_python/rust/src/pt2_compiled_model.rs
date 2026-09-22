@@ -21,16 +21,16 @@ type PreloadResult = (Vec<(String, TypedData)>, HashMap<String, usize>);
 fn resolve_dim_sizes(
     sizes: &[pt2_schema::DimSize],
     sym_to_symbol: &HashMap<String, Symbol>,
-) -> Vec<Expression> {
+) -> Vec<IntExpr> {
     sizes
         .iter()
         .map(|s| match s {
-            pt2_schema::DimSize::Int(i) => Expression::from(i.as_int),
+            pt2_schema::DimSize::Int(i) => IntExpr::from(i.as_int),
             pt2_schema::DimSize::Expr(e) => {
                 let s = e.as_expr.expr_str.trim();
                 // Try the full sympy-style parse first so compound forms like
                 // `Mul(Integer(2), Symbol('s77', ...))` (emitted by `cat` and
-                // similar dim-altering ops) propagate as a real Expression
+                // similar dim-altering ops) propagate as a real IntExpr
                 // rather than collapsing to the size-1 fallback. Fall back to
                 // the bare-Symbol fast path when that fails — the parser
                 // bails on unrecognised heads (Pow, Min, etc.) and we'd
@@ -38,7 +38,7 @@ fn resolve_dim_sizes(
                 parse_sympy_expr(s, sym_to_symbol)
                     .or_else(|| {
                         pt2_parser::extract_symbol_name_pub(s)
-                            .and_then(|sym| sym_to_symbol.get(&sym).map(|c| Expression::from(*c)))
+                            .and_then(|sym| sym_to_symbol.get(&sym).map(|c| IntExpr::from(*c)))
                     })
                     .or_else(|| {
                         // As a last resort, if the EP gave us a concrete `hint`
@@ -49,9 +49,9 @@ fn resolve_dim_sizes(
                             .hint
                             .as_ref()
                             .and_then(|h| h.as_int())
-                            .map(Expression::from)
+                            .map(IntExpr::from)
                     })
-                    .unwrap_or_else(|| Expression::from(1usize))
+                    .unwrap_or_else(|| IntExpr::from(1usize))
             }
         })
         .collect()
@@ -233,7 +233,7 @@ pub fn translate_pt2(
     }
 
     // Compute shape expressions and dtypes from PT2 tensor metadata
-    let output_shape_exprs: Vec<Vec<Expression>> = translated
+    let output_shape_exprs: Vec<Vec<IntExpr>> = translated
         .output_ids
         .iter()
         .map(|(name, _id)| {
@@ -272,7 +272,7 @@ pub fn translate_pt2(
         .collect();
     let output_ids: Vec<NodeIndex> = translated.output_ids.iter().map(|(_, id)| *id).collect();
 
-    let input_shape_exprs: Vec<Vec<Expression>> = translated
+    let input_shape_exprs: Vec<Vec<IntExpr>> = translated
         .user_input_ids
         .iter()
         .map(|(name, _id)| {
@@ -441,7 +441,7 @@ fn preload_safetensors(graph: &Graph, file_path: &str) -> anyhow::Result<Preload
         if let Some(input) = (*graph.graph[node_id])
             .as_any()
             .downcast_ref::<luminal::hlir::Input>()
-            && let Ok(tensor) = st.tensor(&input.label)
+            && let Ok(tensor) = st.tensor(&input.label, DType::F32)
         {
             let types = bytes_to_typed(tensor.data(), safetensors_dtype_to_pt2(tensor.dtype()));
             weights.push((input.label.clone(), types));

@@ -1,116 +1,113 @@
-// use luminal::{prelude::*, tests::random_vec};
+use luminal::prelude::*;
+use luminal::shape::IntExpr;
 
-// pub struct Embedding {
-//     permute: bool,
-//     pub weight: GraphTensor, // n embeddings x embedding dim
-//     embedding_dim: usize,
-// }
+/// Token embedding: a (n_embeddings, embedding_dim) table indexed by Int
+/// token ids. The weight is supplied by the caller with shape
+/// `(n_embeddings, embedding_dim)`.
+pub fn embedding(input: GraphTensor, weight: GraphTensor) -> GraphTensor {
+    assert_eq!(input.dtype, DType::Int, "embedding indices must be Int");
+    assert_eq!(weight.rank(), 2, "embedding weight must be rank two");
+    let in_dims = input.dims();
+    let flat = input.flatten();
+    let rows = crate::attention::gather_rows(weight, flat); // (N, D)
 
-// impl Embedding {
-//     pub fn new(n_embeddings: usize, embedding_dim: usize, cx: &mut Graph) -> Self {
-//         Self {
-//             weight: cx.named_tensor("Embedding Weight", (n_embeddings, embedding_dim)),
-//             permute: false,
-//             embedding_dim,
-//         }
-//     }
+    // Rebuild the batch shape with recorded splits: (N, D) → (in_dims.., D)
+    let mut out = rows.view();
+    for axis in 0..in_dims.len().saturating_sub(1) {
+        let inner: IntExpr = in_dims[axis + 1..]
+            .iter()
+            .copied()
+            .fold(IntExpr::from(1), |acc, d| acc * d)
+            .simplify();
+        out = out.split_dims(axis, inner);
+    }
+    out.finish()
+}
 
-//     pub fn new_permuted(n_embeddings: usize, embedding_dim: usize, cx: &mut Graph) -> Self {
-//         Self {
-//             weight: cx.named_tensor("Embedding Weight", (embedding_dim, n_embeddings)),
-//             permute: true,
-//             embedding_dim,
-//         }
-//     }
+/// Project embedding-space values back to token logits using a tied embedding table.
+pub fn embedding_projection(input: GraphTensor, weight: GraphTensor) -> GraphTensor {
+    assert_eq!(weight.rank(), 2, "embedding weight must be rank two");
+    input.matmul(weight.permute((1, 0)))
+}
 
-//     pub fn initialize(self) -> Self {
-//         self.weight.set(random_vec(
-//             self.weight.shape.n_elements().to_usize().unwrap(),
-//         ));
-//         self
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use super::embedding;
+    use luminal::prelude::*;
+    use luminal::shape::IntExpr;
+    use luminal_reference::CompileOptions;
+    use luminal_reference::ReferenceRuntime;
+    use rustc_hash::FxHashMap;
 
-// impl SerializeModule for Embedding {
-//     fn serialize(&self, s: &mut luminal::module::Serializer) {
-//         s.tensor("weight", self.weight);
-//     }
-// }
+    fn assert_close(ours: &[f32], expected: &[f32]) {
+        assert_eq!(ours.len(), expected.len(), "length mismatch");
+        for (index, (a, b)) in ours.iter().zip(expected).enumerate() {
+            assert!(
+                (a - b).abs() <= 1e-4 * b.abs().max(1.0),
+                "element {index}: ours {a} vs expected {b}"
+            );
+        }
+    }
 
-// impl Module<GraphTensor> for Embedding {
-//     type Output = GraphTensor;
+    const WEIGHT: [f32; 12] = [1.1, 2., 3., 1., 2., 3., 14., 2., 33., 1., 2., 3.];
 
-//     fn forward(&self, input: GraphTensor) -> Self::Output {
-//         // Flatten batches
-//         let batch_size = input.shape.n_elements();
-//         let inp = input.reshape(batch_size);
-//         // Gather
-//         let out = if self.permute {
-//             self.weight.permute((1, 0)).gather(inp)
-//         } else {
-//             self.weight.gather(inp)
-//         };
-//         // Unflatten
-//         let mut new_shape = input.dims();
-//         new_shape.push(self.embedding_dim.into());
-//         out.reshape(new_shape)
-//     }
-// }
+    /// 1-D index lookup through the M3 ladder: out[i] = weight[ids[i]].
+    #[test]
+    fn embedding_looks_up_rows() {
+        let mut cx = Graph::new();
+        let ids = cx.tensor(3, DType::Int);
+        let weight = cx.tensor((3, 4), DType::F32);
+        let out = embedding(ids, weight);
+        assert_eq!(out.dims(), vec![IntExpr::from(3), IntExpr::from(4)]);
 
-// impl Embedding {
-//     // Reverse from embedding to token distribution
-//     pub fn reverse(&self, input: GraphTensor) -> GraphTensor {
-//         if self.permute {
-//             input.matmul(self.weight)
-//         } else {
-//             input.matmul(self.weight.permute((1, 0)))
-//         }
-//     }
-// }
+        let ids_data = vec![1i32, 0, 2];
+        // Hand golden: rows 1, 0, 2 of the table.
+        let mut expected = Vec::new();
+        for id in [1usize, 0, 2] {
+            expected.extend_from_slice(&WEIGHT[id * 4..id * 4 + 4]);
+        }
 
-// #[cfg(test)]
-// mod tests {
-//     use dfdx::{
-//         prelude::Module as DfdxModule,
-//         tensor::{Cpu, TensorFromVec},
-//     };
+        let mut data = FxHashMap::default();
+        data.insert(ids.id, ids_data.clone().into());
+        data.insert(weight.id, WEIGHT.to_vec().into());
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
+        rt.search(&data, &CompileOptions::default())
+            .expect("search finds a plan");
+        rt.set_data(ids.id, ids_data);
+        rt.set_data(weight.id, WEIGHT.to_vec());
+        rt.execute().expect("winner executes");
+        assert_close(rt.get_f32(out.id).expect("output"), &expected);
+    }
 
-//     use luminal::prelude::Module;
+    /// Batched (2, 3) indices: the batch shape is rebuilt around the
+    /// embedding axis — out (2, 3, 4).
+    #[test]
+    fn embedding_batches_rebuild_shape() {
+        let mut cx = Graph::new();
+        let ids = cx.tensor((2, 3), DType::Int);
+        let weight = cx.tensor((3, 4), DType::F32);
+        let out = embedding(ids, weight);
+        assert_eq!(
+            out.dims(),
+            vec![IntExpr::from(2), IntExpr::from(3), IntExpr::from(4)]
+        );
 
-//     use super::Embedding;
-//     use dfdx::nn::BuildOnDevice;
-//     luminal::test_imports!();
+        let id_ints = [1usize, 0, 2, 1, 0, 1];
+        let ids_data: Vec<i32> = id_ints.iter().map(|v| *v as i32).collect();
+        let mut expected = Vec::new();
+        for id in id_ints {
+            expected.extend_from_slice(&WEIGHT[id * 4..id * 4 + 4]);
+        }
 
-//     #[test]
-//     fn test_embedding() {
-//         let mut cx = Graph::new();
-//         let batch = cx.tensor((2, 3)).set(vec![1.0, 0.0, 2.0, 1.0, 0.0, 1.0]);
-//         let a = cx.tensor(3).set(vec![1.0, 0.0, 1.0]).retrieve();
-
-//         let model = Embedding::new(3, 4, &mut cx).initialize();
-//         model
-//             .weight
-//             .set(vec![1.1, 2., 3., 1., 2., 3., 14., 2., 33., 1., 2., 3.]);
-//         let mut b = model.forward(a).retrieve();
-//         let mut batch_out = model.forward(batch).retrieve();
-
-//         cx.compile(GenericCompiler::default(), (&mut b, &mut batch_out));
-
-//         cx.execute();
-
-//         let d_dev = Cpu::default();
-//         let mut d_model = <dfdx::nn::modules::builders::Embedding<3, 4>>::build_on_device(&d_dev);
-//         d_model.weight = d_dev.tensor_from_vec(
-//             vec![1.1, 2., 3., 1., 2., 3., 14., 2., 33., 1., 2., 3.],
-//             (DConst::<3>, DConst::<4>),
-//         );
-//         let d_a = d_dev.tensor_from_vec(vec![1, 0, 1], (DConst::<3>,));
-//         let d_batch = d_dev.tensor_from_vec(vec![1, 0, 2, 1, 0, 1], (DConst::<2>, DConst::<3>));
-
-//         let d_b = d_model.forward(d_a);
-//         let d_batch_out = d_model.forward(d_batch);
-
-//         assert_close(&b.data(), &d_b.as_vec());
-//         assert_close(&batch_out.data(), &d_batch_out.as_vec());
-//     }
-// }
+        let mut data = FxHashMap::default();
+        data.insert(ids.id, ids_data.clone().into());
+        data.insert(weight.id, WEIGHT.to_vec().into());
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
+        rt.search(&data, &CompileOptions::default())
+            .expect("search finds a plan");
+        rt.set_data(ids.id, ids_data);
+        rt.set_data(weight.id, WEIGHT.to_vec());
+        rt.execute().expect("winner executes");
+        assert_close(rt.get_f32(out.id).expect("output"), &expected);
+    }
+}

@@ -1,9 +1,9 @@
-use crate::hlir::*;
 use crate::prelude::*;
 use std::fmt::Debug;
 
 use petgraph::graph::NodeIndex;
 use rustc_hash::FxHashMap;
+use tinyvec::ArrayVec;
 
 /// A tensor on the graph.
 ///
@@ -11,8 +11,8 @@ use rustc_hash::FxHashMap;
 /// ```rust
 /// use luminal::prelude::*;
 /// let mut cx = Graph::new();
-/// let a = cx.tensor(3);
-/// let b = cx.tensor(3);
+/// let a = cx.tensor(3, DType::F32);
+/// let b = cx.tensor(3, DType::F32);
 /// let c = a + b;
 /// // The graph `cx` now has `a` and `b` loading nodes, and an add node resulting in `c`
 /// ```
@@ -20,7 +20,14 @@ use rustc_hash::FxHashMap;
 pub struct GraphTensor {
     pub id: NodeIndex,
     pub graph_ref: *mut Graph,
-    pub shape: ShapeTracker,
+    /// The tensor's ordered logical dims — the ONLY shape state a handle
+    /// carries (the ShapeTracker died with the HLIR pipeline at M3 Step 4;
+    /// strides/contiguity/sizing are the compiler's business — views are
+    /// explicit logical structure, layout is binding vocabulary). R-D
+    /// ruling 2026-08-26: this is a CACHE of the recorder's dims for the
+    /// current value, refreshed from `LogicalGraph::value_dims` by
+    /// `with_logical` after every record call — never hand-maintained.
+    pub(crate) dims: ArrayVec<[IntExpr; 10]>,
     pub dtype: DType,
 }
 
@@ -31,19 +38,36 @@ impl From<&GraphTensor> for GraphTensor {
 }
 
 impl GraphTensor {
-    /// Create a GraphTensor from a NodeIndex
+    /// Create a GraphTensor from a NodeIndex and its logical dims.
     pub fn from_id(
         id: NodeIndex,
-        shape: ShapeTracker,
+        shape: impl ToShape,
         graph_ref: *mut Graph,
         dtype: DType,
     ) -> Self {
         Self {
             id,
             graph_ref,
-            shape,
+            dims: shape.to_shape().into_iter().collect(),
             dtype,
         }
+    }
+
+    /// Adopt the recorded logical value: the handle's id BECOMES the
+    /// value (`GraphTensor.id` is the canonical SSA identity, PR #423)
+    /// AND the dims derive from the recorder (R-D ruling 2026-08-26,
+    /// reasserted 2026-09-01: the recorder's dims are THE dims; no
+    /// frontend method keeps parallel dims arithmetic).
+    pub(crate) fn with_logical(mut self, value: crate::graph::ValueId) -> Self {
+        self.id = value;
+        self.dims = self
+            .graph()
+            .logical
+            .value_dims(value)
+            .iter()
+            .cloned()
+            .collect();
+        self
     }
 
     /// Get a mutable reference to the graph this tensor belongs to
@@ -52,119 +76,97 @@ impl GraphTensor {
         unsafe { self.graph_ref.as_mut().unwrap() }
     }
 
-    /// Set the name of a tensor
-    pub fn set_name(&self, name: &str) {
-        self.graph().get_op_mut::<Input>(self.id).label = name.to_string();
-    }
-
-    /// Mark this tensor as an observable output. Unlike [`GraphTensor::persist`],
-    /// this protects the tensor's logical value from a later in-place update.
-    /// If the tensor has non-contiguous strides (e.g. from transpose + merge_dims),
-    /// inserts a gather to materialize contiguous data before the output node.
-    pub fn output(&self) -> GraphTensor {
-        let source = if self.shape.is_contiguous() {
-            *self
-        } else {
-            // Insert gather to make physically contiguous
-            let dims = self.dims();
-            let total = dims.iter().copied().reduce(|a, b| a * b).unwrap();
-            let idx = self.graph().iota('z', total);
-            let mut gathered = self.gather(idx);
-            gathered.shape = ShapeTracker::new(dims);
-            gathered
-        };
-        self.output_raw(source, false)
-    }
-
-    /// Mark a tensor as an output without any contiguous materialization.
-    /// Used internally by graph_break and persist.
-    fn output_raw(&self, source: GraphTensor, persist_only: bool) -> GraphTensor {
-        self.graph().add_op(
-            Output {
-                node: source.id.index(),
-                persist_only,
-            },
-            &[source.id],
-        );
+    /// Name this value in the logical graph (a `LogicalTensorNamed`
+    /// annotation) so a runtime can bind it by name. Nothing else: what
+    /// is an output, and where its bytes live, is stated by the runtime's
+    /// binding, never by the model.
+    pub fn named(&self, name: &str) -> GraphTensor {
+        let source = *self;
+        let dims = source.dims();
+        self.graph().logical.name(&(source.id, dims), name);
         source
     }
 
-    /// Required bytes to store this tensor's physical elements. Rounds up to nearest byte.
-    pub fn required_total_bytes(&self) -> Expression {
-        self.shape.required_total_bytes()
+    pub fn dims(&self) -> Vec<IntExpr> {
+        self.dims.to_vec()
     }
 
-    /// Mark this tensor's storage to persist across executions. Creates a
-    /// persist-only Output marker so the buffer is not consumed after
-    /// execute(), but does not request an immutable observable snapshot. Call
-    /// [`GraphTensor::output`] separately when the pre-update logical value is
-    /// user-visible. Returns the original tensor rather than the Output marker.
-    pub fn persist(&self) -> GraphTensor {
-        self.output_raw(*self, true);
-        *self
+    /// Dim agreement for elementwise ops: structural equality is the
+    /// fast path; a structural mismatch falls back to PROPER equality
+    /// saturation per dim (`IntExpr::egglog_equal` — ruling
+    /// 2026-08-13: `a + b` and `b + a` are the same extent, and the
+    /// authoring surface must know it, not panic on spelling).
+    pub(crate) fn dims_agree(&self, rhs: &GraphTensor) -> bool {
+        let (a, b) = (self.dims(), rhs.dims());
+        a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| x == y || x.egglog_equal(y))
     }
 
-    pub fn dims(&self) -> Vec<Expression> {
-        self.shape.dims.to_vec()
+    /// The tensor's rank — the public shape surface is dims()/rank()
+    /// (A2 quarantine; ruling 2026-07-30).
+    pub fn rank(&self) -> usize {
+        self.dims.len()
     }
 
-    pub fn dims1(&self) -> Expression {
+    pub fn dims1(&self) -> IntExpr {
         assert_eq!(
-            self.shape.len(),
+            self.rank(),
             1,
             "Shape has {} dimensions, tried to get 1",
-            self.shape.len()
+            self.rank()
         );
-        self.dims()[0]
+        self.dims[0]
     }
-    pub fn dims2(&self) -> (Expression, Expression) {
+    pub fn dims2(&self) -> (IntExpr, IntExpr) {
         assert_eq!(
-            self.shape.len(),
+            self.rank(),
             2,
             "Shape has {} dimensions, tried to get 2",
-            self.shape.len()
+            self.rank()
         );
-        let dims = self.dims();
-        (dims[0], dims[1])
+        (self.dims[0], self.dims[1])
     }
-    pub fn dims3(&self) -> (Expression, Expression, Expression) {
+    pub fn dims3(&self) -> (IntExpr, IntExpr, IntExpr) {
         assert_eq!(
-            self.shape.len(),
+            self.rank(),
             3,
             "Shape has {} dimensions, tried to get 3",
-            self.shape.len()
+            self.rank()
         );
-        let dims = self.dims();
-        (dims[0], dims[1], dims[2])
+        (self.dims[0], self.dims[1], self.dims[2])
     }
-    pub fn dims4(&self) -> (Expression, Expression, Expression, Expression) {
+    pub fn dims4(&self) -> (IntExpr, IntExpr, IntExpr, IntExpr) {
         assert_eq!(
-            self.shape.len(),
+            self.rank(),
             4,
             "Shape has {} dimensions, tried to get 4",
-            self.shape.len()
+            self.rank()
         );
-        let dims = self.dims();
-        (dims[0], dims[1], dims[2], dims[3])
+        (self.dims[0], self.dims[1], self.dims[2], self.dims[3])
     }
-    pub fn dims5(&self) -> (Expression, Expression, Expression, Expression, Expression) {
+    pub fn dims5(&self) -> (IntExpr, IntExpr, IntExpr, IntExpr, IntExpr) {
         assert_eq!(
-            self.shape.len(),
+            self.rank(),
             5,
             "Shape has {} dimensions, tried to get 5",
-            self.shape.len()
+            self.rank()
         );
-        let dims = self.dims();
-        (dims[0], dims[1], dims[2], dims[3], dims[4])
+        (
+            self.dims[0],
+            self.dims[1],
+            self.dims[2],
+            self.dims[3],
+            self.dims[4],
+        )
     }
 }
 
 impl Debug for GraphTensor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Print the shape
-        let mut shape = self.shape;
-        shape.resolve_dyn_dims(&self.graph().dyn_map);
-        let shape = shape.shape_usize();
+        let shape: Vec<IntExpr> = self
+            .dims
+            .iter()
+            .map(|d| d.resolve_vars(&self.graph().dyn_map))
+            .collect();
         writeln!(f, "Tensor with Shape: {shape:?}")
     }
 }

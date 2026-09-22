@@ -1,0 +1,27 @@
+; Layout Tensor Op Iota Generic — the zero-input source: the op list is
+; (inputs = Nil, outputs = [out]). The write gate is the same as every
+; writer's: the destination layout tensor must be provably injective.
+; (Bounds safety needs no gate here: the fixpoint-invariants stratum
+; DEMANDS every iota's bounds — absence is an error there — and panics
+; when they fall outside Int.)
+(rule
+  (
+    (= ?out_logical (LogicalIota ?index_expression ?shape))
+    (= ?out_layout_tensor (LayoutTensorLit ?out_logical ?out_layout))
+    ; WRITE CAPABILITY (ruling 2026-09-01): this backend's kernels write
+    ; `out[i]`, so the rewrite fires only when the out class carries the
+    ; right-major contiguous spelling. The e-graph joins equivalent
+    ; spellings; the matcher matches the hardware's literal one.
+    (= ?out_layout (RightMajorContiguousElementLayoutLit ?out_rm_shape ?out_rm_bits))
+    (= (injectivity-of ?out_layout_tensor) (Injective))
+  )
+  (
+    (let ?layout_tensor_op
+      (LayoutTensorOpLit
+        (LayoutTensorNil)
+        (LayoutTensorCons ?out_layout_tensor (LayoutTensorNil))))
+    (union ?layout_tensor_op
+      (LayoutTensorOpIotaGeneric ?index_expression ?shape ?out_layout))
+  )
+  :ruleset backend
+)

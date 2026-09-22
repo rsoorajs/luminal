@@ -14,12 +14,12 @@ pub(crate) struct ExprBounds {
 
 #[derive(Clone, Copy, Debug)]
 struct ParsedExpr {
-    expr: Expression,
+    expr: IntExpr,
     bounds: ExprBounds,
 }
 
 impl ParsedExpr {
-    fn exact(expr: Expression, value: i64) -> Self {
+    fn exact(expr: IntExpr, value: i64) -> Self {
         Self {
             expr,
             bounds: ExprBounds {
@@ -32,17 +32,17 @@ impl ParsedExpr {
 
 #[derive(Clone, Copy, Debug)]
 struct BoundedExpr {
-    expr: Expression,
+    expr: IntExpr,
     bounds: ExprBounds,
 }
 
-/// Parse a sympy `srepr`-style expression string into a luminal `Expression`.
+/// Parse a sympy `srepr`-style expression string into a luminal `IntExpr`.
 ///
 /// Supports the subset of sympy heads PT2 emits for symbolic shape metadata.
 pub(crate) fn parse_sympy_expr(
     expr: &str,
     sym_to_symbol: &HashMap<String, Symbol>,
-) -> Option<Expression> {
+) -> Option<IntExpr> {
     parse_sympy_expr_with_ranges(expr, sym_to_symbol, &HashMap::new())
 }
 
@@ -50,7 +50,7 @@ pub(crate) fn parse_sympy_expr_with_ranges(
     expr: &str,
     sym_to_symbol: &HashMap<String, Symbol>,
     ranges: &HashMap<String, RangeConstraint>,
-) -> Option<Expression> {
+) -> Option<IntExpr> {
     parse_sympy_expr_inner(expr, sym_to_symbol, ranges).map(|parsed| parsed.expr)
 }
 
@@ -73,22 +73,22 @@ pub(crate) fn sym_char_ranges(sym_map: &SymDimMap) -> FxHashMap<Symbol, ExprBoun
 }
 
 pub(crate) fn simplify_expr_with_ranges(
-    expr: Expression,
+    expr: IntExpr,
     sym_ranges: &FxHashMap<Symbol, ExprBounds>,
-) -> Expression {
+) -> IntExpr {
     simplify_bound_expr(expr, sym_ranges).expr
 }
 
 pub(crate) fn bounds_of_expr(
-    expr: Expression,
+    expr: IntExpr,
     sym_ranges: &FxHashMap<Symbol, ExprBounds>,
 ) -> ExprBounds {
     simplify_bound_expr(expr, sym_ranges).bounds
 }
 
 pub(crate) fn same_expr_with_ranges(
-    lhs: Expression,
-    rhs: Expression,
+    lhs: IntExpr,
+    rhs: IntExpr,
     sym_ranges: &FxHashMap<Symbol, ExprBounds>,
 ) -> bool {
     let lhs = simplify_bound_expr(lhs, sym_ranges);
@@ -99,10 +99,10 @@ pub(crate) fn same_expr_with_ranges(
 }
 
 pub(crate) fn canonical_equal_expr(
-    lhs: Expression,
-    rhs: Expression,
+    lhs: IntExpr,
+    rhs: IntExpr,
     sym_ranges: &FxHashMap<Symbol, ExprBounds>,
-) -> Option<Expression> {
+) -> Option<IntExpr> {
     if !same_expr_with_ranges(lhs, rhs, sym_ranges) {
         return None;
     }
@@ -126,7 +126,7 @@ fn parse_sympy_expr_inner(
     }
 
     if let Ok(value) = expr.parse::<i64>() {
-        return Some(ParsedExpr::exact(Expression::from(value), value));
+        return Some(ParsedExpr::exact(IntExpr::from(value), value));
     }
 
     let (head, body) = split_head(expr)?;
@@ -135,17 +135,17 @@ fn parse_sympy_expr_inner(
             let name = extract_first_quoted(body)?;
             let bounds = infer_symbol_bounds(body, ranges.get(&name));
             sym_to_symbol.get(&name).map(|c| ParsedExpr {
-                expr: Expression::from(*c),
+                expr: IntExpr::from(*c),
                 bounds,
             })
         }
         "Integer" | "Number" => {
             let value = body.trim().parse::<i64>().ok()?;
-            Some(ParsedExpr::exact(Expression::from(value), value))
+            Some(ParsedExpr::exact(IntExpr::from(value), value))
         }
-        "NegativeOne" => Some(ParsedExpr::exact(Expression::from(-1i64), -1)),
-        "Zero" => Some(ParsedExpr::exact(Expression::from(0i64), 0)),
-        "One" => Some(ParsedExpr::exact(Expression::from(1i64), 1)),
+        "NegativeOne" => Some(ParsedExpr::exact(IntExpr::from(-1i64), -1)),
+        "Zero" => Some(ParsedExpr::exact(IntExpr::from(0i64), 0)),
+        "One" => Some(ParsedExpr::exact(IntExpr::from(1i64), 1)),
         "Mul" | "Add" | "Min" | "Max" => {
             let parts = split_top_level_args(body);
             if parts.is_empty() {
@@ -219,7 +219,7 @@ fn infer_symbol_bounds(body: &str, range: Option<&RangeConstraint>) -> ExprBound
 
 fn exact_expr(value: i64) -> BoundedExpr {
     BoundedExpr {
-        expr: Expression::from(value),
+        expr: IntExpr::from(value),
         bounds: ExprBounds {
             min: Some(value),
             max: Some(value),
@@ -239,7 +239,7 @@ fn exact_bound_value(bounds: ExprBounds) -> Option<i64> {
     (bounds.min == bounds.max).then_some(bounds.min).flatten()
 }
 
-fn with_bounds(expr: Expression, bounds: ExprBounds) -> BoundedExpr {
+fn with_bounds(expr: IntExpr, bounds: ExprBounds) -> BoundedExpr {
     BoundedExpr { expr, bounds }
 }
 
@@ -250,7 +250,7 @@ fn bool_bounds() -> ExprBounds {
     }
 }
 
-fn normalize_expr(expr: Expression) -> Expression {
+fn normalize_expr(expr: IntExpr) -> IntExpr {
     if expr.len() <= 16 {
         expr.simplify()
     } else {
@@ -258,11 +258,11 @@ fn normalize_expr(expr: Expression) -> Expression {
     }
 }
 
-fn normalize_add_expr(lhs: Expression, rhs: Expression) -> Expression {
+fn normalize_add_expr(lhs: IntExpr, rhs: IntExpr) -> IntExpr {
     normalize_expr(crate::dim_arith::add_dims(lhs, rhs))
 }
 
-fn normalize_mul_expr(lhs: Expression, rhs: Expression) -> Expression {
+fn normalize_mul_expr(lhs: IntExpr, rhs: IntExpr) -> IntExpr {
     normalize_expr(crate::dim_arith::mul_dims(lhs, rhs))
 }
 
@@ -412,18 +412,18 @@ fn max_bounds(lhs: ExprBounds, rhs: ExprBounds) -> ExprBounds {
     }
 }
 
-fn expr_is_offset_by_small_const(lhs: Expression, rhs: Expression) -> bool {
+fn expr_is_offset_by_small_const(lhs: IntExpr, rhs: IntExpr) -> bool {
     (1..=8).any(|delta| lhs.egglog_equal(rhs + delta))
 }
 
-fn split_add_const(expr: Expression) -> Option<(i64, Expression)> {
+fn split_add_const(expr: IntExpr) -> Option<(i64, IntExpr)> {
     let terms = expr.terms.read();
     if terms.len() >= 3 && terms.last() == Some(&Term::Add) {
         if let Some(Term::Num(n)) = terms.first() {
-            return Some((*n, Expression::new(terms[1..terms.len() - 1].to_vec())));
+            return Some((*n, IntExpr::new(terms[1..terms.len() - 1].to_vec())));
         }
         if let Some(Term::Num(n)) = terms.get(terms.len() - 2) {
-            return Some((*n, Expression::new(terms[..terms.len() - 2].to_vec())));
+            return Some((*n, IntExpr::new(terms[..terms.len() - 2].to_vec())));
         }
     }
     None
@@ -433,9 +433,9 @@ fn simplify_add(lhs: BoundedExpr, rhs: BoundedExpr) -> BoundedExpr {
     let expr = match (exact_value(lhs), exact_value(rhs)) {
         (Some(0), _) => rhs.expr,
         (_, Some(0)) => lhs.expr,
-        (Some(lhs), Some(rhs)) => Expression::from(lhs + rhs),
-        (_, Some(rhs)) => normalize_add_expr(lhs.expr, Expression::from(rhs)),
-        (Some(lhs), _) => normalize_add_expr(Expression::from(lhs), rhs.expr),
+        (Some(lhs), Some(rhs)) => IntExpr::from(lhs + rhs),
+        (_, Some(rhs)) => normalize_add_expr(lhs.expr, IntExpr::from(rhs)),
+        (Some(lhs), _) => normalize_add_expr(IntExpr::from(lhs), rhs.expr),
         _ => normalize_add_expr(lhs.expr, rhs.expr),
     };
     with_bounds(expr, add_bounds(lhs.bounds, rhs.bounds))
@@ -532,7 +532,7 @@ fn simplify_max(
 }
 
 fn simplify_bound_expr(
-    expr: Expression,
+    expr: IntExpr,
     sym_ranges: &FxHashMap<Symbol, ExprBounds>,
 ) -> BoundedExpr {
     let mut stack: Vec<BoundedExpr> = Vec::new();
@@ -541,7 +541,7 @@ fn simplify_bound_expr(
         match term {
             Term::Num(n) => stack.push(exact_expr(n)),
             Term::Var(c) => stack.push(with_bounds(
-                Expression::from(c),
+                IntExpr::from(c),
                 sym_ranges.get(&c).copied().unwrap_or_default(),
             )),
             Term::Add => {
@@ -558,10 +558,10 @@ fn simplify_bound_expr(
                 let lhs = stack.pop().unwrap();
                 let rhs = stack.pop().unwrap();
                 let expr = match (exact_value(lhs), exact_value(rhs)) {
-                    (Some(0), _) | (_, Some(0)) => Expression::from(0),
+                    (Some(0), _) | (_, Some(0)) => IntExpr::from(0),
                     (Some(1), _) => rhs.expr,
                     (_, Some(1)) => lhs.expr,
-                    (Some(lhs), Some(rhs)) => Expression::from(lhs * rhs),
+                    (Some(lhs), Some(rhs)) => IntExpr::from(lhs * rhs),
                     _ => normalize_mul_expr(lhs.expr, rhs.expr),
                 };
                 stack.push(with_bounds(expr, mul_bounds(lhs.bounds, rhs.bounds)));
@@ -570,11 +570,11 @@ fn simplify_bound_expr(
                 let lhs = stack.pop().unwrap();
                 let rhs = stack.pop().unwrap();
                 let expr = match (term, exact_value(lhs), exact_value(rhs)) {
-                    (_, Some(0), _) => Expression::from(0),
+                    (_, Some(0), _) => IntExpr::from(0),
                     (_, _, Some(1)) => lhs.expr,
-                    (Term::Div, Some(lhs), Some(rhs)) if rhs != 0 => Expression::from(lhs / rhs),
+                    (Term::Div, Some(lhs), Some(rhs)) if rhs != 0 => IntExpr::from(lhs / rhs),
                     (Term::CeilDiv, Some(lhs), Some(rhs)) if rhs > 0 => {
-                        Expression::from(if lhs % rhs != 0 {
+                        IntExpr::from(if lhs % rhs != 0 {
                             lhs / rhs + 1
                         } else {
                             lhs / rhs
@@ -590,8 +590,8 @@ fn simplify_bound_expr(
                 let lhs = stack.pop().unwrap();
                 let rhs = stack.pop().unwrap();
                 let expr = match (exact_value(lhs), exact_value(rhs)) {
-                    (Some(0), _) | (_, Some(1)) => Expression::from(0),
-                    (Some(lhs), Some(rhs)) if rhs != 0 => Expression::from(lhs % rhs),
+                    (Some(0), _) | (_, Some(1)) => IntExpr::from(0),
+                    (Some(lhs), Some(rhs)) if rhs != 0 => IntExpr::from(lhs % rhs),
                     _ => normalize_expr(lhs.expr % rhs.expr),
                 };
                 stack.push(with_bounds(expr, mod_bounds(lhs.bounds, rhs.bounds)));
@@ -611,16 +611,16 @@ fn simplify_bound_expr(
                 let rhs = stack.pop().unwrap();
                 let expr = match (term, exact_value(lhs), exact_value(rhs)) {
                     (Term::And, Some(lhs), Some(rhs)) => {
-                        Expression::from((lhs != 0 && rhs != 0) as i64)
+                        IntExpr::from((lhs != 0 && rhs != 0) as i64)
                     }
                     (Term::And, _, _) => normalize_expr(lhs.expr & rhs.expr),
                     (Term::Or, Some(lhs), Some(rhs)) => {
-                        Expression::from((lhs != 0 || rhs != 0) as i64)
+                        IntExpr::from((lhs != 0 || rhs != 0) as i64)
                     }
                     (Term::Or, _, _) => normalize_expr(lhs.expr | rhs.expr),
-                    (Term::Gte, Some(lhs), Some(rhs)) => Expression::from((lhs >= rhs) as i64),
+                    (Term::Gte, Some(lhs), Some(rhs)) => IntExpr::from((lhs >= rhs) as i64),
                     (Term::Gte, _, _) => normalize_expr(lhs.expr.gte(rhs.expr)),
-                    (Term::Lt, Some(lhs), Some(rhs)) => Expression::from((lhs < rhs) as i64),
+                    (Term::Lt, Some(lhs), Some(rhs)) => IntExpr::from((lhs < rhs) as i64),
                     (Term::Lt, _, _) => normalize_expr(lhs.expr.lt(rhs.expr)),
                     _ => unreachable!(),
                 };

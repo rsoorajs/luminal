@@ -48,19 +48,19 @@ impl ComplexTensor {
         torch_dtype: TorchDType,
     ) -> Result<Self> {
         let axis = backing
-            .shape
+            .legacy_tracker_ref()
             .len()
             .checked_sub(1)
             .context("complex interleaved storage must have a component dimension")?;
         anyhow::ensure!(
-            backing.shape.dims[axis].to_usize() == Some(2),
+            backing.legacy_tracker_ref().dims[axis].to_usize() == Some(2),
             "complex interleaved storage must end in dimension 2, got {:?}",
             backing.dims()
         );
         let mut shape = backing.dims();
         shape.pop();
-        let real = backing.gather(graph.iota(Expression::from('z') * 2, shape.clone()));
-        let imag = backing.gather(graph.iota(Expression::from('z') * 2 + 1, shape));
+        let real = backing.gather(graph.iota(IntExpr::from('z') * 2, shape.clone()));
+        let imag = backing.gather(graph.iota(IntExpr::from('z') * 2 + 1, shape));
         Ok(Self::new(real, imag, torch_dtype))
     }
 
@@ -98,8 +98,8 @@ fn interleave(graph: &mut Graph, first: GraphTensor, second: GraphTensor) -> Gra
     let shape = first.dims();
     let mut packed_shape = shape.clone();
     packed_shape.push(2usize.into());
-    let even = graph.iota(Expression::from('z') * 2, shape.clone());
-    let odd = graph.iota(Expression::from('z') * 2 + 1, shape);
+    let even = graph.iota(IntExpr::from('z') * 2, shape.clone());
+    let odd = graph.iota(IntExpr::from('z') * 2 + 1, shape);
     let zero = graph.iota(0, packed_shape).cast(first.dtype);
     second.scatter(odd, first.scatter(even, zero))
 }
@@ -108,7 +108,7 @@ fn squeeze_dims(mut tensor: GraphTensor, dims: &[usize]) -> GraphTensor {
     let mut removed = 0;
     for &original_dim in dims {
         let dim = original_dim - removed;
-        if tensor.shape.dims[dim].to_usize() == Some(1) {
+        if tensor.legacy_tracker_ref().dims[dim].to_usize() == Some(1) {
             tensor = tensor.squeeze(dim);
             removed += 1;
         }
@@ -305,7 +305,7 @@ impl<'a> Translator<'a> {
                 let imag = lhs_imag - rhs_imag;
                 let magnitude = (real.square() + imag.square()).sqrt();
                 let p = self.get_float_arg(node, 2).unwrap_or(2.0);
-                let axes = (0..magnitude.shape.len()).collect();
+                let axes = (0..magnitude.legacy_tracker_ref().len()).collect();
                 let out = self.p_norm(magnitude, p, axes);
                 self.tensors.insert(output_name.to_string(), out);
             }
@@ -523,7 +523,7 @@ impl<'a> Translator<'a> {
             }
             "torch.ops.aten.constant_pad_nd.default" => {
                 let value = self.get_complex_input(node, 0)?;
-                let padding = self.constant_pad_spec(node, value.real.shape.len())?;
+                let padding = self.constant_pad_spec(node, value.real.legacy_tracker_ref().len())?;
                 let fill = match node.inputs.iter().position(|input| input.name == "value") {
                     Some(index) => {
                         self.complex_constructor_scalar_arg(node, index, value.torch_dtype)?
@@ -632,7 +632,7 @@ impl<'a> Translator<'a> {
                 let dims = self.get_ints_arg(node, 1)?;
                 let axes: Vec<usize> = dims
                     .iter()
-                    .map(|&dim| normalize_dim(dim, value.real.shape.len()))
+                    .map(|&dim| normalize_dim(dim, value.real.legacy_tracker_ref().len()))
                     .collect();
                 let copy = target == "torch.ops.aten.permute_copy.default";
                 let value = value.map(|component| {
@@ -649,12 +649,12 @@ impl<'a> Translator<'a> {
                 let value = self.get_complex_input(node, 0)?;
                 let raw_dim = self.get_int_arg(node, 1)?;
                 anyhow::ensure!(
-                    raw_dim >= -(value.real.shape.len() as i64)
-                        && raw_dim < value.real.shape.len() as i64,
+                    raw_dim >= -(value.real.legacy_tracker_ref().len() as i64)
+                        && raw_dim < value.real.legacy_tracker_ref().len() as i64,
                     "complex narrow_copy dimension {raw_dim} out of range for rank {}",
-                    value.real.shape.len()
+                    value.real.legacy_tracker_ref().len()
                 );
-                let dim = normalize_dim(raw_dim, value.real.shape.len());
+                let dim = normalize_dim(raw_dim, value.real.legacy_tracker_ref().len());
                 let start = self.get_expr_arg(node, 2)?;
                 let length = self.get_expr_arg(node, 3)?;
                 let real = narrow_copy_tensor(value.real, dim, start, length)?;
@@ -670,7 +670,7 @@ impl<'a> Translator<'a> {
             "torch.ops.aten.flip.default" => {
                 let value = self.get_complex_input(node, 0)?;
                 let dims =
-                    normalize_flip_dims(&self.get_ints_arg(node, 1)?, value.real.shape.len())?;
+                    normalize_flip_dims(&self.get_ints_arg(node, 1)?, value.real.legacy_tracker_ref().len())?;
                 let indices = flip_indices(value.real, &dims);
                 self.store_complex(
                     output_name,
@@ -683,7 +683,7 @@ impl<'a> Translator<'a> {
                 let (dim1, dim2) = normalize_diagonal_dims(
                     self.get_int_arg(node, 2).unwrap_or(0),
                     self.get_int_arg(node, 3).unwrap_or(1),
-                    value.real.shape.len(),
+                    value.real.legacy_tracker_ref().len(),
                 )?;
                 let output_shape = self.output_meta_shape(node)?;
                 let indices = diagonal_indices(value.real, &output_shape, offset, dim1, dim2)?;
@@ -700,7 +700,7 @@ impl<'a> Translator<'a> {
                 let (dim1, dim2) = normalize_diagonal_dims(
                     self.get_int_arg(node, 3).unwrap_or(0),
                     self.get_int_arg(node, 4).unwrap_or(1),
-                    destination.real.shape.len(),
+                    destination.real.legacy_tracker_ref().len(),
                 )?;
                 self.store_complex(
                     output_name,
@@ -715,7 +715,7 @@ impl<'a> Translator<'a> {
                 let dtype = self.output_complex_dtype(output_name)?;
                 let value = self.value_as_complex(self.input_value_name(node, 0)?, dtype)?;
                 let raw_dim = self.get_int_arg(node, 1)?;
-                let dim = if value.real.shape.is_empty() {
+                let dim = if value.real.legacy_tracker_ref().is_empty() {
                     anyhow::ensure!(
                         raw_dim == 0 || raw_dim == -1,
                         "index_select dimension {raw_dim} out of range for a scalar"
@@ -723,12 +723,12 @@ impl<'a> Translator<'a> {
                     0
                 } else {
                     anyhow::ensure!(
-                        raw_dim >= -(value.real.shape.len() as i64)
-                            && raw_dim < value.real.shape.len() as i64,
+                        raw_dim >= -(value.real.legacy_tracker_ref().len() as i64)
+                            && raw_dim < value.real.legacy_tracker_ref().len() as i64,
                         "index_select dimension {raw_dim} out of range for rank {}",
-                        value.real.shape.len()
+                        value.real.legacy_tracker_ref().len()
                     );
-                    normalize_dim(raw_dim, value.real.shape.len())
+                    normalize_dim(raw_dim, value.real.legacy_tracker_ref().len())
                 };
                 let index = self.get_input_tensor(node, 2)?;
                 let output_shape = self.output_meta_shape(node)?;
@@ -743,7 +743,7 @@ impl<'a> Translator<'a> {
                 let dtype = self.output_complex_dtype(output_name)?;
                 let value = self.value_as_complex(self.input_value_name(node, 0)?, dtype)?;
                 let raw_dim = self.get_int_arg(node, 1)?;
-                let dim = if value.real.shape.is_empty() {
+                let dim = if value.real.legacy_tracker_ref().is_empty() {
                     anyhow::ensure!(
                         raw_dim == 0 || raw_dim == -1,
                         "unfold dimension {raw_dim} out of range for a scalar"
@@ -751,12 +751,12 @@ impl<'a> Translator<'a> {
                     0
                 } else {
                     anyhow::ensure!(
-                        raw_dim >= -(value.real.shape.len() as i64)
-                            && raw_dim < value.real.shape.len() as i64,
+                        raw_dim >= -(value.real.legacy_tracker_ref().len() as i64)
+                            && raw_dim < value.real.legacy_tracker_ref().len() as i64,
                         "unfold dimension {raw_dim} out of range for rank {}",
-                        value.real.shape.len()
+                        value.real.legacy_tracker_ref().len()
                     );
-                    normalize_dim(raw_dim, value.real.shape.len())
+                    normalize_dim(raw_dim, value.real.legacy_tracker_ref().len())
                 };
                 let size = self.get_int_arg(node, 2)?;
                 let step = self.get_int_arg(node, 3)?;
@@ -770,7 +770,7 @@ impl<'a> Translator<'a> {
             }
             "torch.ops.aten.unsqueeze.default" => {
                 let value = self.get_complex_input(node, 0)?;
-                let dim = normalize_dim(self.get_int_arg(node, 1)?, value.real.shape.len() + 1);
+                let dim = normalize_dim(self.get_int_arg(node, 1)?, value.real.legacy_tracker_ref().len() + 1);
                 self.store_complex(output_name, value.map(|component| component.unsqueeze(dim)));
             }
             "torch.ops.aten.squeeze.dims" | "torch.ops.aten.squeeze.default" => {
@@ -788,7 +788,7 @@ impl<'a> Translator<'a> {
                         })
                         .collect()
                 };
-                let rank = value.real.shape.len();
+                let rank = value.real.legacy_tracker_ref().len();
                 let mut dims: Vec<usize> = dims
                     .into_iter()
                     .map(|dim| normalize_dim(dim, rank))
@@ -830,7 +830,7 @@ impl<'a> Translator<'a> {
             "torch.ops.aten.gather.default" => {
                 let value = self.get_complex_input(node, 0)?;
                 let raw_dim = self.get_int_arg(node, 1)?;
-                let dim = normalize_dim(raw_dim, value.real.shape.len());
+                let dim = normalize_dim(raw_dim, value.real.legacy_tracker_ref().len());
                 let indices = self.get_input_tensor(node, 2)?;
                 let real = super::movement_dynamic::pt2_gather_elements(value.real, indices, dim);
                 let imag = super::movement_dynamic::pt2_gather_elements(value.imag, indices, dim);
@@ -845,11 +845,11 @@ impl<'a> Translator<'a> {
                 let source = self.value_as_complex(self.input_value_name(node, 1)?, dtype)?;
                 let dim = normalize_dim(
                     self.get_int_arg(node, 2).unwrap_or(0),
-                    destination.real.shape.len(),
+                    destination.real.legacy_tracker_ref().len(),
                 );
                 let start = normalize_slice_bound(
                     self.get_expr_arg(node, 3)
-                        .unwrap_or_else(|_| Expression::from(0)),
+                        .unwrap_or_else(|_| IntExpr::from(0)),
                     destination.real.dims()[dim],
                 );
                 let step = self.get_int_arg(node, 5).unwrap_or(1);
@@ -1005,34 +1005,34 @@ impl<'a> Translator<'a> {
             }
             "torch.ops.aten.cumsum.default" => {
                 let value = self.get_complex_input(node, 0)?;
-                if value.real.shape.is_empty() {
+                if value.real.legacy_tracker_ref().is_empty() {
                     self.store_complex(output_name, value);
                 } else {
-                    let dim = normalize_dim(self.get_int_arg(node, 1)?, value.real.shape.len());
+                    let dim = normalize_dim(self.get_int_arg(node, 1)?, value.real.legacy_tracker_ref().len());
                     self.store_complex(output_name, value.map(|component| component.cumsum(dim)));
                 }
             }
             "torch.ops.aten.logcumsumexp.default" => {
                 let value = self.get_complex_input(node, 0)?;
                 let raw_dim = self.get_int_arg(node, 1)?;
-                if value.real.shape.is_empty() {
+                if value.real.legacy_tracker_ref().is_empty() {
                     anyhow::ensure!(
                         matches!(raw_dim, -1 | 0),
                         "dimension out of range for scalar"
                     );
                     self.store_complex(output_name, value);
                 } else {
-                    let dim = normalize_dim(raw_dim, value.real.shape.len());
-                    let rank = value.real.shape.len();
+                    let dim = normalize_dim(raw_dim, value.real.legacy_tracker_ref().len());
+                    let rank = value.real.legacy_tracker_ref().len();
                     let length = value.real.dims()[dim];
-                    let mut padding = vec![(Expression::from(0), Expression::from(0)); rank];
-                    padding[dim] = (length - 1, Expression::from(0));
+                    let mut padding = vec![(IntExpr::from(0), IntExpr::from(0)); rank];
+                    padding[dim] = (length - 1, IntExpr::from(0));
                     let negative_infinity =
                         self.floating_scalar(f64::NEG_INFINITY, value.real.dtype);
                     let zero = self.floating_scalar(0.0, value.imag.dtype);
                     let mut real_windows = value.real.pad_with(padding.clone(), negative_infinity);
                     let mut imag_windows = value.imag.pad_with(padding, zero);
-                    let mut kernel = vec![Expression::from(1); rank];
+                    let mut kernel = vec![IntExpr::from(1); rank];
                     kernel[dim] = length;
                     real_windows =
                         real_windows.unfold(kernel.clone(), vec![1usize; rank], vec![1usize; rank]);
@@ -1078,15 +1078,15 @@ impl<'a> Translator<'a> {
                 let dtype = self.output_complex_dtype(output_name)?;
                 let mut value = self.get_complex_input(node, 0)?.cast(dtype);
                 let dim = self.get_int_arg(node, 1)?;
-                if value.real.shape.is_empty() {
+                if value.real.legacy_tracker_ref().is_empty() {
                     anyhow::ensure!(
                         matches!(dim, -1 | 0),
                         "Dimension out of range for scalar cumprod: {dim}"
                     );
                 } else {
-                    let dim = normalize_dim(dim, value.real.shape.len());
+                    let dim = normalize_dim(dim, value.real.legacy_tracker_ref().len());
                     anyhow::ensure!(
-                        dim < value.real.shape.len(),
+                        dim < value.real.legacy_tracker_ref().len(),
                         "Dimension out of range for complex cumprod: {dim}"
                     );
                     let length = value.real.dims()[dim]
@@ -1236,7 +1236,7 @@ impl<'a> Translator<'a> {
         reduction: ScatterReduction,
     ) -> Result<ComplexTensor> {
         anyhow::ensure!(
-            indices.shape.len() == updates.real.shape.len(),
+            indices.legacy_tracker_ref().len() == updates.real.legacy_tracker_ref().len(),
             "complex scatter reduction requires index/update ranks to match"
         );
         let index_shape = indices.dims();
@@ -1283,8 +1283,8 @@ impl<'a> Translator<'a> {
             output_imag = combined.imag.scatter(destination, output_imag);
         }
 
-        output_real.shape = ShapeTracker::new(output_shape.clone());
-        output_imag.shape = ShapeTracker::new(output_shape);
+        *output_real.legacy_tracker_mut() = ShapeTracker::new(output_shape.clone());
+        *output_imag.legacy_tracker_mut() = ShapeTracker::new(output_shape);
         Ok(ComplexTensor::new(
             output_real,
             output_imag,
@@ -1301,11 +1301,11 @@ impl<'a> Translator<'a> {
         let data = self.value_as_complex(self.input_value_name(node, 0)?, dtype)?;
         let raw_dim = self.get_int_arg(node, 1)?;
         anyhow::ensure!(
-            raw_dim >= -(data.real.shape.len() as i64) && raw_dim < data.real.shape.len() as i64,
+            raw_dim >= -(data.real.legacy_tracker_ref().len() as i64) && raw_dim < data.real.legacy_tracker_ref().len() as i64,
             "complex scatter dimension {raw_dim} out of range for rank {}",
-            data.real.shape.len()
+            data.real.legacy_tracker_ref().len()
         );
-        let dim = normalize_dim(raw_dim, data.real.shape.len());
+        let dim = normalize_dim(raw_dim, data.real.legacy_tracker_ref().len());
         let indices = self.get_input_tensor(node, 2)?.cast(DType::Int);
         let updates = self.value_as_complex(self.input_value_name(node, 3)?, dtype)?;
         if node.target == "torch.ops.aten.scatter.src" {
@@ -1339,16 +1339,16 @@ impl<'a> Translator<'a> {
         let data = self.value_as_complex(self.input_value_name(node, 0)?, dtype)?;
         let raw_dim = self.get_int_arg(node, 1)?;
         anyhow::ensure!(
-            raw_dim >= -(data.real.shape.len() as i64) && raw_dim < data.real.shape.len() as i64,
+            raw_dim >= -(data.real.legacy_tracker_ref().len() as i64) && raw_dim < data.real.legacy_tracker_ref().len() as i64,
             "complex scatter dimension {raw_dim} out of range for rank {}",
-            data.real.shape.len()
+            data.real.legacy_tracker_ref().len()
         );
-        let dim = normalize_dim(raw_dim, data.real.shape.len());
+        let dim = normalize_dim(raw_dim, data.real.legacy_tracker_ref().len());
         let indices = self.get_input_tensor(node, 2)?.cast(DType::Int);
         let scalar = self.complex_constructor_scalar_arg(node, 3, dtype)?;
         let updates = ComplexTensor::new(
-            scalar.real.expand_rhs(indices.shape),
-            scalar.imag.expand_rhs(indices.shape),
+            scalar.real.expand_rhs(indices.dims()),
+            scalar.imag.expand_rhs(indices.dims()),
             dtype,
         );
         if node.target == "torch.ops.aten.scatter.value" {
@@ -1377,11 +1377,11 @@ impl<'a> Translator<'a> {
         let value = self.get_complex_input(node, 0)?;
         let raw_dim = self.get_int_arg(node, 1).unwrap_or(0);
         anyhow::ensure!(
-            raw_dim >= -(value.real.shape.len() as i64) && raw_dim < value.real.shape.len() as i64,
+            raw_dim >= -(value.real.legacy_tracker_ref().len() as i64) && raw_dim < value.real.legacy_tracker_ref().len() as i64,
             "complex unbind_copy dimension {raw_dim} out of range for rank {}",
-            value.real.shape.len()
+            value.real.legacy_tracker_ref().len()
         );
-        let dim = normalize_dim(raw_dim, value.real.shape.len());
+        let dim = normalize_dim(raw_dim, value.real.legacy_tracker_ref().len());
         let output_names: Vec<String> = node
             .outputs
             .iter()
@@ -1404,7 +1404,7 @@ impl<'a> Translator<'a> {
                     .unwrap_or_default()
             })
             .collect();
-        let axis_size = value.real.shape.dims[dim]
+        let axis_size = value.real.legacy_tracker_ref().dims[dim]
             .to_usize()
             .context("complex unbind_copy requires a concrete unbound dimension")?;
         anyhow::ensure!(
@@ -1494,7 +1494,7 @@ impl<'a> Translator<'a> {
         } else {
             self.graph.constant_float(value as f32).cast(tensor.dtype)
         };
-        scalar.expand_rhs(tensor.shape)
+        scalar.expand_rhs(tensor.dims())
     }
 
     fn complex_constant_like(
@@ -1549,8 +1549,8 @@ impl<'a> Translator<'a> {
         }
         let scalar = self.complex_constructor_scalar(scalar_arg, value.torch_dtype)?;
         let scalar = ComplexTensor::new(
-            scalar.real.expand_rhs(value.real.shape),
-            scalar.imag.expand_rhs(value.imag.shape),
+            scalar.real.expand_rhs(value.real.dims()),
+            scalar.imag.expand_rhs(value.imag.dims()),
             value.torch_dtype,
         );
         Ok(self.complex_mul(value, scalar))
@@ -1596,7 +1596,7 @@ impl<'a> Translator<'a> {
     ) -> GraphTensor {
         let shape = if_true.dims();
         let packed = interleave(&mut self.graph, if_false, if_true);
-        let base = self.graph.iota(Expression::from('z') * 2, shape);
+        let base = self.graph.iota(IntExpr::from('z') * 2, shape);
         packed.gather(base + condition.cast(DType::Int))
     }
 
@@ -1674,10 +1674,10 @@ impl<'a> Translator<'a> {
     }
 
     fn materialize(&mut self, value: GraphTensor) -> GraphTensor {
-        if value.shape.is_contiguous() {
+        if value.legacy_tracker_ref().is_contiguous() {
             value
         } else {
-            let indexes = self.graph.iota(Expression::from('z'), value.dims());
+            let indexes = self.graph.iota(IntExpr::from('z'), value.dims());
             value.gather(indexes)
         }
     }
@@ -2173,38 +2173,38 @@ impl<'a> Translator<'a> {
     fn reshape_complex_component(
         &mut self,
         value: GraphTensor,
-        shape: Vec<Expression>,
+        shape: Vec<IntExpr>,
     ) -> GraphTensor {
         reshape_tensor(self.materialize(value), shape)
     }
 
     fn expand_complex_component(&self, mut value: GraphTensor, node: &Node) -> Result<GraphTensor> {
-        let raw: Vec<Expression> = if let Ok(sizes) = self.get_ints_arg(node, 1) {
-            sizes.into_iter().map(Expression::from).collect()
+        let raw: Vec<IntExpr> = if let Ok(sizes) = self.get_ints_arg(node, 1) {
+            sizes.into_iter().map(IntExpr::from).collect()
         } else {
             self.get_exprs_arg(node, 1)?
         };
         anyhow::ensure!(
-            raw.len() >= value.shape.len(),
+            raw.len() >= value.legacy_tracker_ref().len(),
             "complex expand rank mismatch"
         );
-        let offset = raw.len() - value.shape.len();
+        let offset = raw.len() - value.legacy_tracker_ref().len();
         for _ in 0..offset {
             value = value.unsqueeze(0);
         }
-        let neg_one = Expression::from(-1i32);
-        let target: Vec<Expression> = raw
+        let neg_one = IntExpr::from(-1i32);
+        let target: Vec<IntExpr> = raw
             .into_iter()
             .enumerate()
             .map(|(axis, dim)| {
                 if dim == neg_one {
-                    value.shape.dims[axis]
+                    value.legacy_tracker_ref().dims[axis]
                 } else {
                     dim
                 }
             })
             .collect();
-        value.shape.expand(target);
+        value.legacy_tracker_mut().expand(target);
         Ok(value)
     }
 
@@ -2214,25 +2214,25 @@ impl<'a> Translator<'a> {
         repeats: &[i64],
     ) -> Result<GraphTensor> {
         anyhow::ensure!(
-            repeats.len() >= value.shape.len(),
+            repeats.len() >= value.legacy_tracker_ref().len(),
             "complex repeat rank mismatch"
         );
         anyhow::ensure!(
             repeats.iter().all(|&r| r >= 1),
             "repeat counts must be >= 1"
         );
-        for _ in 0..(repeats.len() - value.shape.len()) {
+        for _ in 0..(repeats.len() - value.legacy_tracker_ref().len()) {
             value = value.unsqueeze(0);
         }
         Ok(value.repeat(repeats.iter().map(|&r| r as usize).collect::<Vec<_>>()))
     }
 
     fn slice_complex_component(&self, value: GraphTensor, node: &Node) -> Result<GraphTensor> {
-        let dim = normalize_dim(self.get_int_arg(node, 1).unwrap_or(0), value.shape.len());
+        let dim = normalize_dim(self.get_int_arg(node, 1).unwrap_or(0), value.legacy_tracker_ref().len());
         let start = self
             .get_expr_arg(node, 2)
-            .unwrap_or_else(|_| Expression::from(0usize));
-        let start = normalize_slice_bound(start, value.shape.dims[dim]);
+            .unwrap_or_else(|_| IntExpr::from(0usize));
+        let start = normalize_slice_bound(start, value.legacy_tracker_ref().dims[dim]);
         if self.get_int_arg(node, 3).is_ok_and(|end| end == i64::MAX) {
             Ok(if start.to_usize() == Some(0) {
                 value
@@ -2240,7 +2240,7 @@ impl<'a> Translator<'a> {
                 value.slice_along(start.., dim)
             })
         } else {
-            let end = normalize_slice_bound(self.get_expr_arg(node, 3)?, value.shape.dims[dim]);
+            let end = normalize_slice_bound(self.get_expr_arg(node, 3)?, value.legacy_tracker_ref().dims[dim]);
             Ok(value.slice_along(start..end, dim))
         }
     }
@@ -2254,7 +2254,7 @@ impl<'a> Translator<'a> {
             } else {
                 0
             },
-            value.real.shape.len(),
+            value.real.legacy_tracker_ref().len(),
         );
         let output_names: Vec<String> = node
             .outputs
@@ -2319,15 +2319,15 @@ impl<'a> Translator<'a> {
             axis_and_name.context("complex index_put requires one tensor index")?;
         let index = self.get_tensor(index_name)?.cast(DType::Int);
         anyhow::ensure!(
-            index.shape.len() == 1,
+            index.legacy_tracker_ref().len() == 1,
             "complex index_put requires a 1-D tensor index"
         );
         anyhow::ensure!(
-            values.real.shape.len() == data.real.shape.len(),
+            values.real.legacy_tracker_ref().len() == data.real.legacy_tracker_ref().len(),
             "complex index_put does not support value broadcasting"
         );
         anyhow::ensure!(
-            axis < values.real.shape.len(),
+            axis < values.real.legacy_tracker_ref().len(),
             "complex index_put axis is outside the value rank"
         );
 
@@ -2370,10 +2370,10 @@ impl<'a> Translator<'a> {
     }
 
     fn select_complex_component(&self, value: GraphTensor, node: &Node) -> Result<GraphTensor> {
-        let dim = normalize_dim(self.get_int_arg(node, 1)?, value.shape.len());
+        let dim = normalize_dim(self.get_int_arg(node, 1)?, value.legacy_tracker_ref().len());
         let raw_index = self.get_int_arg(node, 2)?;
         let index = if raw_index < 0 {
-            let size = value.shape.dims[dim]
+            let size = value.legacy_tracker_ref().dims[dim]
                 .to_usize()
                 .context("negative complex select index requires a concrete dimension")?;
             (size as i64 + raw_index) as usize
@@ -2403,7 +2403,7 @@ impl<'a> Translator<'a> {
             .find(|input| input.name != "tensors")
             .and_then(|input| input.arg.as_int())
             .unwrap_or(0);
-        let dim = normalize_dim(dim, values[0].real.shape.len());
+        let dim = normalize_dim(dim, values[0].real.legacy_tracker_ref().len());
         let real = values[1..].iter().fold(values[0].real, |acc, value| {
             acc.concat_along(value.real, dim)
         });
@@ -2466,7 +2466,7 @@ impl<'a> Translator<'a> {
         // Row-major matrix coordinates: input frequency/time index `j` is
         // z/N and output index `k` is z%N. Reducing j*k modulo N bounds the
         // trigonometric arguments to [0, 2pi), improving large-N accuracy.
-        let z = Expression::from('z');
+        let z = IntExpr::from('z');
         let input_index = z / length;
         let output_index = z % length;
         let phase_index = (input_index * output_index) % length;
@@ -2478,7 +2478,7 @@ impl<'a> Translator<'a> {
             .graph
             .constant(length)
             .cast(real.dtype)
-            .expand_rhs(phase.shape);
+            .expand_rhs(phase.dims());
         let tau = self.constant_like(phase, std::f64::consts::TAU);
         let angle = phase * tau / denominator;
         let cosine = self.real_cos(angle);
@@ -2513,7 +2513,7 @@ impl<'a> Translator<'a> {
         &mut self,
         value: ComplexTensor,
         axis: usize,
-        output_length: Expression,
+        output_length: IntExpr,
         output_dtype: DType,
     ) -> GraphTensor {
         let input_shape = value.real.dims();
@@ -2535,7 +2535,7 @@ impl<'a> Translator<'a> {
         let real = reshape_tensor(real, vec![batch, input_length]);
         let imag = reshape_tensor(imag, vec![batch, input_length]);
 
-        let z = Expression::from('z');
+        let z = IntExpr::from('z');
         let frequency = z / output_length;
         let time = z % output_length;
         let phase_index = (frequency * time) % output_length;
@@ -2548,13 +2548,13 @@ impl<'a> Translator<'a> {
             .graph
             .constant(output_length)
             .cast(DType::F64)
-            .expand_rhs(phase.shape);
+            .expand_rhs(phase.dims());
         let tau = self.constant_like(phase, std::f64::consts::TAU);
         let angle = phase * tau / denominator;
         let cosine = self.real_cos(angle);
         let sine = angle.sin();
 
-        let frequency = Expression::from('z') / output_length;
+        let frequency = IntExpr::from('z') / output_length;
         let interior = frequency.gte(1) * (frequency * 2).lt(output_length);
         let real_coefficient = self
             .graph
@@ -2582,7 +2582,7 @@ impl<'a> Translator<'a> {
     fn normalize_complex_fft(
         &mut self,
         value: ComplexTensor,
-        transformed_elements: Expression,
+        transformed_elements: IntExpr,
         normalization: i64,
     ) -> ComplexTensor {
         if normalization == 0 {
@@ -2596,14 +2596,14 @@ impl<'a> Translator<'a> {
             if normalization == 1 {
                 divisor = divisor.sqrt();
             }
-            component / divisor.expand_rhs(component.shape)
+            component / divisor.expand_rhs(component.dims())
         })
     }
 
     fn normalize_real_fft(
         &mut self,
         value: GraphTensor,
-        transformed_elements: Expression,
+        transformed_elements: IntExpr,
         normalization: i64,
     ) -> GraphTensor {
         if normalization == 0 {
@@ -2613,13 +2613,13 @@ impl<'a> Translator<'a> {
         if normalization == 1 {
             divisor = divisor.sqrt();
         }
-        value / divisor.expand_rhs(value.shape)
+        value / divisor.expand_rhs(value.dims())
     }
 
     fn translate_fft_c2c(&mut self, node: &Node, output_name: &str) -> Result<ComplexTensor> {
         let dtype = self.output_complex_dtype(output_name)?;
         let mut value = self.value_as_complex(self.input_value_name(node, 0)?, dtype)?;
-        let axes = self.fft_dims(node, value.real.shape.len())?;
+        let axes = self.fft_dims(node, value.real.legacy_tracker_ref().len())?;
         let transformed_elements =
             product_of_dims(axes.iter().map(|&axis| value.real.dims()[axis]));
         let forward = self.get_bool_arg(node, 3)?;
@@ -2633,7 +2633,7 @@ impl<'a> Translator<'a> {
     fn translate_fft_r2c(&mut self, node: &Node, output_name: &str) -> Result<ComplexTensor> {
         let dtype = self.output_complex_dtype(output_name)?;
         let mut value = self.value_as_complex(self.input_value_name(node, 0)?, dtype)?;
-        let axes = self.fft_dims(node, value.real.shape.len())?;
+        let axes = self.fft_dims(node, value.real.legacy_tracker_ref().len())?;
         let transformed_elements =
             product_of_dims(axes.iter().map(|&axis| value.real.dims()[axis]));
         for &axis in &axes {
@@ -2646,7 +2646,7 @@ impl<'a> Translator<'a> {
             let one_sided_length = (value.real.dims()[last_axis] / 2 + 1).simplify();
             value = value.map(|component| {
                 let mut component = component.slice_along(..one_sided_length, last_axis);
-                component.shape.dims[last_axis] = one_sided_length;
+                component.legacy_tracker_mut().dims[last_axis] = one_sided_length;
                 component
             });
         }
@@ -2663,7 +2663,7 @@ impl<'a> Translator<'a> {
             other => anyhow::bail!("c2r FFT requires a floating output dtype, got {other:?}"),
         };
         let mut value = self.value_as_complex(self.input_value_name(node, 0)?, compute_dtype)?;
-        let axes = self.fft_dims(node, value.real.shape.len())?;
+        let axes = self.fft_dims(node, value.real.legacy_tracker_ref().len())?;
         let last_axis = *axes.last().context("c2r FFT requires a dimension")?;
         let output_length = self.get_expr_arg(node, 3)?;
         let transformed_elements = product_of_dims(axes.iter().map(|&axis| {
@@ -2688,7 +2688,7 @@ impl<'a> Translator<'a> {
         op: ReductionOp,
     ) -> Result<ComplexTensor> {
         let value = self.get_complex_input(node, 0)?;
-        let rank = value.real.shape.len();
+        let rank = value.real.legacy_tracker_ref().len();
         if rank == 0 {
             return Ok(value);
         }
@@ -2718,7 +2718,7 @@ impl<'a> Translator<'a> {
 
     fn translate_complex_var_mean(&mut self, node: &Node) -> Result<(GraphTensor, ComplexTensor)> {
         let value = self.get_complex_input(node, 0)?;
-        let axes = self.composed_reduction_axes(node, value.real.shape.len())?;
+        let axes = self.composed_reduction_axes(node, value.real.legacy_tracker_ref().len())?;
         let keepdim = node
             .inputs
             .iter()
@@ -2739,14 +2739,14 @@ impl<'a> Translator<'a> {
                 value.torch_dtype,
             )
         };
-        let centered_real = real - mean.real.expand_to_shape_on_axes(real.shape, axes.clone());
-        let centered_imag = imag - mean.imag.expand_to_shape_on_axes(imag.shape, axes.clone());
+        let centered_real = real - mean.real.expand_to_shape_on_axes(real.dims(), axes.clone());
+        let centered_imag = imag - mean.imag.expand_to_shape_on_axes(imag.dims(), axes.clone());
         let numerator =
             (centered_real * centered_real + centered_imag * centered_imag).sum(axes.clone());
         let degrees = self.graph.constant(n).cast(component_dtype)
             - self.floating_scalar(correction, component_dtype);
         let zero = self.floating_scalar(0.0, component_dtype);
-        let divisor = degrees.maximum(zero).expand_rhs(numerator.shape);
+        let divisor = degrees.maximum(zero).expand_rhs(numerator.dims());
         let variance = numerator / divisor;
         let variance = self.restore_reduced_dims(variance, &axes, keepdim);
         let mean = ComplexTensor::new(
@@ -2764,7 +2764,7 @@ impl<'a> Translator<'a> {
     ) -> Result<ComplexTensor> {
         let dtype = self.output_complex_dtype(output_name)?;
         let mut value = self.value_as_complex(self.input_value_name(node, 0)?, dtype)?;
-        if value.real.shape.is_empty() {
+        if value.real.legacy_tracker_ref().is_empty() {
             if node.target == "torch.ops.aten.prod.dim_int" {
                 let dim = self.get_int_arg(node, 1)?;
                 anyhow::ensure!(
@@ -2775,7 +2775,7 @@ impl<'a> Translator<'a> {
             return Ok(value);
         }
         let (axis, keepdim) = if node.target == "torch.ops.aten.prod.dim_int" {
-            let axis = normalize_dim(self.get_int_arg(node, 1)?, value.real.shape.len());
+            let axis = normalize_dim(self.get_int_arg(node, 1)?, value.real.legacy_tracker_ref().len());
             let keepdim = node.inputs.len() > 2 && self.get_bool_arg(node, 2).unwrap_or(false);
             (axis, keepdim)
         } else {
@@ -2790,7 +2790,7 @@ impl<'a> Translator<'a> {
             (0, false)
         };
 
-        let axis_size = value.real.shape.dims[axis]
+        let axis_size = value.real.legacy_tracker_ref().dims[axis]
             .to_usize()
             .context("complex product requires a concrete reduction dimension")?;
         if axis_size == 0 {
@@ -2855,8 +2855,8 @@ impl<'a> Translator<'a> {
         let input = self.value_as_complex(self.input_value_name(node, 0)?, compute_dtype)?;
         let matrix = self.value_as_complex(self.input_value_name(node, 1)?, compute_dtype)?;
         let vector = self.value_as_complex(self.input_value_name(node, 2)?, compute_dtype)?;
-        anyhow::ensure!(matrix.real.shape.len() == 2, "addmv matrix must be rank 2");
-        anyhow::ensure!(vector.real.shape.len() == 1, "addmv vector must be rank 1");
+        anyhow::ensure!(matrix.real.legacy_tracker_ref().len() == 2, "addmv matrix must be rank 2");
+        anyhow::ensure!(vector.real.legacy_tracker_ref().len() == 1, "addmv vector must be rank 1");
 
         let vector = vector.map(|component| component.unsqueeze(1));
         let product = self
@@ -2881,8 +2881,8 @@ impl<'a> Translator<'a> {
         let input = self.value_as_complex(self.input_value_name(node, 0)?, compute_dtype)?;
         let batch1 = self.value_as_complex(self.input_value_name(node, 1)?, compute_dtype)?;
         let batch2 = self.value_as_complex(self.input_value_name(node, 2)?, compute_dtype)?;
-        anyhow::ensure!(batch1.real.shape.len() == 3, "addbmm batch1 must be rank 3");
-        anyhow::ensure!(batch2.real.shape.len() == 3, "addbmm batch2 must be rank 3");
+        anyhow::ensure!(batch1.real.legacy_tracker_ref().len() == 3, "addbmm batch1 must be rank 3");
+        anyhow::ensure!(batch2.real.legacy_tracker_ref().len() == 3, "addbmm batch2 must be rank 3");
 
         let product = self
             .complex_matmul(batch1, batch2)

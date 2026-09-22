@@ -40,34 +40,34 @@ impl<'a> Translator<'a> {
         padding: &[usize],
         dilation: &[usize],
         ceil_mode: bool,
-        output_shape: &[Expression],
+        output_shape: &[IntExpr],
         fill: GraphTensor,
     ) -> GraphTensor {
-        let rank = input.shape.len();
+        let rank = input.legacy_tracker_ref().len();
         let spatial_rank = kernel.len();
         let first_spatial = rank - spatial_rank;
-        let mut pad = vec![(Expression::from(0), Expression::from(0)); rank];
+        let mut pad = vec![(IntExpr::from(0), IntExpr::from(0)); rank];
         for spatial in 0..spatial_rank {
             let right_extra = if ceil_mode { stride[spatial] - 1 } else { 0 };
             pad[first_spatial + spatial] = (
-                Expression::from(padding[spatial]),
-                Expression::from(padding[spatial] + right_extra),
+                IntExpr::from(padding[spatial]),
+                IntExpr::from(padding[spatial] + right_extra),
             );
         }
         let padded = input.pad_with(pad, fill);
 
-        let mut full_kernel = vec![Expression::from(1); rank];
-        let mut full_stride = vec![Expression::from(1); rank];
-        let mut full_dilation = vec![Expression::from(1); rank];
+        let mut full_kernel = vec![IntExpr::from(1); rank];
+        let mut full_stride = vec![IntExpr::from(1); rank];
+        let mut full_dilation = vec![IntExpr::from(1); rank];
         for spatial in 0..spatial_rank {
-            full_kernel[first_spatial + spatial] = Expression::from(kernel[spatial]);
-            full_stride[first_spatial + spatial] = Expression::from(stride[spatial]);
-            full_dilation[first_spatial + spatial] = Expression::from(dilation[spatial]);
+            full_kernel[first_spatial + spatial] = IntExpr::from(kernel[spatial]);
+            full_stride[first_spatial + spatial] = IntExpr::from(stride[spatial]);
+            full_dilation[first_spatial + spatial] = IntExpr::from(dilation[spatial]);
         }
         let mut windows = padded.unfold(full_kernel, full_stride, full_dilation);
         for spatial in 0..spatial_rank {
             let axis = first_spatial + spatial;
-            windows = windows.slice_along(Expression::from(0)..output_shape[axis], axis);
+            windows = windows.slice_along(IntExpr::from(0)..output_shape[axis], axis);
         }
         // Remove the size-one kernel axes belonging to batch/channel axes.
         for axis in (0..first_spatial).rev() {
@@ -83,7 +83,7 @@ impl<'a> Translator<'a> {
     ) -> Result<GraphTensor> {
         let input = self.get_input_tensor(node, 0)?;
         anyhow::ensure!(
-            input.shape.len() == spatial_rank + 1 || input.shape.len() == spatial_rank + 2,
+            input.legacy_tracker_ref().len() == spatial_rank + 1 || input.legacy_tracker_ref().len() == spatial_rank + 2,
             "avg_pool{spatial_rank}d input rank is invalid"
         );
         let kernel_raw = self.pool_ints(node, "kernel_size", 1)?;
@@ -113,7 +113,7 @@ impl<'a> Translator<'a> {
             .unwrap_or(true);
         let divisor_override = self.named_int_arg(node, "divisor_override");
         let output_shape = self.output_meta_shape(node)?;
-        let rank = input.shape.len();
+        let rank = input.legacy_tracker_ref().len();
         let unit_dilation = vec![1; spatial_rank];
         let zero = self.graph.constant_float(0.0).cast(input.dtype);
         let windows = self.pool_windows(
@@ -134,14 +134,14 @@ impl<'a> Translator<'a> {
             self.graph
                 .constant(divisor)
                 .cast(input.dtype)
-                .expand_rhs(sum.shape)
+                .expand_rhs(sum.dims())
         } else if count_include_pad {
             self.graph
                 .constant(product_of_dims(
-                    kernel.iter().copied().map(Expression::from),
+                    kernel.iter().copied().map(IntExpr::from),
                 ))
                 .cast(input.dtype)
-                .expand_rhs(sum.shape)
+                .expand_rhs(sum.dims())
         } else {
             let one = self.graph.constant_float(1.0).cast(input.dtype);
             let ones = one.expand_rhs(input.dims());
@@ -164,10 +164,10 @@ impl<'a> Translator<'a> {
     fn adaptive_pool_candidates(
         &mut self,
         input: GraphTensor,
-        output_shape: &[Expression],
+        output_shape: &[IntExpr],
         spatial_rank: usize,
     ) -> (GraphTensor, GraphTensor, usize) {
-        let rank = input.shape.len();
+        let rank = input.legacy_tracker_ref().len();
         let prefix_rank = rank - spatial_rank;
         let input_shape = input.dims();
         let input_spatial = &input_shape[prefix_rank..];
@@ -188,12 +188,12 @@ impl<'a> Translator<'a> {
                 .graph
                 .constant(input_spatial[spatial])
                 .cast(DType::F64)
-                .expand_rhs(output_position.shape);
+                .expand_rhs(output_position.dims());
             let output_size = self
                 .graph
                 .constant(output_spatial[spatial])
                 .cast(DType::F64)
-                .expand_rhs(output_position.shape);
+                .expand_rhs(output_position.dims());
             let start =
                 (output_position.cast(DType::F64) * input_size / output_size).cast(DType::Int);
             let end = (((output_position + 1) * input_spatial[spatial]
@@ -215,7 +215,7 @@ impl<'a> Translator<'a> {
         spatial_rank: usize,
     ) -> Result<GraphTensor> {
         let input = self.get_input_tensor(node, 0)?;
-        let rank = input.shape.len();
+        let rank = input.legacy_tracker_ref().len();
         anyhow::ensure!(
             rank == spatial_rank + 1 || rank == spatial_rank + 2,
             "adaptive_avg_pool{spatial_rank}d input rank is invalid"
@@ -238,7 +238,7 @@ impl<'a> Translator<'a> {
         spatial_rank: usize,
     ) -> Result<()> {
         let input = self.get_input_tensor(node, 0)?;
-        let rank = input.shape.len();
+        let rank = input.legacy_tracker_ref().len();
         anyhow::ensure!(
             rank == spatial_rank + 1 || rank == spatial_rank + 2,
             "adaptive max pool input rank is invalid"
@@ -252,14 +252,14 @@ impl<'a> Translator<'a> {
         let spatial_numel = product_of_dims(input_spatial.iter().copied());
         let logical_indices = self
             .graph
-            .iota(Expression::from('z') % spatial_numel, input_shape.clone())
+            .iota(IntExpr::from('z') % spatial_numel, input_shape.clone())
             .cast(DType::I64);
         let mut expanded_indices = logical_indices;
         for (spatial, size) in output_spatial.iter().copied().enumerate() {
             expanded_indices = expanded_indices.expand_dim(prefix_rank + spatial, size);
         }
 
-        let lowest = self.lowest_scalar(input.dtype).expand_rhs(expanded.shape);
+        let lowest = self.lowest_scalar(input.dtype).expand_rhs(expanded.dims());
         let candidates = self.select(membership, expanded, lowest);
         let outputs = self.select_pool_max(candidates, expanded_indices, rank);
         self.store_tensor_outputs(node, &outputs)
@@ -286,8 +286,8 @@ impl<'a> Translator<'a> {
         mut indices: GraphTensor,
         output_rank: usize,
     ) -> [GraphTensor; 2] {
-        while candidates.shape.len() > output_rank + 1 {
-            let last = candidates.shape.len() - 1;
+        while candidates.legacy_tracker_ref().len() > output_rank + 1 {
+            let last = candidates.legacy_tracker_ref().len() - 1;
             candidates = candidates.merge_dims(last - 1, last);
             indices = indices.merge_dims(last - 1, last);
         }
@@ -310,7 +310,7 @@ impl<'a> Translator<'a> {
 
     pub(crate) fn translate_max_pool(&mut self, node: &Node, spatial_rank: usize) -> Result<()> {
         let input = self.get_input_tensor(node, 0)?;
-        let rank = input.shape.len();
+        let rank = input.legacy_tracker_ref().len();
         anyhow::ensure!(
             rank == spatial_rank + 1 || rank == spatial_rank + 2,
             "max pool requires channel-first input"
@@ -350,7 +350,7 @@ impl<'a> Translator<'a> {
         let spatial_numel = product_of_dims(input.dims()[prefix_rank..].iter().copied());
         let logical_indices = self
             .graph
-            .iota(Expression::from('z') % spatial_numel, input.dims())
+            .iota(IntExpr::from('z') % spatial_numel, input.dims())
             .cast(DType::I64);
         let zero_index = self.graph.constant(0i64).cast(DType::I64);
         let index_windows = self.pool_windows(
@@ -380,9 +380,9 @@ impl<'a> Translator<'a> {
             .enumerate()
             .map(|(axis, _)| {
                 if axis < prefix_rank {
-                    Expression::from('z') * strides[axis]
+                    IntExpr::from('z') * strides[axis]
                 } else {
-                    Expression::from(0)
+                    IntExpr::from(0)
                 }
             })
             .collect::<Vec<_>>();
@@ -413,13 +413,13 @@ impl<'a> Translator<'a> {
     ) -> Result<()> {
         let input = self.get_input_tensor(node, 0)?;
         let random_samples = self.get_input_tensor(node, 3)?;
-        let rank = input.shape.len();
+        let rank = input.legacy_tracker_ref().len();
         anyhow::ensure!(
             rank == spatial_rank + 1 || rank == spatial_rank + 2,
             "fractional max pool input rank is invalid"
         );
         anyhow::ensure!(
-            random_samples.shape.len() == 3
+            random_samples.legacy_tracker_ref().len() == 3
                 && random_samples.dims()[2].to_usize() == Some(spatial_rank),
             "fractional max pool random_samples must have shape [N, C, spatial_rank]"
         );
@@ -434,7 +434,7 @@ impl<'a> Translator<'a> {
         let output_spatial = &output_shape[prefix_rank..];
         let input_spatial = &input_shape[prefix_rank..];
         let mut window_shape = output_shape.clone();
-        window_shape.extend(kernel.iter().copied().map(Expression::from));
+        window_shape.extend(kernel.iter().copied().map(IntExpr::from));
 
         let input_strides = super::movement_dynamic::row_major_strides(&input_shape);
         let mut flat_indices = self.axis_positions(&window_shape, 0) * input_strides[0];
@@ -466,7 +466,7 @@ impl<'a> Translator<'a> {
                 sample = sample.squeeze(0);
             }
             for output_size in output_spatial.iter().copied() {
-                sample = sample.expand_dim(sample.shape.len(), output_size);
+                sample = sample.expand_dim(sample.legacy_tracker_ref().len(), output_size);
             }
             let output_axis = prefix_rank + spatial;
             let output_position = self.axis_positions(&output_shape, output_axis);
@@ -474,12 +474,12 @@ impl<'a> Translator<'a> {
                 .graph
                 .constant(input_spatial[spatial] - kernel[spatial])
                 .cast(sample.dtype)
-                .expand_rhs(sample.shape);
+                .expand_rhs(sample.dims());
             let denominator = self
                 .graph
                 .constant(output_spatial[spatial] - 1)
                 .cast(sample.dtype)
-                .expand_rhs(sample.shape);
+                .expand_rhs(sample.dims());
             let output_is_one = self.is_zero(denominator);
             let one = self.constant_like(denominator, 1.0);
             let safe_denominator = self.select(output_is_one, one, denominator);
@@ -491,18 +491,18 @@ impl<'a> Translator<'a> {
                 .graph
                 .constant(output_spatial[spatial] - 1)
                 .cast(DType::Int)
-                .expand_rhs(output_position.shape);
+                .expand_rhs(output_position.dims());
             let final_position = output_position.eq(terminal_position);
             let terminal_start = self
                 .graph
                 .constant(input_spatial[spatial] - kernel[spatial])
                 .cast(sample.dtype)
-                .expand_rhs(ordinary_start.shape);
+                .expand_rhs(ordinary_start.dims());
             let final_or_ordinary = self.select(final_position, terminal_start, ordinary_start);
             let start = self.select(output_is_one, terminal_start, final_or_ordinary);
             let mut coordinate = start;
             for size in kernel.iter().copied() {
-                coordinate = coordinate.expand_dim(coordinate.shape.len(), size);
+                coordinate = coordinate.expand_dim(coordinate.legacy_tracker_ref().len(), size);
             }
             let kernel_axis = rank + spatial;
             coordinate = coordinate
@@ -551,7 +551,7 @@ impl<'a> Translator<'a> {
             self.graph
                 .constant((input_size - 1) as i64)
                 .cast(DType::Int)
-                .expand_rhs(lower.shape),
+                .expand_rhs(lower.dims()),
         );
         let weight = source - lower.cast(DType::F32);
         let mut lower = lower;
@@ -571,7 +571,7 @@ impl<'a> Translator<'a> {
 
     fn static_resize_dimensions(
         input: GraphTensor,
-        output_shape: &[Expression],
+        output_shape: &[IntExpr],
         operation: &str,
     ) -> Result<[usize; 4]> {
         let [
@@ -599,7 +599,7 @@ impl<'a> Translator<'a> {
 
     pub(crate) fn translate_upsample_bilinear2d(&mut self, node: &Node) -> Result<GraphTensor> {
         let input = self.get_input_tensor(node, 0)?;
-        anyhow::ensure!(input.shape.len() == 4, "bilinear2d requires NCHW input");
+        anyhow::ensure!(input.legacy_tracker_ref().len() == 4, "bilinear2d requires NCHW input");
         let output_shape = self.output_meta_shape(node)?;
         let [input_height, input_width, output_height, output_width] =
             Self::static_resize_dimensions(input, &output_shape, "bilinear2d")?;
@@ -733,7 +733,7 @@ impl<'a> Translator<'a> {
         for dim in 0..axis {
             weights = weights.expand_dim(dim, input.dims()[dim]);
         }
-        for dim in axis + 1..input.shape.len() {
+        for dim in axis + 1..input.legacy_tracker_ref().len() {
             weights = weights.expand_dim(dim + 1, input.dims()[dim]);
         }
         candidates *= weights;
@@ -756,7 +756,7 @@ impl<'a> Translator<'a> {
     pub(crate) fn translate_upsample_bilinear2d_aa(&mut self, node: &Node) -> Result<GraphTensor> {
         let input = self.get_input_tensor(node, 0)?;
         anyhow::ensure!(
-            input.shape.len() == 4,
+            input.legacy_tracker_ref().len() == 4,
             "antialiased bilinear2d requires NCHW input"
         );
         let output_shape = self.output_meta_shape(node)?;
@@ -811,7 +811,7 @@ impl<'a> Translator<'a> {
     pub(crate) fn translate_batch_norm_functional(&mut self, node: &Node) -> Result<()> {
         let input = self.get_input_tensor(node, 0)?;
         anyhow::ensure!(
-            input.shape.len() >= 2,
+            input.legacy_tracker_ref().len() >= 2,
             "batch norm input rank must be at least two"
         );
         let output_names = Self::tensor_output_names(node);
@@ -844,12 +844,12 @@ impl<'a> Translator<'a> {
             input.dtype
         };
         let compute = input.cast(compute_dtype);
-        let axes = (0..input.shape.len())
+        let axes = (0..input.legacy_tracker_ref().len())
             .filter(|&axis| axis != 1)
             .collect::<Vec<_>>();
         let (batch_mean, batch_var) = if training {
             let batch_mean = compute.mean(axes.clone());
-            let expanded_mean = batch_mean.expand_to_shape_on_axes(compute.shape, axes.clone());
+            let expanded_mean = batch_mean.expand_to_shape_on_axes(compute.dims(), axes.clone());
             let centered = compute - expanded_mean;
             let batch_var = centered.square().mean(axes.clone());
             (Some(batch_mean), Some(batch_var))
@@ -880,19 +880,19 @@ impl<'a> Translator<'a> {
         let invstd = (variance + self.constant_like(variance, eps))
             .sqrt()
             .reciprocal();
-        let mean_expanded = mean.expand_to_shape_on_axes(compute.shape, axes.clone());
-        let invstd_expanded = invstd.expand_to_shape_on_axes(compute.shape, axes.clone());
+        let mean_expanded = mean.expand_to_shape_on_axes(compute.dims(), axes.clone());
+        let invstd_expanded = invstd.expand_to_shape_on_axes(compute.dims(), axes.clone());
         let mut output = (compute - mean_expanded) * invstd_expanded;
         if let Some(weight) = self.named_tensor_arg(node, "weight")? {
             let weight = weight
                 .cast(compute_dtype)
-                .expand_to_shape_on_axes(output.shape, axes.clone());
+                .expand_to_shape_on_axes(output.dims(), axes.clone());
             output *= weight;
         }
         if let Some(bias) = self.named_tensor_arg(node, "bias")? {
             let bias = bias
                 .cast(compute_dtype)
-                .expand_to_shape_on_axes(output.shape, axes.clone());
+                .expand_to_shape_on_axes(output.dims(), axes.clone());
             output += bias;
         }
         self.tensors
@@ -929,12 +929,12 @@ impl<'a> Translator<'a> {
                     .graph
                     .constant(count)
                     .cast(batch_var.dtype)
-                    .expand_rhs(batch_var.shape);
+                    .expand_rhs(batch_var.dims());
                 let denominator = self
                     .graph
                     .constant(count - 1)
                     .cast(batch_var.dtype)
-                    .expand_rhs(batch_var.shape);
+                    .expand_rhs(batch_var.dims());
                 let unbiased = batch_var * count_tensor / denominator;
                 let var_out = running_var * (1.0 - momentum as f32)
                     + unbiased.cast(running_var.dtype) * momentum as f32;

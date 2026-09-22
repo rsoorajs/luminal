@@ -1,13 +1,14 @@
+//! Visualization interfaces, re-seated on the current pipeline's artifacts
+//! (the HLIR-era display_graph machinery died with the old world): the
+//! recorded [`LogicalGraph`](crate::graph::LogicalGraph), the extracted
+//! plan ([`ExtractedGraph`](crate::layout_ir::ExtractedGraph)), the
+//! bufferized plan ([`BufferIrGraph`](crate::bufferize::BufferIrGraph)),
+//! and the [`SerializedEGraph`](crate::egglog_utils::SerializedEGraph)
+//! snapshot.
+
 use anyhow::Result;
 use egglog::EGraph;
-use std::fmt::{Debug, Display};
-use std::string::String;
-
-use crate::prelude::petgraph::dot::{Config, Dot};
-use crate::prelude::*;
-use petgraph::Directed;
-use petgraph::prelude::StableGraph;
-use std::io::Write;
+use rustc_hash::FxHashMap;
 
 pub trait ToHtml {
     fn to_html(&self) -> Result<String>;
@@ -27,6 +28,8 @@ const EGRAPH_VIS_TEMPLATE: &str = r#"
     mounted.render([JSON.stringify(egraph)]);
 </script>"#;
 
+/// Pipeline-agnostic: any egglog e-graph, rendered by the egraph-visualizer
+/// web component.
 impl ToHtml for EGraph {
     fn to_html(&self) -> Result<String> {
         let egraph_as_json = serde_json::to_string_pretty(
@@ -36,111 +39,205 @@ impl ToHtml for EGraph {
     }
 }
 
-impl ToDot for EGraph {
+/// The homebrew semi-static e-graph snapshot: one cluster per e-class, one
+/// node per e-node, edges from each e-node to the e-class of each child
+/// (compound edges dock at the cluster border). Output is deterministic
+/// (classes and nodes sorted by id string); root classes get the boundary
+/// blue border.
+impl ToDot for crate::egglog_utils::SerializedEGraph {
     fn to_dot(&self) -> Result<String> {
-        Ok(self
-            .serialize(egglog::SerializeConfig::default())
-            .egraph
-            .to_dot())
+        let mut classes: Vec<_> = self.eclasses.iter().collect();
+        classes.sort_by_key(|(class, _)| class.to_string());
+
+        let mut out = String::from(
+            "digraph SerializedEGraph {\n  compound=true;\n  node [shape=box, style=\"rounded,filled\", fillcolor=\"#ede9fe\", color=\"#7c3aed\", fontname=\"Helvetica\"];\n",
+        );
+        // (cluster index, anchor node index) per class — edges point at the
+        // anchor and clip at the cluster border via lhead.
+        let mut anchors = FxHashMap::default();
+        let mut node_ids = FxHashMap::default();
+        let mut next = 0usize;
+        for (cluster, (class, (typ, members))) in classes.iter().enumerate() {
+            let mut members: Vec<_> = members.iter().collect();
+            members.sort_by_key(|node| node.to_string());
+            let border = if self.roots.contains(class) {
+                "#2563eb"
+            } else {
+                "#9ca3af"
+            };
+            out.push_str(&format!(
+                "  subgraph cluster_{cluster} {{\n    label=\"{}\";\n    color=\"{border}\";\n",
+                escape_dot_string(&format!("{typ} {class}"))
+            ));
+            for member in members {
+                let id = next;
+                next += 1;
+                node_ids.insert(member.clone(), id);
+                anchors.entry((*class).clone()).or_insert((cluster, id));
+                let label = escape_dot_string(&self.enodes[member].0);
+                out.push_str(&format!("    n{id} [label=\"{label}\"];\n"));
+            }
+            out.push_str("  }\n");
+        }
+        let mut enodes: Vec<_> = self.enodes.iter().collect();
+        enodes.sort_by_key(|(node, _)| node.to_string());
+        for (node, (_, children)) in enodes {
+            let src = node_ids[node];
+            for child in children {
+                // Children outside the retained snapshot (stripped classes)
+                // simply have no cluster to point at.
+                if let Some((cluster, anchor)) = anchors.get(child) {
+                    out.push_str(&format!(
+                        "  n{src} -> n{anchor} [lhead=cluster_{cluster}];\n"
+                    ));
+                }
+            }
+        }
+        out.push_str("}\n");
+        Ok(out)
     }
 }
 
-/// Implements `ToDot` for [`LLIRGraph`] and [`HLIRGraph`]
-/// TODO: This simple extraction can be improved in the future with support for edge labels
-impl<N, E> ToDot for petgraph::stable_graph::StableGraph<N, E>
-where
-    N: std::fmt::Debug,
-    E: std::fmt::Debug,
-{
+/// The recorded logical model as a dataflow DAG: one node per recorded
+/// value, operand edges into consumers. Inputs are blue, interior values
+/// violet, names annotate their value — the shared visual grammar.
+impl ToDot for crate::graph::LogicalGraph {
     fn to_dot(&self) -> Result<String> {
-        Ok(format!(
-            "{:?}",
-            Dot::with_config(self, &[Config::EdgeNoLabel])
-        ))
+        let mut names: FxHashMap<usize, Vec<&str>> = FxHashMap::default();
+        for (id, name) in self.viz_names() {
+            names.entry(id.index()).or_default().push(name);
+        }
+        let mut out = String::from(
+            "digraph LogicalGraph {\n  node [fontname=\"Helvetica\"];\n  edge [fontname=\"Helvetica\"];\n",
+        );
+        for (id, node) in self.viz_nodes() {
+            let index = id.index();
+            let input_label = match &node.op {
+                crate::graph::LogicalOp::Input { label } => Some(label.as_str()),
+                _ => None,
+            };
+            let dims_text = node
+                .dims
+                .iter()
+                .map(|dim| dim.to_string())
+                .collect::<Vec<_>>()
+                .join("×");
+            let mut lines = vec![
+                match input_label {
+                    Some(name) => format!("v{index} = input {name}"),
+                    None => format!("v{index} = {}", node.op.constructor()),
+                },
+                format!("[{dims_text}] {:?}", node.dtype),
+            ];
+            if let Some(found) = names.get(&index) {
+                for name in found {
+                    lines.push(format!("name {name}"));
+                }
+            }
+            let boundary = input_label.is_some();
+            let (fill, border) = if boundary {
+                ("#dbeafe", "#2563eb")
+            } else {
+                ("#ede9fe", "#7c3aed")
+            };
+            let label = lines
+                .iter()
+                .map(|line| escape_dot_string(line))
+                .collect::<Vec<_>>()
+                .join("\\n");
+            out.push_str(&format!(
+                "  n{index} [shape=box, style=\"rounded,filled\", fillcolor=\"{fill}\", color=\"{border}\", label=\"{label}\"];\n"
+            ));
+            let operands = self.viz_operands(id);
+            for (slot, operand) in &operands {
+                // Position labels only where order matters (2+ operands).
+                if operands.len() > 1 {
+                    out.push_str(&format!(
+                        "  n{} -> n{index} [label=\"{slot}\"];\n",
+                        operand.index()
+                    ));
+                } else {
+                    out.push_str(&format!("  n{} -> n{index};\n", operand.index()));
+                }
+            }
+        }
+        out.push_str("}\n");
+        Ok(out)
     }
 }
 
-/// View a debug graph in the browser using Luminal Visualizer
-pub fn display_graph<E>(graph: &StableGraph<impl Display + Debug, E, Directed, u32>) {
-    let dot_source = graph_to_dot(graph, None);
-
-    // Open in Luminal Visualizer (served from graph_viewer dev server)
-    let url = format!(
-        "http://viz.luminal.com/?dot={}",
-        urlencoding::encode(&dot_source)
-    );
-    let _ = open::that(&url);
+/// The extraction artifact — the most useful single type to render:
+/// `extractor::extract_layout_ir_with_ops_and_matchers` returns
+/// `Result<Option<ExtractedGraph>>` and `dps::dps_rewrite` both consumes
+/// AND produces this same type, so one impl covers the whole
+/// extract → DPS ladder (render before and after the rewrite).
+impl ToDot for crate::layout_ir::ExtractedGraph {
+    fn to_dot(&self) -> Result<String> {
+        // The inherent renderer (layout_ir.rs) wins method resolution — no
+        // recursion here.
+        Ok(crate::layout_ir::ExtractedGraph::to_dot(self))
+    }
 }
 
-/// View a debug graph in the browser using Luminal Visualizer
-pub fn display_graph_marked_nodes<E>(
-    graph: &StableGraph<impl Display + Debug, E, Directed, u32>,
-    mark_nodes: Option<Vec<NodeIndex>>,
-) {
-    let dot_source = graph_to_dot(graph, mark_nodes);
-
-    // Open in Luminal Visualizer (served from graph_viewer dev server)
-    let url = format!(
-        "http://localhost:5173/?dot={}",
-        urlencoding::encode(&dot_source)
-    );
-    let _ = open::that(&url);
+/// The bufferized plan; the inherent renderer (bufferize.rs) carries the
+/// slot-table grammar and buffer-name labeling.
+impl<L: crate::bufferize::PlanLayout> ToDot for crate::bufferize::BufferIrGraph<L> {
+    fn to_dot(&self) -> Result<String> {
+        Ok(crate::bufferize::BufferIrGraph::to_dot(self))
+    }
 }
 
-/// View a debug graph in the browser using Luminal Visualizer
-pub fn display_graph_to_file<E>(
-    graph: &StableGraph<impl Display + Debug, E, Directed, u32>,
-    mark_nodes: Option<Vec<NodeIndex>>,
-    file_name: &str,
-) {
-    let dot_source = graph_to_dot(graph, mark_nodes);
+/// Write rendered html to a file.
+pub fn save_html(html: &str, path: &str) -> Result<()> {
+    std::fs::write(path, html)?;
+    Ok(())
+}
 
-    // Write the DOT source to the file
-    let mut file = std::fs::File::create(file_name).unwrap();
-    file.write_all(dot_source.as_bytes()).unwrap();
+/// Open a dot source in the Luminal Visualizer (browser).
+pub fn open_dot(dot: &str) {
+    let url = format!("http://viz.luminal.com/?dot={}", urlencoding::encode(dot));
+    let _ = open::that(&url);
 }
 
 fn escape_dot_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn graph_to_dot<E>(
-    graph: &StableGraph<impl Display + Debug, E, Directed, u32>,
-    mark_nodes: Option<Vec<NodeIndex>>,
-) -> String {
-    let mut dot = String::from("digraph {\n");
-    let mut map = std::collections::HashMap::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prelude::*;
 
-    for (next_id, node) in graph.node_indices().enumerate() {
-        let weight = graph.node_weight(node).unwrap();
-        let label = escape_dot_string(&format!("{}", weight));
-        let tooltip = escape_dot_string(&format!("{:?}", weight));
-        let id = next_id;
-        map.insert(node, id);
-
-        let is_marked = mark_nodes
-            .as_ref()
-            .map(|m| m.contains(&node))
-            .unwrap_or(false);
-
-        if is_marked {
-            dot.push_str(&format!(
-                "    n{id} [label=\"{label}\", tooltip=\"{tooltip}\", style=filled, fillcolor=\"#ffeb3b\", fontcolor=\"black\", color=\"#ffd600\"];\n"
-            ));
-        } else {
-            dot.push_str(&format!(
-                "    n{id} [label=\"{label}\", tooltip=\"{tooltip}\"];\n"
-            ));
-        }
+    #[test]
+    fn logical_graph_dot_smoke() {
+        let mut cx = Graph::new();
+        let a = cx.tensor(2, DType::F32);
+        let b = cx.tensor(2, DType::F32);
+        let _c = a + b;
+        let dot = cx.logical.to_dot().expect("recorded model renders");
+        assert!(dot.contains("digraph"), "header missing:\n{dot}");
+        assert!(dot.contains("LogicalAdd"), "op node missing:\n{dot}");
+        assert!(dot.contains("->"), "operand edges missing:\n{dot}");
     }
 
-    for edge in graph.edge_indices() {
-        let (src, dest) = graph.edge_endpoints(edge).unwrap();
-        if let (Some(src_id), Some(dest_id)) = (map.get(&src), map.get(&dest)) {
-            dot.push_str(&format!("    n{src_id} -> n{dest_id};\n"));
-        }
+    #[test]
+    fn serialized_egraph_dot_smoke() {
+        // var! is unhygienic — it needs Span/RustSpan in scope.
+        #[allow(unused_imports)]
+        use egglog::{ast::Span, prelude::RustSpan, var};
+        let mut egraph = egglog::EGraph::default();
+        let commands = egraph
+            .parser
+            .get_program_from_string(
+                None,
+                "(datatype Math (Num i64) (Add Math Math))\n(let root (Add (Num 1) (Num 2)))",
+            )
+            .expect("program parses");
+        egraph.run_program(commands).expect("program runs");
+        let (sort, value) = egraph.eval_expr(&var!("root")).expect("root resolves");
+        let serialized = crate::egglog_utils::SerializedEGraph::new(&egraph, vec![(sort, value)]);
+        let dot = serialized.to_dot().expect("snapshot renders");
+        assert!(dot.contains("cluster_"), "eclass clusters missing:\n{dot}");
+        assert!(dot.contains("Add"), "enode label missing:\n{dot}");
     }
-
-    dot.push_str("}\n");
-    dot
 }

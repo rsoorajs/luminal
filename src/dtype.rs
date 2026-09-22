@@ -1,11 +1,9 @@
 use std::fmt::{Debug, Display};
 
 /// Supported dtypes
-/// This is undergoing development. Our goal is to be as explicit as possible about dtype behavior.
-#[derive(Clone, Copy, PartialEq, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum DType {
     /// 32-bit float (8e23m)
-    #[default]
     F32,
     /// 64-bit float (11e52m)
     F64,
@@ -48,10 +46,19 @@ pub enum DType {
 
     /// 8-bit unsigned float (e8m0)
     F8UE8M0,
-    /// 8-bit float (e4m3)
-    F8E4M3,
-    /// 8-bit float (e5m2)
+    /// 8-bit float, OCP e4m3 "fn" encoding: bias 7, max 448, no inf, NaN at
+    /// 0x7F/0xFF (torch `float8_e4m3fn`, CUDA `__nv_fp8_e4m3`).
+    F8E4M3FN,
+    /// 8-bit float, e4m3 "fnuz" encoding: bias 8, max 240, no inf, no -0, the
+    /// single NaN at 0x80 (torch `float8_e4m3fnuz`). The same byte decodes
+    /// differently from F8E4M3FN, so it is its own dtype; no device type.
+    F8E4M3FNUZ,
+    /// 8-bit float, e5m2 (IEEE-like: has inf and NaN; torch `float8_e5m2`)
     F8E5M2,
+    /// 8-bit float, e5m2 "fnuz" encoding: bias 16, no inf, no -0, the single NaN
+    /// at 0x80 (torch `float8_e5m2fnuz`). Its own dtype for the same reason as
+    /// F8E4M3FNUZ; no device type.
+    F8E5M2FNUZ,
 
     /// 6-bit float (e2m3)
     F6E2M3,
@@ -83,8 +90,10 @@ impl Debug for DType {
             DType::U16 => "U16",
             DType::Bool => "Bool",
             DType::F8UE8M0 => "F8UE8M0",
-            DType::F8E4M3 => "F8E4M3",
+            DType::F8E4M3FN => "F8E4M3FN",
+            DType::F8E4M3FNUZ => "F8E4M3FNUZ",
             DType::F8E5M2 => "F8E5M2",
+            DType::F8E5M2FNUZ => "F8E5M2FNUZ",
             DType::F6E2M3 => "F6E2M3",
             DType::F6E3M2 => "F6E3M2",
             DType::F4E2M1 => "F4E2M1",
@@ -115,10 +124,144 @@ impl DType {
             | DType::I8
             | DType::U8
             | DType::F8UE8M0
-            | DType::F8E4M3
-            | DType::F8E5M2 => 8,
+            | DType::F8E4M3FN
+            | DType::F8E4M3FNUZ
+            | DType::F8E5M2
+            | DType::F8E5M2FNUZ => 8,
             DType::F6E2M3 | DType::F6E3M2 => 6,
             DType::F4E2M1 | DType::I4 | DType::U4 => 4,
         }
+    }
+}
+
+/// The egglog `Dtype` vocabulary as read back from serialized `dtype-of`
+/// rows — the PLAN-side dtype (typed-buffers landing A, 2026-08-11).
+/// Deliberately distinct from the authoring [`DType`]: it includes
+/// `Bool8` (binding vocabulary — the byte-code boolean has no frontend
+/// authoring variant on purpose), and its widths are the egglog
+/// `bits-of` rows (information content — `Bool` is ONE bit), not Rust
+/// storage widths. This is the dtype a plan `Buffer` carries and the
+/// executor dispatches on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlanDtype {
+    F32,
+    F64,
+    F16,
+    Bf16,
+    TF32,
+    Int,
+    Int64,
+    I4,
+    U4,
+    I8,
+    U8,
+    I16,
+    U16,
+    Bool,
+    Bool8,
+    F8UE8M0,
+    F8E4M3FN,
+    F8E4M3FNUZ,
+    F8E5M2,
+    F8E5M2FNUZ,
+    F6E2M3,
+    F6E3M2,
+    F4E2M1,
+}
+
+impl PlanDtype {
+    /// Parse a serialized nullary `Dtype` constructor name — the egglog
+    /// spellings (`"Int64"`, never Rust's `I64`).
+    pub fn from_egglog_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "F32" => Self::F32,
+            "F64" => Self::F64,
+            "F16" => Self::F16,
+            "Bf16" => Self::Bf16,
+            "TF32" => Self::TF32,
+            "Int" => Self::Int,
+            "Int64" => Self::Int64,
+            "I4" => Self::I4,
+            "U4" => Self::U4,
+            "I8" => Self::I8,
+            "U8" => Self::U8,
+            "I16" => Self::I16,
+            "U16" => Self::U16,
+            "Bool" => Self::Bool,
+            "Bool8" => Self::Bool8,
+            "F8UE8M0" => Self::F8UE8M0,
+            "F8E4M3FN" => Self::F8E4M3FN,
+            "F8E4M3FNUZ" => Self::F8E4M3FNUZ,
+            "F8E5M2" => Self::F8E5M2,
+            "F8E5M2FNUZ" => Self::F8E5M2FNUZ,
+            "F6E2M3" => Self::F6E2M3,
+            "F6E3M2" => Self::F6E3M2,
+            "F4E2M1" => Self::F4E2M1,
+            _ => return None,
+        })
+    }
+
+    /// The egglog `bits-of` width — MUST mirror the preamble's eager
+    /// rows exactly (Bool = 1: information content, not storage; the
+    /// byte-backed boolean is the separate `Bool8` dtype).
+    pub fn egglog_bits(self) -> i64 {
+        match self {
+            Self::F64 | Self::Int64 => 64,
+            Self::F32 | Self::Int => 32,
+            Self::TF32 => 19,
+            Self::F16 | Self::Bf16 | Self::I16 | Self::U16 => 16,
+            Self::Bool8
+            | Self::I8
+            | Self::U8
+            | Self::F8UE8M0
+            | Self::F8E4M3FN
+            | Self::F8E4M3FNUZ
+            | Self::F8E5M2
+            | Self::F8E5M2FNUZ => 8,
+            Self::F6E2M3 | Self::F6E3M2 => 6,
+            Self::F4E2M1 | Self::I4 | Self::U4 => 4,
+            Self::Bool => 1,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every plan dtype spells itself the way the egglog `Dtype` sort does,
+    /// and reads back; the fp8 encodings are separate names with one width.
+    #[test]
+    fn plan_dtypes_round_trip_their_egglog_names() {
+        for dtype in [
+            PlanDtype::F8E4M3FN,
+            PlanDtype::F8E4M3FNUZ,
+            PlanDtype::F8E5M2,
+            PlanDtype::F8E5M2FNUZ,
+            PlanDtype::F8UE8M0,
+            PlanDtype::Bool8,
+            PlanDtype::Int64,
+        ] {
+            let name = format!("{dtype:?}");
+            assert_eq!(PlanDtype::from_egglog_name(&name), Some(dtype), "{name}");
+        }
+        assert_eq!(PlanDtype::F8E4M3FN.egglog_bits(), 8);
+        assert_eq!(PlanDtype::F8E4M3FNUZ.egglog_bits(), 8);
+        assert_eq!(PlanDtype::F8E5M2FNUZ.egglog_bits(), 8);
+        assert_ne!(PlanDtype::F8E5M2, PlanDtype::F8E5M2FNUZ);
+        assert_ne!(PlanDtype::F8E4M3FN, PlanDtype::F8E4M3FNUZ);
+        assert_eq!(
+            PlanDtype::from_egglog_name("F8E4M3"),
+            None,
+            "the unqualified name is retired"
+        );
+    }
+
+    #[test]
+    fn authoring_dtypes_name_their_encoding() {
+        assert_eq!(format!("{:?}", DType::F8E4M3FN), "F8E4M3FN");
+        assert_eq!(format!("{:?}", DType::F8E4M3FNUZ), "F8E4M3FNUZ");
+        assert_eq!(DType::F8E4M3FN.bits(), 8);
+        assert_eq!(DType::F8E4M3FNUZ.bits(), 8);
     }
 }

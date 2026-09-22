@@ -1,12 +1,13 @@
 use hf_hub::api::sync::Api;
+
 use luminal::{
     dtype::DType,
-    graph::{CompileOptions, DimBucket, Graph},
-    prelude::{F32Pow, GraphTensor, Runtime},
+    graph::{DimBucket, Graph},
+    prelude::{F32Pow, GraphTensor},
 };
-use luminal_metal::MetalRuntime;
-use luminal_nn::{LayerNorm, gather_rows, scatter_rows};
+use luminal_metal::{CompileOptions, HostBuffer, MetalRuntime};
 use luminal_tracing::luminal_filter;
+use model_zoo::model_support::{LayerNorm, Namespace, gather_rows, scatter_rows};
 use rustc_hash::FxHashSet;
 use std::{
     error::Error,
@@ -105,14 +106,16 @@ impl KVCache {
         let mut k_caches = Vec::with_capacity(LAYERS);
         let mut v_caches = Vec::with_capacity(LAYERS);
         for l in 0..LAYERS {
-            k_caches.push(
-                cx.named_tensor(format!("kv_cache.{l}.k"), (num_slots, KV_DIM))
-                    .persist(),
-            );
-            v_caches.push(
-                cx.named_tensor(format!("kv_cache.{l}.v"), (num_slots, KV_DIM))
-                    .persist(),
-            );
+            k_caches.push(cx.named_tensor(
+                format!("kv_cache.{l}.k"),
+                (num_slots, KV_DIM),
+                DType::F32,
+            ));
+            v_caches.push(cx.named_tensor(
+                format!("kv_cache.{l}.v"),
+                (num_slots, KV_DIM),
+                DType::F32,
+            ));
         }
         Self { k_caches, v_caches }
     }
@@ -128,79 +131,81 @@ impl Llama {
     fn init(cx: &mut Graph) -> Self {
         let mut layers = Vec::with_capacity(LAYERS);
         for l in 0..LAYERS {
+            let layer_ns = Namespace::root().child("model").child("layers").index(l);
             layers.push(LlamaLayer {
-                up: cx
-                    .named_tensor(
-                        format!("model.layers.{l}.mlp.up_proj.weight"),
-                        (INTERMEDIATE, HIDDEN),
-                    )
-                    .persist(),
-                gate: cx
-                    .named_tensor(
-                        format!("model.layers.{l}.mlp.gate_proj.weight"),
-                        (INTERMEDIATE, HIDDEN),
-                    )
-                    .persist(),
-                down: cx
-                    .named_tensor(
-                        format!("model.layers.{l}.mlp.down_proj.weight"),
-                        (HIDDEN, INTERMEDIATE),
-                    )
-                    .persist(),
-                q_proj: cx
-                    .named_tensor(
-                        format!("model.layers.{l}.self_attn.q_proj.weight"),
-                        (HIDDEN, HIDDEN),
-                    )
-                    .persist(),
-                k_proj: cx
-                    .named_tensor(
-                        format!("model.layers.{l}.self_attn.k_proj.weight"),
-                        (KV_DIM, HIDDEN),
-                    )
-                    .persist(),
-                v_proj: cx
-                    .named_tensor(
-                        format!("model.layers.{l}.self_attn.v_proj.weight"),
-                        (KV_DIM, HIDDEN),
-                    )
-                    .persist(),
-                o_proj: cx
-                    .named_tensor(
-                        format!("model.layers.{l}.self_attn.o_proj.weight"),
-                        (HIDDEN, HIDDEN),
-                    )
-                    .persist(),
+                up: cx.named_tensor(
+                    format!("model.layers.{l}.mlp.up_proj.weight"),
+                    (INTERMEDIATE, HIDDEN),
+                    DType::F32,
+                ),
+                gate: cx.named_tensor(
+                    format!("model.layers.{l}.mlp.gate_proj.weight"),
+                    (INTERMEDIATE, HIDDEN),
+                    DType::F32,
+                ),
+                down: cx.named_tensor(
+                    format!("model.layers.{l}.mlp.down_proj.weight"),
+                    (HIDDEN, INTERMEDIATE),
+                    DType::F32,
+                ),
+                q_proj: cx.named_tensor(
+                    format!("model.layers.{l}.self_attn.q_proj.weight"),
+                    (HIDDEN, HIDDEN),
+                    DType::F32,
+                ),
+                k_proj: cx.named_tensor(
+                    format!("model.layers.{l}.self_attn.k_proj.weight"),
+                    (KV_DIM, HIDDEN),
+                    DType::F32,
+                ),
+                v_proj: cx.named_tensor(
+                    format!("model.layers.{l}.self_attn.v_proj.weight"),
+                    (KV_DIM, HIDDEN),
+                    DType::F32,
+                ),
+                o_proj: cx.named_tensor(
+                    format!("model.layers.{l}.self_attn.o_proj.weight"),
+                    (HIDDEN, HIDDEN),
+                    DType::F32,
+                ),
                 attn_rms: LayerNorm::new(
                     HIDDEN,
-                    Some(&format!("model.layers.{l}.input_layernorm.weight")),
-                    None,
+                    true,
+                    false,
                     false,
                     RMS_NORM_EPS,
+                    DType::F32,
+                    &layer_ns.child("input_layernorm"),
                     cx,
                 ),
                 mlp_rms: LayerNorm::new(
                     HIDDEN,
-                    Some(&format!("model.layers.{l}.post_attention_layernorm.weight")),
-                    None,
+                    true,
+                    false,
                     false,
                     RMS_NORM_EPS,
+                    DType::F32,
+                    &layer_ns.child("post_attention_layernorm"),
                     cx,
                 ),
             });
         }
 
         Self {
-            embedding: cx
-                .named_tensor("model.embed_tokens.weight", (VOCAB_SIZE, HIDDEN))
-                .persist(),
+            embedding: cx.named_tensor(
+                "model.embed_tokens.weight",
+                (VOCAB_SIZE, HIDDEN),
+                DType::F32,
+            ),
             layers,
             lm_norm: LayerNorm::new(
                 HIDDEN,
-                Some("model.norm.weight"),
-                None,
+                true,
+                false,
                 false,
                 RMS_NORM_EPS,
+                DType::F32,
+                &Namespace::root().child("model").child("norm"),
                 cx,
             ),
         }
@@ -215,11 +220,7 @@ impl Llama {
         attn_mask: GraphTensor,
         kv_cache: &KVCache,
     ) -> (GraphTensor, Vec<(GraphTensor, GraphTensor)>) {
-        let seq = input.dims1();
-        let mut x = self.embedding.gather(
-            (input * HIDDEN).expand_dim(1, HIDDEN)
-                + input.graph().arange(HIDDEN).expand_dim(0, seq),
-        );
+        let mut x = luminal_nn::embedding(input, self.embedding);
         let mut cache_outputs = Vec::with_capacity(LAYERS);
         for (i, layer) in self.layers.iter().enumerate() {
             let (x_new, k_out, v_out) = layer.forward(
@@ -291,11 +292,11 @@ fn attention(
     gather_idx: GraphTensor,
     attn_mask: GraphTensor,
 ) -> (GraphTensor, GraphTensor, GraphTensor) {
-    let k_cache_out = scatter_rows(k_rope, scatter_idx, k_cache, KV_DIM);
-    let v_cache_out = scatter_rows(v, scatter_idx, v_cache, KV_DIM);
+    let k_cache_out = scatter_rows(k_rope, scatter_idx, k_cache);
+    let v_cache_out = scatter_rows(v, scatter_idx, v_cache);
 
-    let k = gather_rows(k_cache_out, gather_idx, KV_DIM);
-    let v_ctx = gather_rows(v_cache_out, gather_idx, KV_DIM);
+    let k = gather_rows(k_cache_out, gather_idx);
+    let v_ctx = gather_rows(v_cache_out, gather_idx);
 
     let q = (q_rope * 1.0).split_dims(1, HEAD_DIM).transpose(0, 1);
     let k = k.split_dims(1, HEAD_DIM).permute((1, 2, 0));
@@ -351,9 +352,15 @@ impl LlamaLayer {
     }
 }
 
+fn read_dense(runtime: &MetalRuntime, tensor: GraphTensor) -> Vec<f32> {
+    let (data, binding) = runtime.fetch(tensor.id).expect("output readback failed");
+    luminal_metal::layouts::dense_f32(&data.as_f32().expect("F32 output"), &binding.layout)
+        .expect("output layout readback failed")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_model_step(
-    cx: &mut Graph,
+    _cx: &mut Graph,
     runtime: &mut MetalRuntime,
     input: GraphTensor,
     q_pos_t: GraphTensor,
@@ -370,30 +377,32 @@ fn run_model_step(
     attn_mask: &[f32],
 ) -> (Vec<f32>, StepProfile) {
     let start = Instant::now();
-    cx.set_dim('s', tokens.len());
-    cx.set_dim('c', gather_idx.len());
+    runtime.set_dim('s', tokens.len());
+    runtime.set_dim('c', gather_idx.len());
 
-    runtime.set_data(input, tokens.iter().map(|t| *t as i32).collect::<Vec<_>>());
-    runtime.set_data(q_pos_t, q_pos.to_vec());
-    runtime.set_data(scatter_idx_t, scatter_idx.to_vec());
-    runtime.set_data(gather_idx_t, gather_idx.to_vec());
-    runtime.set_data(attn_mask_t, attn_mask.to_vec());
-    runtime.allocate_intermediate_buffers(&cx.dyn_map);
+    runtime.set_data(
+        input.id,
+        tokens.iter().map(|t| *t as i32).collect::<Vec<_>>(),
+    );
+    runtime.set_data(q_pos_t.id, q_pos.to_vec());
+    runtime.set_data(scatter_idx_t.id, scatter_idx.to_vec());
+    runtime.set_data(gather_idx_t.id, gather_idx.to_vec());
+    runtime.set_data(attn_mask_t.id, attn_mask.to_vec());
 
     let execute_start = Instant::now();
-    runtime.execute(&cx.dyn_map);
+    runtime.execute().expect("Metal execution failed");
     let execute = execute_start.elapsed();
 
     let logits_start = Instant::now();
-    let logits_data = runtime.get_f32(logits);
+    let logits_data = read_dense(runtime, logits);
     let get_logits = logits_start.elapsed();
 
     let cache_start = Instant::now();
     for (layer_idx, (k_out, v_out)) in cache_outputs.iter().enumerate() {
-        let k_buf = runtime.remove_buffer(*k_out);
-        let v_buf = runtime.remove_buffer(*v_out);
-        runtime.set_buffer(kv_cache.k_caches[layer_idx], k_buf);
-        runtime.set_buffer(kv_cache.v_caches[layer_idx], v_buf);
+        let k_buf = read_dense(runtime, *k_out);
+        let v_buf = read_dense(runtime, *v_out);
+        runtime.set_data(kv_cache.k_caches[layer_idx].id, k_buf);
+        runtime.set_data(kv_cache.v_caches[layer_idx].id, v_buf);
     }
     let cache_roundtrip = cache_start.elapsed();
 
@@ -411,7 +420,12 @@ fn run_model_step(
 fn main() -> Result<(), Box<dyn Error>> {
     let _ = tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(luminal_filter())
+        .with(
+            std::env::var("RUST_LOG")
+                .ok()
+                .and_then(|value| value.parse::<tracing_subscriber::filter::Targets>().ok())
+                .unwrap_or_else(luminal_filter),
+        )
         .try_init();
 
     let model_dir = prepare_hf_model()?;
@@ -426,11 +440,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         .to_vec();
 
     let mut cx = Graph::default();
-    let input = cx.named_tensor("input", 's').as_dtype(DType::Int);
-    let q_pos_t = cx.named_tensor("q_pos", 's').as_dtype(DType::Int);
-    let scatter_idx_t = cx.named_tensor("scatter_idx", 's').as_dtype(DType::Int);
-    let gather_idx_t = cx.named_tensor("gather_idx", 'c').as_dtype(DType::Int);
-    let attn_mask_t = cx.named_tensor("attn_mask", ('s', 'c'));
+    let input = cx.named_tensor("input", 's', DType::Int);
+    let q_pos_t = cx.named_tensor("q_pos", 's', DType::Int);
+    let scatter_idx_t = cx.named_tensor("scatter_idx", 's', DType::Int);
+    let gather_idx_t = cx.named_tensor("gather_idx", 'c', DType::Int);
+    let attn_mask_t = cx.named_tensor("attn_mask", ('s', 'c'), DType::F32);
     let kv_cache = KVCache::new(&mut cx, MAX_SEQ_LEN);
     let (logits, cache_outputs) = Llama::init(&mut cx).forward(
         input,
@@ -440,14 +454,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         attn_mask_t,
         &kv_cache,
     );
-    let logits = logits.output();
-    for (k_out, v_out) in &cache_outputs {
-        k_out.output();
-        v_out.output();
-    }
 
-    cx.set_dim('s', 1);
-    cx.set_dim('c', 1);
     let max_prefill = (prompt_tokens.len() + 16)
         .next_power_of_two()
         .min(MAX_SEQ_LEN);
@@ -456,54 +463,120 @@ fn main() -> Result<(), Box<dyn Error>> {
         .min(MAX_SEQ_LEN);
     let search_s = 16.min(max_prefill).max(2);
     let search_c = 16.min(max_context).max(2);
-    let compile_options = CompileOptions::default()
-        .dim_buckets(
-            's',
-            &[
-                DimBucket::new(1, 1),
-                DimBucket::new(2, max_prefill).representative(search_s),
-            ],
-        )
-        .dim_buckets(
-            'c',
-            &[
-                DimBucket::new(1, 1),
-                DimBucket::new(2, max_context).representative(search_c),
-            ],
-        )
-        .search_graph_limit(SEARCH_GRAPHS)
-        .candidate_timeout(Duration::from_secs(10));
-
+    let compile_options = CompileOptions {
+        generations: 10,
+        generation_size: SEARCH_GRAPHS / 10,
+        candidate_timeout: Some(Duration::from_secs(10)),
+        device_budget_bytes: Some(8 * 1024 * 1024 * 1024),
+        // Keep multi-GiB broadcast products out of the e-graph while retaining
+        // large checkpoint inputs and composed, zero-copy layouts.
+        max_intermediate_bytes: Some(64 * 1024 * 1024),
+        ..Default::default()
+    };
+    // Cache updates are consumed by attention, so they are not graph leaves.
+    // Bind them explicitly because the generation loop reads them back.
+    let outputs: Vec<_> = std::iter::once(logits.id)
+        .chain(cache_outputs.iter().flat_map(|(k, v)| [k.id, v.id]))
+        .collect();
+    let bindings = luminal_metal::bindings::MetalBindings::dense(&cx.logical, &outputs);
+    let mut runtime = MetalRuntime::load_with(&cx, bindings, luminal_metal::metal_registry())?;
+    runtime.bind_dim_buckets(
+        's',
+        vec![
+            DimBucket::new(1, 1),
+            DimBucket::new(2, max_prefill).representative(search_s),
+        ],
+    )?;
+    runtime.bind_dim_buckets(
+        'c',
+        vec![
+            DimBucket::new(1, 1),
+            DimBucket::new(2, max_context).representative(search_c),
+        ],
+    )?;
     println!("Loading weights...");
     let load_start = Instant::now();
-    let mut runtime = MetalRuntime::initialize(());
-    runtime.load_safetensors(&cx, model_dir.join("model.safetensors").to_str().unwrap());
-    println!("  Weight load: {:.2} s", load_start.elapsed().as_secs_f64());
-
-    let cache_bytes = MAX_SEQ_LEN * KV_DIM * std::mem::size_of::<f32>();
-    for i in 0..LAYERS {
-        runtime.set_zeros(kv_cache.k_caches[i], cache_bytes);
-        runtime.set_zeros(kv_cache.v_caches[i], cache_bytes);
+    let checkpoint = std::fs::read(model_dir.join("model.safetensors"))?;
+    let tensors = safetensors::SafeTensors::deserialize(&checkpoint)?;
+    let mut data = luminal::prelude::FxHashMap::default();
+    for spec in cx.logical.input_specs() {
+        if let Ok(tensor) = tensors.tensor(&spec.label) {
+            let values: Vec<f32> = match tensor.dtype() {
+                safetensors::Dtype::F32 => tensor
+                    .data()
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b))
+                    .collect(),
+                safetensors::Dtype::BF16 => tensor
+                    .data()
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| half::bf16::from_le_bytes(*b).to_f32())
+                    .collect(),
+                safetensors::Dtype::F16 => tensor
+                    .data()
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| half::f16::from_le_bytes(*b).to_f32())
+                    .collect(),
+                dtype => return Err(format!("unsupported checkpoint dtype {dtype:?}").into()),
+            };
+            data.insert(spec.id, HostBuffer::from(values));
+        }
     }
-
+    drop(tensors);
+    drop(checkpoint);
+    println!("  Weight load: {:.2} s", load_start.elapsed().as_secs_f64());
+    let cache_elements = MAX_SEQ_LEN * KV_DIM;
+    for i in 0..LAYERS {
+        data.insert(kv_cache.k_caches[i].id, vec![0.0f32; cache_elements].into());
+        data.insert(kv_cache.v_caches[i].id, vec![0.0f32; cache_elements].into());
+    }
+    // Every Cartesian bucket representative needs matching transient inputs.
+    // Weights and KV caches stay shared across all profiling assignments.
+    let profile_inputs: Vec<(luminal::shape::DynMap, _)> = [1, search_s]
+        .into_iter()
+        .flat_map(|s| {
+            [1, search_c].into_iter().map(move |c| {
+                let inputs = [
+                    (input.id, HostBuffer::from(vec![1i32; s])),
+                    (q_pos_t.id, (0..s as i32).collect::<Vec<_>>().into()),
+                    (scatter_idx_t.id, (0..s as i32).collect::<Vec<_>>().into()),
+                    (gather_idx_t.id, (0..c as i32).collect::<Vec<_>>().into()),
+                    (attn_mask_t.id, vec![0.0f32; s * c].into()),
+                ]
+                .into_iter()
+                .collect::<luminal::prelude::FxHashMap<_, _>>();
+                (
+                    [('s'.into(), s), ('c'.into(), c)].into_iter().collect(),
+                    inputs,
+                )
+            })
+        })
+        .collect();
+    for spec in cx.logical.input_specs() {
+        if !data.contains_key(&spec.id) && !profile_inputs[0].1.contains_key(&spec.id) {
+            return Err(format!("missing model input {}", spec.label).into());
+        }
+    }
     println!("Compiling...");
     let compile_start = Instant::now();
-    cx.set_dim('s', search_s);
-    cx.set_dim('c', search_c);
-    runtime.set_data(input, vec![1; search_s]);
-    runtime.set_data(q_pos_t, (0..search_s as i32).collect::<Vec<_>>());
-    runtime.set_data(scatter_idx_t, (0..search_s as i32).collect::<Vec<_>>());
-    runtime.set_data(gather_idx_t, (0..search_c as i32).collect::<Vec<_>>());
-    runtime.set_data(attn_mask_t, vec![0.0f32; search_s * search_c]);
-    runtime = cx.compile(runtime, compile_options);
+    runtime.search_with_profile_inputs(&data, &profile_inputs, &compile_options)?;
+    for (id, values) in data {
+        runtime.set_data(id, values);
+    }
     println!(
         "  Search/compile: {:.2} s",
         compile_start.elapsed().as_secs_f64()
     );
 
     for i in 0..LAYERS {
-        runtime.set_zeros(kv_cache.k_caches[i], cache_bytes);
-        runtime.set_zeros(kv_cache.v_caches[i], cache_bytes);
+        runtime.set_data(kv_cache.k_caches[i].id, vec![0.0f32; cache_elements]);
+        runtime.set_data(kv_cache.v_caches[i].id, vec![0.0f32; cache_elements]);
     }
 
     let prompt_len = prompt_tokens.len();

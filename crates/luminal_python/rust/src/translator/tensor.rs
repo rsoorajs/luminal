@@ -31,7 +31,7 @@ const TRIANGULAR_DIAGONAL_ARG: usize = 1;
 enum ArangeScalar {
     Int(i64),
     Float(f64),
-    Expr(Expression),
+    Expr(IntExpr),
 }
 
 /// A PyTorch `Scalar` constructor argument before it is converted to the
@@ -89,7 +89,7 @@ pub(crate) fn copy_tensor(
     // Canonicalize dimensions to the destination spelling. Equal symbolic
     // dimensions can arrive under different PT2 expressions, and the copied
     // value inherits the destination's shape contract.
-    for (actual, expected) in source.shape.dims.iter_mut().zip(destination_shape) {
+    for (actual, expected) in source.legacy_tracker_mut().dims.iter_mut().zip(destination_shape) {
         *actual = expected;
     }
     Ok(source)
@@ -104,13 +104,13 @@ impl<'a> Translator<'a> {
         ];
         for (input, argument) in inputs.iter_mut().zip(3..6) {
             for raw_dim in self.get_ints_arg(node, argument)? {
-                let dim = normalize_dim(raw_dim, input.shape.len() + 1);
+                let dim = normalize_dim(raw_dim, input.legacy_tracker_ref().len() + 1);
                 *input = input.unsqueeze(dim);
             }
         }
         let (left, middle) = broadcast_binary(inputs[0], inputs[1]);
         let (product, right) = broadcast_binary(left * middle, inputs[2]);
-        let rank = product.shape.len();
+        let rank = product.legacy_tracker_ref().len();
         let dimensions = self
             .get_ints_arg(node, 6)?
             .into_iter()
@@ -221,10 +221,10 @@ impl<'a> Translator<'a> {
         if scalar.is_literal_zero() {
             return Ok(self
                 .typed_scalar_constant(&ConstructorScalar::Int(0), value.dtype)?
-                .expand_rhs(value.shape));
+                .expand_rhs(value.dims()));
         }
         let scalar = self.real_constructor_scalar(node, index, value.dtype)?;
-        Ok(value * scalar.expand_rhs(value.shape))
+        Ok(value * scalar.expand_rhs(value.dims()))
     }
 
     pub(crate) fn translate_addmv(&mut self, node: &Node) -> Result<GraphTensor> {
@@ -236,8 +236,8 @@ impl<'a> Translator<'a> {
         let input = self.get_input_tensor(node, 0)?.cast(compute_dtype);
         let matrix = self.get_input_tensor(node, 1)?.cast(compute_dtype);
         let vector = self.get_input_tensor(node, 2)?.cast(compute_dtype);
-        anyhow::ensure!(matrix.shape.len() == 2, "addmv matrix must be rank 2");
-        anyhow::ensure!(vector.shape.len() == 1, "addmv vector must be rank 1");
+        anyhow::ensure!(matrix.legacy_tracker_ref().len() == 2, "addmv matrix must be rank 2");
+        anyhow::ensure!(vector.legacy_tracker_ref().len() == 1, "addmv vector must be rank 1");
 
         let product = matrix.matmul(vector.unsqueeze(1)).squeeze(1);
         let input = self.scale_by_named_scalar(node, "beta", input)?;
@@ -255,8 +255,8 @@ impl<'a> Translator<'a> {
         let input = self.get_input_tensor(node, 0)?.cast(compute_dtype);
         let batch1 = self.get_input_tensor(node, 1)?.cast(compute_dtype);
         let batch2 = self.get_input_tensor(node, 2)?.cast(compute_dtype);
-        anyhow::ensure!(batch1.shape.len() == 3, "addbmm batch1 must be rank 3");
-        anyhow::ensure!(batch2.shape.len() == 3, "addbmm batch2 must be rank 3");
+        anyhow::ensure!(batch1.legacy_tracker_ref().len() == 3, "addbmm batch1 must be rank 3");
+        anyhow::ensure!(batch2.legacy_tracker_ref().len() == 3, "addbmm batch2 must be rank 3");
 
         // CPU ATen evaluates addbmm as sequential fused addmm updates. A
         // single bmm+sum changes the F32 rounding order, and for BF16 it can
@@ -264,7 +264,7 @@ impl<'a> Translator<'a> {
         // back to BF16. Preserve the observable order when the batch length is
         // concrete; symbolic batches use the algebraically equivalent fallback.
         if matches!(output_dtype, DType::Bf16 | DType::F32)
-            && let Some(batch_count) = batch1.shape.dims[0].to_usize()
+            && let Some(batch_count) = batch1.legacy_tracker_ref().dims[0].to_usize()
         {
             let mut result = self.scale_by_named_scalar(node, "beta", input)?;
             for batch in 0..batch_count {
@@ -298,7 +298,7 @@ impl<'a> Translator<'a> {
         &self,
         node: &Node,
         rank: usize,
-    ) -> Result<Vec<(Expression, Expression)>> {
+    ) -> Result<Vec<(IntExpr, IntExpr)>> {
         let raw = self.get_exprs_arg(node, CONSTANT_PAD_PADDING_ARG)?;
         anyhow::ensure!(
             raw.len().is_multiple_of(2),
@@ -343,7 +343,7 @@ impl<'a> Translator<'a> {
         // Export has already applied PyTorch's dtype-sensitive ceiling and
         // endpoint rules. Its tensor metadata is therefore authoritative for
         // the number of values, including fractional/negative steps and empty
-        // ranges. Recomputing `(end-start)/step` in Expression arithmetic used
+        // ranges. Recomputing `(end-start)/step` in IntExpr arithmetic used
         // truncating division and disagreed with shapes such as arange(-1,2,2).
         let output_shape = self.output_meta_shape(node)?;
         anyhow::ensure!(
@@ -352,10 +352,10 @@ impl<'a> Translator<'a> {
         );
         let output_dtype = self.output_meta_dtype(node)?;
         let indices = self.graph.arange(output_shape[0]).cast(output_dtype);
-        let shape = indices.shape;
+        let shape = indices.dims();
         let step = self
             .arange_scalar_constant(step, output_dtype)
-            .expand_rhs(shape);
+            .expand_rhs(shape.clone());
         let start = self
             .arange_scalar_constant(start, output_dtype)
             .expand_rhs(shape);
@@ -443,9 +443,9 @@ impl<'a> Translator<'a> {
         let max = self.get_float_arg(node, 3).unwrap_or(0.0);
 
         anyhow::ensure!(
-            input.shape.len() == 1,
+            input.legacy_tracker_ref().len() == 1,
             "histc: only 1D input is supported, got {}D",
-            input.shape.len()
+            input.legacy_tracker_ref().len()
         );
         anyhow::ensure!(
             bins_i64 > 0,
@@ -464,11 +464,11 @@ impl<'a> Translator<'a> {
         );
 
         let bins_u = bins_i64 as usize;
-        let n = input.shape.dims[0];
+        let n = input.legacy_tracker_ref().dims[0];
 
         // arange(bins) [bins] → cast to input dtype, optionally shift by min,
         // broadcast to [bins, N], compare for equality with input broadcast.
-        let mut bins_arange = self.graph.arange(Expression::from(bins_u));
+        let mut bins_arange = self.graph.arange(IntExpr::from(bins_u));
         if min != 0.0 {
             // `min` is non-zero (uncommon in the qwen3-moe path but legal)
             // — shift the comparison values to start at min.
@@ -477,11 +477,11 @@ impl<'a> Translator<'a> {
                 .graph
                 .constant_float(min_i as f32)
                 .cast(bins_arange.dtype)
-                .expand_rhs(bins_arange.shape);
+                .expand_rhs(bins_arange.dims());
             bins_arange += shift;
         }
         let bins_expanded = bins_arange.cast(input.dtype).expand_dim(1, n);
-        let input_expanded = input.expand_dim(0, Expression::from(bins_u));
+        let input_expanded = input.expand_dim(0, IntExpr::from(bins_u));
         let matches = input_expanded.eq(bins_expanded); // Bool [bins, N]
 
         let out_dtype = self.output_meta_dtype(node)?;
@@ -504,10 +504,10 @@ impl<'a> Translator<'a> {
         };
 
         anyhow::ensure!(
-            !sorted.shape.is_empty(),
+            !sorted.legacy_tracker_ref().is_empty(),
             "searchsorted requires a sorted sequence with rank at least one"
         );
-        let sorted_axis = sorted.shape.len() - 1;
+        let sorted_axis = sorted.legacy_tracker_ref().len() - 1;
         if let Some(sorter_name) = node
             .inputs
             .iter()
@@ -520,8 +520,8 @@ impl<'a> Translator<'a> {
 
         let (sorted, query) = ensure_same_dtype(sorted, query);
         let row_length = sorted.dims()[sorted_axis];
-        let query_rank = query.shape.len();
-        let (boundaries, queries) = if sorted.shape.len() == 1 {
+        let query_rank = query.legacy_tracker_ref().len();
+        let (boundaries, queries) = if sorted.legacy_tracker_ref().len() == 1 {
             let mut boundaries = sorted;
             for (axis, size) in query.dims().into_iter().enumerate() {
                 boundaries = boundaries.expand_dim(axis, size);
@@ -529,7 +529,7 @@ impl<'a> Translator<'a> {
             (boundaries, query.expand_dim(query_rank, row_length))
         } else {
             anyhow::ensure!(
-                query_rank == sorted.shape.len(),
+                query_rank == sorted.legacy_tracker_ref().len(),
                 "batched searchsorted requires query and sequence ranks to match"
             );
             for axis in 0..sorted_axis {
@@ -570,7 +570,7 @@ impl<'a> Translator<'a> {
                 .graph
                 .constant(row_length)
                 .cast(DType::I64)
-                .expand_rhs(result.shape);
+                .expand_rhs(result.dims());
             result = self.select(nan, end, result);
         }
         Ok(result.cast(self.output_meta_dtype(node)?))
@@ -584,8 +584,8 @@ impl<'a> Translator<'a> {
             "triangular index dimensions must be nonnegative"
         );
         let offset = self.get_int_arg(node, 2).unwrap_or(0);
-        let rows = Expression::from(rows);
-        let columns = Expression::from(columns);
+        let rows = IntExpr::from(rows);
+        let columns = IntExpr::from(columns);
         let row = self
             .graph
             .arange(rows)
@@ -657,7 +657,7 @@ impl<'a> Translator<'a> {
             "constant_pad_nd changed dtype from {:?} to {output_dtype:?}",
             input.dtype
         );
-        let padding = self.constant_pad_spec(node, input.shape.len())?;
+        let padding = self.constant_pad_spec(node, input.legacy_tracker_ref().len())?;
         let value_index = node.inputs.iter().position(|input| input.name == "value");
         let fill = match value_index {
             Some(index) => self.real_constructor_scalar(node, index, output_dtype)?,
@@ -696,25 +696,25 @@ impl<'a> Translator<'a> {
         let out_dtype = self.output_meta_dtype(node)?;
 
         anyhow::ensure!(
-            input.shape.len() == 2,
+            input.legacy_tracker_ref().len() == 2,
             "_grouped_mm: input must be 2D, got {}D",
-            input.shape.len()
+            input.legacy_tracker_ref().len()
         );
         anyhow::ensure!(
-            weight.shape.len() == 3,
+            weight.legacy_tracker_ref().len() == 3,
             "_grouped_mm: weight must be 3D, got {}D",
-            weight.shape.len()
+            weight.legacy_tracker_ref().len()
         );
         anyhow::ensure!(
-            offs.shape.len() == 1,
+            offs.legacy_tracker_ref().len() == 1,
             "_grouped_mm: offs must be 1D, got {}D",
-            offs.shape.len()
+            offs.legacy_tracker_ref().len()
         );
 
-        let s = input.shape.dims[0];
-        let g = weight.shape.dims[0];
-        let k = weight.shape.dims[1];
-        let n = weight.shape.dims[2];
+        let s = input.legacy_tracker_ref().dims[0];
+        let g = weight.legacy_tracker_ref().dims[0];
+        let k = weight.legacy_tracker_ref().dims[1];
+        let n = weight.legacy_tracker_ref().dims[2];
 
         // expert_id[m] = number of g s.t. m >= offs[g], clamped to [0, G-1].
         // Same value as HF MoE's `expert_ids.clamp(0, num_experts-1)` for
@@ -743,7 +743,7 @@ impl<'a> Translator<'a> {
         // resulting Gather matches the GLUMoE / gather-experts egglog patterns.
         let io = k * n;
         let base = expert_id * io;
-        let within = self.graph.iota(Expression::from('z'), (k, n));
+        let within = self.graph.iota(IntExpr::from('z'), (k, n));
         let exp_base = base.expand_dim(1, k).expand_dim(2, n);
         let exp_within = within.expand_dim(0, s);
         let flat_idx = exp_base + exp_within;
@@ -755,7 +755,7 @@ impl<'a> Translator<'a> {
         // by the time matmul expands into elementwise Mul. Using the PT2 output
         // metadata keeps the matmul dtype aligned with the exported contract
         // without upcasting the full expert weight bank.
-        let weight_gathered = weight.gather(flat_idx).cast(out_dtype);
+        let weight_gathered = weight.gather1d(flat_idx).cast(out_dtype);
         let input = input.cast(out_dtype);
 
         // Per-token matmul: [S, 1, K] @ [S, K, N] → [S, 1, N] → [S, N].
@@ -812,7 +812,7 @@ impl<'a> Translator<'a> {
         let out_dtype = x.dtype;
         // Build a tensor for the scalar `other` matching `x`'s shape so we
         // can route through the shared where_formula helper.
-        let other = self.graph.constant_float(other_val).expand_rhs(x.shape);
+        let other = self.graph.constant_float(other_val).expand_rhs(x.dims());
         Ok(self.where_formula(cond, x, other, out_dtype))
     }
 
@@ -831,7 +831,7 @@ impl<'a> Translator<'a> {
         } else {
             0
         };
-        let dims = a.shape.dims;
+        let dims = a.legacy_tracker_ref().dims;
         let rows = dims[dims.len() - 2];
         let cols = dims[dims.len() - 1];
         let (r_val, c_val) = match (rows.to_usize(), cols.to_usize()) {
@@ -865,7 +865,7 @@ impl<'a> Translator<'a> {
         } else {
             -1
         };
-        let dim = normalize_dim(dim, a.shape.len());
+        let dim = normalize_dim(dim, a.legacy_tracker_ref().len());
 
         // Determine output names
         let tuple_outputs = node.outputs.first().and_then(|o| o.as_tensors.as_ref());
@@ -925,7 +925,7 @@ impl<'a> Translator<'a> {
             .position(|input| input.name == "descending")
             .and_then(|index| self.get_bool_arg(node, index).ok())
             .unwrap_or(false);
-        let dim = normalize_dim(dim, a.shape.len());
+        let dim = normalize_dim(dim, a.legacy_tracker_ref().len());
 
         // Determine output names (sort returns (values, indices))
         let tuple_outputs = node

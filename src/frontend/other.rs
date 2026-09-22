@@ -1,91 +1,106 @@
-use crate::hlir::*;
 use crate::prelude::*;
 
 impl Graph {
-    /// A scalar expression constant
-    pub fn constant(&mut self, i: impl Into<Expression>) -> GraphTensor {
-        GraphTensor::from_id(
-            self.add_op(Iota(i.into(), 1.into()), &[]),
-            ShapeTracker::new(()),
-            self,
-            DType::Int,
-        )
+    /// A scalar `Int` (i32) expression constant.
+    pub fn constant_i32(&mut self, i: impl Into<IntExpr>) -> GraphTensor {
+        let expr = i.into();
+        let id = self.logical.record_iota(&expr, &[]);
+        GraphTensor::from_id(id, (), self, DType::Int)
     }
 
-    /// An exact scalar I64 constant built from 16-bit limbs.
+    /// An EXACT scalar `I64` constant, assembled from 16-bit limbs.
     ///
-    /// `Iota` stores values as the default 32-bit integer dtype, so emitting a
-    /// large literal there and casting afterward has already truncated it.
-    /// Horner assembly performs every multiply and add after promotion to I64
-    /// and covers the complete signed 64-bit range without a new HLIR op.
+    /// `constant_i32` records a `LogicalIota`, and
+    /// `src/logical_op/iota/dtype.egg` pins every iota's dtype to `(Int)` —
+    /// 32 bits — unconditionally. So a literal wider than `i32` cannot be
+    /// minted directly: the reference kernel's `luminal_reference::TypedBuffer::I32`
+    /// arm does `i32::try_from(value)` and REFUSES ("iota value {value}
+    /// overflows i32 (ints are non-wrapping)"), and casting after the fact
+    /// is too late because the narrow buffer is already the value. Horner
+    /// assembly instead keeps every limb inside `i32`, casts each to `I64`
+    /// FIRST, and does all four multiplies and adds in 64-bit — covering
+    /// the complete signed range, `i64::MIN` included, with no new op and
+    /// no wrapping.
     pub fn constant_i64(&mut self, value: i64) -> GraphTensor {
-        let base = self.constant(1i64 << 16).cast(DType::I64);
-        let mut result = self.constant(value >> 48).cast(DType::I64);
+        let base = self.constant_i32(1i64 << 16).cast(DType::I64);
+        let mut result = self.constant_i32(value >> 48).cast(DType::I64);
         for shift in [32, 16, 0] {
-            let limb = self.constant((value >> shift) & 0xffff).cast(DType::I64);
+            let limb = self
+                .constant_i32((value >> shift) & 0xffff)
+                .cast(DType::I64);
             result = result * base + limb;
         }
         result
     }
 
-    /// A scalar float constant
-    pub fn constant_float(&mut self, i: f32) -> GraphTensor {
-        GraphTensor::from_id(
-            self.add_op(Constant(i), &[]),
-            ShapeTracker::new(()),
-            self,
-            DType::F32,
-        )
+    /// An exact scalar `F32` constant. The term stores the `f64` number but
+    /// the logical dtype is F32 (the parity rule); narrow float constants
+    /// are casts of this.
+    pub fn constant_f32(&mut self, i: f32) -> GraphTensor {
+        let id = self
+            .logical
+            .op(LogicalOp::Constant(i as f64), &[], Vec::new(), DType::F32);
+        GraphTensor::from_id(id, (), self, DType::F32)
     }
 
-    /// A scalar F64 constant. The value remains F64 through HLIR instead of
-    /// being narrowed to F32 and widened again by a cast.
-    pub fn constant_float64(&mut self, i: f64) -> GraphTensor {
-        GraphTensor::from_id(
-            self.add_op(ConstantF64(i), &[]),
-            ShapeTracker::new(()),
-            self,
-            DType::F64,
-        )
+    /// An exact scalar `F64` constant. `LogicalConstantF64` owns the F64
+    /// dtype rule, so the literal crosses the whole pipeline at full
+    /// double precision (unlike `constant_f32(x).cast(F64)`, which widens
+    /// an already-f32-rounded value).
+    pub fn constant_f64(&mut self, value: f64) -> GraphTensor {
+        let id = self
+            .logical
+            .op(LogicalOp::ConstantF64(value), &[], Vec::new(), DType::F64);
+        GraphTensor::from_id(id, (), self, DType::F64)
     }
 
-    /// Iota expression
-    pub fn iota(&mut self, i: impl Into<Expression>, shape: impl ToShape) -> GraphTensor {
+    /// Iota as a TRUE COORDINATE FUNCTION (P1 ruling 2026-08-07): the
+    /// closure receives one coordinate IntExpr per output axis
+    /// (`c[k]` ranges over `0..shape[k]`) and returns the value
+    /// expression. Coordinates lower to `CoordVar`; named symbols (any
+    /// char — nothing is reserved, `'z'` included) lower to `IntVar` and
+    /// resolve at binding time. The old flat-'z' interface is DELETED —
+    /// flat-index authoring is a rank-1 iota plus recorded reshapes.
+    /// Coordinate Expressions are positional: one that escapes into
+    /// another iota's closure means that iota's same-numbered axis —
+    /// defined behavior, the expression does what it says; escaping
+    /// anywhere else refuses loudly (dim positions reject compound
+    /// terms, out-of-range axes poison the recorder).
+    pub fn iota(
+        &mut self,
+        shape: impl ToShape,
+        f: impl FnOnce(&[IntExpr]) -> IntExpr,
+    ) -> GraphTensor {
         let sh = shape.to_shape();
-        GraphTensor::from_id(
-            self.add_op(
-                Iota(
-                    i.into().simplify(),
-                    sh.iter().copied().product::<Expression>().simplify(),
-                ),
-                &[],
-            ),
-            ShapeTracker::new(sh),
-            self,
-            DType::Int,
-        )
+        let coords: Vec<IntExpr> = (0..sh.len()).map(IntExpr::coord).collect();
+        // Frontend simplification restored (Austin's revert ruling
+        // 2026-08-27): the recorded value expression is
+        // construction-simplified, as pre-R-C.
+        let expr = f(&coords).simplify();
+        let id = self.logical.record_iota(&expr, &sh);
+        GraphTensor::from_id(id, sh, self, DType::Int)
     }
 
     /// ARange from 0 to N
-    pub fn arange(&mut self, to: impl Into<Expression>) -> GraphTensor {
-        self.iota('z', to)
+    pub fn arange(&mut self, to: impl Into<IntExpr>) -> GraphTensor {
+        self.iota(to, |c| c[0])
     }
 
     /// ARange from beginning to end
     pub fn arange_options(
         &mut self,
-        start: impl Into<Expression>,
-        end: impl Into<Expression>,
-        step: impl Into<Expression>,
+        start: impl Into<IntExpr>,
+        end: impl Into<IntExpr>,
+        step: impl Into<IntExpr>,
     ) -> GraphTensor {
         let (start, end, step) = (start.into(), end.into(), step.into());
-        self.iota((Expression::from('z') * step) + start, (end - start) / step)
+        self.iota((end - start) / step, move |c| c[0] * step + start)
     }
 
     /// Lower left-hand triangle of 1s. Currently required to be square
     ///
     /// Same API as https://pytorch.org/docs/stable/generated/torch.tril
-    pub fn tril(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
+    pub fn tril(&mut self, size: impl Into<IntExpr>, diagonal: i32) -> GraphTensor {
         let size = size.into();
         let horizontal = self.arange(size).cast(DType::F32).expand_dim(0, size);
         let vertical = self.arange(size).cast(DType::F32).expand_dim(1, size);
@@ -95,7 +110,7 @@ impl Graph {
     /// Upper right-hand triangle of 1s
     ///
     /// Same API as https://pytorch.org/docs/stable/generated/torch.triu
-    pub fn triu(&mut self, size: impl Into<Expression>, diagonal: i32) -> GraphTensor {
+    pub fn triu(&mut self, size: impl Into<IntExpr>, diagonal: i32) -> GraphTensor {
         let size = size.into();
         let horizontal = self.arange(size).cast(DType::F32).expand_dim(0, size);
         let vertical = self.arange(size).cast(DType::F32).expand_dim(1, size);
@@ -114,38 +129,102 @@ impl Graph {
 
 impl GraphTensor {
     pub fn cast(self, dtype: DType) -> GraphTensor {
+        // Cast policy (2026-08-11): float -> int is a REFUSAL — a
+        // rounding/truncation is a lossy read and must be an explicit
+        // op, never a cast (the Bool8 projection rule generalized).
+        // Refused at authoring time so the author sees it, not the
+        // search.
+        let float_source = matches!(
+            self.dtype,
+            DType::F32 | DType::F64 | DType::F16 | DType::Bf16 | DType::TF32
+        );
+        // The narrow integers joined the executable set on 2026-09-02
+        // (main #399). Their carve-out is about integer WIDTH — a
+        // narrowing int -> int cast truncates — and NOT a licence to
+        // make a lossy float read implicit, so they are int targets
+        // here like every other integer. (I4/U4/U16 have no storage and
+        // no kernel, so a cast to them refuses at the plan instead.)
+        let int_target = matches!(
+            dtype,
+            DType::Int | DType::I64 | DType::I8 | DType::U8 | DType::I16
+        );
+        assert!(
+            !(float_source && int_target),
+            "cast {:?} -> {:?} is refused: a float -> int conversion is a \
+             lossy read and must appear as an explicit op in the model, \
+             never as a cast (typed-buffers ruling 2026-08-11)",
+            self.dtype,
+            dtype
+        );
         if self.dtype == dtype {
             return self;
         }
-        // Cast converts the addressed span of the underlying buffer and the
-        // view passes through unchanged; sliced views address beyond
-        // n_physical_elements, so size by span.
+        if dtype == DType::Bool {
+            // The Bool8 ruling: to-Bool is the `!= 0` PROJECTION — an
+            // explicit comparison in the model, never a cast. x != 0 iff
+            // (0 < x) + (x < 0) is nonzero, and that sum is {0,1}-valued
+            // (x cannot be on both sides of 0), so one more `0 <` lands
+            // it in Bool exactly — total, and exact at every float.
+            //
+            // The comparison zero must be built in the SOURCE dtype: an
+            // integer source cannot be given a `constant_f32(0.0).cast(_)`
+            // zero, because float -> int is a refused lossy cast.
+            let zero_scalar = match self.dtype {
+                DType::F64 => self.graph().constant_f64(0.0),
+                DType::Int | DType::I64 | DType::I8 | DType::U8 | DType::I16 => {
+                    self.graph().constant_i32(0).cast(self.dtype)
+                }
+                _ => self.graph().constant_f32(0.0).cast(self.dtype),
+            };
+            let zero = zero_scalar.expand_rhs(self.dims());
+            let sum = zero.lt(self).cast(DType::F32) + self.lt(zero).cast(DType::F32);
+            let zero_f32 = self.graph().constant_f32(0.0).expand_rhs(self.dims());
+            return zero_f32.lt(sum);
+        }
+        let operand = (self.id, self.dims());
+        let out_dims = self.dims();
         let id = self
             .graph()
-            .add_op(Cast(self.shape.physical_span(), dtype), &[self.id]);
-        let mut shape = self.shape;
-        shape.element_stride_bits = dtype.bits();
-        GraphTensor::from_id(id, shape, self.graph_ref, dtype)
+            .logical
+            .op(LogicalOp::Cast(dtype), &[operand], out_dims, dtype);
+        GraphTensor::from_id(id, self.dims(), self.graph_ref, dtype)
     }
 
-    /// Sets this tensor's dtype without doing a cast
-    pub fn as_dtype(mut self, dtype: DType) -> GraphTensor {
-        self.dtype = dtype;
-        self.shape.element_stride_bits = dtype.bits();
-        if let Some(gmem) = self.graph().try_get_op_mut::<Input>(self.id) {
-            gmem.dtype = dtype;
-        }
-        if let Some((_, d)) = self.graph().input_meta.get_mut(&self.id) {
-            *d = dtype;
-        }
-        self
+    /// THE EXPLICIT LOSSY READ: float -> integer conversion with
+    /// truncation toward zero (`torch.int()` / `torch.long()` /
+    /// `_to_copy` float->int). This exists so [`Self::cast`] can stay
+    /// lossless-only; the lossy conversion is a named op the author (or
+    /// translator) opts into, and runtimes handle NaN/±inf/out-of-range
+    /// loudly (PyTorch declares those undefined).
+    pub fn trunc_cast(self, dtype: DType) -> GraphTensor {
+        let float_source = matches!(
+            self.dtype,
+            DType::F32 | DType::F64 | DType::F16 | DType::Bf16 | DType::TF32
+        );
+        assert!(
+            float_source,
+            "trunc_cast source must be a float, got {:?}",
+            self.dtype
+        );
+        assert!(
+            matches!(dtype, DType::Int | DType::I64),
+            "trunc_cast target must be an integer, got {dtype:?}"
+        );
+        let operand = (self.id, self.dims());
+        let out_dims = self.dims();
+        let id = self
+            .graph()
+            .logical
+            .op(LogicalOp::TruncCast(dtype), &[operand], out_dims, dtype);
+        GraphTensor::from_id(id, self.dims(), self.graph_ref, dtype)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{hlir::ReferenceData, prelude::*, tests::assert_close};
+    use crate::tests::assert_close;
     use candle_core::{Device, Tensor};
+    use luminal::prelude::*;
     use proptest::prelude::*;
 
     pub fn test_init(
@@ -153,51 +232,31 @@ mod tests {
         ref_func: impl Fn(&Device) -> Tensor,
     ) {
         let mut cx = Graph::new();
-        let b = func(&mut cx).output();
+        let b = func(&mut cx);
 
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut rt = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-
-        rt.execute(&cx.dyn_map);
+        let rt = luminal_reference::harness::run_reference(&cx, &[]);
 
         // Reference
         let device = Device::Cpu;
         let ref_b = ref_func(&device).flatten_all().unwrap();
 
         // need to assert close because some unaries (exp and log) are (good) approximations
-        assert_close(rt.get_f32(b.id), &ref_b.to_vec1::<f32>().unwrap())
+        assert_close(rt.get_f32(b.id).unwrap(), &ref_b.to_vec1::<f32>().unwrap())
     }
 
+    /// `constant` records an iota, and the iota dtype rule pins every iota
+    /// to 32-bit `Int`, so a wide literal cannot be minted directly — the
+    /// reference kernel refuses it rather than truncating. `constant_i64`
+    /// assembles the value from four 16-bit limbs, each of which fits
+    /// `i32`, with every multiply and add done after the cast to `I64`.
     #[test]
     fn constant_i64_preserves_full_width_values() {
-        let values = [i64::MIN, -(1i64 << 40) + 7, -1, 0, 1i64 << 40, i64::MAX];
-        let mut cx = Graph::new();
-        for &value in &values {
-            cx.constant_i64(value).output();
+        for value in [i64::MIN, -(1i64 << 40) + 7, -1, 0, 1i64 << 40, i64::MAX] {
+            let mut cx = Graph::new();
+            let c = cx.constant_i64(value);
+            let rt = luminal_reference::harness::run_reference(&cx, &[]);
+            assert_eq!(rt.get_i64(c.id).unwrap(), &vec![value], "value {value}");
         }
-
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut runtime = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
-        runtime.execute(&cx.dyn_map);
-
-        let mut actual = runtime
-            .buffers
-            .values()
-            .map(|data| match data {
-                ReferenceData::I64(values) => values[0],
-                other => panic!("expected I64 output, got {other:?}"),
-            })
-            .collect::<Vec<_>>();
-        actual.sort();
-        let mut expected = values.to_vec();
-        expected.sort();
-        assert_eq!(actual, expected);
     }
 
     proptest! {
@@ -228,24 +287,9 @@ mod tests {
         }
     }
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10))]
-        #[test]
-        fn test_gather(base_len in 5usize..64, count in 1usize..16) {
-            prop_assume!(base_len >= 2 * count - 1);
-            test_init(
-                |cx| {
-                    cx.arange(base_len as i32)
-                        .cast(DType::F32)
-                        .gather(cx.iota(Expression::from('z') * 2, count as i32))
-                },
-                |dev| {
-                    let values = (0..count).map(|i| (2 * i) as f32).collect::<Vec<f32>>();
-                    Tensor::new(values, dev).unwrap()
-                },
-            );
-        }
-    }
+    // test_gather: B-TAIL-GATED (Step 4b). gather1d is the flat gather
+    // the recorder still poisons; coordinate-form gather carries the
+    // native differential coverage until the B-tail records the sugar.
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(10))]
@@ -267,24 +311,22 @@ mod tests {
         use crate::tests::random_vec;
 
         let mut cx = Graph::new();
-        let a = cx.tensor((2, 3));
-        let b = cx.tensor((2, 3));
-        let c = cx.tensor((2, 3));
-        let stacked = cx.stack(&[a, b, c], 0).output();
-
-        cx.build_search_space::<ReferenceRuntime>(CompileOptions::default());
-        let mut rt = cx.search(
-            ReferenceRuntime::default(),
-            CompileOptions::default().search_graph_limit(1),
-        );
+        let a = cx.tensor((2, 3), DType::F32);
+        let b = cx.tensor((2, 3), DType::F32);
+        let c = cx.tensor((2, 3), DType::F32);
+        let stacked = cx.stack(&[a, b, c], 0);
 
         let a_data = random_vec(6);
         let b_data = random_vec(6);
         let c_data = random_vec(6);
-        rt.set_data(a.id, a_data.clone());
-        rt.set_data(b.id, b_data.clone());
-        rt.set_data(c.id, c_data.clone());
-        rt.execute(&cx.dyn_map);
+        let rt = luminal_reference::harness::run_reference(
+            &cx,
+            &[
+                (a.id, a_data.clone().into()),
+                (b.id, b_data.clone().into()),
+                (c.id, c_data.clone().into()),
+            ],
+        );
 
         let ref_a = Tensor::new(a_data, &Device::Cpu)
             .unwrap()
@@ -301,7 +343,7 @@ mod tests {
         let ref_stacked = Tensor::stack(&[&ref_a, &ref_b, &ref_c], 0).unwrap();
 
         assert_close(
-            rt.get_f32(stacked.id),
+            rt.get_f32(stacked.id).unwrap(),
             &ref_stacked.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
         );
     }
