@@ -15,6 +15,7 @@ import luminal_cuda_lite  # noqa: E402
 
 # Full float32 on both sides (see conftest), over a three-matmul stack.
 
+
 @pytest.fixture(autouse=True)
 def _fresh_dynamo():
     """Every test compiles the same module classes; without a reset the
@@ -23,6 +24,7 @@ def _fresh_dynamo():
     torch._dynamo.reset()
     yield
     torch._dynamo.reset()
+
 
 ATOL = 1e-3
 RTOL = 1e-3
@@ -62,16 +64,14 @@ def test_outputs_held_across_calls_stay_correct(build):
     so no call wrote into storage an earlier one still owns."""
     torch.manual_seed(0)
     model = build()
-    compiled = torch.compile(model, backend=luminal_cuda_lite)
+    compiled = torch.compile(model, backend=luminal_cuda_lite.Compiler())
     calls = []
     with torch.no_grad():
         for _ in range(12):
             x = torch.randn(8, 64, device="cuda")
             calls.append((x, compiled(x)))
         pointers = [got.data_ptr() for _, got in calls]
-        assert len(set(pointers)) == len(pointers), (
-            "two held outputs share an address"
-        )
+        assert len(set(pointers)) == len(pointers), "two held outputs share an address"
         for x, got in calls:
             torch.testing.assert_close(got, model(x), atol=ATOL, rtol=RTOL)
 
@@ -84,7 +84,7 @@ def test_rebinding_loop_matches_eager(build):
     as holding."""
     torch.manual_seed(0)
     model = build()
-    compiled = torch.compile(model, backend=luminal_cuda_lite)
+    compiled = torch.compile(model, backend=luminal_cuda_lite.Compiler())
     with torch.no_grad():
         for _ in range(12):
             x = torch.randn(8, 64, device="cuda")
@@ -98,7 +98,7 @@ def test_matmul_output_is_written_in_place():
     at eager's layout."""
     torch.manual_seed(0)
     model = torch.nn.Linear(64, 64).cuda().eval()
-    compiled = torch.compile(model, backend=luminal_cuda_lite)
+    compiled = torch.compile(model, backend=luminal_cuda_lite.Compiler())
     x = torch.randn(8, 64, device="cuda")
     with torch.no_grad():
         expected = model(x)
@@ -160,7 +160,7 @@ def test_elected_layout_mismatch_is_refused_by_name():
     b = torch.randn(64, 32, device="cuda")
     expected = fn(a, b)
     try:
-        got = torch.compile(fn, backend=luminal_cuda_lite)(a, b)
+        got = torch.compile(fn, backend=luminal_cuda_lite.Compiler())(a, b)
     except RuntimeError as refusal:
         message = str(refusal)
         assert (

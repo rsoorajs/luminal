@@ -15,10 +15,12 @@
 //! 2026-09-04; it was a verbatim copy here through Phases 1-7).
 
 pub mod bindings;
+pub mod compiled_artifact;
 /// The e-graph walk, in core: every runtime calls it with its own
 /// matcher list and it names no runtime type. Kept under this crate's
 /// old module name so call sites read the same.
 pub use luminal::extraction as extractor;
+mod egraph_postpass;
 pub mod harness;
 pub mod kernels;
 pub mod layouts;

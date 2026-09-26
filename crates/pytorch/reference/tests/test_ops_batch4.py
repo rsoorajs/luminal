@@ -1,16 +1,15 @@
 """Translator batch 4/5: pooling, conv, norms, index/scatter, movement, special."""
 
+import luminal_reference
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-import luminal_reference
 
 
 def _check(model: nn.Module, *inputs: torch.Tensor, atol: float = 1e-4) -> None:
     torch.manual_seed(0)
     eager = model(*inputs)
-    compiled = torch.compile(model, backend=luminal_reference)
+    compiled = torch.compile(model, backend=luminal_reference.Compiler())
     out = compiled(*inputs)
     assert out.shape == eager.shape, f"{out.shape} != {eager.shape}"
     assert torch.allclose(out.to(torch.float32), eager.to(torch.float32), atol=atol), (
@@ -37,6 +36,7 @@ class Conv(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv = nn.Conv2d(3, 4, kernel_size=3, stride=1, padding=1)
+
     def forward(self, x):
         return self.conv(x)
 
@@ -45,6 +45,7 @@ class GroupedConv(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv = nn.Conv2d(4, 4, kernel_size=3, padding=1, groups=2)
+
     def forward(self, x):
         return self.conv(x)
 
@@ -53,6 +54,7 @@ class BatchNorm(nn.Module):
     def __init__(self):
         super().__init__()
         self.bn = nn.BatchNorm2d(3)
+
     def forward(self, x):
         return self.bn(x)
 
@@ -61,6 +63,7 @@ class GroupNorm(nn.Module):
     def __init__(self):
         super().__init__()
         self.gn = nn.GroupNorm(2, 4)
+
     def forward(self, x):
         return self.gn(x)
 
@@ -176,7 +179,7 @@ def test_adaptive_avg_pool() -> None:
 def test_max_pool_values() -> None:
     torch.manual_seed(0)
     x = torch.randn(2, 3, 8, 8)
-    compiled = torch.compile(MaxPool(), backend=luminal_reference)
+    compiled = torch.compile(MaxPool(), backend=luminal_reference.Compiler())
     out = compiled(x)
     eager = F.max_pool2d(x, 2, 2)
     assert out.shape == eager.shape and torch.allclose(out, eager, atol=1e-5)
@@ -195,7 +198,7 @@ def test_batch_norm_eval() -> None:
     model = BatchNorm().eval()
     x = torch.randn(2, 3, 4, 4)
     eager = model(x)
-    compiled = torch.compile(model, backend=luminal_reference)
+    compiled = torch.compile(model, backend=luminal_reference.Compiler())
     out = compiled(x)
     assert out.shape == eager.shape
     assert torch.allclose(out, eager, atol=1e-4)

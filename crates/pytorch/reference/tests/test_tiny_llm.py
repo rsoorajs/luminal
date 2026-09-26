@@ -1,7 +1,7 @@
 """End-to-end tiny decoder LLM on the reference backend.
 
 A two-block GPT-style transformer is compiled with
-``torch.compile(backend=luminal_reference)`` and driven through a real prefill
+``torch.compile(backend=luminal_reference.Compiler())`` and driven through a real prefill
 + greedy-decode loop. The generated token ids and every step's logits must
 match Torch eager exactly (within float tolerance). This is the "good PyTorch
 citizen" check: the backend has to honour the ``torch.compile`` contract for a
@@ -15,11 +15,10 @@ invisible to the logits we read, so the padded tail never affects the result.
 
 import math
 
+import luminal_reference
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-import luminal_reference
 
 VOCAB = 64
 D_MODEL = 32
@@ -153,7 +152,7 @@ def test_tiny_llm_prefill_and_decode_match_eager() -> None:
 
     eager_tokens, eager_logits = _generate(model, PROMPT, mask)
     compiled = torch.compile(
-        model, backend=luminal_reference, fullgraph=True, dynamic=False
+        model, backend=luminal_reference.Compiler(), fullgraph=True, dynamic=False
     )
     compiled_tokens, compiled_logits = _generate(compiled, PROMPT, mask)
 
@@ -180,9 +179,7 @@ def _growing_decode(
         step_logits.append(next_token_logits)
         nxt = int(next_token_logits.argmax())
         generated.append(nxt)
-        tokens = torch.cat(
-            [tokens, torch.tensor([[nxt]], dtype=torch.long)], dim=1
-        )
+        tokens = torch.cat([tokens, torch.tensor([[nxt]], dtype=torch.long)], dim=1)
     return generated, torch.stack(step_logits)
 
 
@@ -193,7 +190,7 @@ def test_tiny_llm_dynamic_context_reuses_one_compile() -> None:
 
     def backend(gm, example_inputs, **kwargs):
         compiles.append(1)
-        return luminal_reference.luminal_reference(gm, example_inputs, **kwargs)
+        return luminal_reference.Compiler(**kwargs)(gm, example_inputs)
 
     compiled = torch.compile(model, backend=backend, fullgraph=True, dynamic=True)
 
