@@ -83,6 +83,9 @@ fn kernel_scratch_bytes(label: &str, ctx: &ReferenceKernelCtx) -> Result<usize> 
         | "ReduceMaxGeneric"
         | "ReduceSumGeneric"
         | "RoundFunctionalGeneric"
+        | "LeftSequentialScanMax"
+        | "LeftSequentialScanProd"
+        | "LeftSequentialScanSum"
         | "SelectFunctionalGeneric"
         | "SinFunctionalGeneric"
         | "SqrtFunctionalGeneric"
@@ -1248,6 +1251,9 @@ mod tests {
             "LayoutTensorOpGatherGeneric",
             "LayoutTensorOpIndexMapApplyMaterialize",
             "LayoutTensorOpIotaGeneric",
+            "LayoutTensorOpLeftSequentialScanMax",
+            "LayoutTensorOpLeftSequentialScanProd",
+            "LayoutTensorOpLeftSequentialScanSum",
             "LayoutTensorOpLessThanGeneric",
             "LayoutTensorOpLog2FunctionalGeneric",
             "LayoutTensorOpModFunctionalGeneric",
@@ -2735,6 +2741,106 @@ mod tests {
         rt.set_data(b.id, vec![300i32]);
         rt.execute().expect("proven add executes");
         assert_eq!(rt.get_i32(out.id).unwrap(), &vec![1000i32]);
+    }
+
+    /// Int sum scans need NO attestation: the kernel checks every integer
+    /// addition, so nothing is proof-gated.
+    #[test]
+    fn int_sum_scan_runs_unattested() {
+        let mut cx = luminal::graph::Graph::new();
+        let x = cx.tensor(4, DType::Int);
+        let out = x.cumsum(0);
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
+        let mut data = FxHashMap::default();
+        data.insert(x.id, vec![-2i32, 3, -4, 5].into());
+        rt.search(&data, &crate::search::harness_search_options())
+            .expect("unattested int sum scan implements");
+        rt.set_data(x.id, vec![-2i32, 3, -4, 5]);
+        rt.execute().expect("unattested int sum scan executes");
+        assert_eq!(rt.get_i32(out.id).unwrap(), &vec![-2i32, 1, -3, 2]);
+    }
+
+    /// A prefix sum that leaves i32 range refuses loudly instead of
+    /// wrapping. The search profiles by executing, so either step may raise it.
+    #[test]
+    fn int_sum_scan_overflow_fails_loudly() {
+        let mut cx = luminal::graph::Graph::new();
+        let x = cx.tensor(4, DType::Int);
+        let _out = x.cumsum(0);
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
+        let values = vec![i32::MAX, 1, 0, 0];
+        let mut data = FxHashMap::default();
+        data.insert(x.id, values.clone().into());
+        let result = rt
+            .search(&data, &crate::search::harness_search_options())
+            .and_then(|_| {
+                rt.set_data(x.id, values.clone());
+                rt.execute()
+            });
+        let err = result.expect_err("an overflowing prefix sum must refuse");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("overflow"),
+            "expected an overflow refusal, got: {message}"
+        );
+    }
+
+    /// Int prod needs NO attestation: the kernel checks every integer
+    /// multiplication, so nothing is proof-gated.
+    #[test]
+    fn int_prod_runs_unattested() {
+        let mut cx = luminal::graph::Graph::new();
+        let x = cx.tensor(4, DType::Int);
+        let out = x.cumprod(0);
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
+        let mut data = FxHashMap::default();
+        data.insert(x.id, vec![-2i32, 3, -4, 5].into());
+        rt.search(&data, &crate::search::harness_search_options())
+            .expect("unattested int prod implements");
+        rt.set_data(x.id, vec![-2i32, 3, -4, 5]);
+        rt.execute().expect("unattested int prod executes");
+        assert_eq!(rt.get_i32(out.id).unwrap(), &vec![-2i32, -6, 24, 120]);
+    }
+
+    /// Int running maximum needs NO attestation: a maximum never leaves the
+    /// operand range, so nothing is proof-gated.
+    #[test]
+    fn int_max_scan_runs_unattested() {
+        let mut cx = luminal::graph::Graph::new();
+        let x = cx.tensor(4, DType::Int);
+        let out = x.cummax(0);
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
+        let mut data = FxHashMap::default();
+        data.insert(x.id, vec![3i32, -7, 5, 4].into());
+        rt.search(&data, &crate::search::harness_search_options())
+            .expect("unattested int max scan implements");
+        rt.set_data(x.id, vec![3i32, -7, 5, 4]);
+        rt.execute().expect("unattested int max scan executes");
+        assert_eq!(rt.get_i32(out.id).unwrap(), &vec![3i32, 3, 5, 5]);
+    }
+
+    /// A prefix product that leaves i32 range refuses loudly instead of
+    /// wrapping. The search profiles by executing, so either step may raise it.
+    #[test]
+    fn int_prod_overflow_fails_loudly() {
+        let mut cx = luminal::graph::Graph::new();
+        let x = cx.tensor(4, DType::Int);
+        let _out = x.cumprod(0);
+        let mut rt = ReferenceRuntime::load(&cx).expect("native load");
+        let mut data = FxHashMap::default();
+        data.insert(x.id, vec![65536i32, 65536, 1, 1].into());
+        let err = match rt.search(&data, &crate::search::harness_search_options()) {
+            Err(err) => err,
+            Ok(_) => {
+                rt.set_data(x.id, vec![65536i32, 65536, 1, 1]);
+                rt.execute().expect_err("overflowing int prod refuses")
+            }
+        };
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("overflow"),
+            "expected a loud overflow error, got: {message}"
+        );
     }
 
     /// TruncDiv is proof-gated on the divisor excluding zero: with an

@@ -154,3 +154,153 @@ fn scatter_write() {
     );
     assert_close(&want, &got, "scatter");
 }
+
+/// Scan results are integers in f32 here, so both the reference and the
+/// device must hit them exactly: a fused or reassociated fold would not.
+fn assert_exact_both(want: &[f32], got: &[f32], expected: &[f32], what: &str) {
+    assert_eq!(want, expected, "{what}: reference diverges from the fact");
+    assert_eq!(got, expected, "{what}: device diverges from the fact");
+}
+
+#[test]
+fn cumsum_rank1() {
+    let mut cx = Graph::new();
+    let a = cx.tensor(4usize, DType::F32);
+    let out = a.cumsum(0);
+    let (want, got) = run_both(&cx, &[(a.id, vec![1.0, 2., 3., 4.])], out.id);
+    assert_exact_both(&want, &got, &[1.0, 3., 6., 10.], "cumsum [1,2,3,4]");
+}
+
+#[test]
+fn cumprod_carries_signs() {
+    let mut cx = Graph::new();
+    let a = cx.tensor(4usize, DType::F32);
+    let out = a.cumprod(0);
+    let (want, got) = run_both(&cx, &[(a.id, vec![-1.0, 2., -3., 4.])], out.id);
+    assert_exact_both(&want, &got, &[-1.0, -2., 6., 24.], "cumprod [-1,2,-3,4]");
+}
+
+#[test]
+fn cummax_is_the_running_maximum() {
+    let mut cx = Graph::new();
+    let a = cx.tensor(8usize, DType::F32);
+    let out = a.cummax(0);
+    let (want, got) = run_both(
+        &cx,
+        &[(a.id, vec![-5.0, -3., -9., -1., -7., -2., -8., -4.])],
+        out.id,
+    );
+    assert_exact_both(
+        &want,
+        &got,
+        &[-5.0, -3., -3., -1., -1., -1., -1., -1.],
+        "cummax [-5,-3,-9,-1,-7,-2,-8,-4]",
+    );
+}
+
+#[test]
+fn prod_along_rows() {
+    let mut cx = Graph::new();
+    let a = cx.tensor((2usize, 2usize), DType::F32);
+    let out = a.prod(1);
+    let (want, got) = run_both(&cx, &[(a.id, vec![-2.0, 3., -2., -3.])], out.id);
+    assert_exact_both(&want, &got, &[-6.0, 6.], "prod over rows");
+}
+
+/// Axis 0 of a rank-2 value exercises the kernel's outer/inner split: the
+/// scanned axis is not the innermost, so each thread strides by the row.
+#[test]
+fn cumsum_along_the_outer_axis() {
+    let mut cx = Graph::new();
+    let a = cx.tensor((3usize, 2usize), DType::F32);
+    let out = a.cumsum(0);
+    let (want, got) = run_both(&cx, &[(a.id, vec![1.0, 2., 3., 4., 5., 6.])], out.id);
+    assert_exact_both(
+        &want,
+        &got,
+        &[1.0, 2., 4., 6., 9., 12.],
+        "cumsum along axis 0",
+    );
+}
+
+/// The scanned axis is the outer one, so each thread strides by the row.
+#[test]
+fn cummax_along_the_outer_axis() {
+    let mut cx = Graph::new();
+    let a = cx.tensor((3usize, 2usize), DType::F32);
+    let out = a.cummax(0);
+    let (want, got) = run_both(&cx, &[(a.id, vec![-1.0, 6., 3., -2., 2., 5.])], out.id);
+    assert_exact_both(
+        &want,
+        &got,
+        &[-1.0, 6., 3., 6., 3., 6.],
+        "cummax along axis 0",
+    );
+}
+
+/// All-negative integers separate a correct identity from a zero or a
+/// converted float one: any seed above the inputs would reach the output.
+#[test]
+fn int_cummax_over_negatives() {
+    let input = vec![-7i32, -9, -3, -5];
+    let mut cx = Graph::new();
+    let a = cx.tensor(4usize, DType::Int);
+    let out = a.cummax(0);
+    let mut rt = CudaRuntime::load(&cx).expect("device load");
+    let data: FxHashMap<NodeIndex, HostBuffer> =
+        [(a.id, input.clone().into())].into_iter().collect();
+    rt.search(&data, &luminal_cuda_lite::harness_search_options())
+        .expect("device search");
+    rt.set_data(a.id, input).unwrap();
+    rt.execute().expect("device execute");
+    assert_eq!(rt.get_i32(out.id).unwrap(), vec![-7, -7, -3, -3]);
+}
+
+/// Exact equality position by position, where a NaN in `expected` demands a
+/// NaN on both sides.
+fn assert_exact_both_with_nan(want: &[f32], got: &[f32], expected: &[f32], what: &str) {
+    assert_eq!(want.len(), expected.len(), "{what}: reference length");
+    assert_eq!(got.len(), expected.len(), "{what}: device length");
+    for (i, e) in expected.iter().enumerate() {
+        if e.is_nan() {
+            assert!(
+                want[i].is_nan(),
+                "{what}: reference element {i} is {} not NaN",
+                want[i]
+            );
+            assert!(
+                got[i].is_nan(),
+                "{what}: device element {i} is {} not NaN",
+                got[i]
+            );
+        } else {
+            assert_eq!(want[i], *e, "{what}: reference element {i}");
+            assert_eq!(got[i], *e, "{what}: device element {i}");
+        }
+    }
+}
+
+/// `max` is IEEE 754-2019 `maximum`: a NaN in a slice is that slice's maximum.
+#[test]
+fn max_propagates_nan() {
+    let mut cx = Graph::new();
+    let a = cx.tensor((2usize, 2usize), DType::F32);
+    let out = a.max(1);
+    let (want, got) = run_both(&cx, &[(a.id, vec![1.0, f32::NAN, 3., 2.])], out.id);
+    assert_exact_both_with_nan(&want, &got, &[f32::NAN, 3.0], "max over rows with a NaN");
+}
+
+/// Once the running maximum meets a NaN it stays NaN.
+#[test]
+fn cummax_propagates_nan() {
+    let mut cx = Graph::new();
+    let a = cx.tensor(4usize, DType::F32);
+    let out = a.cummax(0);
+    let (want, got) = run_both(&cx, &[(a.id, vec![1.0, f32::NAN, 2., 3.])], out.id);
+    assert_exact_both_with_nan(
+        &want,
+        &got,
+        &[1.0, f32::NAN, f32::NAN, f32::NAN],
+        "cummax after a NaN",
+    );
+}

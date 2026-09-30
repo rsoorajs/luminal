@@ -498,6 +498,12 @@ impl OpWire {
             ("ops::ReduceSumDps", serde_json::json!(v.axis))
         } else if let Some(v) = any.downcast_ref::<ops::ReduceMaxDps>() {
             ("ops::ReduceMaxDps", serde_json::json!(v.axis))
+        } else if let Some(v) = any.downcast_ref::<ops::LeftSequentialScanSumDps>() {
+            ("ops::LeftSequentialScanSumDps", serde_json::json!(v.axis))
+        } else if let Some(v) = any.downcast_ref::<ops::LeftSequentialScanProdDps>() {
+            ("ops::LeftSequentialScanProdDps", serde_json::json!(v.axis))
+        } else if let Some(v) = any.downcast_ref::<ops::LeftSequentialScanMaxDps>() {
+            ("ops::LeftSequentialScanMaxDps", serde_json::json!(v.axis))
         } else if let Some(v) = any.downcast_ref::<ops::IotaDps>() {
             ("ops::IotaDps", serde_json::to_value(&v.expr)?)
         } else if let Some(v) = any.downcast_ref::<ops::IndexMapApplyMaterializeDps>() {
@@ -560,6 +566,15 @@ impl OpWire {
                 axis: serde_json::from_value(payload)?,
             }),
             "ops::ReduceMaxDps" => Box::new(ops::ReduceMaxDps {
+                axis: serde_json::from_value(payload)?,
+            }),
+            "ops::LeftSequentialScanSumDps" => Box::new(ops::LeftSequentialScanSumDps {
+                axis: serde_json::from_value(payload)?,
+            }),
+            "ops::LeftSequentialScanProdDps" => Box::new(ops::LeftSequentialScanProdDps {
+                axis: serde_json::from_value(payload)?,
+            }),
+            "ops::LeftSequentialScanMaxDps" => Box::new(ops::LeftSequentialScanMaxDps {
                 axis: serde_json::from_value(payload)?,
             }),
             "ops::IotaDps" => Box::new(ops::IotaDps {

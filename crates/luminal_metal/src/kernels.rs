@@ -426,6 +426,32 @@ pub(crate) fn metal_f64_literal(v: f64) -> String {
     format!("{v:e}")
 }
 
+/// The identity of a maximum in the accumulator's own type: integers name
+/// their minimum and booleans start false; floats start at `-inf`.
+pub(crate) fn max_identity(dtype: PlanDtype) -> String {
+    match dtype {
+        PlanDtype::Int => "(-2147483647 - 1)".to_string(),
+        PlanDtype::Int64 => "(-9223372036854775807L - 1L)".to_string(),
+        PlanDtype::Bool | PlanDtype::Bool8 => "0".to_string(),
+        _ => metal_f64_literal(f64::NEG_INFINITY),
+    }
+}
+
+/// The fold of a maximum: IEEE 754-2019 `maximum` on floats (a NaN on either
+/// side propagates), plain comparison on integers.
+pub(crate) fn max_fold(dtype: PlanDtype) -> Result<String> {
+    Ok(match dtype {
+        PlanDtype::F32 | PlanDtype::F64 | PlanDtype::F16 | PlanDtype::Bf16 | PlanDtype::TF32 => {
+            format!(
+                "(v != v || acc != acc) ? ({ty})({nan}) : (v > acc ? v : acc)",
+                ty = metal_type(dtype)?,
+                nan = metal_f64_literal(f64::NAN)
+            )
+        }
+        _ => "v > acc ? v : acc".to_string(),
+    })
+}
+
 pub(crate) fn numel(dims: &[Expr]) -> Expr {
     dims.iter().product()
 }
@@ -514,6 +540,70 @@ fn elementwise(
     ulong i = gid;
     if (i >= n) return;
 {prelude}{chains}    out[i] = {rendered};
+}}"#
+    );
+    Ok(vec![KernelSource::plain(source, n)])
+}
+
+/// Inclusive scan along one axis: one thread per (outer, inner) pair folds
+/// the whole extent in order and writes every prefix it passes. The
+/// destination is right-major contiguous over the operand's dims, which the
+/// matcher's write-capability premise guarantees.
+pub(crate) fn scan(
+    ctx: &CodegenCtx,
+    axis_from_end: usize,
+    init: &str,
+    fold: &str,
+) -> Result<Vec<KernelSource>> {
+    let in_dims = &ctx.operand_dims[0];
+    if ctx.dest_dims[0] != *in_dims {
+        bail!(
+            "scan dest extents {:?} differ from operand extents {:?}",
+            ctx.dest_dims[0],
+            in_dims
+        );
+    }
+    let ta = metal_type(ctx.operand_dtypes[0])?;
+    let to = metal_type(ctx.dest_dtypes[0])?;
+    if axis_from_end >= in_dims.len() {
+        bail!("scan axis {axis_from_end} out of rank {}", in_dims.len());
+    }
+    let axis = in_dims.len() - 1 - axis_from_end;
+    let extent = in_dims[axis].clone();
+    let inner: Expr = in_dims[axis + 1..].iter().product();
+    let outer: Expr = in_dims[..axis].iter().product();
+    let n = outer * inner.clone();
+    let layout = ctx.operand_layout(0);
+    let mut coords = String::from("    ulong rem = inner_index;\n");
+    for ax in ((axis + 1)..in_dims.len()).rev() {
+        coords.push_str(&format!(
+            "    long c{ax} = (long)(rem % {d}); rem /= {d};\n",
+            d = in_dims[ax]
+        ));
+    }
+    coords.push_str("    rem = outer_index;\n");
+    for ax in (0..axis).rev() {
+        coords.push_str(&format!(
+            "    long c{ax} = (long)(rem % {d}); rem /= {d};\n",
+            d = in_dims[ax]
+        ));
+    }
+    let (chain, idx) = layout_read_index("a", layout, in_dims, Coords::Bound { prefix: "c" })?;
+    let chain = chain.replace("    ", "        ");
+    let source = format!(
+        r#"kernel void k(device const {ta}* a, device {to}* out, device const long* params, uint gid [[thread_position_in_grid]]) {{
+    const ulong n = {n};
+    ulong i = gid;
+    if (i >= n) return;
+    ulong outer_index = i / {inner};
+    ulong inner_index = i % {inner};
+{coords}    {ta} acc = {init};
+    for (ulong r = 0; r < {extent}; ++r) {{
+        long c{axis} = (long)r;
+{chain}        {ta} v = a[{idx}];
+        acc = {fold};
+        out[outer_index * {extent} * {inner} + r * {inner} + inner_index] = acc;
+    }}
 }}"#
     );
     Ok(vec![KernelSource::plain(source, n)])

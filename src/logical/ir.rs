@@ -145,6 +145,18 @@ pub enum LogicalOp {
     ReduceMax {
         axis_from_end: usize,
     },
+    /// Inclusive scan along one axis, evaluation order unspecified.
+    UnspecifiedOrderScanSum {
+        axis_from_end: usize,
+    },
+    /// Inclusive scan along one axis, evaluation order unspecified.
+    UnspecifiedOrderScanProd {
+        axis_from_end: usize,
+    },
+    /// Inclusive scan along one axis, evaluation order unspecified.
+    UnspecifiedOrderScanMax {
+        axis_from_end: usize,
+    },
     Gather,
     Scatter,
     /// Ternary selection: `Select(cond, if_true, if_false)` picks elementwise
@@ -185,6 +197,9 @@ impl LogicalOp {
             Self::Select => "LogicalSelect",
             Self::ReduceSum { .. } => "LogicalReduceSum",
             Self::ReduceMax { .. } => "LogicalReduceMax",
+            Self::UnspecifiedOrderScanSum { .. } => "LogicalUnspecifiedOrderScanSum",
+            Self::UnspecifiedOrderScanProd { .. } => "LogicalUnspecifiedOrderScanProd",
+            Self::UnspecifiedOrderScanMax { .. } => "LogicalUnspecifiedOrderScanMax",
             Self::Gather => "LogicalGather",
             Self::Scatter => "LogicalScatter",
             Self::IndexMapApply { .. } => "LogicalIndexMapApply",
@@ -216,6 +231,9 @@ impl LogicalOp {
             | Self::Recip
             | Self::ReduceSum { .. }
             | Self::ReduceMax { .. }
+            | Self::UnspecifiedOrderScanSum { .. }
+            | Self::UnspecifiedOrderScanProd { .. }
+            | Self::UnspecifiedOrderScanMax { .. }
             | Self::IndexMapApply { .. } => 1,
             Self::Add
             | Self::Mul
@@ -1111,7 +1129,10 @@ impl LogicalGraph {
                         parts.push(Self::dtype_term(*dtype))
                     }
                     LogicalOp::ReduceSum { axis_from_end }
-                    | LogicalOp::ReduceMax { axis_from_end } => {
+                    | LogicalOp::ReduceMax { axis_from_end }
+                    | LogicalOp::UnspecifiedOrderScanSum { axis_from_end }
+                    | LogicalOp::UnspecifiedOrderScanProd { axis_from_end }
+                    | LogicalOp::UnspecifiedOrderScanMax { axis_from_end } => {
                         parts.push(axis_from_end.to_string());
                     }
                     LogicalOp::IndexMapApply { entries } => {

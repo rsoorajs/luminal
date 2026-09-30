@@ -487,59 +487,53 @@ impl GraphTensor {
         self.gather_elements(top_k_idx, axis)
     }
 
-    /// Apply a cumulative reduction operation along dimensions
-    ///
-    /// See `cumsum` or `cummax` for usage examples.
-    pub fn cumop(
-        mut self,
-        axes: impl ToAxes,
-        op: impl Fn(GraphTensor, usize) -> GraphTensor,
-        pad_elem: f32,
-    ) -> Self {
-        let n_dims = self.rank();
-        for axis in axes.to_axes() {
-            // Pad out length
-            let mut kernel = vec![1.into(); n_dims];
-            let mut padding = vec![(IntExpr::from(0), IntExpr::from(0)); n_dims];
-            let orig_length = self.dims()[axis];
-            padding[axis] = (orig_length - 1, 0.into());
-            kernel[axis] = orig_length;
-            self = self.pad(padding, pad_elem);
-            // Unfold + removal of the non-cumulative kernel dimensions:
-            // ONE macro construct, ONE apply (ruling 2026-08-26) — the
-            // squeezes compose into the unfold's own map.
-            let mut chain = self.unfold_view(kernel, vec![1; n_dims], vec![1; n_dims]);
-            for i in (0..n_dims).rev() {
-                if i != axis {
-                    chain = chain.squeeze(n_dims + i);
-                }
-            }
-            self = chain.finish();
-            // apply operation along cumulative dimensions
-            self = op(self, n_dims);
-        }
-        self
-    }
-
-    /// Apply a cumulative sum along dimensions
+    /// Apply a cumulative sum along dimensions — one inclusive scan per axis.
     pub fn cumsum(self, axes: impl ToAxes) -> Self {
-        self.cumop(axes, |t, axes| t.sum(axes), 0.)
+        self.scan_per_axis(axes, |axis_from_end| LogicalOp::UnspecifiedOrderScanSum {
+            axis_from_end,
+        })
     }
 
-    /// Apply a cumulative max along dimensions
+    /// Apply a cumulative max along dimensions — one inclusive scan per axis.
     pub fn cummax(self, axes: impl ToAxes) -> Self {
-        self.cumop(axes, |t, axes| t.max(axes), f32::MIN)
+        self.scan_per_axis(axes, |axis_from_end| LogicalOp::UnspecifiedOrderScanMax {
+            axis_from_end,
+        })
     }
 
-    /// Apply a cumulative product along dimensions
+    /// Apply a cumulative product along dimensions — one inclusive scan per axis.
     pub fn cumprod(self, axes: impl ToAxes) -> Self {
-        self.cumop(axes, |t, axes| t.prod(axes), 1.)
+        self.scan_per_axis(axes, |axis_from_end| LogicalOp::UnspecifiedOrderScanProd {
+            axis_from_end,
+        })
+    }
+
+    /// One recorded scan per axis, in the given order. A scan keeps the
+    /// operand's dims and dtype, so no axis bookkeeping is needed.
+    fn scan_per_axis(self, axes: impl ToAxes, op: impl Fn(usize) -> LogicalOp) -> Self {
+        let (dims, mut id) = (self.dims(), self.id);
+        let rank = dims.len();
+        // A rank-0 scan is the value itself (torch parity): there is no axis
+        // to fold along, and `rank - 1 - axis` would underflow.
+        if rank == 0 {
+            return self;
+        }
+        for axis in axes.to_axes() {
+            assert!(axis < rank, "scan axis {axis} out of range for rank {rank}");
+            id = self.graph().logical.op(
+                op(rank - 1 - axis),
+                &[(id, dims.clone())],
+                dims.clone(),
+                self.dtype,
+            );
+        }
+        GraphTensor::from_id(id, dims, self.graph_ref, self.dtype)
     }
 }
 
 #[cfg(test)]
 pub(super) mod tests {
-    use crate::tests::{assert_close, random_vec};
+    use crate::tests::{assert_close, assert_exact, random_vec};
     use candle_core::{Device, Tensor};
     use candle_nn::ops::softmax;
     use itertools::Itertools;
@@ -562,6 +556,64 @@ pub(super) mod tests {
                 "abs() on {dtype:?} must be the identity, not a recorded op"
             );
         }
+    }
+
+    /// A cumulative product is exact: the sign of each prefix is carried,
+    /// not reconstructed.
+    #[test]
+    fn cumprod_signs_are_exact() {
+        let input = vec![-1.0f32, 2.0, -3.0, 4.0];
+        let mut cx = Graph::new();
+        let a = cx.tensor(input.len(), DType::F32);
+        let b = a.cumprod(0);
+        let rt = luminal_reference::harness::run_reference(&cx, &[(a.id, input.into())]);
+        assert_exact(rt.get_f32(b.id).unwrap(), &[-1.0, -2.0, 6.0, 24.0]);
+    }
+
+    /// The reference runtime's scan IS the left-sequential fold, bit for bit.
+    /// Once a NaN is seen, every later running maximum is NaN.
+    #[test]
+    fn cummax_propagates_nan() {
+        let mut cx = Graph::new();
+        let a = cx.tensor(4, DType::F32);
+        let b = a.cummax(0);
+        let rt = luminal_reference::harness::run_reference(
+            &cx,
+            &[(a.id, vec![1.0, f32::NAN, 2.0, 3.0].into())],
+        );
+        let out = rt.get_f32(b.id).unwrap();
+        assert_eq!(out[0], 1.0);
+        assert!(out[1..].iter().all(|v| v.is_nan()), "got {out:?}");
+    }
+
+    #[test]
+    fn cumsum_matches_the_sequential_fold() {
+        let input = random_vec(64);
+        let mut expected = Vec::with_capacity(input.len());
+        let mut acc = 0.0f32;
+        for x in &input {
+            acc += *x;
+            expected.push(acc);
+        }
+        let mut cx = Graph::new();
+        let a = cx.tensor(input.len(), DType::F32);
+        let b = a.cumsum(0);
+        let rt = luminal_reference::harness::run_reference(&cx, &[(a.id, input.into())]);
+        assert_exact(rt.get_f32(b.id).unwrap(), &expected);
+    }
+
+    /// The running maximum carries each prefix's largest value exactly.
+    #[test]
+    fn cummax_is_the_running_maximum() {
+        let input = vec![-5.0f32, -3.0, -9.0, -1.0, -7.0, -2.0, -8.0, -4.0];
+        let mut cx = Graph::new();
+        let a = cx.tensor(input.len(), DType::F32);
+        let b = a.cummax(0);
+        let rt = luminal_reference::harness::run_reference(&cx, &[(a.id, input.into())]);
+        assert_exact(
+            rt.get_f32(b.id).unwrap(),
+            &[-5.0, -3.0, -3.0, -1.0, -1.0, -1.0, -1.0, -1.0],
+        );
     }
 
     fn cummax_ref_2d(a: Tensor) -> Tensor {

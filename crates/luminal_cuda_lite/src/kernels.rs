@@ -531,6 +531,33 @@ pub(crate) fn cuda_f64_literal(v: f64) -> String {
     format!("{v:e}")
 }
 
+/// The identity of a maximum in the accumulator's own type: a float `-inf`
+/// converted to an integer accumulator is undefined, so integers name their
+/// minimum and booleans start false.
+pub(crate) fn max_identity(dtype: PlanDtype) -> String {
+    match dtype {
+        PlanDtype::Int => "(-2147483647 - 1)".to_string(),
+        PlanDtype::Int64 => "(-9223372036854775807LL - 1LL)".to_string(),
+        PlanDtype::Bool | PlanDtype::Bool8 => "0".to_string(),
+        _ => cuda_f64_literal(f64::NEG_INFINITY),
+    }
+}
+
+/// The fold of a maximum: IEEE 754-2019 `maximum` on floats (a NaN on either
+/// side propagates), plain comparison on integers.
+pub(crate) fn max_fold(dtype: PlanDtype) -> Result<String> {
+    Ok(match dtype {
+        PlanDtype::F32 | PlanDtype::F64 | PlanDtype::F16 | PlanDtype::Bf16 | PlanDtype::TF32 => {
+            format!(
+                "(v != v || acc != acc) ? ({ty})({nan}) : (v > acc ? v : acc)",
+                ty = cuda_type(dtype)?,
+                nan = cuda_f64_literal(f64::NAN)
+            )
+        }
+        _ => "v > acc ? v : acc".to_string(),
+    })
+}
+
 pub(crate) fn numel(dims: &[Expr]) -> Expr {
     dims.iter().product()
 }
@@ -701,6 +728,77 @@ pub(crate) fn reduce(
         acc = {fold};
     }}
     out[i] = acc;
+}}"#
+    );
+    Ok(vec![KernelSource::plain(source, n)])
+}
+
+/// Inclusive scan along one axis: one thread per (outer, inner) pair folds
+/// the whole extent in order and writes every prefix it passes. The
+/// destination is right-major contiguous over the operand's dims, which the
+/// matcher's write-capability premise guarantees.
+pub(crate) fn scan(
+    ctx: &CodegenCtx,
+    axis_from_end: usize,
+    init: &str,
+    fold: &str,
+) -> Result<Vec<KernelSource>> {
+    let in_dims = &ctx.operand_dims[0];
+    if ctx.dest_dims[0] != *in_dims {
+        bail!(
+            "scan dest extents {:?} differ from operand extents {:?}",
+            ctx.dest_dims[0],
+            in_dims
+        );
+    }
+    let ta = cuda_type(ctx.operand_dtypes[0])?;
+    let to = cuda_type(ctx.dest_dtypes[0])?;
+    if axis_from_end >= in_dims.len() {
+        bail!("scan axis {axis_from_end} out of rank {}", in_dims.len());
+    }
+    let axis = in_dims.len() - 1 - axis_from_end;
+    let extent = in_dims[axis].clone();
+    // Count the input elements before and after the scanned axis.
+    let inner: Expr = in_dims[axis + 1..].iter().product();
+    let outer: Expr = in_dims[..axis].iter().product();
+    let n = outer * inner.clone();
+    // Input coordinates combine the thread's position with the scan loop
+    // index. Use `Coords::Bound`: the input offset cannot simplify to `i`,
+    // which indexes only the axis-free positions.
+    let layout = ctx.operand_layout(0);
+    // Compute coordinates outside the scanned axis once before the loop.
+    // The loop variable supplies `c{axis}`.
+    let mut coords = String::from("    unsigned long long rem = inner_index;\n");
+    for ax in ((axis + 1)..in_dims.len()).rev() {
+        coords.push_str(&format!(
+            "    long long c{ax} = (long long)(rem % {d}); rem /= {d};\n",
+            d = in_dims[ax]
+        ));
+    }
+    coords.push_str("    rem = outer_index;\n");
+    for ax in (0..axis).rev() {
+        coords.push_str(&format!(
+            "    long long c{ax} = (long long)(rem % {d}); rem /= {d};\n",
+            d = in_dims[ax]
+        ));
+    }
+    let (chain, idx) = layout_read_index("a", layout, in_dims, Coords::Bound { prefix: "c" })?;
+    // Indent the generated index code inside the loop.
+    let chain = chain.replace("    ", "        ");
+    let source = format!(
+        r#"extern "C" __global__ void k(const {ta}* a, {to}* out, const long long* params) {{
+    const unsigned long long n = {n};
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    unsigned long long outer_index = i / {inner};
+    unsigned long long inner_index = i % {inner};
+{coords}    {ta} acc = {init};
+    for (unsigned long long r = 0; r < {extent}; ++r) {{
+        long long c{axis} = (long long)r;
+{chain}        {ta} v = a[{idx}];
+        acc = {fold};
+        out[outer_index * {extent} * {inner} + r * {inner} + inner_index] = acc;
+    }}
 }}"#
     );
     Ok(vec![KernelSource::plain(source, n)])

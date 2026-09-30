@@ -42,6 +42,9 @@ pub(crate) mod mul;
 pub(crate) mod trunc_div;
 pub(crate) mod trunc_rem;
 // (poison moved to core `luminal::poison` in Step B; re-exported below.)
+pub(crate) mod left_sequential_scan_max;
+pub(crate) mod left_sequential_scan_prod;
+pub(crate) mod left_sequential_scan_sum;
 pub(crate) mod recip;
 pub(crate) mod reduce_max;
 pub(crate) mod reduce_sum;
@@ -73,6 +76,9 @@ pub use floor::FloorFunctional;
 pub use gather::Gather;
 pub use index_map_apply_materialize::IndexMapApplyMaterialize;
 pub use iota::Iota;
+pub use left_sequential_scan_max::LeftSequentialScanMax;
+pub use left_sequential_scan_prod::LeftSequentialScanProd;
+pub use left_sequential_scan_sum::LeftSequentialScanSum;
 pub use less_than::LessThan;
 pub use log2::Log2Functional;
 pub use luminal::buffer_tensor_ir::Poison;
@@ -102,6 +108,9 @@ pub use floor::FloorFunctionalDps;
 pub use gather::GatherDps;
 pub use index_map_apply_materialize::IndexMapApplyMaterializeDps;
 pub use iota::{IotaDps, IotaExpr};
+pub use left_sequential_scan_max::LeftSequentialScanMaxDps;
+pub use left_sequential_scan_prod::LeftSequentialScanProdDps;
+pub use left_sequential_scan_sum::LeftSequentialScanSumDps;
 pub use less_than::LessThanDps;
 pub use log2::Log2FunctionalDps;
 pub use modulo::ModFunctionalDps;
@@ -127,6 +136,9 @@ pub use floor::FloorFunctionalMatcher;
 pub use gather::GatherMatcher;
 pub use index_map_apply_materialize::IndexMapApplyMaterializeMatcher;
 pub use iota::IotaMatcher;
+pub use left_sequential_scan_max::LeftSequentialScanMaxMatcher;
+pub use left_sequential_scan_prod::LeftSequentialScanProdMatcher;
+pub use left_sequential_scan_sum::LeftSequentialScanSumMatcher;
 pub use less_than::LessThanMatcher;
 pub use log2::Log2FunctionalMatcher;
 pub use modulo::ModFunctionalMatcher;
@@ -289,6 +301,27 @@ pub fn reference_ops() -> &'static [ReferenceOp] {
             ReferenceOp {
                 matcher: || Box::new(ReduceMaxMatcher),
                 kernel: entry::<ReduceMaxDps>("ReduceMaxGeneric", reduce_max::kernel),
+            },
+            ReferenceOp {
+                matcher: || Box::new(LeftSequentialScanSumMatcher),
+                kernel: entry::<LeftSequentialScanSumDps>(
+                    "LeftSequentialScanSum",
+                    left_sequential_scan_sum::kernel,
+                ),
+            },
+            ReferenceOp {
+                matcher: || Box::new(LeftSequentialScanProdMatcher),
+                kernel: entry::<LeftSequentialScanProdDps>(
+                    "LeftSequentialScanProd",
+                    left_sequential_scan_prod::kernel,
+                ),
+            },
+            ReferenceOp {
+                matcher: || Box::new(LeftSequentialScanMaxMatcher),
+                kernel: entry::<LeftSequentialScanMaxDps>(
+                    "LeftSequentialScanMax",
+                    left_sequential_scan_max::kernel,
+                ),
             },
             // ── data movement ──
             ReferenceOp {
